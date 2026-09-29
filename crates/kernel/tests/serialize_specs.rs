@@ -809,6 +809,9 @@ fn tags_round_trip_through_save_load() {
         ))],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (_, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -885,6 +888,9 @@ fn tag_metadata_round_trips_through_save_load() {
                 hidden: false,
             },
         ],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(doc.tag_hidden(&mock));
@@ -927,6 +933,9 @@ fn import_tag_registration_is_undone_and_never_clobbers() {
                 hidden: true,
             },
         ],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(
@@ -984,9 +993,13 @@ fn import_hidden_nodes_arrive_user_hidden() {
             children: vec![ImportNode::Mesh(box_recipe_with_tags("pipe", vec![]))],
             tags: Vec::new(),
             hidden: true,
+            key: None,
         }],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 1, "hidden content still imports");

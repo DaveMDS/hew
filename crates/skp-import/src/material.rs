@@ -42,10 +42,15 @@ impl MatTable {
                     rgba,
                     opacity,
                 } => {
-                    // SketchUp stores opacity separately from the color; Hew
-                    // folds it into the palette alpha (same as dae-import's
-                    // COLLADA transparency channel).
-                    let a = (opacity.clamp(0.0, 1.0) * f64::from(rgba[3])).round() as u8;
+                    // SketchUp's opacity IS the material's alpha; Hew folds it
+                    // into the palette alpha (same as dae-import's COLLADA
+                    // transparency channel, and the textured arm below). The
+                    // reader's colour alpha byte is not a second channel: a
+                    // 2017 file carries 255 or an opacity-derived value there
+                    // and the 2026 container has no colour alpha at all (the
+                    // reader derives it from opacity), so multiplying the two
+                    // would apply the opacity twice.
+                    let a = (opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
                     materials.push(Material::solid(
                         name.clone(),
                         Rgba8::rgba(rgba[0], rgba[1], rgba[2], a),

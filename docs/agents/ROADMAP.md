@@ -541,13 +541,24 @@ below.
 - glTF/GLB export and import, round-trip tested for fidelity through Blender
 - COLLADA (`.dae`) import from SketchUp's own export path, with a healing
   pass that repairs common non-manifold export artifacts
-- Direct SketchUp (`.skp`) import for the 2017 file format, built on
+- Direct SketchUp (`.skp`) import — the 2026 container every current
+  SketchUp saves, and the 2017 format of older files — built on
   [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader with no
   Trimble SDK code anywhere in its lineage — names, materials, components,
-  tags, and guides all come across natively. Groups arrive as groups and
-  components as shared components, nested assemblies keeping both their
-  hierarchy and their sharing; a group wrapping a single solid becomes
-  just that solid, since Hew needs no wrapper to isolate geometry
+  tags, guides, scenes, and the saved view all come across natively, and
+  identically from either container (every corpus file's 2026 save is
+  held to its 2017 original by the importer's own equivalence suite).
+  Groups arrive as groups and components as shared components, nested
+  assemblies keeping both their hierarchy and their sharing; a group
+  wrapping a single solid becomes just that solid, since Hew needs no
+  wrapper to isolate geometry. Each SketchUp scene becomes a Hew Scene
+  with its camera, its hidden objects and hidden tags, and its active
+  section cut; opening a `.skp` into an empty document adopts the
+  SketchUp camera (and the section cut of the scene it was saved on, or
+  else the model's own active plane), so the model first appears as it
+  last did in SketchUp. Production-scale
+  files (hundreds of megabytes, millions of faces, renderer-plugin
+  attribute dictionaries) walk exactly on the continuous archive path
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic
@@ -581,7 +592,7 @@ below.
 | `.hew` (native) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
-| SketchUp (`.skp`, 2017 format) | yes | — |
+| SketchUp (`.skp`, 2026 and 2017 formats) | yes | — |
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |

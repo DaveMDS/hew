@@ -50,7 +50,7 @@ documented container.
 | Format | Import | Export |
 |---|---|---|
 | `.hew` (native) | yes | yes |
-| SketchUp (`.skp`, 2017 format) | yes | — |
+| SketchUp (`.skp`, 2026 and 2017 formats) | yes | — |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
 | STL | yes | yes |

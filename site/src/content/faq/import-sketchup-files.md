@@ -3,6 +3,6 @@ question: "Can it import SketchUp files?"
 order: 4
 ---
 
-Yes. Hew can import SketchUp's native `.skp` format (2017-era files) via a clean-room reader, as well as COLLADA `.dae` files, which every version of SketchUp can export. Imported geometry is healed and classified into watertight Objects where possible, and non-manifold geometry is flagged rather than silently repaired, so you always know what you're starting from.
+Yes. Hew imports SketchUp's native `.skp` format directly through a clean-room reader: the current 2026 format that every SketchUp in use today saves (the free web app included), and the 2017 format that the last free desktop version wrote and that many older models are still in. It also reads COLLADA `.dae` files, which every version of SketchUp can export. Imported geometry is healed and classified into watertight Objects where possible, and non-manifold geometry is flagged rather than silently repaired, so you always know what you're starting from.
 
-The SketchUp native import is limited to 2017 for now since that's the last freely available desktop app version and newer SketchUp versions should be able to save-as 2017.
+Files saved by the releases in between (2018 through 2025) aren't decoded yet; opening one in any current SketchUp and saving it again produces a file Hew reads.

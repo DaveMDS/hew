@@ -108,6 +108,9 @@ fn box_document() -> Document {
         roots: vec![ImportNode::Mesh(unit_box_mesh("Box"))],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
     doc
@@ -813,6 +816,9 @@ fn snapshot_respects_user_hidden_state() {
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -864,6 +870,9 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -933,6 +942,9 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -989,6 +1001,9 @@ fn snapshot_scene_refuses_unknown_scene() {
         roots: vec![ImportNode::Mesh(unit_box_mesh("A"))],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest a box");
 

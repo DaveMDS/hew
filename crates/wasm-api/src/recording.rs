@@ -749,6 +749,13 @@ pub enum RecordedCall {
     ImportGltf { bytes: Vec<u8> },
     /// `import_skp(bytes)` — embeds the .skp file.
     ImportSkp { bytes: Vec<u8> },
+    /// An import whose source file was too large to embed
+    /// ([`EMBED_CAP`]): the recording keeps the fact and the size, so a
+    /// replay fails loudly at this step instead of diverging silently, and
+    /// a bug report is not doubled by a copy of a several-hundred-megabyte
+    /// model the browser kernel is already holding. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    ImportOmitted { of: String, len: u64 },
     /// `import_stl(bytes, unit_scale, name)` — embeds the STL file, the
     /// units-chooser scale it was imported with (STL carries no units of its
     /// own, so replaying without the scale would reproduce the wrong geometry
@@ -1118,6 +1125,35 @@ pub fn stop() {
 /// Whether capture is active.
 pub fn is_active() -> bool {
     ENABLED.with(|e| e.get())
+}
+
+/// Largest source file an import call embeds in the recording; larger
+/// imports record as [`RecordedCall::ImportOmitted`].
+pub const EMBED_CAP: usize = 64 << 20;
+
+/// Records an import of `bytes` under `method`: embedded through `embed`
+/// when the file fits [`EMBED_CAP`], as [`RecordedCall::ImportOmitted`]
+/// otherwise. The copy is only made when capture is active.
+pub fn record_import(method: &str, bytes: &[u8], embed: impl FnOnce(Vec<u8>) -> RecordedCall) {
+    record_import_sized(method, bytes.len(), || embed(bytes.to_vec()));
+}
+
+/// [`record_import`] for an import whose embedded payload is more than one
+/// byte buffer (a COLLADA file plus its images): `total_len` is the sum the
+/// cap applies to, and `embed` builds the call — and makes its copies —
+/// only when capture is active and the total fits.
+pub fn record_import_sized(method: &str, total_len: usize, embed: impl FnOnce() -> RecordedCall) {
+    if !is_active() {
+        return;
+    }
+    if total_len > EMBED_CAP {
+        record(RecordedCall::ImportOmitted {
+            of: method.to_string(),
+            len: total_len as u64,
+        });
+    } else {
+        record(embed());
+    }
 }
 
 /// Appends one committed call — a no-op unless capture is active. Call this

@@ -6730,6 +6730,9 @@ fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
         roots: vec![ImportNode::Mesh(open)],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.leaky, 1);

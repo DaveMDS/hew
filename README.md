@@ -64,8 +64,9 @@ planned.
 - Materials with texturing, per-face painting, and translucency
 - Tags, an object tree, and per-Object solid/watertight reporting
 - SketchUp 2017 keyboard shortcuts
-- Import: SketchUp `.skp` (2017), COLLADA `.dae`, glTF — with names,
-  hierarchy, materials, and tags preserved where the format carries them
+- Import: SketchUp `.skp` (the current 2026 format and the 2017 one),
+  COLLADA `.dae`, glTF, STL — with names, hierarchy, materials, tags, and
+  scenes preserved where the format carries them
 - Export: glTF, STL, 3MF, USDZ, SVG line drawings — see
   [docs/INTEROP.md](docs/INTEROP.md)
 - Print to paper or PDF: what you see, or a drawing at an exact scale

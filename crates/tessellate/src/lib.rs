@@ -623,6 +623,18 @@ fn bridge_hole_into_polygon(
     let n_outer = outer.len();
     let n_hole = hole_verts.len();
 
+    // A hole that shares a vertex with the ring splices there with a
+    // zero-length bridge, whichever hole vertex it is: the glue crosses
+    // nothing, so it is valid regardless of the u-ordering the ray
+    // construction below relies on. Imported geometry pinches holes onto
+    // the outer ring like this — a sliver triangle whose hole touches it
+    // at an apex has no valid bridge from the hole's rightmost vertex at
+    // all (every candidate runs along a ring edge).
+    for (h, hv) in hole_verts.iter().enumerate() {
+        if let Some(k) = (0..n_outer).find(|&k| outer[k][3] == hv[3] && outer[k][4] == hv[4]) {
+            return Ok(bridge_at_vertices(&outer, hole_verts, k, h));
+        }
+    }
     // Find hole vertex M with maximum u-coordinate (rightmost in 2D).
     let m_idx = (0..n_hole)
         .max_by(|&i, &j| hole_verts[i][3].partial_cmp(&hole_verts[j][3]).unwrap())
@@ -1750,6 +1762,20 @@ mod tests {
             circle_hole(0.30, 0.08, 0.007),
         ];
         assert_clips_completely(&outer, &holes);
+    }
+    /// Regression: a sliver triangle whose tiny hole shares the apex vertex
+    /// with the outer ring — but where the hole's rightmost vertex is a
+    /// different one. Every bridge from that rightmost vertex runs along a
+    /// ring edge, so the ray construction and the nearest-first fallback
+    /// both refused; the shared vertex is the splice (a third-party
+    /// SketchUp house carried two such faces, and the whole document
+    /// failed to tessellate in the viewport).
+    #[test]
+    fn hole_sharing_a_non_rightmost_vertex_with_the_ring_bridges_there() {
+        let outer = [[0.0, 0.0, 0.0], [5.0, -0.5, 0.0], [10.0, 0.0, 0.0]];
+        // CW hole: apex shared with the ring, two tiny vertices above it.
+        let holes = vec![vec![[4.7, -0.2, 0.0], [5.0, -0.5, 0.0], [5.3, -0.2, 0.0]]];
+        assert_area_honest(&outer, &holes);
     }
 
     /// Distilled from an imported real-model face (a rosette): two holes

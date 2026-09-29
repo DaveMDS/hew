@@ -457,6 +457,9 @@ mod tests {
             roots: vec![kernel::ImportNode::Mesh(mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc

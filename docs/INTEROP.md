@@ -11,7 +11,7 @@ bring outside geometry in, or send Hew models out to other tools.
 |---|---|---|---|
 | `.hew` (native) | save / load | Supported | Zip container, JSON manifest, binary geometry buffers. Lossless round-trip; the only format that preserves components/instances, tags, guides, and document metadata. |
 | COLLADA `.dae` | Import | Supported | SketchUp's own COLLADA export, and any COLLADA 1.4 source. Geometry, materials/textures, node hierarchy, and component instancing all map through. |
-| SketchUp `.skp` (2017) | Import | Supported | Direct binary read via OpenSKP (see below). Names, materials, textures, tags (from layers), guides, and component instancing carry over. |
+| SketchUp `.skp` | Import | Supported | Direct read via OpenSKP (see below) of the 2026 container every current SketchUp saves, and of the 2017 format. Names, materials, textures, tags (from layers), guides, scenes, and component instancing carry over. |
 | glTF / GLB | Import | Supported | `.gltf` and `.glb`, including Hew's own export output. Geometry, materials, and embedded textures round-trip; see known gaps below. |
 | glTF / GLB | Export | Supported | Binary `.glb`, written by the shared kernel-side writer in `mesh-export`. Y-up, meters. |
 | STL | Export | Supported | Binary STL, Z-up, millimeters (the slicer convention). Export is gated on the model being watertight — a non-solid Object is flagged before writing. |
@@ -101,15 +101,26 @@ dependency chain on it. That separation is a hard project rule, not a
 one-time check: every future change to OpenSKP or `crates/skp-import` must
 keep holding it.
 
-**Supported:** SketchUp's 2017 classic binary format (internally versioned
-`{17.x}`). Every SketchUp release since can save back down to 2017 (File ▸
-Save As ▸ SketchUp Version 2017), so this one decoded version covers
-effectively all SketchUp content in circulation.
+**Supported:** the SketchUp 2026 container (internally versioned `{26.x}`),
+which is what every current SketchUp release saves, the free web app
+included — a `.skp` saved today is this format. Also the 2017 format
+(`{17.x}`), the last free desktop version's format, which many existing
+models still carry and which every SketchUp can still Save As. Both come
+out of the same reader as the same model: the importer's test suite holds
+every corpus file's 2026 save to its fully decoded 2017 original, and a
+10.7 MB production model imports to the same document from either.
 
 **Known limitations:**
-- Hew detects newer `.skp` versions (2018 and later) and rejects them,
-  pointing at the Save As 2017 workaround, rather than importing them
-  partially.
+- A `.skp` in a layout the reader has not decoded — files saved by
+  SketchUp 2013–2016 or 2018–2025 — is refused with its version rather
+  than imported partially; open it in any current SketchUp (the free web
+  app works) and save it again, or Save As ▸ SketchUp Version 2017.
+- A record a future SketchUp release adds to the 2026 container is
+  reported in the import warnings, not silently dropped.
+- Section planes: the cut of the scene the file was saved on, or else the
+  model's own active plane, becomes Hew's section plane, from either
+  format. Hew has one section plane, so a deactivated plane and planes
+  inside groups and components are not imported.
 - `.skp` write/export does not exist — OpenSKP is a reader only.
 - As with all imports, a mesh that is still non-manifold after healing
   imports as separate open shells with a warning; geometry the kernel

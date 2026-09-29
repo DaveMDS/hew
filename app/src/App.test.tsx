@@ -1102,6 +1102,24 @@ describe('App — import overlay lifecycle', () => {
     expect(screen.getByText(/Import failed: corrupt chunk/)).toBeInTheDocument()
   })
 
+  it('latches the kernel-panic banner when the import traps the wasm kernel', async () => {
+    // A wasm trap mid-import (an out-of-memory abort on a model too big for
+    // the browser kernel) surfaces as the engine's "unreachable" error and
+    // leaves the Scene borrow-locked: the toast still shows, and the sticky
+    // banner (latched by handleToast's panic-text check) says the session
+    // is unusable. Pins the import path against a toast that stops latching.
+    mockScene.import_skp = vi.fn(() => {
+      throw new Error('Unreachable code should not be executed')
+    })
+
+    await renderAndLoad()
+    triggerImport()
+
+    await waitFor(() => expect(mockScene.import_skp).toHaveBeenCalled())
+    expect(await screen.findByText(/Import failed: .*unreachable/i)).toBeInTheDocument()
+    expect(screen.getByText(/kernel error occurred/i)).toBeInTheDocument()
+  })
+
   it('never shows the overlay when the user cancels the file picker', async () => {
     vi.mocked(fakeFileHost.openForImport).mockResolvedValue(null)
 

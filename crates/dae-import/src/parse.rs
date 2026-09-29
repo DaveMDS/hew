@@ -124,6 +124,9 @@ pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeErr
         guides: Vec::new(),
         // COLLADA has no layer list; tags ride on nodes via __HEWMETA__.
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
 
     let mut warnings = warnings.messages;
@@ -973,6 +976,7 @@ fn convert_node(
                 name: inst_name.clone(),
                 tags: inst_tags.clone(),
                 hidden: false,
+                key: None,
             });
         }
     }
@@ -1023,6 +1027,7 @@ fn convert_node(
                 children: all,
                 tags,
                 hidden: false,
+                key: None,
             })
         }
     }

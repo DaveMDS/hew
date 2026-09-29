@@ -382,7 +382,8 @@ describe('friendlyErrorText', () => {
     // The .skp importer's own message carries exact guidance — it must reach
     // the toast intact, not buried in the unknown-code fallback.
     const skp =
-      'SKP: unsupported SketchUp version {26.2.0}: open it in SketchUp and ' +
+      'SKP: unsupported SketchUp version {21.1.0}: open it in SketchUp (the ' +
+      'free web app works) and save it again as a current .skp, or ' +
       'File ▸ Save As ▸ SketchUp Version 2017, then import that'
     expect(friendlyErrorText(new Error(skp))).toBe(skp.slice('SKP: '.length))
     expect(friendlyErrorText(new Error('DAE: missing <library_geometries>'))).toBe(

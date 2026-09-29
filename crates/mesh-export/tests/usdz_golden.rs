@@ -74,6 +74,9 @@ fn build_representative_doc() -> Document {
         roots: vec![ImportNode::Mesh(unit_box_mesh("Box"))],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
 
@@ -91,6 +94,9 @@ fn build_representative_doc() -> Document {
         roots: vec![ImportNode::Mesh(painted_mesh)],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a painted box");
 
@@ -103,6 +109,9 @@ fn build_representative_doc() -> Document {
         roots: vec![ImportNode::Mesh(unit_box_mesh("LegSrc"))],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest the component source box");

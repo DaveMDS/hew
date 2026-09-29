@@ -1,8 +1,9 @@
 # skp-import — SketchUp `.skp` -> Hew Objects, via the clean-room OpenSKP reader.
 #
 # The `openskp` dependency is a crates.io semver pin on the hosted OpenSKP
-# releases (https://github.com/hew3d/openskp — clean-room SketchUp 2017
-# reader; local development clone lives at ../openskp). Bump the pin
+# releases (https://github.com/hew3d/openskp — clean-room reader for the
+# SketchUp 2026 container and the 2017 format; local development clone
+# lives at ../openskp). Bump the pin
 # deliberately: import-quality gaps are fixed in OpenSKP first, then the pin
 # advances here.
 [package]
@@ -14,7 +15,7 @@ license.workspace = true
 [dependencies]
 kernel = { workspace = true }
 mesh-heal = { workspace = true }
-openskp = "0.3.0"
+openskp = "0.4.1"
 
 [dev-dependencies]
 proptest.workspace = true

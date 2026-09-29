@@ -214,21 +214,56 @@ impl Object {
             }
             // Hole containment: a hole loop must lie inside its face's outer
             // boundary. Checked conservatively — the hole is invalid only if
-            // NONE of its vertices are inside the outer ring — because a
-            // fully displaced hole is what a wrong ownership assignment
-            // produces, while a vertex grazing the outer boundary within
-            // tolerance must not fail legitimate geometry. (A partially
-            // displaced hole cannot arise from valid operations at all: cut
-            // paths are refused if they cross hole territory.)
+            // NONE of its vertices are inside the outer ring or on it —
+            // because a fully displaced hole is what a wrong ownership
+            // assignment produces, while a vertex grazing the outer boundary
+            // within tolerance must not fail legitimate geometry. (A
+            // partially displaced hole cannot arise from valid operations at
+            // all: cut paths are refused if they cross hole territory.) The
+            // on-ring clause matters: an imported hole whose every vertex
+            // sits on the outer ring (SketchUp draws them) is a boundary
+            // case for the strict ray test, whose verdict on such points
+            // differs between native and wasm float rounding — the same
+            // document must load everywhere.
             if !face.inner_loops.is_empty() {
                 let outer_pts: Vec<crate::math::Point3> =
                     self.loop_positions(face.outer_loop).collect();
                 let normal = face.plane.normal();
+                let on_ring = |p: crate::math::Point3| {
+                    let n = outer_pts.len();
+                    (0..n).any(|i| {
+                        crate::geom2d::point_near_segment(
+                            p,
+                            outer_pts[i],
+                            outer_pts[(i + 1) % n],
+                            crate::tol::POINT_MERGE,
+                        )
+                    })
+                };
+                let n_outer = outer_pts.len();
                 for &inner_id in &face.inner_loops {
-                    let any_inside = self
-                        .loop_positions(inner_id)
-                        .any(|p| crate::geom2d::point_inside_polygon(p, &outer_pts, normal));
-                    if !any_inside {
+                    let hole_pts: Vec<crate::math::Point3> =
+                        self.loop_positions(inner_id).collect();
+                    let any_inside = hole_pts.iter().any(|&p| {
+                        crate::geom2d::point_inside_polygon(p, &outer_pts, normal) || on_ring(p)
+                    });
+                    // A hole that grazes the ring at one vertex but runs
+                    // out through it elsewhere is not inside either: no
+                    // hole edge may properly cross an outer edge (touching
+                    // and shared edges are not crossings).
+                    let n_hole = hole_pts.len();
+                    let crosses = (0..n_hole).any(|i| {
+                        let (a, b) = (hole_pts[i], hole_pts[(i + 1) % n_hole]);
+                        (0..n_outer).any(|k| {
+                            crate::geom2d::segments_cross_properly(
+                                a,
+                                b,
+                                outer_pts[k],
+                                outer_pts[(k + 1) % n_outer],
+                            )
+                        })
+                    });
+                    if !any_inside || crosses {
                         return Err(TopologyError::HoleOutsideFace {
                             face: f,
                             loop_id: inner_id,
@@ -467,6 +502,93 @@ mod tests {
             obj.validate(),
             Err(TopologyError::HoleOutsideFace { .. })
         ));
+    }
+
+    /// A hole whose every vertex sits ON the outer ring (SketchUp draws such
+    /// faces) is legitimate: the strict interior ray test answers
+    /// platform-dependently for boundary points (natively it happens to
+    /// admit two of these four; the wasm build admitted none of a real
+    /// model's), so the on-ring clause is what keeps an imported document
+    /// loadable everywhere. Its edges run along the ring or cut corners
+    /// from vertex to vertex — touches, never proper crossings.
+    #[test]
+    fn hole_with_all_vertices_on_the_outer_ring_validates() {
+        let positions = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0, 4.0, 0.0),
+            Point3::new(0.0, 4.0, 0.0),
+            // hole: a corner cut whose vertices all sit on the right and
+            // top edges
+            Point3::new(4.0, 1.0, 0.0),
+            Point3::new(4.0, 3.0, 0.0),
+            Point3::new(3.0, 4.0, 0.0),
+            Point3::new(1.0, 4.0, 0.0),
+        ];
+        let faces = vec![vec![0, 1, 2, 3]];
+        let holes = vec![vec![vec![4, 5, 6, 7]]];
+        let obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &[crate::material::FaceMaterial::default()],
+            &[None],
+        )
+        .expect("builds");
+        assert!(obj.validate().is_ok(), "on-ring hole is inside its face");
+    }
+
+    /// A hole that touches the ring at one vertex but runs out through it
+    /// elsewhere is displaced, not inside: the on-ring clause alone would
+    /// accept it, the crossing test refuses it. Built valid, then the
+    /// hole's vertices are moved (a builder refuses such input outright).
+    #[test]
+    fn hole_grazing_the_ring_but_crossing_it_is_refused() {
+        let positions = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0, 4.0, 0.0),
+            Point3::new(0.0, 4.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(3.0, 1.0, 0.0),
+            Point3::new(3.0, 3.0, 0.0),
+            Point3::new(1.0, 3.0, 0.0),
+        ];
+        let faces = vec![vec![0, 1, 2, 3]];
+        let holes = vec![vec![vec![4, 5, 6, 7]]];
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &[crate::material::FaceMaterial::default()],
+            &[None],
+        )
+        .expect("builds");
+        assert!(obj.validate().is_ok());
+        let hole = obj
+            .faces
+            .values()
+            .find_map(|f| f.inner_loops.first().copied())
+            .expect("the hole");
+        // Shares B=(4,0) with the ring, then leaves the square and re-enters
+        // across the top edge.
+        let moved = [
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(10.0, 1.0, 0.0),
+            Point3::new(10.0, 5.0, 0.0),
+            Point3::new(2.0, 5.0, 0.0),
+        ];
+        let vids: Vec<_> = obj
+            .loop_half_edges(hole)
+            .map(|h| obj.half_edges[h].origin)
+            .collect();
+        for (vid, p) in vids.into_iter().zip(moved) {
+            obj.vertices[vid].position = p;
+        }
+        assert!(
+            matches!(obj.validate(), Err(TopologyError::HoleOutsideFace { .. })),
+            "a crossing hole is never accepted"
+        );
     }
 
     #[test]

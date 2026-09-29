@@ -287,6 +287,9 @@ pub fn build_scene(
             guides: Vec::new(),
             // STL has no document-level tag/layer concept.
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         },
         warnings,
     )
@@ -301,6 +304,9 @@ fn empty_scene() -> ImportScene {
         roots: Vec::new(),
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     }
 }
 

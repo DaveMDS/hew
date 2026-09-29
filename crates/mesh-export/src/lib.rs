@@ -1719,6 +1719,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(unit_box_mesh("Box"))],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
@@ -1742,6 +1745,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a painted box");
         let ids = doc.material_ids();
@@ -1770,6 +1776,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a textured box");
@@ -1802,6 +1811,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest an open quad");
         doc
@@ -1946,6 +1958,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(painted_mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -1958,6 +1973,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(unit_box_mesh("LegSrc"))],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");
@@ -2626,6 +2644,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest an awkwardly named box");
@@ -2666,6 +2687,9 @@ mod tests {
             ],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest two colliding-sanitized boxes");
@@ -2788,6 +2812,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(painted_mesh)],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -2798,6 +2825,9 @@ mod tests {
             roots: vec![ImportNode::Mesh(unit_box_mesh("LegSrc"))],
             guides: Vec::new(),
             tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");

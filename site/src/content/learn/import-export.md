@@ -9,7 +9,7 @@ order: 19
 | `.hew` (native) | ✓ | ✓ |
 | glTF / GLB (`.gltf`, `.glb`) | ✓ | ✓ (`.glb`) |
 | COLLADA (`.dae`) | ✓ | — |
-| SketchUp (`.skp`, 2017 format) | ✓ | — |
+| SketchUp (`.skp`, 2026 and 2017 formats) | ✓ | — |
 | STL (`.stl`) | ✓ | ✓ |
 | 3MF (`.3mf`) | — | ✓ |
 | USDZ (`.usdz`) | — | ✓ |
@@ -23,7 +23,7 @@ After every import, an **Import Complete** report summarizes what happened: how 
 
 ### SketchUp (`.skp`)
 
-Hew reads SketchUp 2017-format files directly; no SketchUp installation required. Names, materials, components, tags, and guides all come across natively. A SketchUp group becomes a Hew group and a SketchUp component becomes a shared Hew component, nested assemblies keeping their hierarchy and their sharing intact; a group that exists only to wrap a single solid collapses to that solid, since Hew doesn't need a wrapper to isolate geometry the way SketchUp does. (The reader is [OpenSKP](https://github.com/hew3d/openskp), a clean-room implementation with no Trimble SDK code in its lineage.) If a file has damaged sections, the importer recovers what it can and lists warnings in the import report. Newer `.skp` versions can usually be saved back to the 2017 format from SketchUp itself.
+Hew reads `.skp` files directly; no SketchUp installation required. A file saved by any current SketchUp, the free web app included, is in the 2026 format, and that is what Hew reads first; it also reads the 2017 format, the last free desktop version's, that many existing models are still in. Either way the same model comes across: names, materials, components, tags, guides, and scenes all arrive natively. A SketchUp group becomes a Hew group and a SketchUp component becomes a shared Hew component, nested assemblies keeping their hierarchy and their sharing intact; a group that exists only to wrap a single solid collapses to that solid, since Hew doesn't need a wrapper to isolate geometry the way SketchUp does. Each SketchUp scene becomes a Hew Scene, keeping its camera, the objects and tags it hides, and its active section cut; a cut made outside any scene comes across as Hew's section plane too. Importing into an empty document also adopts the view the file was saved with, so the model first appears the way it last did in SketchUp; importing into a document that already has content leaves your view alone. (The reader is [OpenSKP](https://github.com/hew3d/openskp), a clean-room implementation with no Trimble SDK code in its lineage.) If a file has damaged sections, the importer recovers what it can and lists warnings in the import report. A file saved by SketchUp 2013–2016 or 2018–2025 is in a layout the reader hasn't decoded and is refused with its version; open it in any current SketchUp and save it again, or Save As ▸ SketchUp Version 2017.
 
 ### COLLADA (`.dae`)
 

@@ -2361,6 +2361,9 @@ export default function App() {
                 )
       ) as ImportReport
     } catch (err: unknown) {
+      // A wasm trap mid-import (an out-of-memory abort on a model too big
+      // for the browser kernel) reads as the borrow-lock error; handleToast
+      // latches the kernel-panic banner for it like any other panic text.
       handleToast(`Import failed: ${friendlyErrorText(err)}`)
       // The blank-document replace above already committed (applyLoadedBytes
       // mutates the live scene directly, with no rollback), even though the

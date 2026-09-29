@@ -53,11 +53,11 @@ gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
 stl-import = { path = "crates/stl-import" }
 library = { path = "crates/library" }
-# Clean-room SketchUp 2017 .skp reader: a crates.io semver pin on the hosted
-# OpenSKP releases, so CI resolves it like any other dependency. No Trimble
-# SDK material anywhere in its chain (rule 7 admissibility test). Local dev
-# clone: ../openskp.
-openskp = "0.3.0"
+# Clean-room SketchUp .skp reader (the 2026 container and the 2017 format):
+# a crates.io semver pin on the hosted OpenSKP releases, so CI resolves it
+# like any other dependency. No Trimble SDK material anywhere in its chain
+# (rule 7 admissibility test). Local dev clone: ../openskp.
+openskp = "0.4.1"
 
 slotmap = "1"
 proptest = "1"

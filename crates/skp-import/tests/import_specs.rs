@@ -1,11 +1,13 @@
 //! Acceptance specs for `skp_import::import` (DEVELOPMENT.md rule 3).
 //!
 //! Fixtures under `tests/fixtures/` are frozen copies of OpenSKP's
-//! self-authored corpus (`corpus/2017` + one legacy/future sample each) —
-//! committed here so tests run anywhere the workspace builds. Ground truth
-//! and corpus stewardship stay upstream in OpenSKP; refresh fixtures when the
-//! rev pin advances. Expected numbers below were validated against the
-//! paired SketchUp `.dae` exports (see `differential.rs`).
+//! self-authored corpus (`corpus/2017`, its 2026 twins under `2026/`, and
+//! one pre-2017 sample) — committed here so tests run anywhere the
+//! workspace builds. Ground truth and corpus stewardship stay upstream in
+//! OpenSKP; refresh fixtures when the rev pin advances. Expected numbers
+//! below were validated against the paired SketchUp `.dae` exports (see
+//! `differential.rs`); `containers.rs` holds every 2026 twin to its 2017
+//! original.
 
 use std::path::Path;
 
@@ -26,7 +28,9 @@ fn fixture(name: &str) -> Vec<u8> {
 fn ingest(name: &str) -> (kernel::ImportReport, Document) {
     let out = skp_import::import(&fixture(name)).expect(name);
     assert!(
-        !out.warnings.iter().any(|w| w.contains("parser recovered")),
+        !out.warnings
+            .iter()
+            .any(|w| w.contains("parser recovered") || w.contains("reader skipped")),
         "{name}: clean corpus files parse without recovery warnings; got {:?}",
         out.warnings
     );
@@ -63,22 +67,65 @@ fn pre_2017_files_are_refused_with_their_version() {
 }
 
 #[test]
-fn post_2017_files_are_refused_with_their_version() {
-    match skp_import::import(&fixture("box-v2026.skp")) {
+fn the_2026_container_is_imported_whatever_its_version_says() {
+    // box-v2026.skp: the 1 m box saved by SketchUp 2026 — the container
+    // every current release writes, read as a first-class input.
+    let (report, doc) = ingest("box-v2026.skp");
+    assert_eq!(report.objects_created, 1);
+    assert_eq!(report.watertight, 1);
+    assert_eq!(doc.instance_ids().len(), 0);
+}
+
+#[test]
+fn unobserved_carchive_releases_are_refused_with_their_version() {
+    // No 2018–2025 file is in the corpus, so one is made from box.skp: the
+    // header's UTF-16 version string "{17.3.116}" becomes "{21.3.116}" and
+    // the CArchive stream behind it is untouched. The reader has decoded
+    // that layout for 2017 only; a stream claiming another release is
+    // refused with its version, and the copy points at both re-saves.
+    let mut bytes = fixture("box.skp");
+    let needle: Vec<u8> = "{17.".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let patch: Vec<u8> = "{21.".encode_utf16().flat_map(u16::to_le_bytes).collect();
+    let at = bytes
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+        .expect("the header carries the version string");
+    bytes[at..at + patch.len()].copy_from_slice(&patch);
+    match skp_import::import(&bytes) {
         Err(skp_import::SkpError::UnsupportedVersion { version }) => {
-            assert!(version.contains("26"), "got {version}");
-            // The error copy must point at the escape hatch every modern
-            // SketchUp has ( friendly-error hook).
+            assert_eq!(version, "{21.3.116}");
             let msg = skp_import::SkpError::UnsupportedVersion { version }.to_string();
             assert!(
                 msg.contains("Save As"),
                 "copy should suggest Save As: {msg}"
+            );
+            assert!(
+                msg.contains("current"),
+                "copy should suggest a re-save: {msg}"
             );
         }
         other => panic!(
             "expected UnsupportedVersion, got {other:?}",
             other = other.is_ok()
         ),
+    }
+}
+
+#[test]
+fn a_current_release_header_with_no_model_behind_it_is_reported_as_damage() {
+    // The 2026 box with everything after its header strings zeroed: the
+    // header still identifies a {26.x} file, but no ZIP follows. That is a
+    // damaged file, and the copy must not send the user off to re-save an
+    // already current file.
+    let mut cut = fixture("2026/box.skp");
+    cut.truncate(0x41 + 256);
+    cut[0x41..].fill(0);
+    match skp_import::import(&cut) {
+        Err(skp_import::SkpError::Parse(msg)) => {
+            assert!(msg.contains("{26."), "names the version: {msg}");
+            assert!(msg.contains("damaged"), "says it is damage: {msg}");
+        }
+        other => panic!("expected Parse, got {other:?}", other = other.is_ok()),
     }
 }
 
@@ -488,4 +535,55 @@ fn instance_poses_come_through_scaled_rotated_and_moved() {
             "{name}: expected a non-identity placement"
         );
     }
+}
+
+// ── Scenes and the saved view ────────────────────────────────────────────────
+
+#[test]
+fn scenes_arrive_with_cameras_hidden_tags_and_the_saved_view() {
+    // two-scenes.skp: two saved scenes; Scene 1 hides one layer. The
+    // saved view (the preview thumbnail's camera) lands as the document
+    // camera because the document was empty; every scene keeps its own
+    // camera, hidden-tag set and hidden-node set (a full set, empty here).
+    let (_, doc) = ingest("two-scenes.skp");
+    let cam = doc
+        .camera_state()
+        .expect("saved view adopted into the empty document");
+    let inch = openskp::INCH;
+    assert!((cam.eye.x - 326.1769714 / inch).abs() < 1e-6);
+    assert!((cam.eye.y - -250.1695099 / inch).abs() < 1e-6);
+    assert!((cam.eye.z - 154.6123047 / inch).abs() < 1e-6);
+    assert!((cam.fov_deg - 35.0).abs() < 1e-9);
+
+    let scenes = doc.scenes();
+    let names: Vec<&str> = scenes.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["Scene 1", "Scene 2"]);
+    let s1 = &scenes[0];
+    let c1 = s1.camera.as_ref().expect("Scene 1 captures its camera");
+    assert!((c1.eye.x - 56.3224258 / inch).abs() < 1e-6);
+    assert!((c1.eye.y - -385.0967712 / inch).abs() < 1e-6);
+    assert_eq!(
+        s1.hidden_tags.as_ref().map(|t| t.len()),
+        Some(1),
+        "Scene 1 hides one layer"
+    );
+    assert_eq!(s1.hidden_nodes.as_ref().map(|n| n.len()), Some(0));
+    assert_eq!(s1.section, Some(None), "captured: no section cut");
+    let s2 = &scenes[1];
+    assert_eq!(s2.hidden_tags.as_ref().map(|t| t.len()), Some(0));
+    assert!(s2.camera.is_some());
+
+    // Importing into a document that already has content keeps its view.
+    let out = skp_import::import(&fixture("two-scenes.skp")).unwrap();
+    let mut doc2 = Document::new();
+    let first = skp_import::import(&fixture("box.skp")).unwrap();
+    doc2.ingest(first.scene, first.textures_missing).unwrap();
+    let before = doc2.camera_state();
+    doc2.ingest(out.scene, out.textures_missing).unwrap();
+    assert_eq!(
+        doc2.camera_state(),
+        before,
+        "a non-empty document keeps its camera"
+    );
+    assert_eq!(doc2.scenes().len(), 2, "scenes are still added");
 }

@@ -57,8 +57,8 @@ pub use ids::{
     MaterialId, ObjectId, ShellId, SketchId, VertexId,
 };
 pub use import::{
-    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportTag, MeshRecipe,
-    SkippedMesh,
+    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportSceneRecipe, ImportTag,
+    MeshRecipe, SkippedMesh,
 };
 pub use material::{
     FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame,

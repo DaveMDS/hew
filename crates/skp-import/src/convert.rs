@@ -40,17 +40,33 @@
 //!   existence); hidden *instances* (per-entity hide) still drop, matching
 //!   SketchUp's own exports, and faces always import — hidden faces are
 //!   display state, and dropping them would open solids;
-//! - guides map to [`ImportGuide`]s.
+//! - guides map to [`ImportGuide`]s: a guide among the model's own
+//!   entities as it is, a guide inside a definition once per placement of
+//!   that definition, carried through the placement's world pose (that is
+//!   where SketchUp draws it).
 //!
-//! Everything OpenSKP hands us is already metres; poses come from the
-//! composed row-major world matrices, whose first 12 entries are exactly
-//! `Transform::from_affine`'s layout.
+//! Both containers OpenSKP reads (the 2026 ZIP container every current
+//! SketchUp saves, and the 2017 `CArchive` stream) come out as the same
+//! `Model`, so nothing here is container-specific. Everything OpenSKP hands
+//! us is already metres; poses come from the composed row-major world
+//! matrices, whose first 12 entries are exactly `Transform::from_affine`'s
+//! layout.
+//!
+//! Importer keys: scene hidden sets and active section cuts name entities
+//! by SketchUp **persistent id**, the one identity both containers carry.
+//! The composed [`openskp::Node`] tree does not carry pids itself, but it is
+//! built in the exact order of the reader's instance lists — top-level
+//! nodes from `Model::instances` outside every geometry run, children from
+//! the placing run's `GeometryRun::placed` — so the converter walks those
+//! lists in step with the tree to recover each node's pid. A pid of 0 (the
+//! 2017 legacy byte-scan path, which cannot resolve them) yields no key.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
-    DefRecipe, ImportGuide, ImportNode, ImportScene, ImportTag, MeshRecipe, Point3, Transform,
-    UvFrame, Vec3,
+    CameraProjection, CameraState, DefRecipe, ImportGuide, ImportNode, ImportScene,
+    ImportSceneRecipe, ImportTag, MeshRecipe, Plane, Point3, SectionPlaneState, Transform, UvFrame,
+    Vec3,
 };
 use mesh_heal::heal_mesh;
 use mesh_heal::uv::fit_uv_frame;
@@ -75,9 +91,18 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         .map(|&(dr, _)| dr as usize)
         .collect();
 
+    // Every persistent id some scene hides: such a group must stay a Group
+    // node (a bare Mesh carries no key for the scene's hidden set to name).
+    let scene_hidden: BTreeSet<u32> = model
+        .scenes
+        .iter()
+        .flat_map(|s| s.hidden_entities.iter().copied())
+        .collect();
+
     let mut cv = Converter {
         model,
         mats,
+        scene_hidden,
         def_variants: BTreeMap::new(),
         degraded_variants: BTreeMap::new(),
         defs: Vec::new(),
@@ -100,8 +125,9 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
     // ── The composed instance tree ─────────────────────────────────────────
     // `scene()` maps the top-level instances in filter order; zip against the
     // same filter to recover each root placement's own name (nested placements
-    // have no names in the 2017 format — they fall back to their def's name).
-    let top_names: Vec<Option<String>> = model
+    // have no names — they fall back to their def's name) and its persistent
+    // id (the importer key; see the module docs).
+    let top_level: Vec<(Option<String>, u32)> = model
         .instances
         .iter()
         .filter(|i| {
@@ -110,42 +136,41 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
                 .iter()
                 .any(|r| r.start <= i.offset && i.offset < r.end)
         })
-        .map(|i| i.name.clone().filter(|n| !n.is_empty()))
+        .map(|i| (i.name.clone().filter(|n| !n.is_empty()), i.pid))
         .collect();
-    for (node, own_name) in model.scene().iter().zip(top_names) {
-        if let Some(n) = cv.convert_node(node, own_name) {
+    let tree = model.scene();
+    debug_assert_eq!(tree.len(), top_level.len());
+    for (node, (own_name, pid)) in tree.iter().zip(top_level) {
+        if let Some(n) = cv.convert_node(node, own_name, pid) {
             roots.push(n);
         }
     }
 
     // ── Guides ─────────────────────────────────────────────────────────────
-    let guides: Vec<ImportGuide> = model
-        .guides
-        .iter()
-        .map(|g| ImportGuide::Line {
-            origin: Point3::new(g.point_m[0], g.point_m[1], g.point_m[2]),
-            direction: Vec3::new(g.direction[0], g.direction[1], g.direction[2]),
-        })
-        .collect();
+    let guides = world_guides(model, &tree);
 
     // ── Parse anomalies -> user-visible warnings ───────────────────────────
-    // Clean 2017 files parse with zero desync diagnostics (an OpenSKP
-    // regression guarantee); anything else means content may be missing and
-    // is said out loud, never papered over (rule 4 spirit; fixes go upstream).
-    // Converter-emitted warnings (non-manifold splits) come first — they are
-    // per-object and actionable. Desync notes AGGREGATE past a handful: a
-    // badly damaged file can desync tens of thousands of times, and 32k
-    // warning strings help nobody (a damaged production model produced 32k).
+    // Clean files parse with zero desync diagnostics on either container (an
+    // OpenSKP regression guarantee); anything else means content may be
+    // missing and is said out loud, never papered over (rule 4 spirit; fixes
+    // go upstream). Converter-emitted warnings (non-manifold splits) come
+    // first — they are per-object and actionable. Reader notes AGGREGATE
+    // past a handful: a badly damaged file can desync tens of thousands of
+    // times, and 32k warning strings help nobody (a damaged production model
+    // produced 32k).
     const DESYNC_DETAIL_CAP: usize = 8;
     let mut warnings = std::mem::take(&mut cv.warnings);
     let desyncs: Vec<&openskp::Diagnostic> =
         model.diagnostics.iter().filter(|d| d.is_desync()).collect();
-    warnings.extend(
-        desyncs
-            .iter()
-            .take(DESYNC_DETAIL_CAP)
-            .map(|d| format!("parser recovered from a malformed section: {d:?}")),
-    );
+    warnings.extend(desyncs.iter().take(DESYNC_DETAIL_CAP).map(|d| match d {
+        // A 2026 record the reader skipped: damaged, or a tag it does not
+        // know (what a newer release's addition looks like).
+        openskp::Diagnostic::Skipped { class, at, bytes } => format!(
+            "reader skipped a record it could not decode ({class}, {bytes} \
+             bytes at 0x{at:x}); content from it may be missing"
+        ),
+        other => format!("parser recovered from a malformed section: {other:?}"),
+    }));
     if desyncs.len() > DESYNC_DETAIL_CAP {
         warnings.push(format!(
             "parser recovered from {} more malformed sections (content from \
@@ -170,6 +195,85 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
         })
         .collect();
 
+    // ── Saved view + scenes ────────────────────────────────────────────────
+    // The document camera and every page: name, camera, and the hidden
+    // entity / hidden layer sets as node keys (persistent ids) and tag
+    // paths. Ids that name faces or edges carry no node and drop out in
+    // `ingest`; the default layer (list-first) has no tag to hide.
+    let camera = model.camera.as_ref().map(camera_state);
+    let tag_names: BTreeSet<&str> = tags.iter().map(|t| t.path[0].as_str()).collect();
+    // Section planes live in their owning entity list's local frame; a
+    // scene's active-section id resolves through the run holding it and
+    // that run's FIRST placement's world pose (the model root for loose
+    // planes). A plane inside a multiply placed definition is ambiguous in
+    // SketchUp too; the first placement is the documented choice.
+    let section_world = section_planes_world(model, &tree);
+    let saves_section = |s: &openskp::Scene| -> bool {
+        s.saved.has(openskp::SceneProperties::ACTIVE_SECTION_PLANES)
+    };
+    let scene_section = |s: &openskp::Scene| -> Option<SectionPlaneState> {
+        s.active_section_planes
+            .iter()
+            .find_map(|pid| section_world.get(pid).copied())
+    };
+    let scenes: Vec<ImportSceneRecipe> = model
+        .scenes
+        .iter()
+        .map(|s| ImportSceneRecipe {
+            name: s.name.clone(),
+            description: s.description.clone(),
+            camera: s.camera.as_ref().map(camera_state),
+            hidden_keys: Some(s.hidden_entities.iter().map(|&k| k as u64).collect()),
+            hidden_tags: Some(
+                s.hidden_layers
+                    .iter()
+                    .filter(|&&i| i != 0)
+                    .filter_map(|&i| model.layers.get(i))
+                    .filter(|l| tag_names.contains(l.name.as_str()))
+                    .map(|l| vec![l.name.clone()])
+                    .collect(),
+            ),
+            // A scene captures its cut only when it saved the section-planes
+            // property; a scene that did not leaves the cut alone (`None`),
+            // and one that did with nothing active captures "no cut".
+            section: saves_section(s).then(|| scene_section(s)),
+        })
+        .collect();
+    // The scene active at save time is the one whose camera the saved view
+    // repeats exactly; its section cut is what SketchUp showed, so the
+    // document adopts it (the hidden state already lives in the entities'
+    // and layers' own flags) — provided the scene saved the section-planes
+    // property at all; a scene that did not leaves the model's own cut in
+    // force. With no such scene the model's own state decides: the root
+    // entity list's active plane cuts (both containers record which plane
+    // that is), and failing that — a file with planes but none active, or
+    // the legacy byte-scan path, which resolves no ids — the first plane
+    // placed at the root arrives placed but not cutting, ready to switch
+    // on. Hew has one section plane, so planes inside definitions (which
+    // cut only their own contents) are not adopted.
+    let saved_scene = model.camera.as_ref().and_then(|saved| {
+        model
+            .scenes
+            .iter()
+            .find(|s| s.camera.as_ref().is_some_and(|c| c == saved))
+    });
+    let root_run = model.geometry.iter().find(|r| r.def_index.is_none());
+    let section = match saved_scene {
+        Some(s) if saves_section(s) => scene_section(s),
+        _ => root_run.and_then(|root| {
+            root.active_section
+                .and_then(|pid| section_world.get(&pid).copied())
+                .or_else(|| {
+                    root.sections.iter().find_map(|sp| {
+                        section_world.get(&sp.pid).map(|s| SectionPlaneState {
+                            active: false,
+                            ..*s
+                        })
+                    })
+                })
+        }),
+    };
+
     let Converter { mats, defs, .. } = cv;
     Output {
         scene: ImportScene {
@@ -178,6 +282,9 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
             roots,
             guides,
             tags,
+            camera,
+            scenes,
+            section,
         },
         textures_missing: mats.textures_missing,
         warnings,
@@ -187,6 +294,8 @@ pub(crate) fn convert(model: &openskp::Model) -> Output {
 struct Converter<'a> {
     model: &'a openskp::Model,
     mats: MatTable,
+    /// Persistent ids named by any scene's hidden-entity list.
+    scene_hidden: BTreeSet<u32>,
     /// (geometry-run index, inherited material slot) -> def index in `defs`
     /// (`None` = the run has no importable faces at that variant).
     def_variants: BTreeMap<(usize, u16), Option<usize>>,
@@ -203,12 +312,39 @@ struct Converter<'a> {
 }
 
 impl Converter<'_> {
+    /// A node's children paired with their persistent ids: the composed
+    /// tree lists a node's children in exactly the order of its run's
+    /// `placed` list (see the module docs), and a node without a run has
+    /// no children.
+    fn children_with_pids<'n>(
+        &self,
+        node: &'n openskp::Node,
+    ) -> impl Iterator<Item = (&'n openskp::Node, u32)> + use<'_, 'n> {
+        let pids = node
+            .run
+            .map(|ri| self.model.geometry[ri].placed.as_slice())
+            .unwrap_or(&[]);
+        debug_assert!(node.children.is_empty() || node.children.len() == pids.len());
+        node.children.iter().zip(pids.iter().map(|p| p.pid))
+    }
+
+    /// Every child of `node` converted (pruned children drop out).
+    fn convert_children(&mut self, node: &openskp::Node) -> Vec<ImportNode> {
+        let pairs: Vec<(&openskp::Node, u32)> = self.children_with_pids(node).collect();
+        pairs
+            .into_iter()
+            .filter_map(|(c, pid)| self.convert_node(c, None, pid))
+            .collect()
+    }
+
     /// One composed scene node -> an import node, `None` when pruned
     /// (hidden instance, hidden layer, or nothing importable below).
+    /// `pid` is the placing object's persistent id (0 = unknown).
     fn convert_node(
         &mut self,
         node: &openskp::Node,
         own_name: Option<String>,
+        pid: u32,
     ) -> Option<ImportNode> {
         // NOTHING visibility-related is dropped: a hidden INSTANCE
         // (per-entity hide) imports as a user-hidden node (persisted view
@@ -226,7 +362,7 @@ impl Converter<'_> {
             // are independent containers, not shared definitions — each
             // placement converts on its own (deep copy, no shared def).
             Some(ri) if matches!(node.is_group, Some(true)) => {
-                self.group_node(ri, node, own_name, tags, hidden)
+                self.group_node(ri, node, own_name, tags, hidden, pid)
             }
             // A placement of a definition — with or without in-definition
             // child placements. The whole subtree is ONE nested definition
@@ -244,16 +380,13 @@ impl Converter<'_> {
                     name: own_name,
                     tags,
                     hidden,
+                    key: key_of(pid),
                 })
             }
             // A pure container with no geometry run of its own: a world
             // group wrapping its converted children (world poses).
             None => {
-                let children: Vec<ImportNode> = node
-                    .children
-                    .iter()
-                    .filter_map(|c| self.convert_node(c, None))
-                    .collect();
+                let children = self.convert_children(node);
                 if children.is_empty() {
                     return None;
                 }
@@ -265,6 +398,7 @@ impl Converter<'_> {
                     children,
                     tags,
                     hidden,
+                    key: key_of(pid),
                 })
             }
         }
@@ -291,24 +425,23 @@ impl Converter<'_> {
         own_name: Option<String>,
         tags: Vec<Vec<String>>,
         hidden: bool,
+        pid: u32,
     ) -> Option<ImportNode> {
         let name = own_name
             .or_else(|| node.definition.clone())
             .unwrap_or_default();
         let bake = pose_of(&node.world);
         let mut own_meshes = self.mesh_recipes(run_idx, name.clone(), node.material, &bake);
-        let children: Vec<ImportNode> = node
-            .children
-            .iter()
-            .filter_map(|c| self.convert_node(c, None))
-            .collect();
+        let children = self.convert_children(node);
 
         // The "simple solid" special case: SketchUp needs a wrapper group to
         // isolate geometry; Hew's solids-first model doesn't. Skipped when
         // the group itself is hidden — `MeshRecipe` carries no hidden flag
         // of its own, so collapsing would silently drop the group's
-        // visibility state (rule 4 spirit: never lose it quietly).
-        if children.is_empty() && own_meshes.len() == 1 && !hidden {
+        // visibility state (rule 4 spirit: never lose it quietly) — and
+        // when a scene hides it, since a bare mesh carries no key either.
+        let scene_hidden = pid != 0 && self.scene_hidden.contains(&pid);
+        if children.is_empty() && own_meshes.len() == 1 && !hidden && !scene_hidden {
             let mut mesh = own_meshes.pop().expect("len checked above");
             mesh.tags = tags;
             return Some(ImportNode::Mesh(mesh));
@@ -325,6 +458,7 @@ impl Converter<'_> {
             children: all_children,
             tags,
             hidden,
+            key: key_of(pid),
         })
     }
 
@@ -351,10 +485,9 @@ impl Converter<'_> {
                 && !node.children.is_empty()
                 && let Ok(inv) = pose_of(&node.world).inverse()
             {
-                let children: Vec<ImportNode> = node
-                    .children
-                    .iter()
-                    .filter_map(|c| self.convert_node(c, None))
+                let children: Vec<ImportNode> = self
+                    .convert_children(node)
+                    .into_iter()
                     .map(|mut n| {
                         rebase_to_local(&mut n, &inv);
                         n
@@ -382,11 +515,9 @@ impl Converter<'_> {
         // be rebased — its children are dropped loudly, never guessed at.
         match pose_of(&node.world).inverse() {
             Ok(inv) => {
-                for c in &node.children {
-                    if let Some(mut n) = self.convert_node(c, None) {
-                        rebase_to_local(&mut n, &inv);
-                        children.push(n);
-                    }
+                for mut n in self.convert_children(node) {
+                    rebase_to_local(&mut n, &inv);
+                    children.push(n);
                 }
             }
             Err(_) => {
@@ -687,4 +818,138 @@ fn rebase_mesh(m: &mut MeshRecipe, inv: &Transform) {
         }
     }
     m.positions = new_positions;
+}
+
+/// The importer key of a placed object: its persistent id, the identity a
+/// scene's hidden-entity list names. 0 means the reader could not resolve
+/// one (the 2017 legacy byte-scan path), and such a node carries no key.
+fn key_of(pid: u32) -> Option<u64> {
+    (pid != 0).then_some(u64::from(pid))
+}
+
+/// A `.skp` camera as a Hew camera state (both metres).
+fn camera_state(c: &openskp::Camera) -> CameraState {
+    let m = |v: [f64; 3]| Point3::new(v[0], v[1], v[2]);
+    CameraState {
+        projection: if c.perspective {
+            CameraProjection::Perspective
+        } else {
+            CameraProjection::Parallel
+        },
+        fov_deg: c.fov_deg,
+        eye: m(c.eye_m),
+        target: m(c.target_m),
+        up: Vec3::new(c.up[0], c.up[1], c.up[2]),
+    }
+}
+
+/// The world pose of every geometry run's FIRST placement in the composed
+/// tree, by run index (the root run is not placed and is absent).
+fn first_placements(tree: &[openskp::Node]) -> BTreeMap<usize, Transform> {
+    let mut first_pose: BTreeMap<usize, Transform> = BTreeMap::new();
+    fn visit(nodes: &[openskp::Node], out: &mut BTreeMap<usize, Transform>) {
+        for n in nodes {
+            if let Some(ri) = n.run {
+                out.entry(ri).or_insert_with(|| pose_of(&n.world));
+            }
+            visit(&n.children, out);
+        }
+    }
+    visit(tree, &mut first_pose);
+    first_pose
+}
+
+/// Every guide in the model as a world-frame Hew guide. A guide among the
+/// model's own entities is already world; a guide inside a definition is
+/// stored in that definition's local frame and appears once per placement
+/// of the definition, carried through the placement's world pose (a
+/// definition that is never placed contributes nothing, as its geometry
+/// doesn't either). The legacy byte-scan path reports no owner and its
+/// guides pass through as world guides.
+fn world_guides(model: &openskp::Model, tree: &[openskp::Node]) -> Vec<ImportGuide> {
+    // definition map index -> every world pose placing it
+    let mut placements: BTreeMap<usize, Vec<Transform>> = BTreeMap::new();
+    fn visit(
+        nodes: &[openskp::Node],
+        model: &openskp::Model,
+        out: &mut BTreeMap<usize, Vec<Transform>>,
+    ) {
+        for n in nodes {
+            if let Some(di) = n.run.and_then(|ri| model.geometry[ri].def_index) {
+                out.entry(di).or_default().push(pose_of(&n.world));
+            }
+            visit(&n.children, model, out);
+        }
+    }
+    visit(tree, model, &mut placements);
+
+    let mut out = Vec::new();
+    for g in &model.guides {
+        let origin = Point3::new(g.point_m[0], g.point_m[1], g.point_m[2]);
+        let direction = Vec3::new(g.direction[0], g.direction[1], g.direction[2]);
+        match g.def_index {
+            None => out.push(ImportGuide::Line { origin, direction }),
+            Some(di) => {
+                for pose in placements.get(&di).map(Vec::as_slice).unwrap_or(&[]) {
+                    out.push(ImportGuide::Line {
+                        origin: pose.apply_point(origin),
+                        direction: pose.apply_vector(direction),
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every section plane in the model, keyed by persistent id, as a world
+/// frame Hew section state (metres): the run's local plane carried through
+/// the world pose of the run's first placement (identity for the root
+/// run). Planes whose placement pose is singular are left out.
+fn section_planes_world(
+    model: &openskp::Model,
+    tree: &[openskp::Node],
+) -> BTreeMap<u32, SectionPlaneState> {
+    let first_pose = first_placements(tree);
+
+    let mut out = BTreeMap::new();
+    for (ri, run) in model.geometry.iter().enumerate() {
+        let is_root = run.def_index.is_none();
+        let pose = if is_root {
+            Some(Transform::IDENTITY)
+        } else {
+            first_pose.get(&ri).copied()
+        };
+        let Some(pose) = pose else {
+            continue;
+        };
+        for sp in &run.sections {
+            let [a, b, c, d] = sp.plane;
+            let n_local = Vec3::new(a, b, c);
+            // A point on the plane: -D · n (inches -> metres).
+            let p_local = Point3::new(
+                -d * a / openskp::INCH,
+                -d * b / openskp::INCH,
+                -d * c / openskp::INCH,
+            );
+            // The normal goes through the plane transform (inverse
+            // transpose), not the vector one: a non-uniformly scaled
+            // placement would otherwise tilt it off the transformed plane.
+            let Ok(local_plane) = Plane::from_point_normal(p_local, n_local) else {
+                continue;
+            };
+            let Ok(world_plane) = pose.apply_plane(&local_plane) else {
+                continue;
+            };
+            out.insert(
+                sp.pid,
+                SectionPlaneState {
+                    origin: pose.apply_point(p_local),
+                    normal: world_plane.normal(),
+                    active: true,
+                },
+            );
+        }
+    }
+    out
 }

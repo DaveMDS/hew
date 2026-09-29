@@ -1,8 +1,10 @@
 //! Differential validation: every fixture ships as a `.skp` + the
-//! `.dae` SketchUp 2017 itself exported from the same model. Both importers
-//! must agree on the world-space result — flattened face totals and the
-//! world-space bounding box — even where they differ structurally (the `.dae`
-//! path bakes/flattens hierarchy; the `.skp` path keeps shared definitions).
+//! `.dae` SketchUp 2017 itself exported from the same model, and as the
+//! 2026 container SketchUp 2026 saved from the 2017 file
+//! (`fixtures/2026/`). Both importers must agree on the world-space result
+//! — flattened face totals and the world-space bounding box — from either
+//! container, even where they differ structurally (the `.dae` path
+//! bakes/flattens hierarchy; the `.skp` path keeps shared definitions).
 //!
 //! Import-quality gaps surfacing here get filed upstream in OpenSKP, never
 //! papered over in `skp-import` (docs/agents/ROADMAP.md).
@@ -99,17 +101,19 @@ fn dae_flat(name: &str) -> Flat {
 const AABB_TOL: f64 = 1e-3;
 
 fn assert_pair(stem: &str) {
-    let s = skp_flat(&format!("{stem}.skp"));
     let d = dae_flat(&format!("{stem}.dae"));
-    assert_eq!(
-        s.faces, d.faces,
-        "{stem}: flattened world face totals differ (skp {s:?} vs dae {d:?})"
-    );
-    for i in 0..3 {
-        assert!(
-            (s.lo[i] - d.lo[i]).abs() < AABB_TOL && (s.hi[i] - d.hi[i]).abs() < AABB_TOL,
-            "{stem}: world AABB differs on axis {i} (skp {s:?} vs dae {d:?})"
+    for skp in [format!("{stem}.skp"), format!("2026/{stem}.skp")] {
+        let s = skp_flat(&skp);
+        assert_eq!(
+            s.faces, d.faces,
+            "{skp}: flattened world face totals differ (skp {s:?} vs dae {d:?})"
         );
+        for i in 0..3 {
+            assert!(
+                (s.lo[i] - d.lo[i]).abs() < AABB_TOL && (s.hi[i] - d.hi[i]).abs() < AABB_TOL,
+                "{skp}: world AABB differs on axis {i} (skp {s:?} vs dae {d:?})"
+            );
+        }
     }
 }
 
@@ -153,14 +157,25 @@ differential! {
 
 // ── Full-scale stress model ──────────────────────────────────────────────────
 
-/// The 10.7 MB third-party production model (theater), end-to-end. The file
-/// is too large to freeze as a fixture; the test runs wherever the OpenSKP
-/// dev clone sits next to the Hew checkout (every dev box) and skips
-/// silently elsewhere.
+/// The 10.7 MB third-party production model (theater), end-to-end, from
+/// the 2017 original and from its 2026 conversion (7.4 MB), which must
+/// land the same frozen numbers. The files are too large to freeze as
+/// fixtures; the tests run wherever the OpenSKP dev clone sits next to the
+/// Hew checkout (every dev box) and skip silently elsewhere.
 #[test]
 fn theater_production_model_end_to_end() {
+    theater("theater-2017.skp");
+}
+
+#[test]
+fn theater_2026_production_model_end_to_end() {
+    theater("theater-2026.skp");
+}
+
+fn theater(file: &str) {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.skp");
+        .join("../../../openskp/corpus/third-party")
+        .join(file);
     let Ok(bytes) = std::fs::read(&path) else {
         eprintln!("skipped: no ../openskp checkout");
         return;
@@ -171,8 +186,10 @@ fn theater_production_model_end_to_end() {
     // theater carries 28 non-manifold source meshes (ceiling speakers,
     // La-Z-Boy chair sides, the projector body, PVC fittings).
     assert!(
-        !out.warnings.iter().any(|w| w.contains("parser recovered")),
-        "clean production file, no parser recovery: {:?}",
+        !out.warnings
+            .iter()
+            .any(|w| w.contains("parser recovered") || w.contains("reader skipped")),
+        "clean production file, no reader recovery: {:?}",
         out.warnings
     );
     assert_eq!(

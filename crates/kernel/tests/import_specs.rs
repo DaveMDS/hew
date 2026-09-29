@@ -73,6 +73,9 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         roots,
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     }
 }
 
@@ -141,10 +144,14 @@ fn ingest_is_atomic_undo_hides_all() {
                 children: vec![ImportNode::Mesh(box_recipe("m2"))],
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -221,6 +228,7 @@ fn ingest_instance_shares_one_def() {
                 name: None,
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
             ImportNode::Instance {
                 def: 0,
@@ -228,10 +236,14 @@ fn ingest_instance_shares_one_def() {
                 name: None,
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -279,6 +291,7 @@ fn ingest_then_save_load_preserves_names() {
                 children: vec![ImportNode::Mesh(box_recipe("MyBox"))],
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
             ImportNode::Instance {
                 def: 0,
@@ -286,10 +299,14 @@ fn ingest_then_save_load_preserves_names() {
                 name: None,
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -355,6 +372,9 @@ fn ingest_guides_are_atomic_with_the_import() {
             },
         ],
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
 
@@ -401,6 +421,7 @@ fn ingest_instance_own_name_wins_over_def_name() {
                 name: Some("Front Wall".to_string()),
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
             ImportNode::Instance {
                 def: 0,
@@ -408,10 +429,14 @@ fn ingest_instance_own_name_wins_over_def_name() {
                 name: None,
                 tags: Vec::new(),
                 hidden: false,
+                key: None,
             },
         ],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -453,6 +478,7 @@ fn ingest_builds_nested_definitions() {
                         name: None,
                         tags: Vec::new(),
                         hidden: false,
+                        key: None,
                     },
                 ],
             },
@@ -464,9 +490,13 @@ fn ingest_builds_nested_definitions() {
             name: None,
             tags: Vec::new(),
             hidden: false,
+            key: None,
         }],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -504,6 +534,7 @@ fn ingest_refuses_cyclic_definition_recipes() {
         name: None,
         tags: Vec::new(),
         hidden: false,
+        key: None,
     };
     let mut doc = Document::new();
     let scene = ImportScene {
@@ -521,6 +552,9 @@ fn ingest_refuses_cyclic_definition_recipes() {
         roots: vec![],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     assert!(matches!(
         doc.ingest(scene, vec![]),
@@ -550,6 +584,7 @@ fn ingest_skips_nested_instances_of_failed_defs() {
                         name: None,
                         tags: Vec::new(),
                         hidden: false,
+                        key: None,
                     },
                 ],
             },
@@ -561,9 +596,13 @@ fn ingest_skips_nested_instances_of_failed_defs() {
             name: None,
             tags: Vec::new(),
             hidden: false,
+            key: None,
         }],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.skipped.len(), 1);
@@ -584,6 +623,7 @@ fn ingest_refuses_over_wide_definition_recipes() {
         name: None,
         tags: Vec::new(),
         hidden: false,
+        key: None,
     };
     // defs[0] is the leaf; defs[k] holds two instances of defs[k-1].
     let mut defs = vec![DefRecipe::from_meshes(None, vec![box_recipe("leaf")])];
@@ -599,6 +639,9 @@ fn ingest_refuses_over_wide_definition_recipes() {
         roots: vec![inst(21)],
         guides: Vec::new(),
         tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
     };
     let mut doc = Document::new();
     assert!(matches!(
@@ -606,4 +649,112 @@ fn ingest_refuses_over_wide_definition_recipes() {
         Err(kernel::DocumentError::ComponentExpansionExceeded)
     ));
     assert!(doc.component_ids().is_empty(), "refused before mutation");
+}
+
+// ── Scene recipes ────────────────────────────────────────────────────────────
+
+#[test]
+fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
+    use kernel::{
+        CameraProjection, CameraState, ImportSceneRecipe, ImportTag, Point3, SectionPlaneState,
+        Vec3,
+    };
+    let camera = |x: f64| CameraState {
+        projection: CameraProjection::Perspective,
+        fov_deg: 35.0,
+        eye: Point3::new(x, -5.0, 3.0),
+        target: Point3::new(0.0, 0.0, 0.0),
+        up: Vec3::new(0.0, 0.0, 1.0),
+    };
+    let section = SectionPlaneState {
+        origin: Point3::new(0.0, 0.0, 0.5),
+        normal: Vec3::new(0.0, 0.0, -1.0),
+        active: true,
+    };
+    let make = || ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![
+            ImportNode::Group {
+                name: "roof".into(),
+                children: vec![ImportNode::Mesh(box_recipe("roof-box"))],
+                tags: vec![],
+                hidden: false,
+                key: Some(7),
+            },
+            ImportNode::Mesh(box_recipe("floor")),
+        ],
+        guides: vec![],
+        tags: vec![ImportTag {
+            path: vec!["Trees".into()],
+            hidden: false,
+        }],
+        camera: Some(camera(10.0)),
+        scenes: vec![
+            ImportSceneRecipe {
+                name: "Plan".into(),
+                description: "cut".into(),
+                camera: Some(camera(1.0)),
+                // 7 = the roof group; 99 names nothing Hew makes a node for
+                hidden_keys: Some(vec![7, 99]),
+                hidden_tags: Some(vec![vec!["Trees".into()], vec!["Missing".into()]]),
+                section: Some(Some(section)),
+            },
+            ImportSceneRecipe {
+                name: "Plan".into(),
+                description: String::new(),
+                camera: None,
+                hidden_keys: None,
+                hidden_tags: None,
+                section: None,
+            },
+        ],
+        section: Some(section),
+    };
+
+    let mut doc = Document::new();
+    doc.ingest(make(), vec![]).unwrap();
+    // The saved view and its section cut land in the empty document.
+    assert_eq!(doc.camera_state(), Some(camera(10.0)));
+    let scenes = doc.scenes();
+    assert_eq!(scenes.len(), 2);
+    let plan = &scenes[0];
+    assert_eq!(plan.name, "Plan");
+    assert_eq!(plan.description, "cut");
+    assert_eq!(plan.camera, Some(camera(1.0)));
+    assert_eq!(plan.section, Some(Some(section)));
+    let hidden = plan.hidden_nodes.as_ref().expect("captured");
+    assert_eq!(
+        hidden.len(),
+        1,
+        "key 7 resolved to the roof group; 99 dropped"
+    );
+    let roof_sid = doc
+        .top_level_nodes()
+        .into_iter()
+        .find_map(|n| match n {
+            kernel::NodeId::Group(g) => doc.sid_of(&kernel::EntityRef::Group(g)),
+            _ => None,
+        })
+        .unwrap();
+    assert!(hidden.contains(&roof_sid));
+    let tags = plan.hidden_tags.as_ref().expect("captured");
+    assert_eq!(
+        tags.len(),
+        1,
+        "the declared tag resolved; the unknown path dropped"
+    );
+    // Duplicate names get a suffix; uncaptured properties stay None.
+    let second = &scenes[1];
+    assert_eq!(second.name, "Plan (2)");
+    assert!(
+        second.camera.is_none() && second.hidden_nodes.is_none() && second.hidden_tags.is_none()
+    );
+    assert!(second.section.is_none());
+
+    // A second import into the now non-empty document keeps the camera.
+    doc.ingest(make(), vec![]).unwrap();
+    assert_eq!(doc.camera_state(), Some(camera(10.0)));
+    assert_eq!(doc.scenes().len(), 4);
+    assert_eq!(doc.scenes()[2].name, "Plan (3)");
 }

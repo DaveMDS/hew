@@ -12,9 +12,11 @@
 //! The recipe types carry no `serde` derives — they are in-memory only and do
 //! **not** touch the file format (DEVELOPMENT.md rule).
 
+use crate::camera::CameraState;
 use crate::ids::{ComponentId, GroupId, InstanceId, MaterialId, ObjectId};
 use crate::material::{Material, UvFrame};
 use crate::math::Point3;
+use crate::scenes::SectionPlaneState;
 use crate::transform::Transform;
 
 // ── Recipe IR ────────────────────────────────────────────────────────────────
@@ -109,6 +111,10 @@ pub enum ImportNode {
         /// USER-hidden in the source (a `.skp` hidden group): imported,
         /// registered hidden-by-default (manifest v6), never dropped.
         hidden: bool,
+        /// The importer's own identity for this node (a `.skp` archive
+        /// slot), so an [`ImportSceneRecipe`]'s hidden-node list can name
+        /// it before the node exists. `None` when no scene refers to it.
+        key: Option<u64>,
     },
     /// An instance of a shared definition (index into `ImportScene::defs`).
     Instance {
@@ -124,7 +130,32 @@ pub enum ImportNode {
         tags: Vec<Vec<String>>,
         /// USER-hidden in the source (a `.skp` hidden component instance).
         hidden: bool,
+        /// The importer's own identity for this node (see
+        /// [`ImportNode::Group::key`]).
+        key: Option<u64>,
     },
+}
+
+/// A saved view (a `.skp` scene) carried by an import: created by `ingest`
+/// after the geometry, so its hidden sets can name the nodes and tags the
+/// same import creates. Each `Option` is a captured property (`None` = the
+/// scene does not capture it); a captured hidden set is a FULL set, as
+/// `Scene` stores it.
+pub struct ImportSceneRecipe {
+    /// Display name; made unique against the document's existing scenes.
+    pub name: String,
+    pub description: String,
+    pub camera: Option<CameraState>,
+    /// Keys (see [`ImportNode::Group::key`]) of the nodes hidden in this
+    /// scene. Keys that no imported node carries (source entities Hew has
+    /// no node for, such as individual faces) are ignored.
+    pub hidden_keys: Option<Vec<u64>>,
+    /// Tag paths hidden in this scene (`.skp` layers), each declared in
+    /// [`ImportScene::tags`].
+    pub hidden_tags: Option<Vec<Vec<String>>>,
+    /// The section plane active in this scene (world frame), when the
+    /// scene captures one; `Some(None)` captures "no section cut".
+    pub section: Option<Option<SectionPlaneState>>,
 }
 
 /// A construction guide carried by an import (`.skp` guides).
@@ -171,6 +202,17 @@ pub struct ImportScene {
     /// The source document's declared tag list (`.skp` layers) with their
     /// visibility. Registered by `ingest`; unregistered on undo.
     pub tags: Vec<ImportTag>,
+    /// The source document's saved view. Adopted as the working camera
+    /// only when the import lands in an EMPTY document (a fresh open of a
+    /// `.skp`); an import into existing work keeps the user's view.
+    pub camera: Option<CameraState>,
+    /// The source document's saved views (`.skp` scenes), created after
+    /// the geometry in source order. Like palette materials, scenes are
+    /// not removed by undoing the import.
+    pub scenes: Vec<ImportSceneRecipe>,
+    /// The section cut active in the source's saved view, adopted under
+    /// the same empty-document rule as [`ImportScene::camera`].
+    pub section: Option<SectionPlaneState>,
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

@@ -8648,19 +8648,22 @@ impl Scene {
         // Imports push DocAction::Imported and extend the saved document, so
         // they are recorded like any other committed mutation — with the file
         // (and image) bytes embedded, keeping the recording self-contained.
-        recording::record(recording::RecordedCall::ImportDae {
-            bytes: dae_bytes.to_vec(),
-            images: image_map
-                .iter()
-                .map(|(uri, (bytes, format))| recording::RecordedImage {
-                    uri: uri.clone(),
-                    bytes: bytes.clone(),
-                    format: match format {
-                        ImageFormat::Jpeg => 1,
-                        _ => 0,
-                    },
-                })
-                .collect(),
+        let total = dae_bytes.len() + image_map.values().map(|(b, _)| b.len()).sum::<usize>();
+        recording::record_import_sized("import_dae", total, || {
+            recording::RecordedCall::ImportDae {
+                bytes: dae_bytes.to_vec(),
+                images: image_map
+                    .iter()
+                    .map(|(uri, (bytes, format))| recording::RecordedImage {
+                        uri: uri.clone(),
+                        bytes: bytes.clone(),
+                        format: match format {
+                            ImageFormat::Jpeg => 1,
+                            _ => 0,
+                        },
+                    })
+                    .collect(),
+            }
         });
         Ok((report, out.warnings))
     }
@@ -8697,26 +8700,30 @@ impl Scene {
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        recording::record(recording::RecordedCall::ImportGltf {
-            bytes: gltf_bytes.to_vec(),
+        recording::record_import("import_gltf", gltf_bytes, |bytes| {
+            recording::RecordedCall::ImportGltf { bytes }
         });
         Ok((report, out.warnings))
     }
 
-    /// Import SketchUp 2017 `.skp` bytes into the current document (
-    /// clean-room OpenSKP reader —). Additive: existing
-    /// geometry is untouched. Returns the same `ImportReport` JS shape as
-    /// [`Scene::import_dae`], plus `warnings: [string]` — parser recovery
-    /// notes (non-empty means the reader resynced inside a malformed section
-    /// and content may be missing; clean SketchUp 2017 files produce none).
+    /// Import SketchUp `.skp` bytes into the current document — the 2026
+    /// container every current SketchUp saves, or the 2017 format — through
+    /// the clean-room OpenSKP reader. Additive: existing geometry is
+    /// untouched. Returns the same `ImportReport` JS shape as
+    /// [`Scene::import_dae`], plus `warnings: [string]` — reader recovery
+    /// notes (non-empty means a damaged or unknown record was skipped, or
+    /// the reader resynced inside a malformed section, and content may be
+    /// missing; clean SketchUp files produce none).
     ///
     /// Textures are embedded in the `.skp` container, so there is no images
     /// argument; ones without embedded bytes surface in `textures_missing`.
     ///
     /// # Errors
-    /// Throws a `"SKP: <message>"` `JsError` on parse failure. Unsupported
-    /// versions (anything but 2017) throw with the file's own version and
-    /// "Save As ▸ SketchUp Version 2017" guidance baked into the message.
+    /// Throws a `"SKP: <message>"` `JsError` on parse failure. A file in a
+    /// layout the reader has not decoded (a 2013–2016 or 2018–2025 stream)
+    /// throws with the file's own version and re-save guidance (a current
+    /// SketchUp, or "Save As ▸ SketchUp Version 2017") baked into the
+    /// message.
     pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
         let (report, warnings) = self
             .import_skp_core(skp_bytes)
@@ -8740,8 +8747,8 @@ impl Scene {
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        recording::record(recording::RecordedCall::ImportSkp {
-            bytes: skp_bytes.to_vec(),
+        recording::record_import("import_skp", skp_bytes, |bytes| {
+            recording::RecordedCall::ImportSkp { bytes }
         });
         Ok((report, out.warnings))
     }
@@ -8795,10 +8802,12 @@ impl Scene {
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
 
-        recording::record(recording::RecordedCall::ImportStl {
-            bytes: stl_bytes.to_vec(),
-            unit_scale,
-            name,
+        recording::record_import("import_stl", stl_bytes, |bytes| {
+            recording::RecordedCall::ImportStl {
+                bytes,
+                unit_scale,
+                name,
+            }
         });
         Ok((report, out.warnings))
     }
@@ -10144,6 +10153,12 @@ impl Scene {
                     }
                     ImportSkp { bytes } => {
                         self.import_skp_core(&bytes)?;
+                    }
+                    ImportOmitted { of, len } => {
+                        return Err(ApiError(format!(
+                            "recording cannot replay {of}: its {len}-byte source file was \
+                             too large to embed"
+                        )));
                     }
                     ImportStl {
                         bytes,

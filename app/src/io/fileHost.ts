@@ -89,7 +89,8 @@ export interface FileHost {
 
   /**
    * Prompt the user to choose a model file to import — COLLADA (`.dae`),
-   * SketchUp 2017 (`.skp`), glTF (`.glb` / `.gltf`), or STL (`.stl`) — the
+   * SketchUp (`.skp`, the 2026 container or the 2017 format), glTF (`.glb` /
+   * `.gltf`), or STL (`.stl`) — the
    * format is chosen by the file the user picks (the dialog offers a filter
    * for each). Returns null if the user cancels.
    *

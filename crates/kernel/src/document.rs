@@ -4297,6 +4297,63 @@ impl Document {
         Ok(doc)
     }
 
+    /// One imported scene (`ImportSceneRecipe`): a `Scene` whose captured
+    /// hidden sets come from the recipe, not from the document's current
+    /// hide state. A name the document already uses gets a numeric suffix.
+    fn ingest_scene(
+        &mut self,
+        recipe: crate::import::ImportSceneRecipe,
+        keys: &BTreeMap<u64, Vec<NodeId>>,
+    ) {
+        use crate::scenes::SceneProps;
+        let base = if recipe.name.trim().is_empty() {
+            "Scene".to_string()
+        } else {
+            recipe.name.clone()
+        };
+        let mut name = base.clone();
+        let mut n = 2usize;
+        while self.scenes.iter().any(|s| s.name == name) {
+            name = format!("{base} ({n})");
+            n += 1;
+        }
+        let props = SceneProps {
+            camera: recipe.camera.is_some(),
+            hidden_nodes: recipe.hidden_keys.is_some(),
+            hidden_tags: recipe.hidden_tags.is_some(),
+            section: recipe.section.is_some(),
+            display: false,
+        };
+        let Ok(sid) = self.add_scene(Some(name), props, recipe.camera, None, None) else {
+            return;
+        };
+        let hidden_nodes = recipe.hidden_keys.map(|ks| {
+            ks.iter()
+                .filter_map(|k| keys.get(k))
+                .flatten()
+                .filter_map(|n| self.sid_of(&crate::scenes::entity_of(*n)))
+                .collect::<BTreeSet<u64>>()
+        });
+        let hidden_tags = recipe.hidden_tags.map(|paths| {
+            paths
+                .iter()
+                .filter_map(|p| self.sid_of(&EntityRef::Tag(p.clone())))
+                .collect::<BTreeSet<u64>>()
+        });
+        if let Some(scene) = self.scenes.iter_mut().find(|s| s.sid == sid) {
+            scene.description = recipe.description;
+            if hidden_nodes.is_some() {
+                scene.hidden_nodes = hidden_nodes;
+            }
+            if hidden_tags.is_some() {
+                scene.hidden_tags = hidden_tags;
+            }
+            if let Some(section) = recipe.section {
+                scene.section = Some(section);
+            }
+        }
+    }
+
     // -------------------------------------------------------------- ingest
 
     /// Merge an imported scene (COLLADA, etc.) into this document as new
@@ -4357,6 +4414,12 @@ impl Document {
         let mut watertight_count = 0usize;
         let mut leaky_count = 0usize;
         let mut skipped: Vec<SkippedMesh> = Vec::new();
+        // Importer keys -> the nodes they became (scene hidden sets). One
+        // key can name several nodes: a shared definition's members are
+        // rebuilt per material variant of the definition.
+        let mut keys: BTreeMap<u64, Vec<NodeId>> = BTreeMap::new();
+        // A saved view is adopted only into an empty document.
+        let was_empty = self.top_level_nodes().is_empty() && self.sketches.is_empty();
 
         // ── 2. Build component definitions ────────────────────────────────
         // Placeholders allocate in RECIPE order (ComponentId/dense order
@@ -4392,6 +4455,7 @@ impl Document {
                     &mut leaky_count,
                     &mut skipped,
                     &dense_to_mat,
+                    &mut keys,
                 ) {
                     def_members.push(nid);
                 }
@@ -4423,6 +4487,7 @@ impl Document {
                 &mut leaky_count,
                 &mut skipped,
                 &dense_to_mat,
+                &mut keys,
             ) {
                 top_roots.push(nid);
             }
@@ -4483,6 +4548,24 @@ impl Document {
                 self.register_tag(t.path.clone(), t.hidden);
                 tags_added.push((t.path, t.hidden));
             }
+        }
+
+        // ── Saved view + scenes ───────────────────────────────────────────
+        // The source's working camera lands only in an empty document; an
+        // import into existing work keeps the user's view. Scenes are
+        // created after the geometry so their hidden sets resolve to the
+        // nodes and tags this import just made; like palette materials they
+        // are not undone with the import.
+        if was_empty {
+            if let Some(cam) = scene.camera {
+                self.set_camera_state(cam);
+            }
+            if let Some(section) = scene.section {
+                self.section_plane = Some(section);
+            }
+        }
+        for recipe in scene.scenes {
+            self.ingest_scene(recipe, &keys);
         }
 
         // ── 5. Push action + clear redo ───────────────────────────────────
@@ -19936,6 +20019,7 @@ fn ingest_build_node(
     leaky_count: &mut usize,
     skipped: &mut Vec<crate::import::SkippedMesh>,
     dense_to_mat: &dyn Fn(u32) -> Option<MaterialId>,
+    keys: &mut BTreeMap<u64, Vec<NodeId>>,
 ) -> Option<NodeId> {
     match node {
         crate::import::ImportNode::Mesh(recipe) => {
@@ -19961,6 +20045,7 @@ fn ingest_build_node(
             name,
             tags,
             hidden,
+            key,
         } => {
             let cid = def_cid.get(def).copied().flatten()?;
             let iid = doc.insert_instance_record(InstanceRecord {
@@ -19978,6 +20063,9 @@ fn ingest_build_node(
                 doc.user_hidden_instances.insert(iid);
             }
             all_instances.push(iid);
+            if let Some(k) = key {
+                keys.entry(k).or_default().push(NodeId::Instance(iid));
+            }
             Some(NodeId::Instance(iid))
         }
         crate::import::ImportNode::Group {
@@ -19985,6 +20073,7 @@ fn ingest_build_node(
             children,
             tags,
             hidden,
+            key,
         } => {
             let gid = doc.insert_group_record(GroupRecord {
                 members: Vec::new(),
@@ -19998,6 +20087,9 @@ fn ingest_build_node(
                 doc.user_hidden_groups.insert(gid);
             }
             all_groups.push(gid);
+            if let Some(k) = key {
+                keys.entry(k).or_default().push(NodeId::Group(gid));
+            }
             let mut members: Vec<NodeId> = Vec::new();
             for child in children {
                 if let Some(nid) = ingest_build_node(
@@ -20013,6 +20105,7 @@ fn ingest_build_node(
                     leaky_count,
                     skipped,
                     dense_to_mat,
+                    keys,
                 ) {
                     members.push(nid);
                 }
