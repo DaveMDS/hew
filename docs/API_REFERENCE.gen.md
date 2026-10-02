@@ -487,13 +487,97 @@ Close the innermost frame this envelope opened.
 - **Class:** solitary
 - **Served:** kernel
 
-Bind this connection to one open document.
+Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.
 
 **Params schema:**
 
 ```json
 {
+  "additionalProperties": false,
   "properties": {
+    "document": {
+      "description": "a document id (doc_N), or its exact path, label, or title when unambiguous",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "document": {
+      "properties": {
+        "attached": {
+          "description": "this is the connection's current document",
+          "type": "boolean"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "front": {
+          "description": "this is the user's front-most document window",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "doc_N, unique for the host's lifetime and never reused",
+          "type": "string"
+        },
+        "label": {
+          "description": "the client-chosen label given at hew.doc.new/open, if any",
+          "type": "string"
+        },
+        "path": {
+          "description": "the file last opened from or saved to; null while unsaved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "path",
+        "dirty"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_document`
+- `ambiguous_document`
+
+### `hew.doc.close`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+
+Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "discard": {
+      "description": "close even with unsaved changes (they are lost); default false",
+      "type": "boolean"
+    },
     "document": {
       "type": "string"
     }
@@ -506,11 +590,59 @@ Bind this connection to one open document.
 
 ```json
 {
+  "properties": {
+    "closed": {
+      "properties": {
+        "attached": {
+          "description": "this is the connection's current document",
+          "type": "boolean"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "front": {
+          "description": "this is the user's front-most document window",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "doc_N, unique for the host's lifetime and never reused",
+          "type": "string"
+        },
+        "label": {
+          "description": "the client-chosen label given at hew.doc.new/open, if any",
+          "type": "string"
+        },
+        "path": {
+          "description": "the file last opened from or saved to; null while unsaved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "path",
+        "dirty"
+      ],
+      "type": "object"
+    }
+  },
   "type": "object"
 }
 ```
 
-**Refusals:** none.
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_document`
+- `ambiguous_document`
+- `unsaved_changes`
+- `last_document`
 
 ### `hew.doc.export`
 
@@ -580,14 +712,14 @@ Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, by
 - `nothing_to_export`
 - `save_failed`
 
-### `hew.doc.import`
+### `hew.doc.focus`
 
 - **Version:** 1
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
 
-Merge a foreign-format file into the attached document through the shared healing pipeline.
+Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.
 
 **Params schema:**
 
@@ -595,6 +727,96 @@ Merge a foreign-format file into the attached document through the shared healin
 {
   "additionalProperties": false,
   "properties": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "document": {
+      "properties": {
+        "attached": {
+          "description": "this is the connection's current document",
+          "type": "boolean"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "front": {
+          "description": "this is the user's front-most document window",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "doc_N, unique for the host's lifetime and never reused",
+          "type": "string"
+        },
+        "label": {
+          "description": "the client-chosen label given at hew.doc.new/open, if any",
+          "type": "string"
+        },
+        "path": {
+          "description": "the file last opened from or saved to; null while unsaved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "path",
+        "dirty"
+      ],
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_document`
+- `ambiguous_document`
+
+### `hew.doc.import`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+
+Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "bytes_base64": {
+      "description": "the file's bytes, for a host with no filesystem (the desktop app); `path` then only names the file. hew-cli supplies this for you",
+      "type": "string"
+    },
+    "images": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+      "type": "object"
+    },
     "path": {
       "type": "string"
     },
@@ -645,14 +867,27 @@ Merge a foreign-format file into the attached document through the shared healin
 - **Class:** solitary
 - **Served:** host
 
-Create a fresh document (headless hosts; live hosts advertise via capabilities).
+Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
 
 **Params schema:**
 
 ```json
 {
   "additionalProperties": false,
-  "properties": {},
+  "properties": {
+    "focus": {
+      "description": "where the new window goes; background (the default) never takes the user's focus",
+      "enum": [
+        "background",
+        "front"
+      ],
+      "type": "string"
+    },
+    "label": {
+      "description": "a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents",
+      "type": "string"
+    }
+  },
   "type": "object"
 }
 ```
@@ -661,8 +896,48 @@ Create a fresh document (headless hosts; live hosts advertise via capabilities).
 
 ```json
 {
-  "additionalProperties": false,
-  "properties": {},
+  "properties": {
+    "document": {
+      "properties": {
+        "attached": {
+          "description": "this is the connection's current document",
+          "type": "boolean"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "front": {
+          "description": "this is the user's front-most document window",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "doc_N, unique for the host's lifetime and never reused",
+          "type": "string"
+        },
+        "label": {
+          "description": "the client-chosen label given at hew.doc.new/open, if any",
+          "type": "string"
+        },
+        "path": {
+          "description": "the file last opened from or saved to; null while unsaved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "path",
+        "dirty"
+      ],
+      "type": "object"
+    }
+  },
   "type": "object"
 }
 ```
@@ -670,6 +945,7 @@ Create a fresh document (headless hosts; live hosts advertise via capabilities).
 **Refusals:**
 
 - `host_capability_missing`
+- `window_not_ready`
 
 ### `hew.doc.open`
 
@@ -678,7 +954,7 @@ Create a fresh document (headless hosts; live hosts advertise via capabilities).
 - **Class:** solitary
 - **Served:** host
 
-Open a .hew document (headless hosts; live hosts advertise via capabilities).
+Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
 
 **Params schema:**
 
@@ -686,6 +962,18 @@ Open a .hew document (headless hosts; live hosts advertise via capabilities).
 {
   "additionalProperties": false,
   "properties": {
+    "focus": {
+      "description": "where the new window goes; background (the default) never takes the user's focus",
+      "enum": [
+        "background",
+        "front"
+      ],
+      "type": "string"
+    },
+    "label": {
+      "description": "a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents",
+      "type": "string"
+    },
     "path": {
       "type": "string"
     }
@@ -701,8 +989,52 @@ Open a .hew document (headless hosts; live hosts advertise via capabilities).
 
 ```json
 {
-  "additionalProperties": false,
-  "properties": {},
+  "properties": {
+    "already_open": {
+      "description": "the file was already open in a window; the connection was attached to it instead of opening a second copy",
+      "type": "boolean"
+    },
+    "document": {
+      "properties": {
+        "attached": {
+          "description": "this is the connection's current document",
+          "type": "boolean"
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "front": {
+          "description": "this is the user's front-most document window",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "doc_N, unique for the host's lifetime and never reused",
+          "type": "string"
+        },
+        "label": {
+          "description": "the client-chosen label given at hew.doc.new/open, if any",
+          "type": "string"
+        },
+        "path": {
+          "description": "the file last opened from or saved to; null while unsaved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "path",
+        "dirty"
+      ],
+      "type": "object"
+    }
+  },
   "type": "object"
 }
 ```
@@ -711,6 +1043,7 @@ Open a .hew document (headless hosts; live hosts advertise via capabilities).
 
 - `host_capability_missing`
 - `load_failed`
+- `window_not_ready`
 
 ### `hew.doc.purge_unused`
 
@@ -761,7 +1094,7 @@ Delete every unused material and component definition, as one undo entry.
 - **Class:** solitary
 - **Served:** host
 
-Save the attached document — written by hosts with filesystem access, bytes base64 by those without.
+Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
 
 **Params schema:**
 
@@ -769,8 +1102,16 @@ Save the attached document — written by hosts with filesystem access, bytes ba
 {
   "additionalProperties": false,
   "properties": {
+    "copy": {
+      "description": "write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path`",
+      "type": "boolean"
+    },
     "path": {
       "type": "string"
+    },
+    "return_bytes": {
+      "description": "hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path`",
+      "type": "boolean"
     }
   },
   "type": "object"
@@ -796,6 +1137,7 @@ Save the attached document — written by hosts with filesystem access, bytes ba
 - `host_capability_missing`
 - `path_required`
 - `save_failed`
+- `file_open_elsewhere`
 
 ### `hew.doc.transact`
 
@@ -2580,7 +2922,7 @@ The registry as data: every granted command's schemas, summary, and refusal inve
 - **Class:** read-only
 - **Served:** host
 
-The host's open documents.
+The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.
 
 **Params schema:**
 
@@ -2598,6 +2940,46 @@ The host's open documents.
 {
   "properties": {
     "documents": {
+      "items": {
+        "properties": {
+          "attached": {
+            "description": "this is the connection's current document",
+            "type": "boolean"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "front": {
+            "description": "this is the user's front-most document window",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "doc_N, unique for the host's lifetime and never reused",
+            "type": "string"
+          },
+          "label": {
+            "description": "the client-chosen label given at hew.doc.new/open, if any",
+            "type": "string"
+          },
+          "path": {
+            "description": "the file last opened from or saved to; null while unsaved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "path",
+          "dirty"
+        ],
+        "type": "object"
+      },
       "type": "array"
     }
   },
@@ -2676,6 +3058,46 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
       "type": "object"
     },
     "documents": {
+      "items": {
+        "properties": {
+          "attached": {
+            "description": "this is the connection's current document",
+            "type": "boolean"
+          },
+          "dirty": {
+            "type": "boolean"
+          },
+          "front": {
+            "description": "this is the user's front-most document window",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "doc_N, unique for the host's lifetime and never reused",
+            "type": "string"
+          },
+          "label": {
+            "description": "the client-chosen label given at hew.doc.new/open, if any",
+            "type": "string"
+          },
+          "path": {
+            "description": "the file last opened from or saved to; null while unsaved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "path",
+          "dirty"
+        ],
+        "type": "object"
+      },
       "type": "array"
     },
     "encoding": {
@@ -4459,6 +4881,7 @@ Draw a regular N-gon on a plane spec.
       "type": "number"
     },
     "sides": {
+      "maximum": 120,
       "minimum": 3,
       "type": "integer"
     }
@@ -4531,6 +4954,7 @@ Draw a regular N-gon on a plane spec.
 - `ambiguous_locator`
 - `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
 - `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
+- `sides_above_cap`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
@@ -6199,14 +6623,30 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
       ],
       "type": "object"
     },
+    "depth_bits": {
+      "description": "bits per pixel of the depth PNG (default 8); only with include_depth",
+      "enum": [
+        8,
+        16
+      ],
+      "type": "integer"
+    },
     "height": {
       "description": "defaults to 512; out-of-range values are clamped, not refused",
       "maximum": 2048,
       "minimum": 16,
       "type": "integer"
     },
+    "include_depth": {
+      "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect",
+      "type": "boolean"
+    },
     "include_ids": {
       "description": "defaults to false; when true, also returns a per-pixel id-buffer and its palette",
+      "type": "boolean"
+    },
+    "include_normals": {
+      "description": "defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255)",
       "type": "boolean"
     },
     "path": {
@@ -6245,8 +6685,28 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 
 ```json
 {
-  "description": "two shapes depending on whether path was given: bytes base64 inline (default), or a path plus, when include_ids was true, a sidecar path for the id-buffer",
+  "description": "two shapes depending on whether path was given: bytes base64 inline (default), or a path plus a sidecar path for each extra pass asked for (id-buffer, depth, normals)",
   "properties": {
+    "depth_bits": {
+      "description": "with a depth pass: 8 or 16",
+      "type": "integer"
+    },
+    "depth_far": {
+      "description": "with a depth pass: the farthest drawn surface",
+      "type": "number"
+    },
+    "depth_near": {
+      "description": "with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface",
+      "type": "number"
+    },
+    "depth_path": {
+      "description": "present only when include_depth and path were both given: \"<path>.depth.png\"",
+      "type": "string"
+    },
+    "depth_png_base64": {
+      "description": "present only when include_depth was true and path was not given",
+      "type": "string"
+    },
     "height": {
       "type": "integer"
     },
@@ -6264,6 +6724,14 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
         "type": "string"
       },
       "type": "array"
+    },
+    "normals_path": {
+      "description": "present only when include_normals and path were both given: \"<path>.normals.png\"",
+      "type": "string"
+    },
+    "normals_png_base64": {
+      "description": "present only when include_normals was true and path was not given",
+      "type": "string"
     },
     "path": {
       "description": "present only when path was given: echoes it back",

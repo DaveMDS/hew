@@ -327,6 +327,87 @@ fn tri_normal(t: &Tri) -> Vec3 {
     cross(t.b - t.a, t.c - t.a)
 }
 
+/// A world-space triangle cut to `view z > clip_z` (`zs` are its vertices'
+/// view depths): 0, 1 or 2 triangles. Linear interpolation of world points
+/// along an edge matches the camera's affine map, so the cut is exact.
+fn clip_tri_near(t: &Tri, zs: [f64; 3], clip_z: f64) -> Vec<Tri> {
+    let pts = [t.a, t.b, t.c];
+    let mut poly: Vec<Point3> = Vec::with_capacity(4);
+    for i in 0..3 {
+        let j = (i + 1) % 3;
+        let (in_i, in_j) = (zs[i] > clip_z, zs[j] > clip_z);
+        if in_i {
+            poly.push(pts[i]);
+        }
+        if in_i != in_j {
+            let f = (clip_z - zs[i]) / (zs[j] - zs[i]);
+            poly.push(pts[i] + (pts[j] - pts[i]) * f);
+        }
+    }
+    match poly.len() {
+        3 => vec![Tri {
+            a: poly[0],
+            b: poly[1],
+            c: poly[2],
+        }],
+        4 => vec![
+            Tri {
+                a: poly[0],
+                b: poly[1],
+                c: poly[2],
+            },
+            Tri {
+                a: poly[0],
+                b: poly[2],
+                c: poly[3],
+            },
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// A world-space segment cut to `view z > clip_z`, or `None` if wholly behind.
+fn clip_seg_near(a: Point3, b: Point3, za: f64, zb: f64, clip_z: f64) -> Option<(Point3, Point3)> {
+    match (za > clip_z, zb > clip_z) {
+        (true, true) => Some((a, b)),
+        (true, false) => Some((a, a + (b - a) * ((clip_z - za) / (zb - za)))),
+        (false, true) => Some((a + (b - a) * ((clip_z - za) / (zb - za)), b)),
+        (false, false) => None,
+    }
+}
+
+/// Liang–Barsky: the parameter range `[t0, t1]` of the 2D segment `a → b`
+/// that lies inside the box, or `None` if none does.
+fn clip_params_to_window(
+    a: [f64; 2],
+    b: [f64; 2],
+    min: [f64; 2],
+    max: [f64; 2],
+) -> Option<(f64, f64)> {
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for k in 0..2 {
+        let d = b[k] - a[k];
+        for (p, q) in [(-d, a[k] - min[k]), (d, max[k] - a[k])] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return None;
+                }
+            } else {
+                let r = q / p;
+                if p < 0.0 {
+                    t0 = t0.max(r);
+                } else {
+                    t1 = t1.min(r);
+                }
+                if t0 > t1 {
+                    return None;
+                }
+            }
+        }
+    }
+    Some((t0, t1))
+}
+
 /// Clip a triangle to the kept half-space of a section (`(p - o)·n <= 0`).
 /// Returns 0, 1, or 2 triangles plus the cut segment (if the plane crosses
 /// the triangle's interior).
@@ -642,38 +723,38 @@ pub fn line_drawing(
 
     // ---- 2. project occluders
     let near = frame.dist * NEAR_REL;
-    let mut occs: Vec<Occ> = Vec::with_capacity(tris.len());
+    // Extent of the drawing, from the vertices actually in front of the eye
+    // (a vertex at the near plane projects 1000× off-page and would
+    // swamp every tolerance below).
     let mut all_min = [f64::INFINITY; 2];
     let mut all_max = [f64::NEG_INFINITY; 2];
-    let mut pending: Vec<(Tri, [V; 3])> = Vec::with_capacity(tris.len());
-    for t in &tris {
-        let vs = [frame.view(t.a), frame.view(t.b), frame.view(t.c)];
-        if frame.perspective && vs.iter().any(|v| v.z <= near) {
-            // Behind or on the near plane: not an occluder (a proper clip
-            // would be more faithful; such triangles are off-page anyway).
-            continue;
+    let mut note = |p: Point3| {
+        let v = frame.view(p);
+        if frame.perspective && v.z <= near {
+            return;
         }
-        let ps = [frame.proj(&vs[0]), frame.proj(&vs[1]), frame.proj(&vs[2])];
-        for p in &ps {
-            for k in 0..2 {
-                all_min[k] = all_min[k].min(p[k]);
-                all_max[k] = all_max[k].max(p[k]);
+        let q = frame.proj(&v);
+        for k in 0..2 {
+            all_min[k] = all_min[k].min(q[k]);
+            all_max[k] = all_max[k].max(q[k]);
+        }
+    };
+    // Only triangles wholly in front count: a straddling one has a vertex
+    // that may sit just past the near plane and project hundreds of times
+    // off-page, which would inflate every tolerance derived from the extent.
+    for t in &tris {
+        let in_front =
+            !frame.perspective || [t.a, t.b, t.c].iter().all(|&p| frame.view(p).z > near);
+        if in_front {
+            for p in [t.a, t.b, t.c] {
+                note(p);
             }
         }
-        pending.push((*t, vs));
     }
     // Candidates contribute to the extent too (a lone segment scene).
     for c in &cands {
         for p in [c.a, c.b] {
-            let v = frame.view(p);
-            if frame.perspective && v.z <= near {
-                continue;
-            }
-            let q = frame.proj(&v);
-            for k in 0..2 {
-                all_min[k] = all_min[k].min(q[k]);
-                all_max[k] = all_max[k].max(q[k]);
-            }
+            note(p);
         }
     }
     let diag = if all_min[0].is_finite() {
@@ -683,6 +764,79 @@ pub fn line_drawing(
     } else {
         1.0
     };
+    // The page window: the drawing's extent. Geometry cut at the near plane
+    // projects far outside it; what runs past it is trimmed here (the
+    // drawing's `bounds` therefore never exceed the extent a caller frames
+    // the page by) and its footprint is clamped for the acceleration grid.
+    let (win_min, win_max) = if all_min[0].is_finite() {
+        (all_min, all_max)
+    } else {
+        (
+            [-2.0 * frame.dist, -2.0 * frame.dist],
+            [2.0 * frame.dist, 2.0 * frame.dist],
+        )
+    };
+    // Cut everything at the perspective near plane instead of dropping what
+    // straddles it: a long ceiling sheet in a close view has vertices
+    // behind the eye, and dropping it let whatever lay above show through.
+    // The cut sits a hair in front of `near` so the pieces are strictly in
+    // front of it.
+    let clip_z = near * 1.0001;
+    if frame.perspective {
+        let mut kept_tris: Vec<Tri> = Vec::with_capacity(tris.len());
+        for t in &tris {
+            let zs = [frame.view(t.a).z, frame.view(t.b).z, frame.view(t.c).z];
+            if zs.iter().all(|&z| z > clip_z) {
+                kept_tris.push(*t);
+            } else {
+                kept_tris.extend(clip_tri_near(t, zs, clip_z));
+            }
+        }
+        tris = kept_tris;
+        cands = cands
+            .into_iter()
+            .filter_map(|c| {
+                let (za, zb) = (frame.view(c.a).z, frame.view(c.b).z);
+                if za > clip_z && zb > clip_z {
+                    return Some(c);
+                }
+                clip_seg_near(c.a, c.b, za, zb, clip_z).map(|(a, b)| Cand { a, b, ..c })
+            })
+            // Trim what the cut left running far off the page to the window
+            // BEFORE the occlusion test: an unbounded footprint would query
+            // the whole grid and spend the pair budget on invisible work.
+            .filter_map(|c| {
+                let eps = diag * 1e-9;
+                let (va, vb) = (frame.view(c.a), frame.view(c.b));
+                let (pa, pb) = (frame.proj(&va), frame.proj(&vb));
+                let outside = |p: [f64; 2]| {
+                    (0..2).any(|k| p[k] < win_min[k] - eps || p[k] > win_max[k] + eps)
+                };
+                if !outside(pa) && !outside(pb) {
+                    return Some(c);
+                }
+                let (s0, s1) = clip_params_to_window(pa, pb, win_min, win_max)?;
+                // Projected parameter → world parameter: depth z is linear
+                // in the world parameter, 1/z in the projected one.
+                let world_t = |s: f64| {
+                    let z = 1.0 / ((1.0 - s) / va.z + s / vb.z);
+                    if (vb.z - va.z).abs() < 1e-12 {
+                        s
+                    } else {
+                        (z - va.z) / (vb.z - va.z)
+                    }
+                };
+                let (t0, t1) = (world_t(s0), world_t(s1));
+                let (a, b) = (c.a + (c.b - c.a) * t0, c.a + (c.b - c.a) * t1);
+                Some(Cand { a, b, ..c })
+            })
+            .collect();
+    }
+    let mut occs: Vec<Occ> = Vec::with_capacity(tris.len());
+    let mut pending: Vec<(Tri, [V; 3])> = Vec::with_capacity(tris.len());
+    for t in &tris {
+        pending.push((*t, [frame.view(t.a), frame.view(t.b), frame.view(t.c)]));
+    }
     let depth_tol = diag * DEPTH_TOL_REL;
     let min_area = (diag * MIN_AREA_REL).powi(2);
     let min_piece = diag * MIN_PIECE_REL;
@@ -713,8 +867,17 @@ pub fn line_drawing(
         let c = dot(n, t.a - Point3::ORIGIN);
         occs.push(Occ {
             p: ps,
-            min: [x0.min(x1).min(x2), y0.min(y1).min(y2)],
-            max: [x0.max(x1).max(x2), y0.max(y1).max(y2)],
+            // Clamped to the page window so a footprint stretched by the
+            // near-plane cut cannot stretch the grid with it (the exact
+            // footprint `p` is untouched; queries clamp the same way).
+            min: [
+                x0.min(x1).min(x2).clamp(win_min[0], win_max[0]),
+                y0.min(y1).min(y2).clamp(win_min[1], win_max[1]),
+            ],
+            max: [
+                x0.max(x1).max(x2).clamp(win_min[0], win_max[0]),
+                y0.max(y1).max(y2).clamp(win_min[1], win_max[1]),
+            ],
             k0,
             kx,
             ky,

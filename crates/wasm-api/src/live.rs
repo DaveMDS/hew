@@ -204,14 +204,14 @@ impl Host for LiveHost {
     fn new_document(&mut self, _doc: &mut kernel::Document) -> Result<(), Refusal> {
         Err(refuse(
             "create a new document",
-            "Document lifecycle stays user-driven on a live connection — use the app's File > New.",
+            "This window cannot replace its own document. The desktop app answers hew.doc.new itself by opening a new window; a connection that reaches this host directly should use the app's File > New.",
         ))
     }
 
     fn open_document(&mut self, _doc: &mut kernel::Document, _path: &str) -> Result<(), Refusal> {
         Err(refuse(
             "open a document",
-            "Document lifecycle stays user-driven on a live connection — use the app's File > Open.",
+            "This window cannot replace its own document. The desktop app answers hew.doc.open itself by opening the file in a new window; a connection that reaches this host directly should use the app's File > Open.",
         ))
     }
 
@@ -267,16 +267,153 @@ impl Host for LiveHost {
         Ok(Some(bytes))
     }
 
+    /// Merges a file the CLIENT read — this boundary has no filesystem —
+    /// into the live document, additively, through the same importers the
+    /// app's own File > Import uses. `hew-cli` (or any client) sends the
+    /// file as `bytes_base64` (plus COLLADA `images`); a request with only
+    /// a path cannot be served here and says so. Records the import the way
+    /// [`crate::Scene::import_dae`] and friends do (embedded bytes, subject
+    /// to the same size cap) so a bug-report recording replays it; the
+    /// dispatcher therefore does not also record the envelope.
+    ///
+    /// The logic mirrors `crates/hew-cli`'s `CliHost::import_document` over
+    /// the same importers — that crate cannot be shared with this one (it
+    /// has a filesystem; this has none), so the two must stay in step.
     fn import_document(
         &mut self,
-        _doc: &mut kernel::Document,
-        _path: &str,
-        _options: &serde_json::Value,
+        doc: &mut kernel::Document,
+        path: &str,
+        options: &api::ImportOptions,
     ) -> Result<serde_json::Value, Refusal> {
-        Err(refuse(
-            "import",
-            "The WASM boundary has no filesystem access of its own — use the app's File > Import.",
-        ))
+        let Some(bytes) = options.bytes.as_deref() else {
+            return Err(refuse(
+                "import from a path",
+                "The WASM boundary has no filesystem access of its own — send the file's bytes as \
+                 `bytes_base64` (hew-cli does this for you).",
+            ));
+        };
+        let file = std::path::Path::new(path);
+        let ext = file
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        // Recording waits until the merge has actually succeeded: a refused
+        // import must leave no trace in a replay.
+        let record: Box<dyn FnOnce() + '_>;
+        let load_failed =
+            |e: &dyn std::fmt::Display| Refusal::api("load_failed", &format!("{path}: {e}"));
+        let (scene, missing, warnings) = match ext.as_deref() {
+            Some("stl") => {
+                let units = options.units.as_deref();
+                let scale = match units {
+                    Some("m") => 1.0,
+                    Some("mm") => 0.001,
+                    Some("cm") => 0.01,
+                    Some("in") => 0.0254,
+                    Some(other) => {
+                        return Err(Refusal::api(
+                            "units_required",
+                            &format!("Unknown units \"{other}\". Use one of m, mm, cm, in."),
+                        ));
+                    }
+                    None => {
+                        return Err(Refusal::api(
+                            "units_required",
+                            "STL carries no units of its own; pass units: \"m\" | \"mm\" | \"cm\" | \"in\".",
+                        ));
+                    }
+                };
+                let name = file
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(str::to_string);
+                let out = stl_import::import(bytes, scale, name.as_deref())
+                    .map_err(|e| load_failed(&e))?;
+                record = Box::new(move || {
+                    crate::recording::record_import("import_stl", bytes, |b| {
+                        crate::recording::RecordedCall::ImportStl {
+                            bytes: b,
+                            unit_scale: scale,
+                            name,
+                        }
+                    });
+                });
+                (out.scene, out.missing, out.warnings)
+            }
+            Some("glb") | Some("gltf") => {
+                let out = gltf_import::import(bytes).map_err(|e| load_failed(&e))?;
+                record = Box::new(move || {
+                    crate::recording::record_import("import_gltf", bytes, |b| {
+                        crate::recording::RecordedCall::ImportGltf { bytes: b }
+                    });
+                });
+                (out.scene, out.missing, out.warnings)
+            }
+            Some("dae") => {
+                let mut map = dae_import::ImageMap::new();
+                for (uri, image) in &options.images {
+                    let format = match image.format.as_deref() {
+                        Some("jpeg") | Some("jpg") => kernel::ImageFormat::Jpeg,
+                        _ => kernel::ImageFormat::Png,
+                    };
+                    map.insert(uri.clone(), (image.bytes.clone(), format));
+                }
+                let out = dae_import::import(bytes, &map).map_err(|e| load_failed(&e))?;
+                let total = bytes.len() + map.values().map(|(b, _)| b.len()).sum::<usize>();
+                let recorded_map = map;
+                record = Box::new(move || {
+                    crate::recording::record_import_sized("import_dae", total, || {
+                        crate::recording::RecordedCall::ImportDae {
+                            bytes: bytes.to_vec(),
+                            images: recorded_map
+                                .iter()
+                                .map(|(uri, (b, format))| crate::recording::RecordedImage {
+                                    uri: uri.clone(),
+                                    bytes: b.clone(),
+                                    format: match format {
+                                        kernel::ImageFormat::Jpeg => 1,
+                                        _ => 0,
+                                    },
+                                })
+                                .collect(),
+                        }
+                    });
+                });
+                (out.scene, out.textures_missing, out.warnings)
+            }
+            Some("skp") => {
+                let out = skp_import::import(bytes).map_err(|e| load_failed(&e))?;
+                record = Box::new(move || {
+                    crate::recording::record_import("import_skp", bytes, |b| {
+                        crate::recording::RecordedCall::ImportSkp { bytes: b }
+                    });
+                });
+                (out.scene, out.textures_missing, out.warnings)
+            }
+            _ => {
+                return Err(Refusal::api(
+                    "unsupported_format",
+                    &format!(
+                        "Unrecognized import extension for \"{path}\" — expected .stl, .gltf/.glb, .dae, or .skp."
+                    ),
+                ));
+            }
+        };
+        let (report, _change) = doc
+            .ingest(scene, missing)
+            .map_err(|e| Refusal::from_document_error(&e))?;
+        record();
+        Ok(serde_json::json!({
+            "objects_created": report.objects_created,
+            "watertight": report.watertight,
+            "leaky": report.leaky,
+            "skipped": report.skipped.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "reason": s.reason,
+            })).collect::<Vec<_>>(),
+            "textures_missing": report.textures_missing,
+            "warnings": warnings,
+        }))
     }
 
     fn snapshot(
@@ -286,7 +423,7 @@ impl Host for LiveHost {
     ) -> Result<api::SnapshotResult, Refusal> {
         Err(refuse(
             "render a snapshot",
-            "The live viewport isn't wired to the API host yet; a headless hew-cli connection renders via its software rasterizer instead.",
+            "The WASM host does not render. hew-cli renders live documents itself — it fetches the document with hew.doc.save and renders the bytes with the headless rasterizer; a raw client should do the same.",
         ))
     }
 
@@ -295,6 +432,40 @@ impl Host for LiveHost {
             "write files",
             "The WASM boundary has no filesystem access of its own.",
         ))
+    }
+
+    /// The browser's clock: `std::time::SystemTime::now()` panics on
+    /// `wasm32-unknown-unknown`, which used to wedge the whole app the
+    /// first time a live client called `hew.library.save`.
+    fn unix_time_ms(&self) -> u64 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            js_sys::Date::now() as u64
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            std::time::SystemTime::now() // wasm-guard: cfg(not(wasm32)) branch only
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+        }
+    }
+
+    /// `Math.random()` — 53 bits twice over — in place of the native
+    /// default's pid and OS entropy, neither of which exists here.
+    fn random_u64(&self) -> u64 {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let hi = (js_sys::Math::random() * 4_294_967_296.0) as u64;
+            let lo = (js_sys::Math::random() * 4_294_967_296.0) as u64;
+            (hi << 32) | lo
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static COUNTER: AtomicU64 = AtomicU64::new(0x1234_5678_9ABC_DEF1);
+            COUNTER.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed)
+        }
     }
 
     fn set_camera(&mut self, spec: &ViewCameraSpec) -> Result<(), Refusal> {
@@ -410,6 +581,7 @@ mod tests {
 
     fn req(id: i64, method: &str, params: serde_json::Value) -> Request {
         Request {
+            document: None,
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Number(id)),
             method: method.to_string(),
@@ -752,5 +924,121 @@ mod tests {
             Some(ViewDirective::ActivateScene { sid: got }) => assert_eq!(got, sid),
             other => panic!("expected an ActivateScene directive, got {other:?}"),
         }
+    }
+
+    /// The box above, as binary STL bytes — a real file for the import
+    /// tests below to merge.
+    fn box_stl() -> Vec<u8> {
+        mesh_export::export(&box_document(), "stl", 0, true).expect("export the box to STL")
+    }
+
+    fn import_params(path: &str, bytes: Option<&[u8]>, units: Option<&str>) -> serde_json::Value {
+        let mut p = serde_json::json!({ "path": path });
+        if let Some(bytes) = bytes {
+            p["bytes_base64"] = serde_json::Value::String(api::commands::doc::encode_base64(bytes));
+        }
+        if let Some(units) = units {
+            p["units"] = serde_json::Value::String(units.to_string());
+        }
+        p
+    }
+
+    fn app_connection(doc: &mut kernel::Document) -> Connection {
+        let mut conn = Connection::new(Profile::App, "t");
+        let mut host = LiveHost::default();
+        for (id, method, params) in [
+            (1, "hew.meta.hello", serde_json::json!({ "protocol": 1 })),
+            (2, "hew.doc.attach", serde_json::json!({})),
+        ] {
+            conn.dispatch(doc, &mut host, req(id, method, params));
+        }
+        conn
+    }
+
+    #[test]
+    fn a_live_import_merges_the_clients_bytes_additively_and_reports_warnings() {
+        let mut doc = box_document();
+        let before = doc.undo_depth();
+        let mut conn = app_connection(&mut doc);
+        let mut host = LiveHost::default();
+        let stl = box_stl();
+        let DispatchOutcome::Reply(r) = conn.dispatch(
+            &mut doc,
+            &mut host,
+            req(
+                3,
+                "hew.doc.import",
+                import_params("part.stl", Some(&stl), Some("m")),
+            ),
+        ) else {
+            panic!("a request is answered");
+        };
+        let report = r.result.expect("import succeeds")["report"].clone();
+        assert_eq!(report["objects_created"], 1, "{report}");
+        assert!(
+            report["warnings"].is_array(),
+            "the report carries warnings: {report}"
+        );
+        assert!(doc.undo_depth() > before, "the merge is one undoable entry");
+    }
+
+    #[test]
+    fn a_live_import_without_bytes_or_units_refuses_typed_and_changes_nothing() {
+        let mut doc = box_document();
+        let before = doc.undo_depth();
+        let mut conn = app_connection(&mut doc);
+        let mut host = LiveHost::default();
+        let stl = box_stl();
+        for (params, refusal) in [
+            (
+                import_params("part.stl", None, Some("m")),
+                "host_capability_missing",
+            ),
+            (
+                import_params("part.stl", Some(&stl), None),
+                "units_required",
+            ),
+            (
+                import_params("part.stl", Some(&stl), Some("furlongs")),
+                "units_required",
+            ),
+            (
+                import_params("part.xyz", Some(&stl), None),
+                "unsupported_format",
+            ),
+            (
+                import_params("part.stl", Some(b"not an stl"), Some("m")),
+                "load_failed",
+            ),
+        ] {
+            let DispatchOutcome::Reply(r) = conn.dispatch(
+                &mut doc,
+                &mut host,
+                req(9, "hew.doc.import", params.clone()),
+            ) else {
+                panic!("a request is answered");
+            };
+            let data = r
+                .error
+                .unwrap_or_else(|| panic!("{params} should refuse"))
+                .data;
+            assert_eq!(data.expect("refusal data")["refusal"], refusal, "{params}");
+        }
+        assert_eq!(
+            doc.undo_depth(),
+            before,
+            "a refused import leaves the document alone"
+        );
+    }
+
+    #[test]
+    fn import_is_registered_as_a_mutation_so_the_live_bridge_resyncs() {
+        let registry = api::Registry::protocol_1();
+        assert!(
+            registry
+                .get("hew.doc.import")
+                .expect("declared")
+                .mutates_document
+        );
     }
 }

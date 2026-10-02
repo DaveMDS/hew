@@ -65,6 +65,7 @@ use serde_json::{Value, json};
 
 fn req(id: Option<RequestId>, method: String, params: Option<Value>) -> Request {
     Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id,
         method,
@@ -359,6 +360,7 @@ fn arb_hostile_request() -> impl Strategy<Value = Request> {
         arb_params(),
     )
         .prop_map(|(jsonrpc, id, method, params)| Request {
+            document: None,
             jsonrpc,
             id,
             method,

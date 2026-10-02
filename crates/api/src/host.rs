@@ -103,6 +103,15 @@ pub struct SnapshotParams {
     /// When true, the result also carries a per-pixel id-buffer and the
     /// palette of public ids it indexes.
     pub include_ids: bool,
+    /// When true, the result also carries a depth pass (a grayscale PNG,
+    /// near = white, plus the metric range it encodes).
+    pub include_depth: bool,
+    /// Bits per pixel of the depth PNG: 8 or 16 (`commands/doc.rs` has
+    /// already validated it; 8 when depth was not asked for).
+    pub depth_bits: u8,
+    /// When true, the result also carries a camera-space normals pass (an
+    /// RGB PNG).
+    pub include_normals: bool,
     /// When given, the PNG is written here instead of returned inline
     /// (docs/agents/HEW_API.md §7, mirroring `hew.doc.export`'s posture):
     /// honored by hosts with filesystem access, refused typed elsewhere.
@@ -128,6 +137,27 @@ pub struct SnapshotResult {
     /// `id_palette[i]` is the public id `id_buffer` reports as index
     /// `i + 1`. Empty when `id_buffer` is `None`.
     pub id_palette: Vec<String>,
+    /// The depth pass — present only when the request asked for it.
+    pub depth: Option<DepthPass>,
+    /// The camera-space normals pass as a complete RGB PNG — present only
+    /// when the request asked for it.
+    pub normals_png: Option<Vec<u8>>,
+}
+
+/// A rendered depth pass (`hew.view.snapshot {include_depth}`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DepthPass {
+    /// A complete grayscale PNG, `bits` bits per pixel. NEAR is WHITE.
+    /// Background pixels are 0; every drawn surface maps linearly into
+    /// `1..=max` (`max` = 255 or 65535) between `far` (1) and `near`
+    /// (`max`), so `depth = far - (v - 1) / (max - 1) * (far - near)`; a
+    /// scene at a single depth is a flat `max`.
+    pub png: Vec<u8>,
+    pub bits: u8,
+    /// Metres from the eye, along the view axis (not radial), of the
+    /// nearest and farthest drawn surface.
+    pub near: f64,
+    pub far: f64,
 }
 
 // ------------------------------------------ hew.view.line_drawing / hew.print.pdf
@@ -318,6 +348,84 @@ pub struct LibraryWriteResult {
     pub content_hash: String,
 }
 
+/// Resolve a client's document reference against `documents` (the shape
+/// [`Host::documents`] returns): an exact `id` (`doc_3`), else an exact
+/// `path`, else an exact `label`, else an exact `title`. The last two
+/// must be unambiguous — two windows both titled "Untitled" refuse
+/// `ambiguous_document` listing the candidates' ids rather than guess,
+/// since a guess is exactly how an edit lands in the wrong window.
+/// Nothing matching refuses `unknown_document`, with the open documents
+/// as detail so the client can correct itself in one round trip.
+pub fn resolve_document<'a>(
+    documents: &'a [serde_json::Value],
+    query: &str,
+) -> Result<&'a serde_json::Value, Refusal> {
+    let field = |d: &serde_json::Value, key: &str| -> Option<String> {
+        d.get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    if let Some(d) = documents
+        .iter()
+        .find(|d| field(d, "id").as_deref() == Some(query))
+    {
+        return Ok(d);
+    }
+    for key in ["path", "label", "title"] {
+        let hits: Vec<&serde_json::Value> = documents
+            .iter()
+            .filter(|d| field(d, key).as_deref() == Some(query))
+            .collect();
+        match hits.as_slice() {
+            [] => {}
+            [one] => return Ok(one),
+            many => {
+                let ids: Vec<String> = many.iter().filter_map(|d| field(d, "id")).collect();
+                return Err(Refusal::api(
+                    "ambiguous_document",
+                    &format!(
+                        "\"{query}\" matches {} documents by {key} ({}); pass one of their ids instead.",
+                        many.len(),
+                        ids.join(", ")
+                    ),
+                )
+                .with_detail(serde_json::json!({ "matches": ids, "documents": documents })));
+            }
+        }
+    }
+    Err(Refusal::api(
+        "unknown_document",
+        &format!("No open document is identified by \"{query}\" (match is by id, path, label, or title); hew.meta.documents lists them."),
+    )
+    .with_detail(serde_json::json!({ "documents": documents })))
+}
+
+/// What `hew.doc.import` hands a host beyond the path.
+///
+/// `bytes` and `images` exist for hosts with no filesystem of their own
+/// (the desktop app's WASM boundary): the client reads the file — and the
+/// texture images a COLLADA file refers to — and sends them along, so the
+/// host imports from memory. A host with a filesystem uses `bytes` when
+/// given and otherwise reads `path` (and looks for textures beside it).
+#[derive(Debug, Clone, Default)]
+pub struct ImportOptions {
+    /// Meters-per-source-unit hint name (`m`/`mm`/`cm`/`in`); required by
+    /// formats that carry no units (STL).
+    pub units: Option<String>,
+    /// The file's bytes, if the client supplied them.
+    pub bytes: Option<Vec<u8>>,
+    /// COLLADA texture images by the uri the file uses.
+    pub images: std::collections::BTreeMap<String, ImportImage>,
+}
+
+/// One texture image of an [`ImportOptions`].
+#[derive(Debug, Clone)]
+pub struct ImportImage {
+    pub bytes: Vec<u8>,
+    /// `png` or `jpeg`; `None` means png.
+    pub format: Option<String>,
+}
+
 /// What a host can do for the dispatcher. Every method has a refusing
 /// default, so a host implements exactly what it supports and the
 /// dispatcher's contract never depends on which host is behind it.
@@ -352,6 +460,16 @@ pub trait Host {
         Err(unsupported("save files"))
     }
 
+    /// Save a COPY of the document to `path` (`hew.doc.save {copy: true}`):
+    /// the file is written, but the document is neither bound to it nor
+    /// marked saved — the working document's file association and unsaved
+    /// mark stay exactly as they were. The safe way to snapshot someone
+    /// else's open document to disk.
+    fn save_copy(&mut self, doc: &kernel::Document, path: &str) -> Result<(), Refusal> {
+        let _ = (doc, path);
+        Err(unsupported("save a copy of a document"))
+    }
+
     /// Export the document (`hew.doc.export`): returns the exported bytes
     /// (base64-encoded by the command) unless `path` was given and the
     /// host wrote it directly. `segments_per_turn` is the STL curve
@@ -375,7 +493,7 @@ pub trait Host {
         &mut self,
         doc: &mut kernel::Document,
         path: &str,
-        options: &serde_json::Value,
+        options: &ImportOptions,
     ) -> Result<serde_json::Value, Refusal> {
         let _ = (doc, path, options);
         Err(unsupported("import"))
@@ -440,8 +558,63 @@ pub trait Host {
 
     /// The host's open documents (`hew.meta.documents` and the `hello`
     /// response). A headless host has exactly its working document.
-    fn documents(&self) -> Vec<serde_json::Value> {
+    ///
+    /// Each entry is an object `{id, title, path, dirty}` (docs/agents/HEW_API.md
+    /// §4.2): `id` is the host-lifetime-unique `doc_N` a client passes to
+    /// `hew.doc.attach`/`close`/`focus`, `path` is the file the document
+    /// was last opened from or saved to (`null` while unsaved), and `dirty`
+    /// is whether it has edits since its last save. A multi-window host
+    /// adds `label`, `front`, and `attached`.
+    fn documents(&self, doc: &kernel::Document) -> Vec<serde_json::Value> {
+        let _ = doc;
         Vec::new()
+    }
+
+    /// Close a document (`hew.doc.close`). `document` is a resolved
+    /// document id, or `None` for the connection's own attached document;
+    /// `discard` closes it even with unsaved changes (without it, a dirty
+    /// document refuses `unsaved_changes`). Only a multi-document host
+    /// with windows has anything to close; a headless host refuses
+    /// `host_capability_missing`.
+    fn close_document(&mut self, document: Option<&str>, discard: bool) -> Result<(), Refusal> {
+        let _ = (document, discard);
+        Err(unsupported("close documents"))
+    }
+
+    /// Raise a document's window to the front (`hew.doc.focus`) — the
+    /// opt-in counterpart of every other command's promise not to steal
+    /// the user's focus. `None` is the connection's own attached document.
+    fn focus_document(&mut self, document: Option<&str>) -> Result<(), Refusal> {
+        let _ = document;
+        Err(unsupported("focus a document window"))
+    }
+
+    /// Milliseconds since the Unix epoch — `hew.library.save`'s `savedAt`
+    /// and the entropy of a fresh item id. A host supplies its own clock
+    /// because `std::time::SystemTime::now()` PANICS on
+    /// `wasm32-unknown-unknown`: the live app's WASM kernel has to read the
+    /// browser's. The default is the native clock.
+    fn unix_time_ms(&self) -> u64 {
+        std::time::SystemTime::now() // wasm-guard: native default; LiveHost overrides
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    /// 64 bits that differ call to call (a fresh library item id's raw
+    /// material). Native default: the OS-seeded `RandomState` mixed with
+    /// the clock, pid, and a counter. A WASM host overrides it
+    /// (`std::process::id()` is unavailable there).
+    fn random_u64(&self) -> u64 {
+        use std::collections::hash_map::RandomState;
+        use std::hash::{BuildHasher, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let mut h = RandomState::new().build_hasher();
+        h.write_u64(self.unix_time_ms());
+        h.write_u32(std::process::id()); // wasm-guard: native default; LiveHost overrides
+        h.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
+        h.finish()
     }
 
     /// The path the working document was last opened from or saved to, if

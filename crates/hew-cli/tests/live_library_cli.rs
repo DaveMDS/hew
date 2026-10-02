@@ -140,7 +140,23 @@ fn spawn_single_command_fake_instance(
         reader
             .read_line(&mut cmd_line)
             .expect("read the forwarded command");
-        let cmd: Value = serde_json::from_str(cmd_line.trim_end()).unwrap();
+        let mut cmd: Value = serde_json::from_str(cmd_line.trim_end()).unwrap();
+        // The client may look the attached document up first (a
+        // `hew.library.save` records its file as `source_doc`): answer that
+        // lookup, with a document that has no file, and read on.
+        if cmd["method"] == "hew.meta.documents" {
+            writeln!(
+                writer,
+                "{}",
+                json!({ "jsonrpc": "2.0", "id": cmd["id"], "result": { "documents": [] } })
+            )
+            .unwrap();
+            cmd_line.clear();
+            reader
+                .read_line(&mut cmd_line)
+                .expect("read the forwarded command");
+            cmd = serde_json::from_str(cmd_line.trim_end()).unwrap();
+        }
         check(&cmd);
         let mut reply = respond;
         reply["id"] = cmd["id"].clone();
@@ -185,6 +201,7 @@ fn local_only_library_commands_work_over_live_with_no_instance_running() {
     let opts = hew_cli::live::LiveOptions {
         launch: false,
         instance: None,
+        document: None,
     };
     let result = hew_cli::run::dispatch_live("hew.library.list", json!({}), &opts);
     assert_eq!(result.exit_code, 0, "response: {:?}", result.response);
@@ -269,6 +286,7 @@ fn insert_pre_resolves_item_to_bytes_before_forwarding() {
         &hew_cli::live::LiveOptions {
             launch: false,
             instance: Some(std::process::id()),
+            document: None,
         },
     );
     assert_eq!(result.exit_code, 0, "response: {:?}", result.response);
@@ -338,6 +356,7 @@ fn save_forces_return_bytes_and_writes_the_item_locally() {
         &hew_cli::live::LiveOptions {
             launch: false,
             instance: Some(std::process::id()),
+            document: None,
         },
     );
     assert_eq!(result.exit_code, 0, "response: {:?}", result.response);

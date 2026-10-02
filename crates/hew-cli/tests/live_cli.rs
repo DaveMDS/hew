@@ -113,7 +113,12 @@ fn spawn_attach_gated_fake_instance(
                     || frame["params"]["commands"][0]["params"]
                         .get("path")
                         .is_some();
-                if forwarded_path {
+                if forwarded_path && method == "hew.doc.save" {
+                    // The app saves a named path itself (file written,
+                    // unsaved mark cleared, document bound to it): the
+                    // path must arrive intact and the answer is `{}`.
+                    json!({ "jsonrpc": "2.0", "id": frame["id"], "result": {} })
+                } else if forwarded_path {
                     json!({
                         "jsonrpc": "2.0", "id": frame["id"],
                         "error": {
@@ -285,6 +290,7 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
         &hew_cli::live::LiveOptions {
             launch: false,
             instance: None,
+            document: None,
         },
     );
     assert_eq!(
@@ -308,6 +314,7 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
         &hew_cli::live::LiveOptions {
             launch: false,
             instance: Some(std::process::id()),
+            document: None,
         },
     );
     assert_eq!(picked.exit_code, 0, "response: {:?}", picked.response);
@@ -339,6 +346,7 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
     let mut mcp_server = hew_cli::mcp::McpServer::new_live(&hew_cli::live::LiveOptions {
         launch: false,
         instance: Some(std::process::id()),
+        document: None,
     })
     .expect("mcp --live connects and attaches");
     let line = mcp_server
@@ -383,6 +391,7 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
         &hew_cli::live::LiveOptions {
             launch: false,
             instance: Some(child_pid),
+            document: None,
         },
     );
     assert_eq!(
@@ -408,9 +417,10 @@ fn discovery_and_dispatch_live_work_through_hew_runtime_dir_end_to_end() {
     let _ = std::fs::remove_file(&refusing_socket);
 }
 
-/// A live `hew.doc.save`/`export` carrying a path must be written HERE:
-/// the app has no filesystem inside its sandbox, so it hands the bytes
-/// back and this side writes them. Both live entry points have to do it
+/// A live `hew.doc.export` carrying a path must be written HERE: the app
+/// has no filesystem inside its sandbox, so it hands the bytes back and
+/// this side writes them. (`hew.doc.save` is the app's own: its path is
+/// forwarded intact — see the second half of this test.) Both live entry points have to do it
 /// — `dispatch --live` did and `run --live` did not, so a script asking
 /// to save got a bare refusal while the identical one-shot command
 /// worked. The fake instance above refuses a forwarded path exactly as
@@ -442,15 +452,20 @@ fn a_live_script_writes_the_bytes_a_save_hands_back() {
     );
 
     let target = fixture_dir.join("written-by-the-client.hew");
+    // A save with a path is forwarded intact for the app to perform: it
+    // succeeds without the client writing anything.
+    let saved_to = fixture_dir.join("app-saves-this.hew");
     let script = fixture_dir.join("save.jsonl");
     std::fs::write(
         &script,
         format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{}\n",
             json!({"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}),
             json!({"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}),
-            json!({"jsonrpc":"2.0","id":2,"method":"hew.doc.save",
-                   "params":{"path": target.to_str().unwrap()}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"hew.doc.export",
+                   "params":{"format":"stl","path": target.to_str().unwrap()}}),
+            json!({"jsonrpc":"2.0","id":3,"method":"hew.doc.save",
+                   "params":{"path": saved_to.to_str().unwrap()}}),
         ),
     )
     .unwrap();
@@ -458,6 +473,7 @@ fn a_live_script_writes_the_bytes_a_save_hands_back() {
     let live = hew_cli::live::LiveOptions {
         launch: false,
         instance: None,
+        document: None,
     };
     let outcome = hew_cli::run::run_script(&script, None, Some(&live));
     assert_eq!(outcome.exit_code, 0, "the script must succeed, not refuse");
@@ -467,10 +483,15 @@ fn a_live_script_writes_the_bytes_a_save_hands_back() {
         "the bytes the host handed back must land on disk verbatim"
     );
 
+    assert!(
+        !saved_to.exists(),
+        "the app writes a saved file, not this client"
+    );
+
     let seen = handle.join().expect("fake instance thread");
     assert!(
-        seen.contains(&"hew.doc.save".to_string()),
-        "the save must actually reach the host: {seen:?}"
+        seen.contains(&"hew.doc.export".to_string()) && seen.contains(&"hew.doc.save".to_string()),
+        "both commands must actually reach the host: {seen:?}"
     );
 
     let _ = std::fs::remove_file(&socket);

@@ -25,6 +25,14 @@ pub enum DispatchOutcome {
     Dropped,
 }
 
+/// Why `hew.doc.attach` did not bind.
+enum AttachError {
+    /// Malformed params: `-32602`.
+    Params(String),
+    /// The host declined: a typed refusal.
+    Refused(crate::refusal::Refusal),
+}
+
 /// One client connection's dispatch state: the granted profile and the
 /// handshake/attachment lifecycle. The host owns the `kernel::Document`
 /// and lends it per dispatch — transports and document ownership are host
@@ -105,7 +113,7 @@ impl Connection {
         };
         if !self.hello_done {
             if cmd.name == "hew.meta.hello" {
-                return self.hello(id, request.params);
+                return self.hello(id, request.params, doc, host);
             }
             return Response::err(id, codes::NOT_READY, "hew.meta.hello first");
         }
@@ -118,14 +126,42 @@ impl Connection {
         }
         let class = cmd.class;
         let name = cmd.name;
+        // A request that names its document (§4.2's envelope `document`)
+        // addresses it directly: it must resolve, and it needs no prior
+        // attach. A host with several documents routes before the request
+        // ever reaches this dispatcher (the desktop shell strips the
+        // member), so what arrives here names the one document this
+        // dispatcher has.
+        let explicit = match &request.document {
+            None => false,
+            Some(query) => {
+                let documents = host.documents(doc);
+                if let Err(refusal) = crate::host::resolve_document(&documents, query) {
+                    return Response::err_with(
+                        id,
+                        codes::REFUSED,
+                        "refused",
+                        refusal.into_data(0, name),
+                    );
+                }
+                true
+            }
+        };
         match name {
-            "hew.meta.hello" => self.hello(id, request.params),
+            "hew.meta.hello" => self.hello(id, request.params, doc, host),
             "hew.meta.capabilities" => self.capabilities(id),
             "hew.doc.attach" => {
-                // Scaffold posture: the single lent document is the
-                // attachable one.
-                self.attached = true;
-                Response::ok(id, serde_json::json!({}))
+                let params = request.params.unwrap_or(serde_json::json!({}));
+                match self.attach(doc, host, &params) {
+                    Ok(result) => Response::ok(id, result),
+                    Err(AttachError::Params(msg)) => Response::err(id, codes::INVALID_PARAMS, &msg),
+                    Err(AttachError::Refused(refusal)) => Response::err_with(
+                        id,
+                        codes::REFUSED,
+                        "refused",
+                        refusal.into_data(0, "hew.doc.attach"),
+                    ),
+                }
             }
             "hew.doc.transact" => {
                 let params = request.params.unwrap_or(serde_json::json!({}));
@@ -136,17 +172,31 @@ impl Connection {
                 // inline here (its state lives on the connection).
                 let single_solitary = single_solitary_method(&self.registry, &params);
                 if single_solitary.as_deref() == Some("hew.doc.attach") {
-                    self.attached = true;
-                    return Response::ok(
-                        id,
-                        serde_json::json!({ "results": [{}], "label": "hew.doc.attach" }),
-                    );
+                    let attach_params = params
+                        .pointer("/commands/0/params")
+                        .cloned()
+                        .unwrap_or(serde_json::json!({}));
+                    return match self.attach(doc, host, &attach_params) {
+                        Ok(result) => Response::ok(
+                            id,
+                            serde_json::json!({ "results": [result], "label": "hew.doc.attach" }),
+                        ),
+                        Err(AttachError::Params(msg)) => {
+                            Response::err(id, codes::INVALID_PARAMS, &msg)
+                        }
+                        Err(AttachError::Refused(refusal)) => Response::err_with(
+                            id,
+                            codes::REFUSED,
+                            "refused",
+                            refusal.into_data(0, "hew.doc.attach"),
+                        ),
+                    };
                 }
                 let establishes = matches!(
                     single_solitary.as_deref(),
                     Some("hew.doc.new") | Some("hew.doc.open")
                 );
-                if !self.attached && !establishes {
+                if !self.attached && !establishes && !explicit {
                     return Response::err(id, codes::NO_DOCUMENT, "no document attached");
                 }
                 let response = self.tx_response(id, doc, host, &params);
@@ -161,7 +211,7 @@ impl Connection {
                 // and `open` auto-attach on success.
                 let establishes = matches!(name, "hew.doc.new" | "hew.doc.open");
                 let host_wide = name == "hew.meta.documents";
-                if !(self.attached || establishes || host_wide) {
+                if !(self.attached || establishes || host_wide || explicit) {
                     return Response::err(id, codes::NO_DOCUMENT, "no document attached");
                 }
                 match class {
@@ -277,7 +327,48 @@ impl Connection {
         }
     }
 
-    fn hello(&mut self, id: Option<RequestId>, params: Option<serde_json::Value>) -> Response {
+    /// `hew.doc.attach`: bind this connection to the document named by
+    /// `document` (resolved against the host's open documents), or — with
+    /// no `document` — to the host's current one. Single-document hosts
+    /// attach with no params; a named document that does not resolve is
+    /// refused typed, never silently accepted, so a client can never go
+    /// on to edit a window it did not mean to.
+    fn attach(
+        &mut self,
+        doc: &kernel::Document,
+        host: &mut dyn Host,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, AttachError> {
+        let Some(object) = params.as_object() else {
+            return Err(AttachError::Params("params must be an object".into()));
+        };
+        if let Some(extra) = object.keys().find(|k| k.as_str() != "document") {
+            return Err(AttachError::Params(format!("unknown field `{extra}`")));
+        }
+        let documents = host.documents(doc);
+        let mut result = serde_json::json!({});
+        match object.get("document") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(query)) => {
+                let found = crate::host::resolve_document(&documents, query)
+                    .map_err(AttachError::Refused)?;
+                result = serde_json::json!({ "document": found });
+            }
+            Some(_) => {
+                return Err(AttachError::Params("`document` must be a string".into()));
+            }
+        }
+        self.attached = true;
+        Ok(result)
+    }
+
+    fn hello(
+        &mut self,
+        id: Option<RequestId>,
+        params: Option<serde_json::Value>,
+        doc: &kernel::Document,
+        host: &dyn Host,
+    ) -> Response {
         let requested = params
             .as_ref()
             .and_then(|p| p.get("protocol"))
@@ -304,7 +395,7 @@ impl Connection {
                     Profile::App => "app",
                 },
                 "encoding": "json",
-                "documents": [],
+                "documents": host.documents(doc),
             }),
         )
     }
@@ -353,6 +444,7 @@ mod tests {
 
     fn req(id: i64, method: &str, params: serde_json::Value) -> Request {
         Request {
+            document: None,
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Number(id)),
             method: method.to_string(),
@@ -497,6 +589,7 @@ mod tests {
             &mut doc,
             &mut crate::host::NoHost,
             Request {
+                document: None,
                 jsonrpc: "2.0".to_string(),
                 id: None,
                 method: "hew.solid.extrude".to_string(),

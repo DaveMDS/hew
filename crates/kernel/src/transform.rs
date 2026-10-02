@@ -186,6 +186,42 @@ impl Transform {
         )
     }
 
+    /// Maps a surface normal: the inverse-transpose of the linear part
+    /// applied to `n` (not unit length — normalize the result). Unlike
+    /// [`Transform::apply_vector`] this keeps a normal perpendicular to
+    /// its surface under non-uniform scale and shear, and keeps pointing
+    /// the same side of the surface under a reflection.
+    pub fn apply_normal(&self, n: Vec3) -> Vec3 {
+        let l = &self.linear;
+        // Rows of the cofactor matrix; cofactor / det is inverse-transpose.
+        let c = [
+            [
+                l[1][1] * l[2][2] - l[1][2] * l[2][1],
+                l[1][2] * l[2][0] - l[1][0] * l[2][2],
+                l[1][0] * l[2][1] - l[1][1] * l[2][0],
+            ],
+            [
+                l[0][2] * l[2][1] - l[0][1] * l[2][2],
+                l[0][0] * l[2][2] - l[0][2] * l[2][0],
+                l[0][1] * l[2][0] - l[0][0] * l[2][1],
+            ],
+            [
+                l[0][1] * l[1][2] - l[0][2] * l[1][1],
+                l[0][2] * l[1][0] - l[0][0] * l[1][2],
+                l[0][0] * l[1][1] - l[0][1] * l[1][0],
+            ],
+        ];
+        // Dividing by the determinant's SIGN (the magnitude is a scale
+        // the caller's normalize removes) keeps a reflection from
+        // flipping the normal.
+        let sign = if self.determinant() < 0.0 { -1.0 } else { 1.0 };
+        Vec3::new(
+            sign * (c[0][0] * n.x + c[0][1] * n.y + c[0][2] * n.z),
+            sign * (c[1][0] * n.x + c[1][1] * n.y + c[1][2] * n.z),
+            sign * (c[2][0] * n.x + c[2][1] * n.y + c[2][2] * n.z),
+        )
+    }
+
     /// Maps a plane so that transformed points stay on the transformed plane.
     ///
     /// Internally maps three points spanning the plane and refits, which is
@@ -423,5 +459,21 @@ mod tests {
             squash.apply_plane(&plane).unwrap_err(),
             TransformError::Singular
         );
+    }
+
+    #[test]
+    fn a_normal_stays_perpendicular_under_non_uniform_scale() {
+        // A 45° face of the plane x + z = 0, scaled 3x along x: its tangent
+        // (1, 0, -1) becomes (3, 0, -1); the mapped normal must still be
+        // perpendicular to that, which `apply_vector` would not give.
+        let t = Transform::scale(Vec3::new(3.0, 1.0, 1.0));
+        let tangent = t.apply_vector(Vec3::new(1.0, 0.0, -1.0));
+        let normal = t.apply_normal(Vec3::new(1.0, 0.0, 1.0));
+        assert!(tangent.dot(normal).abs() < 1e-12, "{tangent:?} {normal:?}");
+        // A mirror must not flip a normal to the other side of its surface:
+        // reflecting x leaves a +z face's normal +z.
+        let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+        let n = mirror.apply_normal(Vec3::new(0.0, 0.0, 1.0));
+        assert!(n.z > 0.0, "{n:?}");
     }
 }

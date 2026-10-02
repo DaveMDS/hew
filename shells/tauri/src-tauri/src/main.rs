@@ -31,6 +31,7 @@ mod fonts;
 // top-of-file doc comment for the full contract with
 // crates/wasm-api/src/live.rs (the webview-side dispatch half).
 mod live;
+mod live_router;
 
 // "Open on Phone" QR handoff (docs/design/shop-mode.md §4, workers/
 // share-relay/README.md): the desktop encrypts the document and uploads it
@@ -533,6 +534,36 @@ fn window_label_for_path(app: &tauri::AppHandle, path: &str) -> Option<String> {
                 && app.get_webview_window(label).is_some()
         })
         .map(|(label, _)| label.clone())
+}
+
+/// Every document window's open `.hew` path (label → path), for the live
+/// API's document list.
+fn document_paths_snapshot(app: &tauri::AppHandle) -> HashMap<String, String> {
+    app.state::<Mutex<DocumentPaths>>()
+        .lock()
+        .map(|g| g.0.clone())
+        .unwrap_or_default()
+}
+
+/// Record that window `label` holds `path` (see [`DocumentPaths`]) — the
+/// shell-side twin of `set_document_path`, for a window the live API opens.
+fn claim_document_path(app: &tauri::AppHandle, label: &str, path: &str) {
+    if let Ok(mut guard) = app.state::<Mutex<DocumentPaths>>().lock() {
+        guard
+            .0
+            .insert(label.to_string(), canonical_document_path(path));
+    }
+}
+
+/// Report whether this window's document has unsaved changes — the one
+/// piece of document state the shell cannot see for itself, and the live
+/// API's `hew.meta.documents` `dirty` field. The webview pushes it on every
+/// change (App.tsx).
+#[tauri::command]
+fn set_document_dirty(app: tauri::AppHandle, window: tauri::WebviewWindow, dirty: bool) {
+    if let Ok(mut docs) = app.state::<live::LiveApi>().docs.lock() {
+        docs.set_dirty(window.label(), dirty);
+    }
 }
 
 /// Record (or clear, with `None`) the `.hew` path this window has open —
@@ -1046,6 +1077,54 @@ fn refresh_window_list_after_retitle(app: &tauri::AppHandle, retitled: Retitled)
     refresh_window_list_impl(app, Some(retitled));
 }
 
+/// Put `label`'s window back in front and give it key focus WITHOUT
+/// unminimizing it — what the live API does for the user's window after
+/// creating a background one where there is no `order_window_behind`.
+/// A minimized window stays minimized.
+#[cfg(not(target_os = "macos"))]
+fn refocus_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> {
+    match app.get_webview_window(label) {
+        Some(w) if !w.is_minimized().unwrap_or(false) => w.set_focus().map_err(|e| e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Slot `label`'s window directly BEHIND `anchor`'s in the window order —
+/// without activating the app, taking key status, or moving anything else
+/// — so a window the live API creates for background work never covers the
+/// one the user is using, whether or not Hew is the active app. macOS only
+/// (`orderWindow:relativeTo:` is exactly this operation); AppKit insists on
+/// the main thread, hence the hop. Elsewhere there is no such primitive, and
+/// the caller falls back to [`refocus_window`].
+#[cfg(target_os = "macos")]
+fn order_window_behind(app: &tauri::AppHandle, label: &str, anchor: &str) {
+    use objc2_app_kit::{NSWindow, NSWindowOrderingMode};
+    let handle = app.clone();
+    let (label, anchor) = (label.to_string(), anchor.to_string());
+    let _ = app.run_on_main_thread(move || {
+        let (Some(win), Some(anchor_win)) = (
+            handle.get_webview_window(&label),
+            handle.get_webview_window(&anchor),
+        ) else {
+            return;
+        };
+        let (Ok(win_ptr), Ok(anchor_ptr)) = (win.ns_window(), anchor_win.ns_window()) else {
+            return;
+        };
+        if win_ptr.is_null() || anchor_ptr.is_null() {
+            return;
+        }
+        // SAFETY: both pointers are live NSWindows owned by their Tauri
+        // windows, which `handle` keeps alive for this call, and this
+        // closure runs on the main thread.
+        unsafe {
+            let win: &NSWindow = &*(win_ptr as *const NSWindow);
+            let anchor: &NSWindow = &*(anchor_ptr as *const NSWindow);
+            win.orderWindow_relativeTo(NSWindowOrderingMode::Below, anchor.windowNumber());
+        }
+    });
+}
+
 /// Raise and focus the document window with the given label. Shared by the
 /// `focus_window` command (the in-app React Window-menu tail) and the native
 /// macOS Window-menu tail's own `win-focus:<label>` dispatch.
@@ -1113,6 +1192,7 @@ async fn create_document_window(
     app: &tauri::AppHandle,
     window: &tauri::WebviewWindow,
     recover_slot: Option<String>,
+    focus: bool,
 ) -> Result<String, String> {
     let label = {
         let state = app.state::<Mutex<WindowCounter>>();
@@ -1133,6 +1213,7 @@ async fn create_document_window(
     let builder =
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title("Hew")
+            .focused(focus)
             .inner_size(
                 f64::from(size.width) / scale,
                 f64::from(size.height) / scale,
@@ -1159,7 +1240,7 @@ async fn new_window(
     window: tauri::WebviewWindow,
     recover_slot: Option<String>,
 ) -> Result<(), String> {
-    create_document_window(&app, &window, recover_slot).await?;
+    create_document_window(&app, &window, recover_slot, true).await?;
     Ok(())
 }
 
@@ -1185,7 +1266,7 @@ async fn open_in_new_window(
             return focus_window_by_label(&app, &label);
         }
     }
-    let label = create_document_window(&app, &window, None).await?;
+    let label = create_document_window(&app, &window, None, true).await?;
     // Propagate a lock failure (matches the sibling recover_slot insert in
     // create_document_window) rather than swallowing it: on a poisoned
     // mutex, silently returning Ok would leave the freshly opened window
@@ -1566,14 +1647,20 @@ fn recovery_claim(
 /// cleared — a Save of the new document must not delete the old one.
 #[tauri::command]
 fn recovery_clear(app: tauri::AppHandle, window: tauri::WebviewWindow) -> Result<(), String> {
+    clear_recovery_for_label(&app, window.label());
+    Ok(())
+}
+
+/// [`recovery_clear`] by label — for the live API closing a window whose
+/// webview no longer answers, so it cannot clear its own snapshot.
+fn clear_recovery_for_label(app: &tauri::AppHandle, label: &str) {
     let Some(config_dir) = app.path().app_config_dir().ok() else {
-        return Ok(());
+        return;
     };
-    let slot = effective_own_slot(&app, window.label());
+    let slot = effective_own_slot(app, label);
     let (hew_path, json_path) = slot_paths(&config_dir, &slot);
     let _ = std::fs::remove_file(hew_path);
     let _ = std::fs::remove_file(json_path);
-    Ok(())
 }
 
 /// Discard every stored recovery snapshot (all window labels + legacy),
@@ -2618,6 +2705,7 @@ fn main() {
             list_windows,
             focus_window,
             set_document_path,
+            set_document_dirty,
             focus_window_with_path,
             set_window_title,
             open_settings_window,

@@ -26,6 +26,7 @@ USAGE
 COMMANDS
     run <script>          Run a file of JSON-RPC envelopes in order
     dispatch <method>     Send one command
+    documents             List the app's open documents (--live)
     mcp                   Serve MCP on stdio, for an AI client
 
 EXAMPLES
@@ -37,6 +38,10 @@ EXAMPLES
 
     # Frame the model in the app the user already has open.
     hew-cli dispatch hew.view.zoom_extents --live
+
+    # See every window the app has open, then work in one that is not in front.
+    hew-cli documents --live
+    hew-cli dispatch hew.query.scene --live --document doc_2
 
     # Serve an AI client. Put this in the client's MCP config.
     hew-cli mcp
@@ -51,6 +56,8 @@ OPTIONS
     --live                Work on a running app's open document
     --launch              With --live, start the app first and wait for it
     --instance <pid>      Pick one when several apps are running
+    --document <ref>      With --live, work in this open document (id, path,
+                          label, or title) instead of the front window
     --out <file.hew>      run: write the finished document here
     --file <model.hew>    dispatch: open this file, and save it back
     -h, --help            Print help
@@ -74,7 +81,7 @@ const USAGE_RUN: &str = r#"hew-cli run — run a file of JSON-RPC envelopes in o
 
 USAGE
     hew-cli run <script.json|script.jsonl> [--out <file.hew>]
-                [--live [--launch] [--instance <pid>]]
+                [--live [--launch] [--instance <pid>] [--document <ref>]]
 
 The script speaks the protocol directly: one JSON object per line, or a
 single JSON array. It opens with its own hew.meta.hello, then
@@ -101,6 +108,11 @@ OPTIONS
     --live              Run against the app's open document instead.
     --launch            Start the app first and wait for it.
     --instance <pid>    Pick one when several apps are running.
+    --document <ref>    Live: attach to this open document (an id such as
+                        doc_2, or its path, label, or title) rather than
+                        the front window. A frame may also carry its own
+                        "document" member to address one document for just
+                        that command.
 "#;
 
 /// `hew-cli dispatch --help`.
@@ -108,7 +120,8 @@ const USAGE_DISPATCH: &str = r#"hew-cli dispatch — send one command.
 
 USAGE
     hew-cli dispatch <method> [params-json]
-                     (--file <model.hew> | --live [--launch] [--instance <pid>])
+                     (--file <model.hew> |
+                      --live [--launch] [--instance <pid>] [--document <ref>])
 
 Params are a JSON object, defaulting to {}. The reply prints to stdout.
 A refusal prints to stderr and exits 1.
@@ -119,6 +132,7 @@ EXAMPLES
     hew-cli dispatch hew.query.scene --file chair.hew
     hew-cli dispatch hew.entity.move '{"ids":["obj_1"],"translation":[0,0,0.5]}' --file chair.hew
     hew-cli dispatch hew.doc.export '{"format":"stl","path":"chair.stl"}' --live
+    hew-cli dispatch hew.query.scene --live --document "524 E Tremaine Ave"
 
 OPTIONS
     --file <model.hew>  Open this file. A command that changes it saves
@@ -128,13 +142,41 @@ OPTIONS
                         document, and their undo history.
     --launch            Start the app first and wait for it.
     --instance <pid>    Pick one when several apps are running.
+    --document <ref>    Send to this open document (an id such as doc_2, or
+                        its path, label, or title) instead of the front
+                        window. It is reached where it is: nothing is
+                        raised, and the user's window order is untouched.
+"#;
+
+/// `hew-cli documents --help`.
+const USAGE_DOCUMENTS: &str = r#"hew-cli documents — list the app's open documents.
+
+USAGE
+    hew-cli documents --live [--launch] [--instance <pid>]
+
+Prints one JSON object per open document, in window creation order:
+its id (doc_N — unique for the app's lifetime, never reused), title,
+path (null until saved), dirty (unsaved changes), front (the window the
+user is looking at), and label if one was given at hew.doc.new/open.
+
+Pass an id, path, label, or title to --document on run/dispatch/mcp to
+work in any of them, front or not. The same list is hew.meta.documents.
+
+EXAMPLE
+    hew-cli documents --live
+
+OPTIONS
+    --live              Ask the running app. Required: a document you
+                        hold yourself has nothing to list.
+    --launch            Start the app first and wait for it.
+    --instance <pid>    Pick one when several apps are running.
 "#;
 
 /// `hew-cli mcp --help`.
 const USAGE_MCP: &str = r#"hew-cli mcp — serve MCP on stdio, for an AI client.
 
 USAGE
-    hew-cli mcp [--live [--launch] [--instance <pid>]]
+    hew-cli mcp [--live [--launch] [--instance <pid>] [--document <ref>]]
 
 Speaks newline-delimited JSON-RPC to whatever spawned the process. The
 tools come from the command registry, so they match the protocol
@@ -155,6 +197,9 @@ OPTIONS
     --live              Drive the app's open document.
     --launch            Start the app first and wait for it.
     --instance <pid>    Pick one when several apps are running.
+    --document <ref>    Start attached to this open document (an id, path,
+                        label, or title) instead of the front window. Every
+                        tool also takes a per-call "document".
 "#;
 
 fn usage_error(message: &str) -> ! {
@@ -167,7 +212,7 @@ fn usage_error(message: &str) -> ! {
 /// listing all of them: `hew-cil run` should say "did you mean run?".
 /// Distance 2 or less, so a genuinely different word suggests nothing.
 fn unknown_subcommand(typed: &str) -> String {
-    const COMMANDS: [&str; 3] = ["run", "dispatch", "mcp"];
+    const COMMANDS: [&str; 4] = ["run", "dispatch", "documents", "mcp"];
     let nearest = COMMANDS
         .iter()
         .map(|c| (edit_distance(typed, c), *c))
@@ -215,20 +260,22 @@ struct LiveFlags {
     live: bool,
     launch: bool,
     instance: Option<u32>,
+    document: Option<String>,
 }
 
 impl LiveFlags {
     /// `Some(LiveOptions)` when `--live` was given, having already
     /// rejected `--launch`/`--instance` without it.
     fn into_options(self, usage_ctx: &str) -> Option<LiveOptions> {
-        if !self.live && (self.launch || self.instance.is_some()) {
+        if !self.live && (self.launch || self.instance.is_some() || self.document.is_some()) {
             usage_error(&format!(
-                "{usage_ctx}: --launch/--instance only make sense with --live"
+                "{usage_ctx}: --launch/--instance/--document only make sense with --live"
             ));
         }
         self.live.then_some(LiveOptions {
             launch: self.launch,
             instance: self.instance,
+            document: self.document,
         })
     }
 }
@@ -251,6 +298,16 @@ fn try_parse_live_flag(
         "--launch" => {
             flags.launch = true;
             *i += 1;
+            true
+        }
+        "--document" => {
+            let Some(reference) = args.get(*i + 1) else {
+                usage_error(&format!(
+                    "{usage_ctx}: --document needs a document id, path, label, or title"
+                ));
+            };
+            flags.document = Some(reference.clone());
+            *i += 2;
             true
         }
         "--instance" => {
@@ -280,6 +337,7 @@ fn main() {
         "run" => run_subcommand(&args[1..]),
         "dispatch" => dispatch_subcommand(&args[1..]),
         "mcp" => mcp_subcommand(&args[1..]),
+        "documents" => documents_subcommand(&args[1..]),
         // A help page is what the user asked for, so it goes to stdout
         // where it can be piped and paged. Only a usage ERROR prints it
         // to stderr, alongside what went wrong.
@@ -383,6 +441,30 @@ fn dispatch_subcommand(args: &[String]) -> i32 {
     }
 }
 
+fn documents_subcommand(args: &[String]) -> i32 {
+    if help_requested(args, USAGE_DOCUMENTS) {
+        return 0;
+    }
+    let mut live_flags = LiveFlags::default();
+    let mut i = 0;
+    while i < args.len() {
+        if try_parse_live_flag(args, &mut i, &mut live_flags, "hew-cli documents") {
+            continue;
+        }
+        usage_error(&format!(
+            "hew-cli documents: unrecognized argument \"{}\"",
+            args[i]
+        ));
+    }
+    if live_flags.document.is_some() {
+        usage_error("hew-cli documents: --document does not apply — it lists every document");
+    }
+    let Some(opts) = live_flags.into_options("hew-cli documents") else {
+        usage_error("hew-cli documents: --live is required — there is nothing to list otherwise");
+    };
+    hew_cli::run::list_documents_live(&opts).exit_code
+}
+
 fn mcp_subcommand(args: &[String]) -> i32 {
     if help_requested(args, USAGE_MCP) {
         return 0;
@@ -404,7 +486,10 @@ fn mcp_subcommand(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{USAGE, USAGE_DISPATCH, USAGE_MCP, USAGE_RUN, edit_distance, unknown_subcommand};
+    use super::{
+        USAGE, USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_MCP, USAGE_RUN, edit_distance,
+        unknown_subcommand,
+    };
 
     /// A mistyped command names the nearest real one. Silently accepting
     /// a typo, or listing every command and leaving the reader to spot
@@ -453,7 +538,7 @@ mod tests {
 
     #[test]
     fn every_command_has_its_own_help_with_an_example() {
-        for page in [USAGE_RUN, USAGE_DISPATCH, USAGE_MCP] {
+        for page in [USAGE_RUN, USAGE_DISPATCH, USAGE_DOCUMENTS, USAGE_MCP] {
             assert!(page.starts_with("hew-cli "));
             assert!(page.contains("USAGE"));
             assert!(

@@ -19,6 +19,7 @@ use std::collections::BTreeMap;
 
 fn req(id: i64, method: &str, params: Value) -> Request {
     Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Number(id)),
         method: method.to_string(),

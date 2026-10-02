@@ -660,6 +660,11 @@ below.
   checkmark on the current one, to switch between them, and opening a file
   that is already open brings its window forward instead of opening a
   duplicate
+- Live API window management: `hew.meta.documents` lists every open window
+  (stable `doc_N` ids), `hew.doc.attach`/`--document` and a per-request
+  `document` member address any window — background ones included, without
+  raising them — and `hew.doc.new`/`open` create documents in new
+  background windows, with `hew.doc.close`/`focus` to finish
 - Shop Mode — a read-only, touch-first phone viewer (auto-selected on a
   phone, or via an explicit override) for referencing a model in the
   workshop: tap a part for its size, a live parts cutlist, a Tape Measure

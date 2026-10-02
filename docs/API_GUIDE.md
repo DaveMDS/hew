@@ -187,9 +187,59 @@ documents it has open.
 
 Then get a document to work on. Headless, that means `hew.doc.new` or
 `hew.doc.open {path}`, and the issuing connection is attached to the
-result automatically. Against a running app, the user owns the
-documents and you pick one with `hew.doc.attach`. Commands that touch
-the model answer `-32002` until a document is attached.
+result automatically. Against a running app, the user may have several
+documents open, and you pick one with `hew.doc.attach`. Commands that
+touch the model answer `-32002` until a document is attached.
+
+## Several documents at once
+
+A running app can have many windows open, and the one in front is rarely
+the one an automation wants. List them, then choose:
+
+```
+hew-cli documents --live
+{"id":"doc_1","title":"Octagon box","path":null,"dirty":true,"front":true,"attached":true}
+{"id":"doc_2","title":"524 E Tremaine Ave - Main House","path":"/Users/me/Hew/house.hew","dirty":false,"front":false,"attached":false}
+```
+
+`hew.meta.documents` returns the same list. `id` (`doc_N`) is unique for
+the life of the app and never reused. To work in the house model while
+the octagon box stays in front:
+
+```
+hew-cli dispatch hew.query.scene --live --document doc_2
+hew-cli run build.jsonl --live --document "524 E Tremaine Ave - Main House"
+```
+
+`--document` takes an id, or a path, label, or title that matches exactly
+one window. In a script or over the raw protocol, `hew.doc.attach
+{"document": "doc_2"}` rebinds the connection, or put a `"document"` member
+on any single envelope to address just that request and leave the
+attachment alone:
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"hew.query.scene","document":"doc_2"}
+```
+
+None of this raises a window. A background document is edited where it
+sits; its viewport catches up the moment the user looks at it. Only
+`hew.doc.focus {document}` moves the user's focus, so use it when they
+should see something.
+
+Create documents on the fly the same way — `hew.doc.new` opens a new
+window *behind* the user's current one and attaches you to it, so scratch
+work never lands in the model they are editing:
+
+```
+{"method":"hew.doc.new","params":{"label":"scratch-gears"}}
+→ {"document":{"id":"doc_5","title":"Untitled","label":"scratch-gears",...}}
+```
+
+`hew.doc.open {path}` does the same for a file, or attaches to the window
+that already has it. Clean up with `hew.doc.close {document,
+"discard": true}`; without `discard`, a document with unsaved changes
+refuses (`unsaved_changes`) so an agent cannot throw away work by
+accident, and the last open document refuses (`last_document`).
 
 ## Headless or live
 
@@ -202,7 +252,7 @@ whose document you are editing.
 | Undo history | Yours | The user's, interleaved with their edits |
 | Requires the app | No | Yes, running (`--launch` starts one) |
 | Profile granted | `core` | `app` |
-| Getting a document | `hew.doc.new` / `hew.doc.open` | `hew.doc.attach` |
+| Getting a document | `hew.doc.new` / `hew.doc.open` | `hew.doc.attach` (any open window), or `hew.doc.new`/`open` into a new background window |
 | Saving | `hew.doc.save`, or `run --out` | The user saves |
 
 Use headless for scripts, batch work, and CI: it runs on a machine where
@@ -221,18 +271,29 @@ structure, materials, tags, guides, attributes, history — and it aims
 the viewport too: `hew.view.camera`, `hew.view.zoom_extents`, and
 `hew.view.units` all take effect in the window you are looking at.
 
-`hew.doc.save` and `hew.doc.export` work as well, with one difference.
-The app has no filesystem inside its sandbox, so it
-serializes the document (or encodes the mesh) and hands the bytes back;
-`hew-cli` writes the file for you, so the command you type is the same
-one you would type headless and it produces the same file. Speaking the
-protocol directly rather than through `hew-cli`? Omit `path` and write
-the `bytes_base64` you get back.
+Documents save, import, and render live too, and the same command gives the
+same result as headless:
 
-What refuses live is document lifecycle —
-`hew.doc.new`/`open`/`import` — because opening and replacing documents
-stays in the user's hands, and `hew.view.snapshot`, which has no
-viewport handle to render through yet.
+- `hew.doc.save` writes the file *through the app's own Save*, so the
+  document stops being dirty and becomes bound to that file, exactly as if
+  the user had pressed Save As. With no `path` it re-saves in place. To
+  write a file without touching the user's document, pass `"copy": true`
+  with a `path`. (A document that has never been saved, with no `path`,
+  hands you its bytes instead of refusing.)
+- `hew.doc.export` works as before: the app encodes the mesh and `hew-cli`
+  writes the file.
+- `hew.doc.import {path}` merges an STL, glTF/GLB, COLLADA, or SketchUp file
+  into the document, additively and as one undo entry. `hew-cli` reads the
+  file (and a COLLADA file's textures) for you and sends the bytes; a raw
+  client sends `bytes_base64` itself.
+- `hew.view.snapshot`, `hew.view.line_drawing`, and `hew.print.pdf` are
+  rendered by `hew-cli` from a copy of the document's saved bytes, so you
+  can see a background document too. With no camera named, the render
+  starts from what the user is looking at (the viewport camera at the
+  moment of the request).
+
+HEW_API.md §12.2 lists the few things that legitimately differ between the
+two modes and why they cannot be made to agree.
 
 ## One envelope, one undo entry
 
@@ -476,6 +537,15 @@ rasterizer — no GPU, no viewport, no display.
 `include_ids: true` additionally returns a per-pixel id buffer and the
 palette it indexes, so you can answer "which object is at pixel
 (x, y)" without guessing from color.
+
+`include_depth: true` and `include_normals: true` add the two passes an
+image model wants as conditioning: a grayscale depth image (near is white,
+background black; `depth_bits: 16` for finer steps) and a camera-space
+normals image. The depth result carries `depth_near` and `depth_far` in
+metres so a pixel value converts back to a distance (HEW_API.md §7 has the
+formula). With `path`, each lands beside the snapshot as
+`<path>.depth.png` and `<path>.normals.png`. They come from the same render
+and camera as the color image, so the three line up pixel for pixel.
 
 ## Undo carefully in a live session
 
@@ -739,9 +809,10 @@ ships as a new command beside the original.
 
 ```
 hew-cli run <script.json|script.jsonl> [--out <file.hew>]
-             [--live [--launch] [--instance <pid>]]
+             [--live [--launch] [--instance <pid>] [--document <ref>]]
 hew-cli dispatch <method> [params-json] (--file <model.hew> | --live [...])
-hew-cli mcp [--live [--launch] [--instance <pid>]]
+hew-cli documents --live [--launch] [--instance <pid>]
+hew-cli mcp [--live [--launch] [--instance <pid>] [--document <ref>]]
 ```
 
 `run` executes a script of raw envelopes in order. A `.json` file is

@@ -256,6 +256,31 @@ fn doc_err(e: DocumentError) -> ApiError {
     }
 }
 
+/// Whether the command in `frame` records itself when it succeeds, so the
+/// dispatcher must not ALSO record the envelope: `hew.doc.import` (bare, or
+/// as the sole command of a one-command `hew.doc.transact`, the shape MCP
+/// sends) records the file it merged under the import size cap
+/// (`LiveHost::import_document`); recording its frame too would replay the
+/// import twice and carry the whole file in base64 past that cap.
+fn records_itself(method: &str, frame: &str) -> bool {
+    if method == "hew.doc.import" {
+        return true;
+    }
+    if method != "hew.doc.transact" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(frame)
+        .ok()
+        .and_then(|v| {
+            let commands = v.pointer("/params/commands")?.as_array()?.clone();
+            match commands.as_slice() {
+                [only] => Some(only.get("method")?.as_str()? == "hew.doc.import"),
+                _ => Some(false),
+            }
+        })
+        .unwrap_or(false)
+}
+
 /// Serialize a kernel `ImportReport` to the plain JS object the import UI
 /// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
 /// textures_missing: [string], warnings: [string] }`. Shared by `import_dae`,
@@ -2576,9 +2601,14 @@ impl Scene {
             // session co-authored by a user and an agent replays with
             // only half its history — the reproducer silently differs
             // from the document that broke.
-            recording::record(recording::RecordedCall::ApiDispatch {
-                frame: frame.to_string(),
-            });
+            // `hew.doc.import` records itself, as the file it merged
+            // (`LiveHost::import_document`): its frame carries the whole file
+            // in base64, which the import cap — not this path — governs.
+            if !records_itself(&method, frame) {
+                recording::record(recording::RecordedCall::ApiDispatch {
+                    frame: frame.to_string(),
+                });
+            }
             self.full_resync();
         }
         if resp.error.is_none() {
@@ -16841,5 +16871,20 @@ mod tests {
             1,
             "the refused hew.doc.new left the live document untouched"
         );
+    }
+}
+
+#[cfg(test)]
+mod records_itself_tests {
+    use super::records_itself;
+
+    #[test]
+    fn an_import_records_itself_bare_or_as_the_sole_transact_command() {
+        assert!(records_itself("hew.doc.import", "{}"));
+        let wrapped = r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.import","params":{}}]}}"#;
+        assert!(records_itself("hew.doc.transact", wrapped));
+        let mixed = r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.import"},{"method":"hew.sketch.draw_rect"}]}}"#;
+        assert!(!records_itself("hew.doc.transact", mixed));
+        assert!(!records_itself("hew.sketch.draw_rect", "{}"));
     }
 }

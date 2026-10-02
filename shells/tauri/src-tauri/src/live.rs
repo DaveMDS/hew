@@ -76,34 +76,46 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 /// same effective ceiling regardless of which side is slow. A timeout
 /// does not close the connection: the client's NEXT frame gets a fresh
 /// wait, so one slow dispatch cannot poison every request after it.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Live API dispatch bookkeeping, managed as Tauri state. Session-only:
 /// nothing here is persisted or fed into a document's canonical bytes.
 #[derive(Default)]
-struct LiveApi {
-    next_conn_id: AtomicU32,
-    /// Which window a connection's frames route to, fixed at accept time
-    /// (see `spawn_accept_loop`'s doc comment on why it is not re-resolved
-    /// per frame).
-    conn_window: Mutex<HashMap<u32, String>>,
+pub(crate) struct LiveApi {
+    pub(crate) next_conn_id: AtomicU32,
+    /// The window a connection is currently attached to: its accept-time
+    /// front window until the client says otherwise (`hew.doc.attach`,
+    /// `hew.doc.new`/`open` — see `live_router.rs`). Never re-resolved
+    /// from window focus: a user switching windows mid-session must not
+    /// move an open connection's next mutation to a different document.
+    /// Absent = detached (the document's window closed, §4.2).
+    pub(crate) conn_window: Mutex<HashMap<u32, String>>,
     /// One slot per frame currently awaiting its `hew://api-reply` — filled
     /// just before emitting `hew://api-frame`, drained by the global reply
     /// listener registered in `start`.
-    pending_replies: Mutex<HashMap<u32, mpsc::Sender<String>>>,
+    pub(crate) pending_replies: Mutex<HashMap<u32, mpsc::Sender<String>>>,
+    /// The document registry (ids, client labels, dirty marks).
+    pub(crate) docs: Mutex<crate::live_router::DocState>,
+    pub(crate) next_op_id: AtomicU32,
+    /// Held by `hew.doc.new`/`open`/`close` for their whole run (see
+    /// `live_router::lifecycle_lock`).
+    pub(crate) window_ops: Mutex<()>,
+    /// Webview-side operations (`hew://api-op`) awaiting their
+    /// `hew://api-op-reply`.
+    pub(crate) pending_ops: Mutex<HashMap<u32, mpsc::Sender<serde_json::Value>>>,
 }
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct FramePayload<'a> {
-    conn_id: u32,
-    frame: &'a str,
+pub(crate) struct FramePayload<'a> {
+    pub(crate) conn_id: u32,
+    pub(crate) frame: &'a str,
 }
 
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ConnPayload {
-    conn_id: u32,
+pub(crate) struct ConnPayload {
+    pub(crate) conn_id: u32,
 }
 
 #[derive(serde::Deserialize)]
@@ -111,6 +123,30 @@ struct ConnPayload {
 struct ReplyPayload {
     conn_id: u32,
     frame: String,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpReplyPayload {
+    op_id: u32,
+    #[serde(flatten)]
+    outcome: serde_json::Value,
+}
+
+/// Hands one webview operation's answer to the thread waiting on it.
+fn deliver_op_reply(app: &AppHandle, event_payload: &str) {
+    let Ok(payload) = serde_json::from_str::<OpReplyPayload>(event_payload) else {
+        return;
+    };
+    let tx = app
+        .state::<LiveApi>()
+        .pending_ops
+        .lock()
+        .expect("pending_ops mutex")
+        .remove(&payload.op_id);
+    if let Some(tx) = tx {
+        let _ = tx.send(payload.outcome);
+    }
 }
 
 // ------------------------------------------------------------- discovery
@@ -413,6 +449,11 @@ pub fn start(app: &AppHandle) {
         }
     });
 
+    let op_handle = app.clone();
+    app.listen_any("hew://api-op-reply", move |event| {
+        deliver_op_reply(&op_handle, event.payload());
+    });
+
     spawn_accept_loop(app.clone(), listener, token);
 }
 
@@ -466,8 +507,9 @@ fn spawn_accept_loop(app: AppHandle, listener: std::os::unix::net::UnixListener,
 
 /// One accepted connection's whole lifetime: the mandatory `hello`+token
 /// handshake (§11.2 — anything else on the first frame is dropped
-/// silently, no bytes written back), then the frame-at-a-time forward
-/// loop until the peer closes or a write fails.
+/// silently, no bytes written back), then the frame-at-a-time loop until
+/// the peer closes or a write fails. Routing — which window a frame goes
+/// to — is `live_router`'s; this only reads and writes the socket.
 #[cfg(unix)]
 fn handle_connection(
     app: AppHandle,
@@ -488,23 +530,14 @@ fn handle_connection(
         return; // wrong method, missing/wrong token, or malformed — drop silently
     };
 
-    let conn_id = {
-        let state = app.state::<LiveApi>();
-        let id = state.next_conn_id.fetch_add(1, Ordering::Relaxed);
-        state
-            .conn_window
-            .lock()
-            .expect("conn_window mutex")
-            .insert(id, window_label.clone());
-        id
-    };
-    let _ = app.emit_to(
-        &window_label,
-        "hew://api-connection-open",
-        ConnPayload { conn_id },
-    );
+    let (conn_id, mut route) = register_connection(&app, &window_label);
 
-    let mut ok = forward_and_await(&app, &window_label, conn_id, &sanitized_hello, &mut stream);
+    let mut write = |out: &str| -> bool {
+        let mut framed = out.to_string();
+        framed.push('\n');
+        stream.write_all(framed.as_bytes()).is_ok() && stream.flush().is_ok()
+    };
+    let mut ok = serve_frame(&app, &mut route, &sanitized_hello, &mut write);
     while ok {
         let mut line = String::new();
         match reader.read_line(&mut line) {
@@ -520,9 +553,36 @@ fn handle_connection(
         // field, and the webview must never see the secret. Strip it from
         // every frame, not just the handshake.
         let sanitized = strip_token(trimmed);
-        ok = forward_and_await(&app, &window_label, conn_id, &sanitized, &mut stream);
+        ok = serve_frame(&app, &mut route, &sanitized, &mut write);
     }
 
+    unregister_connection(&app, conn_id, &mut route);
+}
+
+/// Registers a freshly accepted connection: binds it to `window_label` (the
+/// front window at accept time) and opens its session there.
+fn register_connection(
+    app: &AppHandle,
+    window_label: &str,
+) -> (u32, crate::live_router::ConnRoute) {
+    let state = app.state::<LiveApi>();
+    let id = state.next_conn_id.fetch_add(1, Ordering::Relaxed);
+    state
+        .conn_window
+        .lock()
+        .expect("conn_window mutex")
+        .insert(id, window_label.to_string());
+    let _ = app.emit_to(
+        window_label,
+        "hew://api-connection-open",
+        ConnPayload { conn_id: id },
+    );
+    (id, crate::live_router::ConnRoute::new(id, window_label))
+}
+
+/// Forgets a finished connection and closes its session in every window it
+/// touched.
+fn unregister_connection(app: &AppHandle, conn_id: u32, route: &mut crate::live_router::ConnRoute) {
     let state = app.state::<LiveApi>();
     state
         .conn_window
@@ -534,11 +594,31 @@ fn handle_connection(
         .lock()
         .expect("pending_replies mutex")
         .remove(&conn_id);
-    let _ = app.emit_to(
-        &window_label,
-        "hew://api-connection-close",
-        ConnPayload { conn_id },
-    );
+    route.close_sessions(app);
+}
+
+/// Routes one frame (`live_router::handle_frame`) and writes whatever
+/// comes back through `write`. Returns `false` when the connection should
+/// end: a failed write, a hard transport failure, or a reply timeout
+/// (whose synthesized answer is written first — the dispatch is still
+/// running in the webview, replies are correlated by connection, and a
+/// late one must not be handed to the NEXT request).
+fn serve_frame(
+    app: &AppHandle,
+    route: &mut crate::live_router::ConnRoute,
+    line: &str,
+    write: &mut dyn FnMut(&str) -> bool,
+) -> bool {
+    use crate::live_router::Outcome;
+    match crate::live_router::handle_frame(app, route, line) {
+        Outcome::NoReply => true,
+        Outcome::Reply(reply) => write(&reply),
+        Outcome::ReplyThenClose(reply) => {
+            let _ = write(&reply);
+            false
+        }
+        Outcome::Close => false,
+    }
 }
 
 /// Validates that `line` is `hew.meta.hello` carrying `params.token ==
@@ -591,122 +671,6 @@ fn strip_token(line: &str) -> String {
     }
 }
 
-/// Forwards one frame to `window_label`'s webview and, if it carries an
-/// `id` (i.e. it is a real request, not a notification — a notification
-/// gets no reply from `crates/api` at all, §4.1), blocks for the matching
-/// `hew://api-reply` and writes it back to the socket. Returns `false`
-/// only on a hard transport failure (the window is gone, or the socket
-/// write itself failed) — a reply *timeout* still writes a synthesized
-/// internal-fault reply and returns `true`, so one slow dispatch cannot
-/// wedge every frame after it.
-///
-/// The `id`-presence peek is transport-level flow control, not a
-/// duplication of `crates/api`'s own protocol rules: whether a JSON-RPC
-/// object carries an `id` key is a wire-level fact either side can read
-/// off the frame, and `crates/api`'s `Connection::dispatch` remains the
-/// sole authority on what a notification actually MEANS (dropped,
-/// unexecuted). If `line` fails to parse as JSON at all, this always
-/// waits for a reply — `Scene::api_dispatch` guarantees one for malformed
-/// JSON (a `PARSE_ERROR` response, id `null`).
-///
-/// Unix-only: this signature names `std::os::unix::net::UnixStream`
-/// directly, a type that does not exist on Windows, so the whole function
-/// must be `#[cfg(unix)]`-gated rather than merely unreferenced there —
-/// leaving it ungated is what made the crate fail to compile for Windows
-/// at all (adversarial review's finding 1). `mod windows` below has its
-/// own `forward_and_await`, generic over a pipe `HANDLE` instead of a
-/// `UnixStream`, sharing everything else (the needs-reply peek,
-/// `REPLY_TIMEOUT`, the synthesized-timeout-then-close behavior) with
-/// this one by hand rather than through a common trait — see this file's
-/// top doc comment for why a `UnixListener`/named-pipe `HANDLE` are not
-/// abstracted over a shared trait for just two call sites.
-#[cfg(unix)]
-fn forward_and_await(
-    app: &AppHandle,
-    window_label: &str,
-    conn_id: u32,
-    line: &str,
-    stream: &mut std::os::unix::net::UnixStream,
-) -> bool {
-    // `id: null` is NOT a request: `api::Request` deserializes it to
-    // `None`, i.e. a notification the dispatcher drops without answering.
-    // Peeking for the KEY alone would leave this side waiting 60s for a
-    // reply that is never coming, so the peek matches the dispatcher's
-    // own rule — a non-null id, or an unparseable frame (which
-    // `Scene::api_dispatch` always answers with a parse error).
-    let needs_reply = serde_json::from_str::<serde_json::Value>(line)
-        .map(|v| v.get("id").is_some_and(|id| !id.is_null()))
-        .unwrap_or(true);
-
-    if !needs_reply {
-        let _ = app.emit_to(
-            window_label,
-            "hew://api-frame",
-            FramePayload {
-                conn_id,
-                frame: line,
-            },
-        );
-        return true;
-    }
-
-    let (tx, rx) = mpsc::channel::<String>();
-    {
-        let state = app.state::<LiveApi>();
-        state
-            .pending_replies
-            .lock()
-            .expect("pending_replies mutex")
-            .insert(conn_id, tx);
-    }
-    if app
-        .emit_to(
-            window_label,
-            "hew://api-frame",
-            FramePayload {
-                conn_id,
-                frame: line,
-            },
-        )
-        .is_err()
-    {
-        let state = app.state::<LiveApi>();
-        state
-            .pending_replies
-            .lock()
-            .expect("pending_replies mutex")
-            .remove(&conn_id);
-        return false; // the target window is gone
-    }
-
-    let reply = match rx.recv_timeout(REPLY_TIMEOUT) {
-        Ok(reply) => reply,
-        Err(_) => {
-            // The dispatch is still running in the webview and will emit
-            // its reply eventually. Replies are correlated by connection,
-            // not by request id, so leaving this connection open would
-            // hand that late reply to whatever request came NEXT — the
-            // caller would receive another command's result under its own
-            // id. Write the timeout answer and CLOSE the connection
-            // instead: the stale reply then finds no slot and is dropped,
-            // and the client reconnects with a clean slate.
-            app.state::<LiveApi>()
-                .pending_replies
-                .lock()
-                .expect("pending_replies mutex")
-                .remove(&conn_id);
-            let mut out = synthesize_timeout_reply(line);
-            out.push('\n');
-            let _ = stream.write_all(out.as_bytes());
-            let _ = stream.flush();
-            return false;
-        }
-    };
-    let mut out = reply;
-    out.push('\n');
-    stream.write_all(out.as_bytes()).is_ok() && stream.flush().is_ok()
-}
-
 /// Builds the `-32003` (internal fault) reply written back when the
 /// webview never answers `hew://api-reply` in time — `id` is echoed back
 /// when `request` parses well enough to have one, `null` otherwise
@@ -718,8 +682,8 @@ fn forward_and_await(
 /// a timed-out dispatch is still RUNNING in the webview and usually
 /// completes. The caller learns the request's fate by querying, not by
 /// assuming it was rolled back. The connection closes immediately after
-/// this reply (see `forward_and_await`).
-fn synthesize_timeout_reply(request: &str) -> String {
+/// this reply (see `serve_frame`).
+pub(crate) fn synthesize_timeout_reply(request: &str) -> String {
     let id = serde_json::from_str::<serde_json::Value>(request)
         .ok()
         .and_then(|v| v.get("id").cloned())
@@ -1205,6 +1169,10 @@ mod windows {
                 let _ = tx.send(payload.frame);
             }
         });
+        let op_handle = app.clone();
+        app.listen_any("hew://api-op-reply", move |event| {
+            deliver_op_reply(&op_handle, event.payload());
+        });
 
         spawn_accept_loop(app.clone(), name, token, first_handle);
     }
@@ -1330,23 +1298,14 @@ mod windows {
             return; // wrong method, missing/wrong token, or malformed — drop silently
         };
 
-        let conn_id = {
-            let state = app.state::<LiveApi>();
-            let id = state.next_conn_id.fetch_add(1, Ordering::Relaxed);
-            state
-                .conn_window
-                .lock()
-                .expect("conn_window mutex")
-                .insert(id, window_label.clone());
-            id
-        };
-        let _ = app.emit_to(
-            &window_label,
-            "hew://api-connection-open",
-            ConnPayload { conn_id },
-        );
+        let (conn_id, mut route) = super::register_connection(&app, &window_label);
 
-        let mut ok = forward_and_await(&app, &window_label, conn_id, &sanitized_hello, handle);
+        let mut write = |out: &str| -> bool {
+            let mut framed = out.to_string();
+            framed.push('\n');
+            write_all(handle, framed.as_bytes()).is_ok()
+        };
+        let mut ok = super::serve_frame(&app, &mut route, &sanitized_hello, &mut write);
         while ok {
             let Some(line) = read_line(handle, &mut leftover) else {
                 break; // peer closed / read error
@@ -1362,25 +1321,10 @@ mod windows {
                 continue;
             }
             let sanitized = strip_token(trimmed);
-            ok = forward_and_await(&app, &window_label, conn_id, &sanitized, handle);
+            ok = super::serve_frame(&app, &mut route, &sanitized, &mut write);
         }
 
-        let state = app.state::<LiveApi>();
-        state
-            .conn_window
-            .lock()
-            .expect("conn_window mutex")
-            .remove(&conn_id);
-        state
-            .pending_replies
-            .lock()
-            .expect("pending_replies mutex")
-            .remove(&conn_id);
-        let _ = app.emit_to(
-            &window_label,
-            "hew://api-connection-close",
-            ConnPayload { conn_id },
-        );
+        super::unregister_connection(&app, conn_id, &mut route);
 
         unsafe {
             // `FlushFileBuffers` before `DisconnectNamedPipe` — NOT
@@ -1390,14 +1334,14 @@ mod windows {
             // socket's `close` (where already-transmitted-but-unread data
             // survives in the kernel buffer for the peer to still read),
             // a named pipe has no such grace. Without this flush, the
-            // synthesized reply `forward_and_await` writes right before
+            // synthesized reply `serve_frame` writes right before
             // returning `false` on a reply timeout — the load-bearing
             // "the desktop app did not reply in time" answer — could be
             // destroyed before the client ever sees it. `FlushFileBuffers`
             // on a named pipe blocks until the client has read everything
             // written or the pipe breaks, which is the standard remedy
             // and is sufficient here: every write on this connection
-            // (`forward_and_await`'s `write_all`) already completed
+            // (`serve_frame`'s `write_all`) already completed
             // before this point, so there is nothing still being written
             // for it to race against. The one residual cost is that a
             // client that stops reading entirely (frozen, not merely
@@ -1443,81 +1387,6 @@ mod windows {
             }
             leftover.extend_from_slice(&buf[..n as usize]);
         }
-    }
-
-    /// Windows counterpart of unix's `forward_and_await`: identical
-    /// semantics (needs-reply peek, one frame in flight, `REPLY_TIMEOUT`,
-    /// synthesized timeout reply + connection close on timeout), writing
-    /// to a pipe `HANDLE` via `WriteFile` instead of a `UnixStream`.
-    fn forward_and_await(
-        app: &AppHandle,
-        window_label: &str,
-        conn_id: u32,
-        line: &str,
-        handle: SendableHandle,
-    ) -> bool {
-        let needs_reply = serde_json::from_str::<serde_json::Value>(line)
-            .map(|v| v.get("id").is_some_and(|id| !id.is_null()))
-            .unwrap_or(true);
-
-        if !needs_reply {
-            let _ = app.emit_to(
-                window_label,
-                "hew://api-frame",
-                FramePayload {
-                    conn_id,
-                    frame: line,
-                },
-            );
-            return true;
-        }
-
-        let (tx, rx) = mpsc::channel::<String>();
-        {
-            let state = app.state::<LiveApi>();
-            state
-                .pending_replies
-                .lock()
-                .expect("pending_replies mutex")
-                .insert(conn_id, tx);
-        }
-        if app
-            .emit_to(
-                window_label,
-                "hew://api-frame",
-                FramePayload {
-                    conn_id,
-                    frame: line,
-                },
-            )
-            .is_err()
-        {
-            let state = app.state::<LiveApi>();
-            state
-                .pending_replies
-                .lock()
-                .expect("pending_replies mutex")
-                .remove(&conn_id);
-            return false; // the target window is gone
-        }
-
-        let reply = match rx.recv_timeout(REPLY_TIMEOUT) {
-            Ok(reply) => reply,
-            Err(_) => {
-                app.state::<LiveApi>()
-                    .pending_replies
-                    .lock()
-                    .expect("pending_replies mutex")
-                    .remove(&conn_id);
-                let mut out = synthesize_timeout_reply(line);
-                out.push('\n');
-                let _ = write_all(handle, out.as_bytes());
-                return false;
-            }
-        };
-        let mut out = reply;
-        out.push('\n');
-        write_all(handle, out.as_bytes()).is_ok()
     }
 
     fn write_all(handle: SendableHandle, mut buf: &[u8]) -> std::io::Result<()> {
@@ -1807,10 +1676,10 @@ mod tests {
 
     #[test]
     fn forward_and_await_needs_reply_matches_id_presence() {
-        // Exercised indirectly: a notification-shaped frame (no "id") must
-        // never be treated as needing a reply. `forward_and_await` itself
-        // needs a live AppHandle/socket, so this pins the pure predicate
-        // it's built on instead.
+        // A notification-shaped frame (no "id") must never be treated as
+        // needing a reply. The routing itself (`live_router::classify`,
+        // tested there) needs a live AppHandle to run end to end; this
+        // pins the wire-level fact it is built on.
         let with_id: serde_json::Value =
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":1,"method":"x"}"#).unwrap();
         let without_id: serde_json::Value =

@@ -153,6 +153,85 @@ pub struct Rendered {
     pub ids: Vec<u16>,
     /// `id_palette_sids[index - 1]` is the stable id under that pixel.
     pub id_palette_sids: Vec<u64>,
+    /// Per-pixel SURFACE depth: distance from the eye along the view axis
+    /// (camera-space z, metres), `f32::INFINITY` where nothing was drawn.
+    /// Face fills only — the edge overlay's depth bias is not in it.
+    pub depth: Vec<f32>,
+    /// Per-pixel camera-space surface normal, RGB8, `(n * 0.5 + 0.5) * 255`
+    /// per axis with x right, y up, z toward the viewer; background pixels
+    /// are `(128, 128, 255)`, a normal facing the viewer straight on.
+    pub normals: Vec<u8>,
+}
+
+/// A depth image: the PNG and the metric range it encodes.
+pub struct DepthImage {
+    pub png: Vec<u8>,
+    /// Surface depth (metres along the view axis) of the nearest and
+    /// farthest drawn pixel; the image's full range maps onto it.
+    pub near: f64,
+    pub far: f64,
+}
+
+impl Rendered {
+    /// The depth pass as a grayscale PNG (8 or 16 bits per pixel): NEAR is
+    /// WHITE and far is dark — the convention depth-conditioned image
+    /// models expect. Background pixels are 0; every drawn surface maps
+    /// into `1..=max` linearly between the nearest and farthest drawn
+    /// depth, so `depth = far - (v - 1) / (max - 1) * (far - near)`. A
+    /// scene whose surfaces are all at one depth (a face-on parallel view)
+    /// is a flat `max` — "one depth" meaning within single-precision
+    /// interpolation noise (a perspective view of a wall face-on differs by
+    /// ~1e-7 relative from pixel to pixel; stretching that over the whole
+    /// range would render a flat wall as speckle). A render that drew
+    /// nothing is all background with a zero range.
+    pub fn depth_image(&self, bits: u8) -> DepthImage {
+        let (mut near, mut far) = (f32::INFINITY, f32::NEG_INFINITY);
+        for &z in &self.depth {
+            if z.is_finite() {
+                near = near.min(z);
+                far = far.max(z);
+            }
+        }
+        if !near.is_finite() {
+            // Nothing was drawn (every triangle clipped): a depth pass is
+            // still owed — an all-background image over a zero range.
+            near = 0.0;
+            far = 0.0;
+        }
+        let max: f64 = if bits == 16 { 65_535.0 } else { 255.0 };
+        let span = (far - near) as f64;
+        let flat = span <= 1e-5 * (far.abs() as f64).max(1.0);
+        let level = |z: f32| -> f64 {
+            if !z.is_finite() {
+                return 0.0;
+            }
+            if flat {
+                return max;
+            }
+            1.0 + ((far - z) as f64 / span) * (max - 1.0)
+        };
+        let png = if bits == 16 {
+            let samples: Vec<u16> = self
+                .depth
+                .iter()
+                .map(|&z| level(z).round() as u16)
+                .collect();
+            png::encode_gray16(&samples, self.width, self.height)
+        } else {
+            let samples: Vec<u8> = self.depth.iter().map(|&z| level(z).round() as u8).collect();
+            png::encode_gray8(&samples, self.width, self.height)
+        };
+        DepthImage {
+            png,
+            near: near as f64,
+            far: far as f64,
+        }
+    }
+
+    /// The normals pass as an RGB PNG (see [`Rendered::normals`]).
+    pub fn normals_png(&self) -> Vec<u8> {
+        png::encode_rgb(&self.normals, self.width, self.height)
+    }
 }
 
 const BACKGROUND: [u8; 4] = [245, 246, 248, 255];
@@ -164,6 +243,10 @@ const EDGE_COLOR: [u8; 4] = [40, 44, 52, 255];
 /// Depth bias pulling edges toward the viewer so they win the z-test
 /// against their own faces.
 const EDGE_DEPTH_BIAS: f32 = 2e-3;
+
+/// Perspective near plane, metres from the eye: geometry nearer than this is
+/// cut away (and a triangle straddling it is clipped to it).
+const NEAR_PLANE: f64 = 0.01;
 
 struct Frame {
     view: [[f64; 4]; 3], // world → camera (rotation+translation rows)
@@ -206,28 +289,85 @@ impl Frame {
         }
     }
 
-    /// World point → (screen x, screen y, camera-space depth). `None`
-    /// behind the eye under perspective.
-    fn project(&self, p: Point3) -> Option<(f32, f32, f32)> {
+    /// World point → camera space (x right, y up, z forward).
+    fn camera(&self, p: Point3) -> [f64; 3] {
         let v = [p.x, p.y, p.z, 1.0];
-        let cx = dot4(&self.view[0], &v);
-        let cy = dot4(&self.view[1], &v);
-        let cz = dot4(&self.view[2], &v);
+        [
+            dot4(&self.view[0], &v),
+            dot4(&self.view[1], &v),
+            dot4(&self.view[2], &v),
+        ]
+    }
+
+    /// Camera-space point (already at or beyond the near plane under
+    /// perspective) → (screen x, screen y, camera-space depth).
+    fn screen(&self, c: [f64; 3]) -> (f32, f32, f32) {
         let (sx, sy) = match self.proj {
             Projection::Perspective { .. } => {
-                if cz <= 1e-9 {
-                    return None;
-                }
-                (cx / cz * self.focal, cy / cz * self.focal)
+                let z = c[2].max(NEAR_PLANE);
+                (c[0] / z * self.focal, c[1] / z * self.focal)
             }
-            Projection::Parallel { .. } => (cx * self.focal, cy * self.focal),
+            Projection::Parallel { .. } => (c[0] * self.focal, c[1] * self.focal),
         };
-        Some((
+        (
             (self.width as f64 * 0.5 + sx) as f32,
             (self.height as f64 * 0.5 - sy) as f32,
-            cz as f32,
-        ))
+            c[2] as f32,
+        )
     }
+
+    /// The part of a camera-space triangle in front of the near plane, as
+    /// 0, 1 or 2 triangles (Sutherland–Hodgman against `z >= NEAR_PLANE`,
+    /// then a fan). A triangle with a vertex behind the eye — a long
+    /// ceiling sheet in a close view — is CUT at the plane, not dropped:
+    /// dropping it made whatever lay behind it show through. Parallel
+    /// projection has no behind-the-eye, so nothing is clipped there.
+    fn clip_triangle(&self, tri: [[f64; 3]; 3]) -> Vec<[[f64; 3]; 3]> {
+        if matches!(self.proj, Projection::Parallel { .. })
+            || tri.iter().all(|v| v[2] >= NEAR_PLANE)
+        {
+            return vec![tri];
+        }
+        let mut poly: Vec<[f64; 3]> = Vec::with_capacity(4);
+        for i in 0..3 {
+            let (cur, next) = (tri[i], tri[(i + 1) % 3]);
+            let (cur_in, next_in) = (cur[2] >= NEAR_PLANE, next[2] >= NEAR_PLANE);
+            if cur_in {
+                poly.push(cur);
+            }
+            if cur_in != next_in {
+                poly.push(lerp_to_plane(cur, next));
+            }
+        }
+        match poly.len() {
+            3 => vec![[poly[0], poly[1], poly[2]]],
+            4 => vec![[poly[0], poly[1], poly[2]], [poly[0], poly[2], poly[3]]],
+            _ => Vec::new(),
+        }
+    }
+
+    /// The part of a camera-space segment in front of the near plane.
+    fn clip_segment(&self, a: [f64; 3], b: [f64; 3]) -> Option<([f64; 3], [f64; 3])> {
+        if matches!(self.proj, Projection::Parallel { .. }) {
+            return Some((a, b));
+        }
+        match (a[2] >= NEAR_PLANE, b[2] >= NEAR_PLANE) {
+            (true, true) => Some((a, b)),
+            (true, false) => Some((a, lerp_to_plane(a, b))),
+            (false, true) => Some((lerp_to_plane(a, b), b)),
+            (false, false) => None,
+        }
+    }
+}
+
+/// Where the segment `a → b` crosses `z = NEAR_PLANE`.
+fn lerp_to_plane(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    let t = (NEAR_PLANE - a[2]) / (b[2] - a[2]);
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        NEAR_PLANE,
+    ]
 }
 
 fn dot4(row: &[f64; 4], v: &[f64; 4]) -> f64 {
@@ -253,6 +393,8 @@ pub fn render(
         rgba.extend_from_slice(&BACKGROUND);
     }
     let mut depth = vec![f32::INFINITY; n];
+    let mut surface_depth = vec![f32::INFINITY; n];
+    let mut normals: Vec<u8> = [128u8, 128, 255].repeat(n);
     let mut ids = vec![0u16; n];
     let mut palette: Vec<u64> = Vec::with_capacity(items.len());
     let frame = Frame::new(camera, width, height);
@@ -262,8 +404,8 @@ pub fn render(
         let id_index = palette.len() as u16; // 0 is background
         let mesh = item.mesh;
 
-        // Pose + project every vertex once.
-        let mut proj: Vec<Option<(f32, f32, f32)>> = Vec::with_capacity(mesh.positions.len() / 3);
+        // Pose every vertex into camera space once.
+        let mut cams: Vec<[f64; 3]> = Vec::with_capacity(mesh.positions.len() / 3);
         let mut world_normals: Vec<Vec3> = Vec::with_capacity(mesh.normals.len() / 3);
         for i in (0..mesh.positions.len()).step_by(3) {
             let p = item.pose.apply_point(Point3::new(
@@ -271,10 +413,12 @@ pub fn render(
                 mesh.positions[i + 1] as f64,
                 mesh.positions[i + 2] as f64,
             ));
-            proj.push(frame.project(p));
+            cams.push(frame.camera(p));
         }
         for i in (0..mesh.normals.len()).step_by(3) {
-            let v = item.pose.apply_vector(Vec3::new(
+            // Inverse-transpose, so a group or instance posed with a
+            // non-uniform scale keeps normals perpendicular to its faces.
+            let v = item.pose.apply_normal(Vec3::new(
                 mesh.normals[i] as f64,
                 mesh.normals[i + 1] as f64,
                 mesh.normals[i + 2] as f64,
@@ -288,9 +432,10 @@ pub fn render(
 
         for tri in mesh.indices.chunks_exact(3) {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
-            let (Some(pa), Some(pb), Some(pc)) = (proj[a], proj[b], proj[c]) else {
-                continue; // behind the eye — clip whole triangle (v0 posture)
-            };
+            let clipped = frame.clip_triangle([cams[a], cams[b], cams[c]]);
+            if clipped.is_empty() {
+                continue; // wholly behind the near plane
+            }
             // Two-sided flat shade from the face normal (headlight).
             let nrm = world_normals[a];
             let lambert = nrm.dot(view_dir).abs() as f32;
@@ -301,28 +446,59 @@ pub fn render(
                 (mesh.colors[a * 3 + 2] * shade * 255.0).clamp(0.0, 255.0) as u8,
                 255,
             ];
-            fill_triangle(
-                pa,
-                pb,
-                pc,
-                color,
-                id_index,
-                perspective,
-                width,
-                height,
-                &mut rgba,
-                &mut depth,
-                &mut ids,
+            // Camera-space normal for the normals pass: x right, y up, z
+            // toward the viewer, flipped to face the viewer like the
+            // two-sided shading above.
+            let (mut nx, mut ny, mut nz) = (
+                frame.view[0][0] * nrm.x + frame.view[0][1] * nrm.y + frame.view[0][2] * nrm.z,
+                frame.view[1][0] * nrm.x + frame.view[1][1] * nrm.y + frame.view[1][2] * nrm.z,
+                -(frame.view[2][0] * nrm.x + frame.view[2][1] * nrm.y + frame.view[2][2] * nrm.z),
             );
+            if nz < 0.0 {
+                (nx, ny, nz) = (-nx, -ny, -nz);
+            }
+            let to_byte = |v: f64| ((v * 0.5 + 0.5) * 255.0).round().clamp(0.0, 255.0) as u8;
+            let normal_rgb = [to_byte(nx), to_byte(ny), to_byte(nz)];
+            for piece in &clipped {
+                let (pa, pb, pc) = (
+                    frame.screen(piece[0]),
+                    frame.screen(piece[1]),
+                    frame.screen(piece[2]),
+                );
+                fill_triangle(
+                    pa,
+                    pb,
+                    pc,
+                    color,
+                    id_index,
+                    perspective,
+                    width,
+                    height,
+                    &mut rgba,
+                    &mut depth,
+                    &mut ids,
+                    &mut surface_depth,
+                    &mut normals,
+                    normal_rgb,
+                );
+            }
         }
 
         // Hard-edge overlay (soft edges deliberately suppressed).
         for seg in item_edges(mesh) {
             let (p0, p1) = seg;
-            let w0 = item.pose.apply_point(p0);
-            let w1 = item.pose.apply_point(p1);
-            if let (Some(a), Some(b)) = (frame.project(w0), frame.project(w1)) {
-                draw_line(a, b, perspective, width, height, &mut rgba, &mut depth);
+            let c0 = frame.camera(item.pose.apply_point(p0));
+            let c1 = frame.camera(item.pose.apply_point(p1));
+            if let Some((c0, c1)) = frame.clip_segment(c0, c1) {
+                draw_line(
+                    frame.screen(c0),
+                    frame.screen(c1),
+                    perspective,
+                    width,
+                    height,
+                    &mut rgba,
+                    &mut depth,
+                );
             }
         }
     }
@@ -333,6 +509,8 @@ pub fn render(
         rgba,
         ids,
         id_palette_sids: palette,
+        depth: surface_depth,
+        normals,
     })
 }
 
@@ -358,6 +536,9 @@ fn fill_triangle(
     rgba: &mut [u8],
     depth: &mut [f32],
     ids: &mut [u16],
+    surface_depth: &mut [f32],
+    normals: &mut [u8],
+    normal_rgb: [u8; 3],
 ) {
     let min_x = a.0.min(b.0).min(c.0).floor().max(0.0) as i64;
     let max_x = (a.0.max(b.0).max(c.0).ceil() as i64).min(width as i64 - 1);
@@ -392,6 +573,8 @@ fn fill_triangle(
                 depth[idx] = z;
                 ids[idx] = id_index;
                 rgba[idx * 4..idx * 4 + 4].copy_from_slice(&color);
+                surface_depth[idx] = z;
+                normals[idx * 3..idx * 3 + 3].copy_from_slice(&normal_rgb);
             }
         }
     }
@@ -647,6 +830,7 @@ pub fn render_document_thumbnail(doc: &kernel::Document, size: u32) -> Option<Ve
 
 #[cfg(test)]
 mod tests {
+    use super::perspective_tests::tri_mesh;
     use super::*;
 
     fn box_mesh() -> (tessellate::RenderMesh, kernel::MaterialPalette) {
@@ -754,6 +938,313 @@ mod tests {
         assert!(hi.x <= 4.0 + 1e-9, "bbox excludes the Scene-hidden c");
     }
 
+    fn render_box(view: StandardView) -> Rendered {
+        let (mesh, _) = box_mesh();
+        let camera = Camera::standard_view(
+            view,
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
+        );
+        render(
+            &[RenderItem {
+                mesh: &mesh,
+                pose: Transform::IDENTITY,
+                sid: 1,
+            }],
+            &camera,
+            128,
+            128,
+        )
+        .expect("renders")
+    }
+
+    #[test]
+    fn the_depth_pass_is_near_white_far_dark_with_a_metric_range() {
+        let r = render_box(StandardView::Iso);
+        let img = r.depth_image(8);
+        assert!(
+            img.near > 0.0 && img.near < img.far,
+            "{} {}",
+            img.near,
+            img.far
+        );
+        // Read the PNG itself back: the encoder's output, not a copy of its
+        // formula, must put near at 255, far at 1 and the background at 0.
+        let pixels = decode_gray(&img.png, r.width, r.height, 8);
+        let nearest = r.depth.iter().copied().fold(f32::INFINITY, f32::min);
+        let farthest = r
+            .depth
+            .iter()
+            .copied()
+            .filter(|z| z.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        let at = |target: f32| {
+            let i = r.depth.iter().position(|&z| z == target).unwrap();
+            pixels[i]
+        };
+        assert_eq!(at(nearest), 255, "nearest is white");
+        assert_eq!(at(farthest), 1, "farthest is dark but not background");
+        assert_eq!(pixels[0], 0, "the corner is background");
+        assert!(
+            pixels
+                .iter()
+                .zip(&r.depth)
+                .all(|(&v, z)| (v == 0) == !z.is_finite()),
+            "only background is 0"
+        );
+        // And the documented inverse recovers the metric depth.
+        let i = r.depth.iter().position(|&z| z == farthest).unwrap();
+        let recovered = img.far - (pixels[i] as f64 - 1.0) / 254.0 * (img.far - img.near);
+        assert!(
+            (recovered - farthest as f64).abs() < 1e-3,
+            "{recovered} vs {farthest}"
+        );
+        // 16-bit uses the same mapping at finer steps.
+        let wide = r.depth_image(16);
+        assert_eq!(&wide.png[24..26], &[16, 0]);
+        assert!((wide.near - img.near).abs() < 1e-9 && (wide.far - img.far).abs() < 1e-9);
+        let wide_pixels = decode_gray(&wide.png, r.width, r.height, 16);
+        let j = r.depth.iter().position(|&z| z == nearest).unwrap();
+        assert_eq!(wide_pixels[j], 65_535);
+    }
+
+    /// Decodes a gray PNG this crate's encoder wrote (stored deflate,
+    /// filter 0) back into samples — enough to test what a viewer would see.
+    fn decode_gray(png: &[u8], width: u32, height: u32, bits: u8) -> Vec<u16> {
+        let mut i = 8;
+        let mut idat = Vec::new();
+        while i < png.len() {
+            let len = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+            if &png[i + 4..i + 8] == b"IDAT" {
+                idat.extend_from_slice(&png[i + 8..i + 8 + len]);
+            }
+            i += 12 + len;
+        }
+        let mut raw = Vec::new();
+        let mut z = &idat[2..]; // past the zlib header
+        loop {
+            let last = z[0] & 1 == 1;
+            let n = u16::from_le_bytes([z[1], z[2]]) as usize;
+            raw.extend_from_slice(&z[5..5 + n]);
+            z = &z[5 + n..];
+            if last {
+                break;
+            }
+        }
+        let bytes = if bits == 16 { 2 } else { 1 };
+        let stride = width as usize * bytes;
+        let mut out = Vec::new();
+        for row in raw.chunks_exact(stride + 1).take(height as usize) {
+            assert_eq!(row[0], 0, "filter 0");
+            for px in row[1..].chunks_exact(bytes) {
+                out.push(if bits == 16 {
+                    u16::from_be_bytes([px[0], px[1]])
+                } else {
+                    px[0] as u16
+                });
+            }
+        }
+        out
+    }
+
+    fn ceiling_camera() -> Camera {
+        // Standing under a ceiling, looking forward and up at it.
+        Camera {
+            eye: Point3::new(0.0, 0.0, 1.5),
+            target: Point3::new(0.0, 5.0, 2.5),
+            up: Vec3::new(0.0, 0.0, 1.0),
+            projection: Projection::Perspective { fov_y_deg: 60.0 },
+        }
+    }
+
+    /// A long ceiling sheet (two triangles reaching 100 m in every
+    /// direction, so vertices lie behind the eye) at z = 2.5.
+    fn ceiling_sheet() -> [tessellate::RenderMesh; 2] {
+        [
+            tri_mesh([
+                (-100.0, -100.0, 2.5),
+                (100.0, -100.0, 2.5),
+                (100.0, 100.0, 2.5),
+            ]),
+            tri_mesh([
+                (-100.0, -100.0, 2.5),
+                (100.0, 100.0, 2.5),
+                (-100.0, 100.0, 2.5),
+            ]),
+        ]
+    }
+
+    #[test]
+    fn a_sheet_reaching_behind_the_eye_is_clipped_not_dropped() {
+        let sheet = ceiling_sheet();
+        // Joists ABOVE the ceiling (farther along the view): they must stay
+        // hidden wherever the ceiling covers them.
+        let joists = tri_mesh([(-100.0, 0.5, 3.0), (100.0, 0.5, 3.0), (0.0, 100.0, 3.0)]);
+        let items = [
+            RenderItem {
+                mesh: &joists,
+                pose: Transform::IDENTITY,
+                sid: 9,
+            },
+            RenderItem {
+                mesh: &sheet[0],
+                pose: Transform::IDENTITY,
+                sid: 1,
+            },
+            RenderItem {
+                mesh: &sheet[1],
+                pose: Transform::IDENTITY,
+                sid: 1,
+            },
+        ];
+        let r = render(&items, &ceiling_camera(), 128, 128).expect("renders");
+        // The view centre looks at (0, 5, 2.5), on the ceiling: 26^0.5 m
+        // along the view axis (the sheet meets the view at a shallow angle,
+        // so half a pixel off-centre moves the depth by a tenth of a metre).
+        let centre = 64 * 128 + 64;
+        assert_eq!(
+            r.id_palette_sids[r.ids[centre] as usize - 1],
+            1,
+            "the ceiling is there, and the joists above it are not"
+        );
+        assert!(
+            (r.depth[centre] as f64 - 26f64.sqrt()).abs() < 0.5,
+            "{}",
+            r.depth[centre]
+        );
+        // Every row that looks up at the ceiling is covered, right to the
+        // top of the frame (rays pointing below the horizon never meet a
+        // ceiling, so the lower rows are legitimately background).
+        for row in [10, 40, 70, 80] {
+            assert!(r.ids[row * 128 + 64] != 0, "row {row} sees the ceiling");
+        }
+    }
+
+    #[test]
+    fn an_edge_with_an_endpoint_behind_the_eye_is_cut_at_the_near_plane() {
+        let mut mesh = tri_mesh([(50.0, 50.0, 50.0), (51.0, 50.0, 50.0), (50.0, 51.0, 50.0)]);
+        // A line along the ceiling from behind the camera to far ahead.
+        mesh.edge_positions = vec![0.0, -50.0, 2.5, 0.0, 50.0, 2.5];
+        let items = [RenderItem {
+            mesh: &mesh,
+            pose: Transform::IDENTITY,
+            sid: 1,
+        }];
+        let r = render(&items, &ceiling_camera(), 128, 128).expect("renders");
+        let ink = [EDGE_COLOR[0], EDGE_COLOR[1], EDGE_COLOR[2], 255];
+        assert!(
+            r.rgba.chunks_exact(4).any(|px| px == ink),
+            "the edge is drawn, not dropped with its behind-the-eye endpoint"
+        );
+    }
+
+    #[test]
+    fn a_triangle_wholly_behind_the_eye_still_draws_nothing() {
+        let behind = tri_mesh([(-1.0, -5.0, 2.0), (1.0, -5.0, 2.0), (0.0, -9.0, 2.0)]);
+        let items = [RenderItem {
+            mesh: &behind,
+            pose: Transform::IDENTITY,
+            sid: 1,
+        }];
+        let r = render(&items, &ceiling_camera(), 64, 64).expect("renders");
+        assert!(r.ids.iter().all(|&i| i == 0));
+    }
+
+    #[test]
+    fn a_face_on_perspective_view_of_a_flat_wall_is_one_flat_depth_not_speckle() {
+        let (mesh, _) = box_mesh();
+        let camera = Camera {
+            eye: Point3::new(0.5, 0.5, 10.0),
+            target: Point3::new(0.5, 0.5, 0.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            projection: Projection::Perspective { fov_y_deg: 40.0 },
+        };
+        let r = render(
+            &[RenderItem {
+                mesh: &mesh,
+                pose: Transform::IDENTITY,
+                sid: 1,
+            }],
+            &camera,
+            64,
+            64,
+        )
+        .expect("renders");
+        let img = r.depth_image(8);
+        let pixels = decode_gray(&img.png, 64, 64, 8);
+        let drawn: Vec<u16> = pixels.iter().copied().filter(|&v| v != 0).collect();
+        assert!(!drawn.is_empty());
+        assert!(
+            drawn.iter().all(|&v| v == 255),
+            "every pixel of a single-depth face is the flat max, not noise"
+        );
+    }
+
+    #[test]
+    fn an_empty_render_still_owes_a_depth_image() {
+        let camera = Camera::standard_view(
+            StandardView::Iso,
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 1.0, 1.0)),
+        );
+        let r = render(&[], &camera, 16, 16).expect("renders nothing");
+        let img = r.depth_image(8);
+        assert_eq!((img.near, img.far), (0.0, 0.0));
+        assert!(decode_gray(&img.png, 16, 16, 8).iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn a_face_on_parallel_view_is_one_flat_depth() {
+        let (mesh, _) = box_mesh();
+        let camera = Camera {
+            eye: Point3::new(0.5, 0.5, 10.0),
+            target: Point3::new(0.5, 0.5, 0.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            projection: Projection::Parallel { half_height: 1.0 },
+        };
+        let r = render(
+            &[RenderItem {
+                mesh: &mesh,
+                pose: Transform::IDENTITY,
+                sid: 1,
+            }],
+            &camera,
+            64,
+            64,
+        )
+        .expect("renders");
+        let img = r.depth_image(8);
+        // The box's top (z = 1) is 9 m from an eye at z = 10.
+        assert!((img.near - 9.0).abs() < 1e-3 && (img.far - 9.0).abs() < 1e-3);
+        // Its normal, seen from above, faces the viewer straight on.
+        let centre = (32 * 64 + 32) * 3;
+        assert_eq!(&r.normals[centre..centre + 3], &[128, 128, 255]);
+    }
+
+    #[test]
+    fn the_normals_pass_distinguishes_the_visible_faces_and_fills_the_background() {
+        let r = render_box(StandardView::Iso);
+        assert_eq!(
+            &r.normals[0..3],
+            &[128, 128, 255],
+            "background faces the viewer"
+        );
+        let mut distinct: Vec<[u8; 3]> = r
+            .normals
+            .chunks_exact(3)
+            .zip(&r.depth)
+            .filter(|(_, z)| z.is_finite())
+            .map(|(n, _)| [n[0], n[1], n[2]])
+            .collect();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            3,
+            "an iso view of a box shows three faces: {distinct:?}"
+        );
+        // Every drawn normal faces the viewer (z at or above the midpoint).
+        assert!(distinct.iter().all(|n| n[2] >= 127), "{distinct:?}");
+    }
+
     #[test]
     fn a_box_renders_with_ids_and_background() {
         let (mesh, _) = box_mesh();
@@ -836,7 +1327,7 @@ mod tests {
 mod perspective_tests {
     use super::*;
 
-    fn tri_mesh(verts: [(f32, f32, f32); 3]) -> tessellate::RenderMesh {
+    pub(crate) fn tri_mesh(verts: [(f32, f32, f32); 3]) -> tessellate::RenderMesh {
         let mut positions = Vec::new();
         for v in verts {
             positions.extend_from_slice(&[v.0, v.1, v.2]);

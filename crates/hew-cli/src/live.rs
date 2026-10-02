@@ -35,6 +35,10 @@ const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct LiveOptions {
     pub launch: bool,
     pub instance: Option<u32>,
+    /// `--document <ref>`: attach to this open document (id, path, label,
+    /// or title — `hew.meta.documents` lists them) instead of the app's
+    /// front window.
+    pub document: Option<String>,
 }
 
 /// One discovery file's contents (docs/agents/HEW_API.md §11.2): the socket path,
@@ -909,13 +913,259 @@ impl LiveSession {
     /// `id`) is dropped unexecuted without ever touching the wire — §4.1's
     /// "no mutation ever rides a fire-and-forget frame" applies identically
     /// to a live connection.
-    pub fn dispatch(&mut self, request: Request) -> Result<DispatchOutcome, LiveError> {
+    pub fn dispatch(&mut self, mut request: Request) -> Result<DispatchOutcome, LiveError> {
         if request.id.is_none() {
             return Ok(DispatchOutcome::Dropped);
         }
+        absolutize_open_path(&mut request);
+        // Headless, `hew.library.save` records the opened file as the item's
+        // source document; the app's host cannot know its document's file,
+        // so supply it from the document list.
+        if let Some(params) = request.params.as_ref()
+            && crate::live_library::lacks_source_doc(&request.method, params)
+            && let Some(path) = self.document_path(request.document.as_deref())
+        {
+            let params = request.params.take().unwrap_or_default();
+            request.params = Some(crate::live_library::with_source_doc(
+                &request.method,
+                params,
+                &path,
+            ));
+        }
+        if let Err(refusal) = attach_import_inputs(&mut request) {
+            let response = Response::err_with(
+                request.id.clone(),
+                api::codes::REFUSED,
+                "refused",
+                refusal.into_data(0, "hew.doc.import"),
+            );
+            return Ok(DispatchOutcome::Reply(response));
+        }
         let response = self.conn.send_receive(&request)?;
+        if is_unrendered_by_live_host(&request.method, &response)
+            && let Some(rendered) = self.render_client_side(&request)
+        {
+            return Ok(DispatchOutcome::Reply(rendered));
+        }
         Ok(DispatchOutcome::Reply(response))
     }
+
+    /// The file the addressed document (`document`, else the attached one)
+    /// was last opened from or saved to, per `hew.meta.documents`.
+    fn document_path(&mut self, document: Option<&str>) -> Option<String> {
+        let list = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text("live-source-doc".to_string())),
+            method: "hew.meta.documents".to_string(),
+            params: Some(json!({})),
+            document: None,
+        };
+        let response = self.conn.send_receive(&list).ok()?;
+        let documents = response.result?.get("documents")?.as_array()?.clone();
+        let entry = match document {
+            Some(reference) => api::resolve_document(&documents, reference).ok()?.clone(),
+            None => documents
+                .iter()
+                .find(|d| d.get("attached").and_then(Value::as_bool) == Some(true))?
+                .clone(),
+        };
+        entry.get("path")?.as_str().map(str::to_string)
+    }
+
+    /// Answers a render command the running app cannot (its viewport is
+    /// not wired to the API host yet) by fetching the addressed document's
+    /// bytes with `hew.doc.save` and rendering them HERE, through the same
+    /// headless renderer `hew-cli` uses with `--file` — so an agent can
+    /// SEE a document it is editing, including one in a background window.
+    /// The render is from the camera the request names (or the standard
+    /// iso view), not from wherever the user's live camera happens to be.
+    /// `None` — leaving the app's own refusal as the answer — if any step
+    /// fails.
+    fn render_client_side(&mut self, request: &Request) -> Option<Response> {
+        let save = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text("live-render-save".to_string())),
+            method: "hew.doc.save".to_string(),
+            // Bytes only: a bare save would re-save the user's own file.
+            params: Some(json!({ "return_bytes": true })),
+            document: request.document.clone(),
+        };
+        let saved = self.conn.send_receive(&save).ok()?;
+        let b64 = saved.result?.get("bytes_base64")?.as_str()?.to_string();
+        let bytes = crate::run::decode_base64(&b64)?;
+        let mut doc = kernel::Document::load(&bytes).ok()?;
+        let source = self.document_path(request.document.as_deref());
+        let mut host = crate::host::CliHost::with_working_path(source.map(PathBuf::from));
+        let mut conn = api::Connection::new(Profile::Core, "hew-cli:live-render");
+        let local = |method: &str, params: Value, id: &str| Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Text(id.to_string())),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        };
+        for (method, params) in [
+            ("hew.meta.hello", json!({ "protocol": 1 })),
+            ("hew.doc.attach", json!({})),
+        ] {
+            conn.dispatch(
+                &mut doc,
+                &mut host,
+                local(method, params, "live-render-setup"),
+            );
+        }
+        let mut forwarded = request.clone();
+        forwarded.document = None;
+        match conn.dispatch(&mut doc, &mut host, forwarded) {
+            DispatchOutcome::Reply(response) => Some(response),
+            DispatchOutcome::Dropped => None,
+        }
+    }
+}
+
+/// `hew.doc.import {path}` against a live app: the app has no filesystem, so
+/// read the file — and, for COLLADA, the textures beside it — HERE and send
+/// them in the request (`bytes_base64`, `images`), for the bare command and
+/// for the one-command transaction MCP sends. A request that already
+/// carries `bytes_base64` is left alone. A file that cannot be read is
+/// refused `load_failed`, exactly as the headless host would.
+fn attach_import_inputs(request: &mut Request) -> Result<(), api::Refusal> {
+    fn attach(params: &mut Value) -> Result<(), api::Refusal> {
+        if params.get("bytes_base64").is_some() {
+            return Ok(());
+        }
+        let Some(path) = params
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(()); // the app's own params check reports the missing path
+        };
+        let (bytes, images) = crate::host::read_import_inputs(&path)?;
+        params["bytes_base64"] = Value::String(api::commands::doc::encode_base64(&bytes));
+        if !images.is_empty() {
+            let encoded: serde_json::Map<String, Value> = images
+                .into_iter()
+                .map(|(uri, image)| {
+                    (
+                        uri,
+                        json!({
+                            "bytes_base64": api::commands::doc::encode_base64(&image.bytes),
+                            "format": image.format,
+                        }),
+                    )
+                })
+                .collect();
+            params["images"] = Value::Object(encoded);
+        }
+        Ok(())
+    }
+    match request.method.as_str() {
+        "hew.doc.import" => match request.params.as_mut() {
+            Some(params) => attach(params),
+            None => Ok(()),
+        },
+        "hew.doc.transact" => {
+            let Some(commands) = request
+                .params
+                .as_mut()
+                .and_then(|p| p.get_mut("commands"))
+                .and_then(Value::as_array_mut)
+            else {
+                return Ok(());
+            };
+            for command in commands {
+                if command.get("method").and_then(Value::as_str) == Some("hew.doc.import")
+                    && let Some(params) = command.get_mut("params")
+                {
+                    attach(params)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `hew.doc.open {path}` is resolved by the APP, whose working directory is
+/// not the caller's: a relative `path` would open (or fail to open) the
+/// wrong file. Make it absolute against THIS process's directory first,
+/// for the bare command and for the one-command transaction MCP sends.
+fn absolutize_open_path(request: &mut Request) {
+    // A document REFERENCE can be a path too (`--document ./house.hew`):
+    // make it absolute when it names a file here, so it resolves against
+    // the app's open paths — an id or a title that merely looks relative
+    // (it names no file on disk) is left alone.
+    fn absolutize_reference(reference: &mut String) {
+        if !Path::new(reference.as_str()).is_absolute()
+            && Path::new(reference.as_str()).exists()
+            && let Ok(absolute) = std::path::absolute(reference.as_str())
+        {
+            *reference = absolute.to_string_lossy().into_owned();
+        }
+    }
+    if let Some(document) = request.document.as_mut() {
+        absolutize_reference(document);
+    }
+    if request.method == "hew.doc.attach"
+        && let Some(Value::String(document)) =
+            request.params.as_mut().and_then(|p| p.get_mut("document"))
+    {
+        absolutize_reference(document);
+    }
+    fn absolutize(params: &mut Value) {
+        let Some(path) = params.get("path").and_then(Value::as_str) else {
+            return;
+        };
+        if Path::new(path).is_absolute() {
+            return;
+        }
+        if let Ok(absolute) = std::path::absolute(path) {
+            params["path"] = Value::String(absolute.to_string_lossy().into_owned());
+        }
+    }
+    match request.method.as_str() {
+        "hew.doc.open" | "hew.doc.save" => {
+            if let Some(params) = request.params.as_mut() {
+                absolutize(params);
+            }
+        }
+        "hew.doc.transact" => {
+            let Some(commands) = request
+                .params
+                .as_mut()
+                .and_then(|p| p.get_mut("commands"))
+                .and_then(Value::as_array_mut)
+            else {
+                return;
+            };
+            for command in commands {
+                if matches!(
+                    command.get("method").and_then(Value::as_str),
+                    Some("hew.doc.open" | "hew.doc.save")
+                ) && let Some(params) = command.get_mut("params")
+                {
+                    absolutize(params);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `response` is a live host's `host_capability_missing` refusal
+/// of one of the render commands the client can do itself.
+fn is_unrendered_by_live_host(method: &str, response: &Response) -> bool {
+    matches!(
+        method,
+        "hew.view.snapshot" | "hew.view.line_drawing" | "hew.print.pdf"
+    ) && response
+        .error
+        .as_ref()
+        .and_then(|e| e.data.as_ref())
+        .and_then(|d| d.get("refusal"))
+        .and_then(Value::as_str)
+        == Some("host_capability_missing")
 }
 
 /// A `hew.meta.hello` request built by `hew-cli` itself (as opposed to one
@@ -923,6 +1173,7 @@ impl LiveSession {
 /// `mcp` both start a live connection this way.
 pub fn build_hello_request(client_name: &str) -> Request {
     Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Text("live-hello".to_string())),
         method: "hew.meta.hello".to_string(),
@@ -1029,6 +1280,74 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::io::Write;
+
+    fn request(method: &str, params: Value) -> Request {
+        Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(1)),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        }
+    }
+
+    #[test]
+    fn a_relative_open_path_is_made_absolute_for_the_app() {
+        let mut bare = request("hew.doc.open", json!({ "path": "models/house.hew" }));
+        absolutize_open_path(&mut bare);
+        let path = bare.params.unwrap()["path"].as_str().unwrap().to_string();
+        assert!(Path::new(&path).is_absolute(), "{path}");
+        assert!(path.ends_with("models/house.hew"));
+
+        let mut wrapped = request(
+            "hew.doc.transact",
+            json!({ "commands": [{ "method": "hew.doc.open", "params": { "path": "a.hew" } }] }),
+        );
+        absolutize_open_path(&mut wrapped);
+        let path = wrapped.params.unwrap()["commands"][0]["params"]["path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(Path::new(&path).is_absolute(), "{path}");
+    }
+
+    #[test]
+    fn absolute_paths_and_other_commands_are_left_alone() {
+        let mut abs = request("hew.doc.open", json!({ "path": "/m/a.hew" }));
+        absolutize_open_path(&mut abs);
+        assert_eq!(abs.params.unwrap()["path"], "/m/a.hew");
+        let mut other = request(
+            "hew.doc.export",
+            json!({ "path": "rel.stl", "format": "stl" }),
+        );
+        absolutize_open_path(&mut other);
+        assert_eq!(other.params.unwrap()["path"], "rel.stl");
+    }
+
+    #[test]
+    fn only_a_live_hosts_capability_refusal_of_a_render_command_triggers_the_fallback() {
+        let refusal = |name: &str| Response {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(1)),
+            result: None,
+            error: Some(api::ErrorObject {
+                code: -32000,
+                message: "refused".to_string(),
+                data: Some(json!({ "refusal": name })),
+            }),
+        };
+        let missing = refusal("host_capability_missing");
+        assert!(is_unrendered_by_live_host("hew.view.snapshot", &missing));
+        assert!(is_unrendered_by_live_host(
+            "hew.view.line_drawing",
+            &missing
+        ));
+        assert!(!is_unrendered_by_live_host("hew.query.scene", &missing));
+        assert!(!is_unrendered_by_live_host(
+            "hew.view.snapshot",
+            &refusal("nothing_to_render")
+        ));
+    }
 
     /// A fresh, process-unique scratch directory under `std::env::temp_dir()`.
     fn scratch_dir(tag: &str) -> PathBuf {
@@ -1405,6 +1724,7 @@ mod tests {
         );
 
         let request = Request {
+            document: None,
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Text("q1".to_string())),
             method: "hew.query.scene".to_string(),
@@ -1461,6 +1781,7 @@ mod tests {
             .expect("handshake succeeds");
 
         let notification = Request {
+            document: None,
             jsonrpc: "2.0".to_string(),
             id: None,
             method: "hew.event.whatever".to_string(),
@@ -1643,6 +1964,7 @@ mod tests {
         assert_eq!(session.granted_profile(), Profile::App);
 
         let request = Request {
+            document: None,
             jsonrpc: "2.0".to_string(),
             id: Some(RequestId::Text("q1".to_string())),
             method: "hew.query.scene".to_string(),

@@ -314,6 +314,10 @@ pub fn generate_ts_sdk(registry: &Registry) -> String {
     out.push_str("  id: number | string\n");
     out.push_str("  method: string\n");
     out.push_str("  params?: unknown\n");
+    out.push_str(
+        "  /** The one document this request addresses (§4.2): an id, path, label, or title. */\n",
+    );
+    out.push_str("  document?: string\n");
     out.push_str("}\n\n");
 
     out.push_str(&doc_comment(&[

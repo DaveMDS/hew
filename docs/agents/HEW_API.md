@@ -242,15 +242,60 @@ ready). A host that cannot serve the client's requested protocol version
 answers `hello` itself with an error naming the versions it speaks.
 
 On transports where a host serves multiple documents (the desktop app
-with several windows), the connection then binds to one with
-`hew.doc.attach`; every subsequent envelope on that connection addresses
-the attached document. A connection is attached to at most one document
-at a time. Document ids are unique for the host's lifetime and never
-reused, so a stale attach can never silently target the wrong document;
-closing a document detaches every attached connection, whose subsequent
-requests answer `-32002`. In hosts that honor `hew.doc.new`/`open`, the
-issuing connection is attached to the resulting document automatically —
-no separate `attach` round-trip.
+with several windows), a connection is bound at connect time to the
+document that was front-most then — requests to it still answer `-32002`
+until the connection attaches — and `hew.doc.attach {"document": ...}`
+attaches (or rebinds) it. `document` is a document id (`doc_N`), or a document's exact
+`path`, `label`, or `title` when that is unambiguous; an unmatched or
+ambiguous reference is refused (`unknown_document`, `ambiguous_document`,
+the open documents in `detail`) rather than guessed at, so a client can
+never go on to edit a window it did not mean to. The result carries the
+document's entry. Without `document` it attaches to the connection's
+current one. Every subsequent envelope on that connection addresses the
+attached document; a connection is attached to at most one document at a
+time. Document ids are unique for the host's lifetime and never reused,
+so a stale attach can never silently target the wrong document; closing a
+document detaches every attached connection, whose subsequent requests
+answer `-32002`. In hosts that honor `hew.doc.new`/`open`, the issuing
+connection is attached to the resulting document automatically — no
+separate `attach` round-trip.
+
+`hew.meta.documents` (and `hello`'s `documents`) list the open documents,
+oldest window first. Each entry is `{id, title, path, dirty}` — `path` is
+`null` until the document has a file, `dirty` is unsaved changes — and a
+multi-window host adds `front` (the user's front-most window), `attached`
+(this connection's current document), and `label` (the name given at
+`hew.doc.new`/`open`, if any). It is host-wide: it needs no attached
+document and works however the connection is bound.
+
+Addressing is also available **per request**: any envelope may carry a
+top-level `"document"` member naming a document, and that one request runs
+there. The connection's attachment does not change, and the request
+needs no prior attach. Where a host has one document (headless), the
+member is accepted only if it names that document (`doc_1`). Reaching a
+background document this way — or by attaching to it — never raises it:
+nothing in the protocol moves the user's window order except the explicit
+`hew.doc.focus`, and `hew.doc.new`/`open` place their new window behind
+the user's current one unless `focus: "front"` says otherwise.
+
+The desktop host's window commands, in the `app` profile only except
+`new`/`open`:
+
+- `hew.doc.new {focus?, label?}` — a fresh document in a NEW window
+  (never replacing one), attached to the connection; headless hosts
+  replace the working document. Result `{document}`.
+- `hew.doc.open {path, focus?, label?}` — a `.hew` file in a new window,
+  or, if some window already has that file open, an attach to that window
+  (`already_open: true`) — two windows are never two writers of one file.
+  Result `{document, already_open?}`.
+- `hew.doc.close {document?, discard?}` — close a window. A document with
+  unsaved changes refuses `unsaved_changes` unless `discard` is true; the
+  last open document refuses `last_document` (a live connection needs
+  something to attach to). A window whose page has hung (it does not
+  answer within 30 seconds) closes anyway when `discard` is true — the
+  shell destroys it — since there is no other way to close it.
+- `hew.doc.focus {document?}` — raise a window to the front. The one
+  command whose purpose is to move the user's focus.
 
 ### 4.3 Encoding
 
@@ -653,8 +698,8 @@ for, not shipped.
 
 | Namespace | Contents | Tier |
 |---|---|---|
-| `hew.meta` | `hello`, `capabilities`, `documents` | Required |
-| `hew.doc` | `attach`, `transact`, `new`, `open`, `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused` Standard) |
+| `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty; in the desktop app also front, attached, label — §4.2) | Required |
+| `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
 | `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn-but-not-yet-pushed shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one before it is ever pushed/pulled) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
@@ -809,7 +854,23 @@ Semantics notes, normative:
   writes them to an explicit `path` instead (below). `include_ids: true` also
   returns a per-pixel id-buffer (`u16` little-endian, 0 = background) and
   the palette of public ids it indexes, so a caller can ask "what object
-  is at pixel (x, y)" machine-readably.
+  is at pixel (x, y)" machine-readably. Two more passes, from the same
+  rasterizer pass and the same camera, come back as their own PNGs:
+  `include_depth: true` a grayscale depth image — NEAR is WHITE, the
+  background is 0, every drawn surface maps linearly into `1..=max`
+  (`max` is 255, or 65535 with `depth_bits: 16`) between the farthest and
+  nearest drawn surface — together with `depth_near`/`depth_far`, the
+  metres from the eye along the view axis (not radial distance) those two
+  ends stand for, so absolute depth is `depth_far - (v - 1) / (max - 1) *
+  (depth_far - depth_near)`; and `include_normals: true` a camera-space
+  normals image, `(n * 0.5 + 0.5) * 255` per axis with x right, y up, z
+  toward the viewer, background `(128, 128, 255)`. These are the
+  conditioning images depth- and normal-aware image models take, so a
+  render pipeline needs no external depth estimator. Under perspective,
+  geometry is cut at a near plane 1 cm in front of the eye — a long
+  ceiling sheet that reaches behind a close camera is clipped to it, not
+  dropped — in every pass; a render that draws nothing returns an
+  all-background depth image over a zero range.
 - `hew.history.undo`/`redo` act on the shared document history — the
   topmost entry, whoever authored it. Because that is a blunt instrument
   in a `--live` session, `undo` accepts an optional `expected_label`,
@@ -860,7 +921,11 @@ Semantics notes, normative:
   in place of `png_base64`; `include_ids`'s id-buffer follows the same
   split, written to `<path>.ids.bin` (with its path returned as
   `id_buffer_path`) rather than base64-encoded inline — `id_palette`
-  itself stays inline either way, since it is small.
+  itself stays inline either way, since it is small. The depth and
+  normals passes split the same way: `depth_png_base64` /
+  `normals_png_base64` inline, or `<path>.depth.png` / `<path>.normals.png`
+  (returned as `depth_path` / `normals_path`) with `path`; the metric
+  range (`depth_near`, `depth_far`, `depth_bits`) is always inline.
 - `hew.entity.rename`/`hew.entity.delete` reach a palette material
   (`mat_…`) or a component definition (`cmp_…`) the same way they reach
   any other entity kind — no separate namespace. A material's `name` is a
@@ -1057,7 +1122,11 @@ of **File ▸ Print…** and its Export dialog's SVG format
 `crates/hlr`'s hidden-line-removal pass over tessellated geometry, the
 same engine the desktop print pages and SVG export use, so a script gets
 the identical visible-edge/silhouette/section-outline/hidden-line output
-a person would see in the app.
+a person would see in the app. Under perspective, geometry is cut at a
+near plane a thousandth of the eye–target distance in front of the eye, so
+a long wall or ceiling that reaches behind a close camera still hides what
+lies beyond it; what the cut leaves running off the page is trimmed to the
+drawing's extent, which is also all `bounds` ever covers.
 
 **`hew.view.line_drawing`** takes a camera, a named standard view, or a
 Scene's id (the same three mutually-exclusive forms `hew.view.snapshot`
@@ -1308,6 +1377,20 @@ caught by this. As with unix's root, a local Administrator or SYSTEM can
 still bypass a Windows DACL with sufficient privilege — neither
 platform's transport tries to defeat that ceiling.
 
+Window routing is the shell's, not the document's: each window's
+webview owns one document and one dispatcher per client, and the shell
+keeps the document registry (§4.2's ids), answers the host-wide commands
+(`hew.meta.documents`, `attach` to a named document, `new`, `open`,
+`close`, `focus`), and delivers every other frame to the window the
+connection is attached to — or the one a frame's `"document"` member
+names — by addressing that window directly, so a background window is
+reached exactly as the front one is. A connection holds one session per
+window it has touched, opened on first use by replaying its own `hello`
+into that window; the `document` member is stripped before the frame
+reaches the webview. A window that has not finished starting (a freshly
+created one) is waited for, up to a bound, before the request is refused
+`window_not_ready`.
+
 A crashed instance leaves its discovery file behind, so discovery is
 validate-then-use: a connector confirms the pid is alive, connects, and
 completes `hello` before trusting an entry, and deletes stale files it
@@ -1356,6 +1439,10 @@ One binary, two modes, chosen per invocation:
   agent-opens-the-app flow. Several live instances at once are an error
   listing the candidates, unless `--instance <id>` disambiguates. Live
   connections are granted the `app` profile by the application.
+  `--document <ref>` (an id, path, label, or title; §4.2) attaches to
+  that open document instead of the front window, in the background —
+  with several documents open, the front window is rarely the right
+  default for automation.
 
 Headless is the default deliberately. Attaching to — and mutating — a
 user's live document is the invasive act, and a CLI invocation or a
@@ -1369,6 +1456,10 @@ in the MCP configuration, chosen once, on purpose.
 Subcommands:
 
 - `hew-cli mcp [--live [--launch]]` — serve MCP on stdio (§11.3, §13).
+  Every tool also accepts a per-call `document` (the envelope member of
+  §4.2).
+- `hew-cli documents --live` — print the open documents, one JSON object
+  per line (`hew.meta.documents`).
 - `hew-cli run <script> [--out model.hew]` — headless script runner: the
   script is a JSON array (or JSONL stream) of envelopes, executed in
   order against the embedded kernel; refusals stop execution with a
@@ -1426,6 +1517,51 @@ for every live entry point (`dispatch --live`, `run --live`, `mcp
 Either shape a mutating command can arrive in — bare, or as the sole
 command of a one-command `hew.doc.transact` (§6.4's canonical MCP
 invocation) — is handled identically.
+
+### 12.2 Headless and live: what is the same, and what cannot be
+
+The 73 commands the kernel serves run the same dispatcher over the same
+kernel in both modes — a script's replies are the same, byte for byte
+(exports included), except where §12.2's last list says otherwise. The 18
+host-served commands are where the two hosts differ, and each is either
+at parity or a stated, reasoned difference:
+
+| Command | Headless | Live (desktop app) |
+|---|---|---|
+| `hew.meta.documents` | the one working document, `doc_1` | every open window (§4.2) |
+| `hew.doc.new` / `open` | replaces the working document | a NEW window; never replaces one |
+| `hew.doc.save` | writes the file, clears unsaved, binds the document to it | the same: the app saves through its own save path (title, recents, dirty mark), for a named `path` and for a document that already has a file |
+| `hew.doc.save {copy}` | writes a copy; the document stays unbound and dirty | the same |
+| `hew.doc.save`, no path, never saved | refuses `path_required` | hands the bytes back (the app cannot ask where) |
+| `hew.doc.export` | writes the file | `hew-cli` writes it from the bytes the app returns |
+| `hew.doc.import` | reads the file (and a COLLADA file's textures) | the same: `hew-cli` reads them and sends `bytes_base64`/`images`; the app merges additively, one undo entry, and records it for replay |
+| `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
+| `hew.library.*` | the library folder | the library folder, on the client's side (§12.1); `save` records the document's file as `source_doc` as headless does |
+| `hew.view.camera`, `zoom_extents`, `units` | refused (`core` profile) | take effect in the window |
+| `hew.doc.close`, `focus` | refused (`core` profile) | §4.2 |
+
+A headless host has no viewport, window, or app preferences, so the
+`hew.view.*` effects and the window commands have nothing to act on there:
+that difference is inherent, not a gap. A headless client chooses a camera
+per `hew.view.snapshot` instead.
+
+What differs and cannot be made to agree:
+
+- **Float last digits after trigonometry.** `sin`/`cos` on native targets
+  call the platform's libm; on `wasm32-unknown-unknown` the kernel carries
+  its own, and the two can differ by one unit in the last place. A polygon
+  or circle's vertices — and everything computed from them — can therefore
+  differ at about 1e-16 between hosts. Making them identical means
+  routing the kernel's trigonometry through one shared implementation on
+  both targets, a change to the kernel's dependencies.
+- **History origin.** Each edit's `origin` names the connection that made
+  it (`hew-cli:run` headless, `live:N` in the app) — the identity differs
+  because the connection does.
+- **Segment order of a hidden-line drawing** (and so a PDF's drawing
+  bytes) depends on how the document's edges were enumerated, which differs
+  between a document built in memory and the same document reloaded from
+  bytes. The set of lines is the same. This holds headless too, and a live
+  client-side render always starts from saved bytes.
 
 ## 13. MCP mapping
 

@@ -231,6 +231,36 @@ pub(crate) fn force_return_bytes(method: &str, params: Value) -> Value {
     .unwrap_or_else(|_| unreachable!("force_return_bytes's closure never errors"))
 }
 
+/// Whether `method`/`params` is a `hew.library.save` that names no
+/// `source_doc` — the one case where a live client can fill in what the
+/// remote host cannot know (the file the attached document came from).
+pub(crate) fn lacks_source_doc(method: &str, params: &Value) -> bool {
+    if library_method(method, params).as_deref() != Some("hew.library.save") {
+        return false;
+    }
+    let inner = if method == "hew.doc.transact" {
+        params.pointer("/commands/0/params")
+    } else {
+        Some(params)
+    };
+    inner.is_none_or(|p| p.get("source_doc").is_none())
+}
+
+/// Sets `source_doc` on a `hew.library.save` (bare or one-command
+/// transaction), leaving everything else untouched.
+pub(crate) fn with_source_doc(method: &str, params: Value, source_doc: &str) -> Value {
+    map_command_params(method, params, |mut inner| {
+        if let Some(obj) = inner.as_object_mut() {
+            obj.insert(
+                "source_doc".to_string(),
+                Value::String(source_doc.to_string()),
+            );
+        }
+        Ok(inner)
+    })
+    .unwrap_or_else(|_| unreachable!("with_source_doc's closure never errors"))
+}
+
 /// After a successful remote `hew.library.save` reply (bytes forced via
 /// [`force_return_bytes`]), writes the item to THIS side's library folder
 /// and returns the rewritten result (`{path, id}`, `bytes_base64` kept
@@ -388,6 +418,22 @@ mod tests {
         ] {
             assert!(!is_local_only(m, &json!({})), "{m}");
         }
+    }
+
+    #[test]
+    fn source_doc_is_added_only_to_a_library_save_that_lacks_one() {
+        assert!(lacks_source_doc("hew.library.save", &json!({"name": "X"})));
+        assert!(!lacks_source_doc(
+            "hew.library.save",
+            &json!({"name": "X", "source_doc": "/m/a.hew"})
+        ));
+        assert!(!lacks_source_doc("hew.library.list", &json!({})));
+        let wrapped = json!({"commands":[{"method":"hew.library.save","params":{"name":"X"}}]});
+        assert!(lacks_source_doc("hew.doc.transact", &wrapped));
+        let out = with_source_doc("hew.doc.transact", wrapped, "/m/a.hew");
+        assert_eq!(out["commands"][0]["params"]["source_doc"], "/m/a.hew");
+        let bare = with_source_doc("hew.library.save", json!({"name": "X"}), "/m/a.hew");
+        assert_eq!(bare["source_doc"], "/m/a.hew");
     }
 
     #[test]

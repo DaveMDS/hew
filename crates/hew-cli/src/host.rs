@@ -34,6 +34,13 @@ impl CliHost {
     /// The path a prior open/save recorded, if any. Exposed for the CLI's
     /// `run --out` step, which wants to know whether a bare `save` (no
     /// path) is even possible before trying.
+    /// A host that already knows which file its document came from — the
+    /// live client's render fallback, which renders a copy of the app's
+    /// document and wants the title block to name the file the app does.
+    pub fn with_working_path(path: Option<PathBuf>) -> CliHost {
+        CliHost { working_path: path }
+    }
+
     pub fn working_path(&self) -> Option<&Path> {
         self.working_path.as_deref()
     }
@@ -82,6 +89,11 @@ impl Host for CliHost {
         Ok(None)
     }
 
+    fn save_copy(&mut self, doc: &Document, path: &str) -> Result<(), Refusal> {
+        std::fs::write(path, doc.save_for_persistence())
+            .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))
+    }
+
     fn export_document(
         &mut self,
         doc: &Document,
@@ -109,7 +121,7 @@ impl Host for CliHost {
         &mut self,
         doc: &mut Document,
         path: &str,
-        options: &serde_json::Value,
+        options: &api::ImportOptions,
     ) -> Result<serde_json::Value, Refusal> {
         import_by_extension(doc, path, options)
     }
@@ -206,6 +218,22 @@ impl Host for CliHost {
 
     fn working_document_path(&self) -> Option<&str> {
         self.working_path.as_deref().and_then(Path::to_str)
+    }
+
+    /// A headless host has exactly its working document, always `doc_1`
+    /// (docs/agents/HEW_API.md §4.2).
+    fn documents(&self, doc: &Document) -> Vec<serde_json::Value> {
+        let path = self.working_path.as_deref();
+        let title = path
+            .and_then(Path::file_stem)
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("Untitled");
+        vec![serde_json::json!({
+            "id": "doc_1",
+            "title": title,
+            "path": path.and_then(Path::to_str),
+            "dirty": !doc.at_saved_mark(),
+        })]
     }
 }
 
@@ -329,12 +357,27 @@ fn render_snapshot(doc: &Document, params: &SnapshotParams) -> Result<SnapshotRe
         (None, Vec::new())
     };
 
+    let depth = if params.include_depth {
+        let d = rendered.depth_image(params.depth_bits);
+        Some(api::DepthPass {
+            png: d.png,
+            bits: params.depth_bits,
+            near: d.near,
+            far: d.far,
+        })
+    } else {
+        None
+    };
+    let normals_png = params.include_normals.then(|| rendered.normals_png());
+
     Ok(SnapshotResult {
         png,
         width: rendered.width,
         height: rendered.height,
         id_buffer,
         id_palette,
+        depth,
+        normals_png,
     })
 }
 
@@ -455,25 +498,119 @@ fn unit_scale(units: &str) -> Option<f64> {
 
 // ------------------------------------------------------------------ import
 
-/// Merges `path` into `doc` by file extension, honest about the one thing
-/// no importer can guess: STL units (docs/agents/HEW_API.md §7's semantics note —
-/// STL carries none, so `hew.doc.import` refuses `units_required` rather
-/// than assume).
+/// Reads what `hew.doc.import` needs from disk, for a client whose host has
+/// no filesystem of its own (the live desktop app): the file's bytes and,
+/// for COLLADA, the texture images it refers to — found the way the app's
+/// own import finds them (the file's folder, plus `<stem>/`,
+/// `<stem>_textures/`, `textures/`, `Textures/`), keyed by bare name and by
+/// folder-relative name so `wood.png` and `textures/wood.png` both resolve.
+/// Best-effort for the images, like the app: an unreadable one just ends up
+/// in the report's `textures_missing`.
+pub(crate) fn read_import_inputs(
+    path: &str,
+) -> Result<
+    (
+        Vec<u8>,
+        std::collections::BTreeMap<String, api::ImportImage>,
+    ),
+    Refusal,
+> {
+    // Sent whole over a socket as base64 (and held in the app's memory), so
+    // a file this large is refused up front rather than wedging a connection.
+    const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > MAX_IMPORT_BYTES
+    {
+        return Err(Refusal::api(
+            "load_failed",
+            &format!(
+                "{path}: {} MiB is more than the {} MiB a live import carries; import it in the app (File > Import).",
+                meta.len() / (1024 * 1024),
+                MAX_IMPORT_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let mut images = std::collections::BTreeMap::new();
+    let is_dae = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("dae"));
+    if !is_dae {
+        return Ok((bytes, images));
+    }
+    let file = Path::new(path);
+    let dir = file.parent().unwrap_or_else(|| Path::new("."));
+    let stem = file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+    let mut add = |folder: &Path, relative_prefix: Option<&str>| {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let lower = name.to_ascii_lowercase();
+            let format = if lower.ends_with(".png") {
+                "png"
+            } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+                "jpeg"
+            } else {
+                continue;
+            };
+            let Ok(image) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let image = api::ImportImage {
+                bytes: image,
+                format: Some(format.to_string()),
+            };
+            images.insert(name.clone(), image.clone());
+            if let Some(prefix) = relative_prefix {
+                images.insert(format!("{prefix}/{name}"), image);
+            }
+        }
+    };
+    add(dir, None);
+    for sub in [
+        stem.clone(),
+        format!("{stem}_textures"),
+        "textures".to_string(),
+        "Textures".to_string(),
+    ] {
+        add(&dir.join(&sub), Some(&sub));
+    }
+    Ok((bytes, images))
+}
+
+/// Merges a file into `doc` by extension, honest about the one thing the
+/// path alone cannot say: STL carries no units and refuses without them
+/// (`units_required`). The bytes (and COLLADA images) come from `options`
+/// when the client supplied them, else from `path` and the files beside it.
+///
+/// `crates/wasm-api`'s live host has the same logic over the same
+/// importers (it cannot share this: that crate has no filesystem and this
+/// one is not a dependency of it); the two must stay in step.
 fn import_by_extension(
     doc: &mut Document,
     path: &str,
-    options: &serde_json::Value,
+    options: &api::ImportOptions,
 ) -> Result<serde_json::Value, Refusal> {
-    let bytes =
-        std::fs::read(path).map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let (bytes, images) = match &options.bytes {
+        Some(bytes) => (bytes.clone(), options.images.clone()),
+        None => read_import_inputs(path)?,
+    };
     let ext = Path::new(path)
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
 
-    let (scene, textures_missing) = match ext.as_deref() {
+    let (scene, textures_missing, warnings) = match ext.as_deref() {
         Some("stl") => {
-            let units = options.get("units").and_then(|v| v.as_str());
+            let units = options.units.as_deref();
             let scale = match units.map(unit_scale) {
                 Some(Some(scale)) => scale,
                 Some(None) => {
@@ -495,23 +632,30 @@ fn import_by_extension(
             let name_hint = Path::new(path).file_stem().and_then(|s| s.to_str());
             let parsed = stl_import::import(&bytes, scale, name_hint)
                 .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-            (parsed.scene, parsed.missing)
+            (parsed.scene, parsed.missing, parsed.warnings)
         }
         Some("glb") | Some("gltf") => {
             let parsed = gltf_import::import(&bytes)
                 .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-            (parsed.scene, parsed.missing)
+            (parsed.scene, parsed.missing, parsed.warnings)
         }
         Some("dae") => {
-            let images = dae_import::ImageMap::new();
-            let parsed = dae_import::import(&bytes, &images)
+            let mut map = dae_import::ImageMap::new();
+            for (uri, image) in &images {
+                let format = match image.format.as_deref() {
+                    Some("jpeg") | Some("jpg") => kernel::ImageFormat::Jpeg,
+                    _ => kernel::ImageFormat::Png,
+                };
+                map.insert(uri.clone(), (image.bytes.clone(), format));
+            }
+            let parsed = dae_import::import(&bytes, &map)
                 .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-            (parsed.scene, parsed.textures_missing)
+            (parsed.scene, parsed.textures_missing, parsed.warnings)
         }
         Some("skp") => {
             let parsed = skp_import::import(&bytes)
                 .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-            (parsed.scene, parsed.textures_missing)
+            (parsed.scene, parsed.textures_missing, parsed.warnings)
         }
         _ => {
             return Err(Refusal::api(
@@ -526,10 +670,10 @@ fn import_by_extension(
     let (report, _change) = doc
         .ingest(scene, textures_missing)
         .map_err(|e| api::Refusal::from_document_error(&e))?;
-    Ok(report_to_json(&report))
+    Ok(report_to_json(&report, &warnings))
 }
 
-fn report_to_json(report: &kernel::ImportReport) -> serde_json::Value {
+fn report_to_json(report: &kernel::ImportReport, warnings: &[String]) -> serde_json::Value {
     serde_json::json!({
         "objects_created": report.objects_created,
         "watertight": report.watertight,
@@ -539,12 +683,74 @@ fn report_to_json(report: &kernel::ImportReport) -> serde_json::Value {
             "reason": s.reason,
         })).collect::<Vec<_>>(),
         "textures_missing": report.textures_missing,
+        "warnings": warnings,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hew-cli-host-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_collada_files_textures_are_found_beside_it_like_the_apps_import_does() {
+        let dir = scratch("dae-textures");
+        std::fs::write(dir.join("chair.dae"), b"<COLLADA/>").unwrap();
+        std::fs::write(dir.join("wood.png"), b"png-bytes").unwrap();
+        std::fs::create_dir_all(dir.join("textures")).unwrap();
+        std::fs::write(dir.join("textures").join("oak.JPG"), b"jpg-bytes").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"ignored").unwrap();
+        let (bytes, images) = read_import_inputs(dir.join("chair.dae").to_str().unwrap()).unwrap();
+        assert_eq!(bytes, b"<COLLADA/>");
+        assert_eq!(images["wood.png"].format.as_deref(), Some("png"));
+        assert_eq!(images["oak.JPG"].format.as_deref(), Some("jpeg"));
+        // Both the bare name and the folder-relative one resolve.
+        assert!(images.contains_key("textures/oak.JPG"));
+        assert!(!images.contains_key("notes.txt"));
+        // A non-COLLADA file never scans for textures.
+        std::fs::write(dir.join("part.stl"), b"x").unwrap();
+        let (_, none) = read_import_inputs(dir.join("part.stl").to_str().unwrap()).unwrap();
+        assert!(none.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_import_from_supplied_bytes_needs_no_file_and_reports_warnings() {
+        let mut doc = Document::new();
+        let options = api::ImportOptions {
+            units: Some("m".to_string()),
+            bytes: Some(tetrahedron_stl_bytes()),
+            ..Default::default()
+        };
+        let report = import_by_extension(&mut doc, "/no/such/dir/tet.stl", &options).unwrap();
+        assert!(report["objects_created"].as_u64().unwrap() >= 1, "{report}");
+        assert!(
+            report["warnings"].is_array(),
+            "the report carries warnings: {report}"
+        );
+    }
+
+    #[test]
+    fn save_copy_writes_the_file_but_leaves_the_working_document_unbound() {
+        let dir = scratch("save-copy");
+        let mut host = CliHost::new();
+        let doc = Document::new();
+        let target = dir.join("copy.hew");
+        host.save_copy(&doc, target.to_str().unwrap()).unwrap();
+        assert!(target.exists());
+        assert_eq!(
+            host.working_path(),
+            None,
+            "a copy does not bind the document"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn import_by_extension_refuses_units_required_for_stl_without_units() {
@@ -558,8 +764,12 @@ mod tests {
         std::fs::write(&path, &stl).unwrap();
 
         let mut doc = Document::new();
-        let err = import_by_extension(&mut doc, path.to_str().unwrap(), &serde_json::json!({}))
-            .unwrap_err();
+        let err = import_by_extension(
+            &mut doc,
+            path.to_str().unwrap(),
+            &api::ImportOptions::default(),
+        )
+        .unwrap_err();
         assert_eq!(err.name, "units_required");
 
         let _ = std::fs::remove_dir_all(&dir);

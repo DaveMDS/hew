@@ -124,7 +124,7 @@ fn node_ref_json(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
 
 fn documents(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let _: EmptyParams = parse(params)?;
-    Ok(json!({ "documents": ctx.host.documents() }))
+    Ok(json!({ "documents": ctx.host.documents(ctx.doc) }))
 }
 
 // --------------------------------------------------------------- hew.query.scene

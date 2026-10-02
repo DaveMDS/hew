@@ -482,7 +482,7 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         None => default_category,
     };
 
-    let id = mint_item_id();
+    let id = mint_item_id(ctx.host);
     let mut set = |key: &str, value: AttrValue| -> Result<(), CmdError> {
         item_doc
             .attr_set(AttrTarget::Document, "hew.library", key, value)
@@ -513,7 +513,7 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     if let Some(source_doc) = source_doc {
         set("sourceDoc", AttrValue::Text(source_doc))?;
     }
-    set("savedAt", AttrValue::Text(iso_now()))?;
+    set("savedAt", AttrValue::Text(iso_now(ctx.host.unix_time_ms())))?;
 
     let bytes = item_doc.save();
     let write = ctx
@@ -565,38 +565,19 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 
 // ---------------------------------------------------------------- helpers
 
-/// Mints a fresh library item id: 128 bits drawn from
-/// `std::collections::hash_map::RandomState`, which seeds each instance
-/// from the OS's own CSPRNG (the same source `HashMap`'s DoS-resistance
-/// relies on) — good enough uniqueness for a library item's own identity
-/// (never used as a security token, and collision would only cost a
-/// re-save), without pulling a `uuid`/rand crate into this pure crate
-/// (`crates/api` stays std + kernel + serde — see `host.rs`'s module doc).
-/// Formatted as an RFC 4122-shaped string (version 4, variant bits set)
-/// purely for familiarity — nothing here or in `crates/library` parses
-/// that shape back out.
-fn mint_item_id() -> String {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-
-    let mut h1 = RandomState::new().build_hasher();
-    h1.write_u128(nanos);
-    h1.write_u32(std::process::id());
-    h1.write_u64(counter);
-    let a = h1.finish();
-
-    let mut h2 = RandomState::new().build_hasher();
-    h2.write_u64(a);
-    h2.write_u64(counter ^ 0x9E37_79B9_7F4A_7C15);
-    let b = h2.finish();
+/// Mints a fresh library item id: 128 bits from the host's
+/// [`Host::random_u64`] — good enough uniqueness for a library item's own
+/// identity (never used as a security token, and a collision would only
+/// cost a re-save), without pulling a `uuid`/rand crate into this pure
+/// crate (`crates/api` stays std + kernel + serde — see `host.rs`'s module
+/// doc). The host supplies the randomness because the live app's WASM
+/// kernel has no OS entropy, clock, or pid to read. Formatted as an RFC
+/// 4122-shaped string (version 4, variant bits set) purely for
+/// familiarity — nothing here or in `crates/library` parses that shape
+/// back out.
+fn mint_item_id(host: &dyn crate::host::Host) -> String {
+    let a = host.random_u64();
+    let b = host.random_u64() ^ 0x9E37_79B9_7F4A_7C15;
 
     let mut bytes = [0u8; 16];
     bytes[..8].copy_from_slice(&a.to_be_bytes());
@@ -622,11 +603,8 @@ fn mint_item_id() -> String {
 /// civil-date conversion from a Unix-epoch day count is ~15 lines
 /// (Howard Hinnant's `civil_from_days`, public domain), well-trodden
 /// enough not to need a crate for it.
-fn iso_now() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let total_ms = now.as_millis();
+fn iso_now(unix_ms: u64) -> String {
+    let total_ms = u128::from(unix_ms);
     let secs = (total_ms / 1000) as i64;
     let ms = (total_ms % 1000) as u32;
     let days = secs.div_euclid(86_400);
@@ -659,8 +637,8 @@ mod tests {
 
     #[test]
     fn mint_item_id_looks_like_a_uuid_and_is_never_repeated() {
-        let a = mint_item_id();
-        let b = mint_item_id();
+        let a = mint_item_id(&crate::host::NoHost);
+        let b = mint_item_id(&crate::host::NoHost);
         assert_ne!(a, b);
         for id in [&a, &b] {
             let parts: Vec<&str> = id.split('-').collect();
@@ -680,7 +658,7 @@ mod tests {
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
         assert_eq!(civil_from_days(0), (1970, 1, 1));
 
-        let now = iso_now();
+        let now = iso_now(1_700_000_000_123);
         assert_eq!(now.len(), 24, "{now}");
         assert!(now.ends_with('Z'), "{now}");
         assert_eq!(now.as_bytes()[4], b'-');

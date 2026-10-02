@@ -137,7 +137,7 @@ impl Host for FakeHost {
         &mut self,
         _doc: &mut Document,
         _path: &str,
-        _options: &Value,
+        _options: &api::ImportOptions,
     ) -> Result<Value, Refusal> {
         self.import_result
             .take()
@@ -157,6 +157,8 @@ impl Host for FakeHost {
                 height: params.height,
                 id_buffer: None,
                 id_palette: Vec::new(),
+                depth: None,
+                normals_png: None,
             })
         })
     }
@@ -188,6 +190,8 @@ impl Host for RendersButCannotWriteHost {
             height: params.height,
             id_buffer: None,
             id_palette: Vec::new(),
+            depth: None,
+            normals_png: None,
         })
     }
 }
@@ -196,6 +200,7 @@ impl Host for RendersButCannotWriteHost {
 
 fn req(id: i64, method: &str, params: Value) -> Request {
     Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Number(id)),
         method: method.to_string(),
@@ -806,6 +811,8 @@ fn snapshot_includes_id_buffer_and_palette_when_requested() {
             height: 64,
             id_buffer: Some(vec![0, 0, 1, 0]),
             id_palette: vec!["obj_1".to_string()],
+            depth: None,
+            normals_png: None,
         })),
         ..Default::default()
     };
@@ -867,6 +874,8 @@ fn snapshot_with_path_and_include_ids_writes_an_id_buffer_sidecar() {
             height: 64,
             id_buffer: Some(vec![0, 0, 1, 0]),
             id_palette: vec!["obj_1".to_string()],
+            depth: None,
+            normals_png: None,
         })),
         ..Default::default()
     };

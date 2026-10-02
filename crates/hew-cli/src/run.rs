@@ -199,6 +199,15 @@ fn run_script_live(
     if record_reply(responses, &session.hello_response) {
         return Err(1);
     }
+    // `--document`: bind to it up front, so a script can stay ignorant of
+    // which window it was pointed at. A script may still attach (or name a
+    // `document` per frame) itself.
+    if let Some(document) = opts.document.as_deref()
+        && let Err(msg) = attach_live(&mut session, Some(document))
+    {
+        eprintln!("hew-cli run --live: {msg}");
+        return Err(1);
+    }
 
     for (i, raw) in frames.into_iter().enumerate().skip(1) {
         let mut request: Request = serde_json::from_value(raw).map_err(|e| {
@@ -273,7 +282,11 @@ fn run_script_live(
                 // thing a one-shot dispatch reports.
                 if let Some(path) = write_path {
                     if let Err(msg) = write_live_bytes(&value, &path) {
-                        eprintln!("hew-cli run --live: frame {i}: {msg}");
+                        // The same reply a host that owned the filesystem
+                        // would have given, on stdout where a script reads it.
+                        let failed = write_failure_reply(&value, &method, &msg);
+                        println!("{failed}");
+                        responses.push(failed);
                         return Err(1);
                     }
                     let saved = serde_json::json!({ "saved": path });
@@ -397,6 +410,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         .unwrap_or(false);
 
     let request = Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Text("dispatch".to_string())),
         method: method.to_string(),
@@ -485,7 +499,7 @@ pub fn dispatch_live(
             };
         }
     };
-    if let Err(msg) = attach_live(&mut session) {
+    if let Err(msg) = attach_live(&mut session, opts.document.as_deref()) {
         eprintln!("hew-cli dispatch --live: {msg}");
         return DispatchResult {
             exit_code: 1,
@@ -522,6 +536,7 @@ pub fn dispatch_live(
     let (params, client_write_path) = take_client_write_path(method, params);
 
     let request = Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Text("dispatch".to_string())),
         method: method.to_string(),
@@ -571,10 +586,11 @@ pub fn dispatch_live(
                 match write_live_bytes(&value, &path) {
                     Ok(()) => println!("{}", serde_json::json!({"saved": path})),
                     Err(msg) => {
-                        eprintln!("hew-cli dispatch --live: {msg}");
+                        let failed = write_failure_reply(&value, method, &msg);
+                        println!("{failed}");
                         return DispatchResult {
                             exit_code: 1,
-                            response: Some(value),
+                            response: Some(failed),
                         };
                     }
                 }
@@ -612,7 +628,11 @@ pub(crate) fn take_client_write_path(
     params: serde_json::Value,
 ) -> (serde_json::Value, Option<String>) {
     match method {
-        "hew.doc.save" | "hew.doc.export" => strip_path(params),
+        // `hew.doc.save` is NOT here: the app saves through its own save
+        // path (file written, unsaved mark cleared, document bound to the
+        // file), which a client-side write could not do. Export has no such
+        // state and is still written here.
+        "hew.doc.export" => strip_path(params),
         // A solitary command wrapped in a one-command transaction is the
         // SAME command — §6.4 calls that the canonical way to invoke one,
         // and §13 gives an MCP client no other shape for a command that
@@ -628,7 +648,7 @@ pub(crate) fn take_client_write_path(
             };
             if !matches!(
                 only.get("method").and_then(|m| m.as_str()),
-                Some("hew.doc.save" | "hew.doc.export")
+                Some("hew.doc.export")
             ) {
                 return (params, None);
             }
@@ -709,6 +729,41 @@ pub(crate) fn decode_base64(s: &str) -> Option<Vec<u8>> {
 /// exported STL/3MF/GLB for export; both shapes carry the same
 /// `bytes_base64` field the live host base64s them into, since it has no
 /// filesystem of its own. This side decodes and writes.
+/// The JSON-RPC reply for a client-side write that failed: the canonical
+/// refusal envelope (`failed_index`, `failed_method`, `detail`,
+/// `explanation`) a filesystem host answers for the same failure, with the
+/// request's own `id`. `message` is [`write_live_bytes`]'s error — the
+/// refusal JSON it built, or plain text for a reply with no bytes in it.
+pub(crate) fn write_failure_reply(
+    reply: &serde_json::Value,
+    method: &str,
+    message: &str,
+) -> serde_json::Value {
+    let id = reply.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    match serde_json::from_str::<serde_json::Value>(message) {
+        Ok(refusal) if refusal.get("refusal").is_some() => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32000,
+                "message": "refused",
+                "data": {
+                    "refusal": refusal["refusal"],
+                    "failed_index": 0,
+                    "failed_method": method,
+                    "detail": refusal.get("detail").cloned().unwrap_or_else(empty_object),
+                    "explanation": refusal["explanation"],
+                },
+            },
+        }),
+        _ => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": { "code": -32003, "message": message },
+        }),
+    }
+}
+
 pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Result<(), String> {
     // Both shapes are real: a bare `hew.doc.save` answers its own result,
     // while the one-command transaction §6.4 calls canonical (and the
@@ -735,6 +790,62 @@ pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Resu
     })
 }
 
+/// `hew-cli documents --live`: prints one JSON object per open document.
+/// `hew.meta.documents` is host-wide, so no attach is needed (or done) —
+/// listing the windows must work whatever state the connection is in.
+pub fn list_documents_live(opts: &LiveOptions) -> DispatchResult {
+    let hello_request = live::build_hello_request("hew-cli:documents");
+    let mut session = match live::connect_live(opts, hello_request) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("hew-cli documents --live: {e}");
+            return DispatchResult {
+                exit_code: 1,
+                response: None,
+            };
+        }
+    };
+    let request = Request {
+        jsonrpc: "2.0".to_string(),
+        id: Some(RequestId::Text("live-documents".to_string())),
+        method: "hew.meta.documents".to_string(),
+        params: Some(serde_json::json!({})),
+        document: None,
+    };
+    match session.dispatch(request) {
+        Ok(DispatchOutcome::Reply(response)) => {
+            let value = serde_json::to_value(&response).expect("Response serializes");
+            if response.error.is_some() {
+                eprintln!("{value}");
+                return DispatchResult {
+                    exit_code: 1,
+                    response: Some(value),
+                };
+            }
+            if let Some(documents) = value
+                .pointer("/result/documents")
+                .and_then(|d| d.as_array())
+            {
+                for document in documents {
+                    println!("{document}");
+                }
+            }
+            DispatchResult {
+                exit_code: 0,
+                response: Some(value),
+            }
+        }
+        Ok(DispatchOutcome::Dropped) => unreachable!("the request carries an id"),
+        Err(e) => {
+            eprintln!("hew-cli documents --live: {e}");
+            DispatchResult {
+                exit_code: 1,
+                response: None,
+            }
+        }
+    }
+}
+
 /// Dispatches `hew.doc.attach` (`{}` params) over an already hello'd live
 /// session — the shared step [`dispatch_live`] and
 /// [`crate::mcp::McpServer::new_live`] both need, since neither gets to
@@ -742,20 +853,38 @@ pub(crate) fn write_live_bytes(response: &serde_json::Value, path: &str) -> Resu
 /// script can (that script controls every frame it sends). Returns a
 /// clear message on refusal or transport error; `Ok(())` once the
 /// connection is attached and every subsequent command can proceed.
-pub(crate) fn attach_live(session: &mut live::LiveSession) -> Result<(), String> {
+pub(crate) fn attach_live(
+    session: &mut live::LiveSession,
+    document: Option<&str>,
+) -> Result<(), String> {
+    let params = match document {
+        Some(document) => serde_json::json!({ "document": document }),
+        None => serde_json::json!({}),
+    };
     let request = Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Text("live-attach".to_string())),
         method: "hew.doc.attach".to_string(),
-        params: Some(serde_json::json!({})),
+        params: Some(params),
     };
     match session.dispatch(request) {
         Ok(DispatchOutcome::Reply(response)) => match response.error {
             None => Ok(()),
-            Some(err) => Err(format!(
-                "hew.doc.attach was refused: {} (code {})",
-                err.message, err.code
-            )),
+            Some(err) => {
+                // A refusal explains itself (`unknown_document` lists the
+                // open documents); the bare message alone is just "refused".
+                let why = err
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("explanation"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(err.message.as_str());
+                Err(format!(
+                    "hew.doc.attach was refused: {why} (code {})",
+                    err.code
+                ))
+            }
         },
         Ok(DispatchOutcome::Dropped) => {
             unreachable!("attach's request always carries an id")
@@ -774,6 +903,7 @@ fn run_silently(
     params: serde_json::Value,
 ) -> Option<String> {
     let request = Request {
+        document: None,
         jsonrpc: "2.0".to_string(),
         id: Some(RequestId::Text(format!("internal-{method}"))),
         method: method.to_string(),
@@ -837,7 +967,7 @@ mod tests {
 
 #[cfg(test)]
 mod save_roundtrip_tests {
-    use super::{decode_base64, take_client_write_path};
+    use super::{decode_base64, take_client_write_path, write_failure_reply};
     use serde_json::json;
 
     /// A solitary command wrapped in a one-command transaction is the
@@ -847,16 +977,17 @@ mod save_roundtrip_tests {
     /// save/export with a path refused live while the identical headless
     /// call wrote the file. Found by adversarial review.
     #[test]
-    fn a_transact_wrapped_save_has_its_path_stripped_like_a_bare_one() {
-        let (params, path) = take_client_write_path(
-            "hew.doc.transact",
-            json!({"commands":[{"method":"hew.doc.save","params":{"path":"/tmp/a.hew"}}]}),
-        );
-        assert_eq!(path.as_deref(), Some("/tmp/a.hew"));
-        assert!(
-            params["commands"][0]["params"].get("path").is_none(),
-            "the forwarded envelope must not still carry the path: {params}"
-        );
+    fn a_transact_wrapped_export_has_its_path_stripped_like_a_bare_one() {
+        // `hew.doc.save` is deliberately NOT client-written any more: the
+        // app saves through its own save path (file, clean mark, binding),
+        // so its path is forwarded untouched, bare or wrapped.
+        let save = json!({"commands":[{"method":"hew.doc.save","params":{"path":"/tmp/a.hew"}}]});
+        let (params, path) = take_client_write_path("hew.doc.transact", save.clone());
+        assert_eq!(path, None);
+        assert_eq!(params, save);
+        let (params, path) = take_client_write_path("hew.doc.save", json!({"path":"/tmp/a.hew"}));
+        assert_eq!(path, None);
+        assert_eq!(params["path"], "/tmp/a.hew");
 
         let (params, path) = take_client_write_path(
             "hew.doc.transact",
@@ -865,6 +996,27 @@ mod save_roundtrip_tests {
         );
         assert_eq!(path.as_deref(), Some("/tmp/a.stl"));
         assert_eq!(params["commands"][0]["params"]["format"], "stl");
+    }
+
+    #[test]
+    fn a_failed_client_write_answers_the_canonical_refusal_envelope() {
+        let reply = json!({"jsonrpc":"2.0","id":7,"result":{"bytes_base64":"Zm9v"}});
+        let message = json!({
+            "refusal": "save_failed",
+            "explanation": "/no/such/dir/a.stl: No such file or directory (os error 2)",
+            "detail": {"path": "/no/such/dir/a.stl"},
+        })
+        .to_string();
+        let out = write_failure_reply(&reply, "hew.doc.export", &message);
+        assert_eq!(out["id"], 7);
+        assert_eq!(out["error"]["code"], -32000);
+        assert_eq!(out["error"]["data"]["refusal"], "save_failed");
+        assert_eq!(out["error"]["data"]["failed_method"], "hew.doc.export");
+        assert_eq!(out["error"]["data"]["failed_index"], 0);
+        assert_eq!(out["error"]["data"]["detail"]["path"], "/no/such/dir/a.stl");
+        // Free text (no bytes in the reply) is an internal fault, not a refusal.
+        let plain = write_failure_reply(&reply, "hew.doc.export", "no bytes");
+        assert_eq!(plain["error"]["code"], -32003);
     }
 
     /// Only the one-command form is the same command. A multi-command

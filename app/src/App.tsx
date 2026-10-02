@@ -37,10 +37,10 @@ import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
-import { installLiveBridge } from './api/liveBridge'
+import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { makeFileHost, isTauri, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import { makeFileHost, isTauri, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -999,6 +999,15 @@ export default function App() {
     }).catch(() => { /* ignore */ })
   }, [docSession.currentRef])
 
+  // Tell the shell whether this document has unsaved changes — the live
+  // API's `hew.meta.documents` `dirty`, which only this window can know.
+  useEffect(() => {
+    if (!isTauri) return
+    import('@tauri-apps/api/core').then(({ invoke }) => {
+      invoke('set_document_dirty', { dirty: docSession.dirty }).catch(() => { /* older shell — ignore */ })
+    }).catch(() => { /* ignore */ })
+  }, [docSession.dirty])
+
   // Warn before unload when there are unsaved changes. (The "also clear
   // the recovery snapshot on a CLEAN unload" half of this lives further
   // down, right after `clearRecoverySnapshot` is defined — referencing it
@@ -1603,8 +1612,20 @@ export default function App() {
   // shell's local-socket JSON-RPC frames to this document's own live
   // Scene, exactly like installTestHarness above — a no-op outside Tauri
   // (isTauri gate lives inside installLiveBridge itself).
+  const liveOpRef = useRef<LiveOpRunner | null>(null)
+  // `pushCameraStateToScene` is defined further up the component; the
+  // bridge (installed once) reaches it through this ref.
+  const pushCameraStateRef = useRef<(scene: Scene) => void>(() => {})
+  useEffect(() => {
+    pushCameraStateRef.current = pushCameraStateToScene
+  }, [pushCameraStateToScene])
   useEffect(() => {
     return installLiveBridge({
+      pushCameraState: (scene) => pushCameraStateRef.current(scene),
+      runOp: (op, args) =>
+        liveOpRef.current !== null
+          ? liveOpRef.current(op, args)
+          : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
       reconcile: () => reconcileRef.current(),
@@ -2602,39 +2623,54 @@ export default function App() {
   // the original discard-triggering action (Close/Open/New/Import) on
   // success. Ordinary trigger sites (menu, shortcut) call these
   // fire-and-forget and ignore the result, exactly as before.
-  const saveDocument = useCallback(async (): Promise<boolean> => {
-    const scene = sceneRef.current
-    if (scene === null) return false
-    // `Scene.save()` is transparent to an open explode session — it
-    // serializes as-if-closed, so saving mid-session needs no special
-    // handling here (the session, and its dimming/scoping, is untouched).
-    pushCameraStateToScene(scene)
-    const undoDepthAtSave = scene.undo_depth()
-    const bytes = new Uint8Array(scene.save())
-    const ref = docSession.currentRef
-    try {
-      const newRef = await fileHostRef.current.save(bytes, ref)
-      if (newRef === null) return false // user cancelled
-      // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
-      // saved mark when nothing has edited the document since the bytes
-      // above were grabbed.
-      const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
-      setDocSession(afterSave(newRef, Date.now(), atSavedMark))
-      LogStore.log.info('app', `Saved: ${newRef.name}`)
-      // The work is now safely on disk — drop the autosave snapshot.
-      void clearRecoverySnapshot()
-      if (isTauri && typeof newRef.handle === 'string') {
-        import('@tauri-apps/api/core').then(({ invoke }) =>
-          invoke('push_recent', { path: newRef.handle as string })
-        ).catch(() => { /* ignore */ })
+  /** Why the last `saveToRef` failed — the live API reports it to its client. */
+  const lastSaveErrorRef = useRef('the document could not be saved')
+
+  /** Writes the document to `ref` (or prompts for a location when `ref` is
+   * null) and commits the post-save session state. The one save path: Save
+   * is this with the document's own ref; the live API's `hew.doc.save` is
+   * this with a ref for the path the client named. */
+  const saveToRef = useCallback(
+    async (ref: FileRef | null): Promise<boolean> => {
+      const scene = sceneRef.current
+      if (scene === null) return false
+      // `Scene.save()` is transparent to an open explode session — it
+      // serializes as-if-closed, so saving mid-session needs no special
+      // handling here (the session, and its dimming/scoping, is untouched).
+      pushCameraStateToScene(scene)
+      const undoDepthAtSave = scene.undo_depth()
+      const bytes = new Uint8Array(scene.save())
+      try {
+        const newRef = await fileHostRef.current.save(bytes, ref)
+        if (newRef === null) return false // user cancelled
+        // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
+        // saved mark when nothing has edited the document since the bytes
+        // above were grabbed.
+        const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
+        setDocSession(afterSave(newRef, Date.now(), atSavedMark))
+        LogStore.log.info('app', `Saved: ${newRef.name}`)
+        // The work is now safely on disk — drop the autosave snapshot.
+        void clearRecoverySnapshot()
+        if (isTauri && typeof newRef.handle === 'string') {
+          import('@tauri-apps/api/core').then(({ invoke }) =>
+            invoke('push_recent', { path: newRef.handle as string })
+          ).catch(() => { /* ignore */ })
+        }
+        persistSceneThumbnails(bytes)
+        return true
+      } catch (err: unknown) {
+        lastSaveErrorRef.current = friendlyErrorText(err)
+        handleToast(`Save failed: ${friendlyErrorText(err)}`)
+        return false
       }
-      persistSceneThumbnails(bytes)
-      return true
-    } catch (err: unknown) {
-      handleToast(`Save failed: ${friendlyErrorText(err)}`)
-      return false
-    }
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
+    },
+    [handleToast, clearRecoverySnapshot, pushCameraStateToScene],
+  )
+
+  const saveDocument = useCallback(
+    (): Promise<boolean> => saveToRef(docSession.currentRef),
+    [docSession.currentRef, saveToRef],
+  )
 
   const saveAsDocument = useCallback(async (): Promise<boolean> => {
     const scene = sceneRef.current
@@ -2679,9 +2715,9 @@ export default function App() {
   // extension upstream), but a pick delivered to a new window can be any
   // format the unified Open dialog accepts, so this dispatches on extension
   // the same way openDocument does.
-  const openPathInPlace = useCallback(async (path: string) => {
+  const openPathInPlace = useCallback(async (path: string): Promise<boolean> => {
     const scene = sceneRef.current
-    if (scene === null) return
+    if (scene === null) return false
     const { invoke } = await import('@tauri-apps/api/core')
     if (/\.hew$/i.test(path)) {
       // Claim the path in the shell BEFORE the read/apply, so a second open
@@ -2708,13 +2744,14 @@ export default function App() {
           invoke('set_document_path', { path: null }).catch(() => { /* ignore */ })
         }
       }
-      return
+      return landed
     }
     const buf = await invoke<ArrayBuffer>('read_file', { path })
     const bytes = new Uint8Array(buf)
     const { resolveImportPickFromPath } = await import('./io/tauriFileHost')
     const pick = await resolveImportPickFromPath(path, bytes)
     await runImportPick(scene, pick)
+    return true
   }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
@@ -3848,6 +3885,83 @@ export default function App() {
   useEffect(() => { handleZoomExtentsRef.current = handleZoomExtents }, [handleZoomExtents])
   useEffect(() => { openPathRef.current = openPath }, [openPath])
   useEffect(() => { openSettingsRef.current = openSettings }, [openSettings])
+
+  // The webview half of the live API's window management (docs/agents/
+  // HEW_API.md §4.2, `shells/tauri/src-tauri/src/live_router.rs`): the shell
+  // creates and routes windows, but only this window knows whether its
+  // document has unsaved work and can load a file through the same open
+  // path the UI uses.
+  useEffect(() => {
+    liveOpRef.current = async (op, args): Promise<LiveOpOutcome> => {
+      if (op === 'save') {
+        // `hew.doc.save`: a named path saves (and rebinds) there; none
+        // re-saves in place (the shell only asks when the document has a file).
+        const path = typeof args.path === 'string' ? args.path : null
+        const ref = path !== null ? { name: basenameOf(path), handle: path } : docSession.currentRef
+        if (ref === null) {
+          return { ok: false, refusal: 'save_failed', message: 'the document has no file to save to' }
+        }
+        if (args.copy === true) {
+          // Save a copy: write the bytes, change nothing about this document
+          // (no rebinding to the file, no clean mark).
+          const scene = sceneRef.current
+          if (scene === null) return { ok: false, refusal: 'save_failed', message: 'not ready' }
+          pushCameraStateToScene(scene)
+          try {
+            await fileHostRef.current.save(new Uint8Array(scene.save()), ref)
+            return { ok: true }
+          } catch (err) {
+            return {
+              ok: false,
+              refusal: 'save_failed',
+              message: err instanceof Error ? err.message : String(err),
+            }
+          }
+        }
+        lastSaveErrorRef.current = 'the document could not be saved'
+        const saved = await saveToRef(ref)
+        return saved
+          ? { ok: true }
+          : { ok: false, refusal: 'save_failed', message: lastSaveErrorRef.current }
+      }
+      if (op === 'open') {
+        const path = typeof args.path === 'string' ? args.path : ''
+        try {
+          const landed = await openPathInPlace(path)
+          return landed
+            ? { ok: true }
+            : { ok: false, refusal: 'load_failed', message: 'the file could not be loaded' }
+        } catch (err) {
+          return {
+            ok: false,
+            refusal: 'load_failed',
+            message: err instanceof Error ? err.message : String(err),
+          }
+        }
+      }
+      if (op === 'close') {
+        const refuse = (): LiveOpOutcome => ({
+          ok: false,
+          refusal: 'unsaved_changes',
+          message: 'The document has unsaved changes; pass discard:true to close it anyway.',
+        })
+        if (docSessionRef.current.dirty && args.discard !== true) return refuse()
+        // Dropping the autosave snapshot takes a moment; the user (or another
+        // client) may edit meanwhile, so decide again afterwards, before the
+        // answer that commits to destroying the window.
+        await clearRecoverySnapshot()
+        if (docSessionRef.current.dirty && args.discard !== true) return refuse()
+        return {
+          ok: true,
+          afterReply: async () => {
+            const { getCurrentWindow } = await import('@tauri-apps/api/window')
+            await getCurrentWindow().destroy()
+          },
+        }
+      }
+      return { ok: false, refusal: 'host_capability_missing', message: `unknown operation ${op}` }
+    }
+  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene])
 
   // ---------------------------------------------------------------- native menu-action dispatch
   // The dispatch switch lives in a ref refreshed every render. The listener

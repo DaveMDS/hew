@@ -27,6 +27,14 @@ pub struct Request {
     pub method: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
+    /// The document this ONE request addresses (§4.2), by id, path, label,
+    /// or title — an envelope member rather than a param so it applies to
+    /// every command alike, including a `hew.doc.transact` wrapping many.
+    /// Absent = the connection's attached document. A multi-document host
+    /// routes the request there without changing the attachment; a
+    /// single-document host accepts only its own document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
 }
 
 /// One response frame: exactly one of `result` / `error` is present.

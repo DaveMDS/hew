@@ -28,6 +28,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 /// A JSON-RPC error `{code, message}` — the MCP layer's own errors
 /// (unknown method, bad params), distinct from a `hew.*` refusal (which
 /// travels as a normal tool-call *result*, per §13: refusals are answers).
+#[derive(Debug)]
 struct JsonRpcErr {
     code: i64,
     message: String,
@@ -177,6 +178,23 @@ anything you do. The model may already contain their work: call
 hew_describe_scene before you change or delete anything, and do not
 clear the document to make room. Frame what you build with
 hew.view.zoom_extents so they can see it.
+
+SEVERAL DOCUMENTS MAY BE OPEN
+The person may have more than one document open, and you are not limited
+to the front one. hew_query {"method":"hew.meta.documents"} lists them
+(id, title, path, dirty, front, attached). Every tool accepts an optional
+"document" (an id like doc_2, or an exact path, label, or title) that
+sends just that one call to that document, in the background, without
+changing which window is in front or which document you are attached to.
+hew.doc.attach {"document": ...} changes the default for later calls.
+Check "attached" before editing if you are unsure where you are.
+
+hew.doc.new and hew.doc.open make a NEW window behind the one the person
+is using — never replacing theirs — and attach you to it. Use hew.doc.new
+for scratch work (give it a "label" so you can find it again), and
+hew.doc.close {"discard": true} to clean up when you are done. Never close
+a document you did not create unless asked. hew.doc.focus brings a window
+to the front; do that only when the person should look at it.
 "#;
 
 impl McpServer {
@@ -193,6 +211,7 @@ impl McpServer {
             ("hew.doc.new", json!({})),
         ] {
             let request = Request {
+                document: None,
                 jsonrpc: "2.0".to_string(),
                 id: Some(RequestId::Text(format!("startup-{method}"))),
                 method: method.to_string(),
@@ -236,7 +255,7 @@ impl McpServer {
     pub fn new_live(opts: &LiveOptions) -> Result<McpServer, live::LiveError> {
         let hello_request = live::build_hello_request("hew-cli:mcp");
         let mut session = live::connect_live(opts, hello_request)?;
-        if let Err(msg) = crate::run::attach_live(&mut session) {
+        if let Err(msg) = crate::run::attach_live(&mut session, opts.document.as_deref()) {
             return Err(live::LiveError::Protocol(msg));
         }
         let profile = session.granted_profile();
@@ -320,18 +339,25 @@ impl McpServer {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| JsonRpcErr::invalid_params("tools/call needs a \"name\""))?;
-        let arguments = params
+        let mut arguments = params
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
+        // Every tool may name the document it addresses; it rides the
+        // envelope, not the command's params (§4.2).
+        let document = take_document(&mut arguments)?;
 
         let response = match name {
-            "hew_capabilities" => self.dispatch_tool("hew.meta.capabilities", json!({}))?,
-            "hew_transact" => self.dispatch_tool("hew.doc.transact", arguments)?,
-            "hew_describe_scene" => self.dispatch_tool("hew.query.scene", json!({}))?,
-            "hew_snapshot" => self.dispatch_tool("hew.view.snapshot", arguments)?,
-            "hew_print_pdf" => self.dispatch_tool("hew.print.pdf", arguments)?,
-            "hew_line_drawing" => self.dispatch_tool("hew.view.line_drawing", arguments)?,
+            "hew_capabilities" => {
+                self.dispatch_tool("hew.meta.capabilities", json!({}), document)?
+            }
+            "hew_transact" => self.dispatch_tool("hew.doc.transact", arguments, document)?,
+            "hew_describe_scene" => self.dispatch_tool("hew.query.scene", json!({}), document)?,
+            "hew_snapshot" => self.dispatch_tool("hew.view.snapshot", arguments, document)?,
+            "hew_print_pdf" => self.dispatch_tool("hew.print.pdf", arguments, document)?,
+            "hew_line_drawing" => {
+                self.dispatch_tool("hew.view.line_drawing", arguments, document)?
+            }
             "hew_query" => {
                 let method = arguments
                     .get("method")
@@ -351,7 +377,7 @@ impl McpServer {
                     .get("params")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                self.dispatch_tool(method, sub_params)?
+                self.dispatch_tool(method, sub_params, document)?
             }
             other => {
                 return Err(JsonRpcErr::invalid_params(format!(
@@ -372,7 +398,12 @@ impl McpServer {
     /// tool call always succeeds at the JSON-RPC layer even when the
     /// underlying command refuses; the refusal is the answer, forwarded
     /// verbatim in live mode (§13).
-    fn dispatch_tool(&mut self, method: &str, params: Value) -> Result<Value, JsonRpcErr> {
+    fn dispatch_tool(
+        &mut self,
+        method: &str,
+        params: Value,
+        document: Option<String>,
+    ) -> Result<Value, JsonRpcErr> {
         let live = matches!(self.backend, Backend::Live(_));
 
         // `hew.library.list`/`describe`/`remove`/`update_meta` never touch
@@ -413,6 +444,7 @@ impl McpServer {
             id: Some(RequestId::Text("mcp".to_string())),
             method: method.to_string(),
             params: Some(params),
+            document,
         };
         let outcome = match &mut self.backend {
             Backend::Embedded { conn, doc, host } => conn.dispatch(doc, host, request),
@@ -464,6 +496,30 @@ impl Default for McpServer {
     fn default() -> McpServer {
         McpServer::new()
     }
+}
+
+/// Pulls the optional `document` out of a tool call's arguments — it
+/// addresses the call (an envelope member), so it must not reach the
+/// command's own params, which reject unknown fields.
+fn take_document(arguments: &mut Value) -> Result<Option<String>, JsonRpcErr> {
+    let Some(object) = arguments.as_object_mut() else {
+        return Ok(None);
+    };
+    match object.remove("document") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(document)) => Ok(Some(document)),
+        Some(_) => Err(JsonRpcErr::invalid_params(
+            "\"document\" must be a string (a document id, path, label, or title)",
+        )),
+    }
+}
+
+/// The `document` property every tool accepts.
+fn document_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "Optional. Send just this call to that open document — a document id (doc_2), or an exact path, label, or title (hew_query hew.meta.documents lists them) — instead of the one you are attached to. It does not change your attachment or the user's front window.",
+    })
 }
 
 /// The MCP tool inventory (docs/agents/HEW_API.md §13): a small set of chunky
@@ -544,6 +600,15 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
                     "width": { "type": "integer", "minimum": 16, "maximum": 2048 },
                     "height": { "type": "integer", "minimum": 16, "maximum": 2048 },
                     "include_ids": { "type": "boolean" },
+                    "include_depth": {
+                        "type": "boolean",
+                        "description": "also return a depth pass (grayscale PNG, near = white, background 0) with depth_near/depth_far in metres — the conditioning image a depth-aware image model expects",
+                    },
+                    "depth_bits": { "type": "integer", "enum": [8, 16], "description": "bits per pixel of the depth PNG (default 8); needs include_depth" },
+                    "include_normals": {
+                        "type": "boolean",
+                        "description": "also return a camera-space normals pass (RGB PNG; x right, y up, z toward the viewer)",
+                    },
                     "path": {
                         "type": "string",
                         "description": "write the PNG here instead of returning it inline — the inline bytes can exceed an MCP tool result's size budget at any useful resolution",
@@ -602,6 +667,12 @@ pub fn generate_tools(registry: &Registry, profile: Profile) -> Vec<Value> {
             },
         }));
     }
+    for tool in &mut tools {
+        if tool["name"] == "hew_capabilities" {
+            continue;
+        }
+        tool["inputSchema"]["properties"]["document"] = document_property();
+    }
     tools
 }
 
@@ -657,6 +728,59 @@ pub fn run_stdio(live: Option<&LiveOptions>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_tool_but_capabilities_accepts_a_document() {
+        let registry = Registry::protocol_1();
+        for tool in generate_tools(&registry, Profile::App) {
+            let has = tool["inputSchema"]["properties"].get("document").is_some();
+            assert_eq!(
+                has,
+                tool["name"] != "hew_capabilities",
+                "{} document property",
+                tool["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn take_document_removes_it_from_the_command_arguments() {
+        let mut args = json!({ "commands": [], "document": "doc_2" });
+        assert_eq!(take_document(&mut args).unwrap().as_deref(), Some("doc_2"));
+        assert!(args.get("document").is_none(), "must not reach the params");
+        let mut none = json!({ "commands": [] });
+        assert_eq!(take_document(&mut none).unwrap(), None);
+        let mut null = json!({ "document": null });
+        assert_eq!(take_document(&mut null).unwrap(), None);
+        let mut bad = json!({ "document": 3 });
+        assert!(take_document(&mut bad).is_err());
+    }
+
+    #[test]
+    fn an_unknown_document_is_refused_by_the_embedded_session_not_ignored() {
+        let mut server = McpServer::new();
+        let reply = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"hew_describe_scene","arguments":{"document":"no-such-doc"}}}"#,
+            )
+            .expect("a request gets a reply");
+        let v: Value = serde_json::from_str(&reply).unwrap();
+        let text = v["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("unknown_document"), "{text}");
+        // The headless session's own document answers to doc_1.
+        let ok = server
+            .handle_line(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"hew_describe_scene","arguments":{"document":"doc_1"}}}"#,
+            )
+            .expect("reply");
+        let v: Value = serde_json::from_str(&ok).unwrap();
+        assert!(
+            !v["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("unknown_document")
+        );
+    }
 
     #[test]
     fn frame_round_trips_compact_json() {

@@ -402,3 +402,77 @@ fn svg_is_true_size_at_the_given_scale() {
     );
     assert!(svg2.contains("width=\"60mm\" height=\"60mm\""), "{svg2}");
 }
+
+/// A close perspective camera under a long ceiling: the ceiling slab's
+/// triangles reach behind the eye. They used to be dropped whole, so a joist
+/// ABOVE the ceiling drew straight through it. They are clipped at the near
+/// plane instead: the ceiling occludes, and its own edges still draw.
+#[test]
+fn a_ceiling_reaching_behind_the_eye_still_hides_the_joist_above_it() {
+    let mut doc = kernel::Document::new();
+    let (_, ceiling) = box_mesh(&mut doc, -20.0, -20.0, 2.5, 20.0, 20.0, 2.55);
+    let (_, joist) = box_mesh(&mut doc, -20.0, 1.0, 2.55, 20.0, 1.2, 3.0);
+    let items = [
+        Item {
+            mesh: &ceiling,
+            pose: Transform::IDENTITY,
+            sid: 1,
+        },
+        Item {
+            mesh: &joist,
+            pose: Transform::IDENTITY,
+            sid: 2,
+        },
+    ];
+    let cam = perspective([0.0, 0.0, 1.6], [0.0, 5.0, 2.4], [0.0, 0.0, 1.0]);
+    let d = hlr::line_drawing(
+        &items,
+        &cam,
+        &Options {
+            include_hidden: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let visible = |sid: u64| {
+        d.segs
+            .iter()
+            .filter(|s| s.sid == sid && s.kind == Kind::Hard)
+            .count()
+    };
+    assert_eq!(visible(2), 0, "no joist edge shows through: {:?}", d.segs);
+    assert!(visible(1) > 0, "the ceiling's own edges draw");
+    assert!(
+        d.segs.iter().any(|s| s.sid == 2 && s.kind == Kind::Hidden),
+        "the joist is there, hidden, on request"
+    );
+    // The cut geometry runs far off the page (a vertex at the near plane
+    // projects ~1000x out); none of it may leak into the output or the
+    // bounds a caller frames the drawing by. The joist's genuinely close
+    // end projects ~90 m wide here, so the bound is the leak, not the scale:
+    // bounds must not exceed the drawing's own extent.
+    let (mn, mx) = d.bounds.unwrap();
+    assert!(
+        mn.iter().chain(mx.iter()).all(|v| v.abs() < 100.0),
+        "bounds stay on the page: {mn:?} {mx:?}"
+    );
+}
+
+#[test]
+fn an_edge_crossing_the_eye_plane_is_cut_not_dropped() {
+    let mut doc = kernel::Document::new();
+    // A long thin bar passing under the camera, front to back.
+    let (_, bar) = box_mesh(&mut doc, -0.1, -30.0, 2.5, 0.1, 30.0, 2.6);
+    let items = [Item {
+        mesh: &bar,
+        pose: Transform::IDENTITY,
+        sid: 1,
+    }];
+    let cam = perspective([0.0, 0.0, 1.6], [0.0, 5.0, 2.4], [0.0, 0.0, 1.0]);
+    let d = hlr::line_drawing(&items, &cam, &Options::default()).unwrap();
+    assert!(
+        count(&d, Kind::Hard) > 0,
+        "the bar's long edges draw out to the near plane: {:?}",
+        d.segs
+    );
+}

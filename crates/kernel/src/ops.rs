@@ -2865,31 +2865,6 @@ impl Object {
             }
         }
 
-        if std::env::var("HEW_DEBUG_DUMP").is_ok() {
-            for (vid, v) in &obj.vertices {
-                eprintln!("V {:?} pos={:?}", vid, v.position);
-            }
-            for (fid, f) in &obj.faces {
-                eprintln!(
-                    "F {:?} outer_loop={:?} normal={:?}",
-                    fid,
-                    f.outer_loop,
-                    f.plane.normal()
-                );
-            }
-            for (l, lp) in &obj.loops {
-                eprintln!(
-                    "L {:?} face={:?} first={:?}",
-                    l, lp.face, lp.first_half_edge
-                );
-            }
-            for (h, he) in &obj.half_edges {
-                eprintln!(
-                    "HE {:?} origin={:?} twin={:?} next={:?} prev={:?} edge={:?} loop={:?}",
-                    h, he.origin, he.twin, he.next, he.prev, he.edge, he.loop_id
-                );
-            }
-        }
         // Walls raised along a drawn circle's rim are chord facets of its
         // cylinder: stamp them so they shade smooth, snap at the circle's
         // center and quadrants, and push as one wall — exactly as a boss

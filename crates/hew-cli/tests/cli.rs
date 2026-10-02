@@ -256,6 +256,7 @@ fn run_script_rejects_out_together_with_live() {
     let live = hew_cli::live::LiveOptions {
         launch: false,
         instance: None,
+        document: None,
     };
     let outcome = hew_cli::run::run_script(&script_path, Some(&out_path), Some(&live));
     assert_eq!(
@@ -441,7 +442,10 @@ fn cli_host_imports_a_tetrahedron_stl_with_units() {
         .import_document(
             &mut doc,
             path.to_str().unwrap(),
-            &serde_json::json!({ "units": "m" }),
+            &api::ImportOptions {
+                units: Some("m".to_string()),
+                ..Default::default()
+            },
         )
         .expect("a valid tetrahedron STL imports");
 
@@ -462,7 +466,11 @@ fn cli_host_import_refuses_units_required_without_units() {
     let mut doc = Document::new();
     let mut host = CliHost::new();
     let err = host
-        .import_document(&mut doc, path.to_str().unwrap(), &serde_json::json!({}))
+        .import_document(
+            &mut doc,
+            path.to_str().unwrap(),
+            &api::ImportOptions::default(),
+        )
         .unwrap_err();
     assert_eq!(err.name, "units_required");
 
@@ -834,6 +842,9 @@ fn snapshot_respects_user_hidden_state() {
         view: api::host::StandardView::from_name("iso"),
         scene: None,
         include_ids: true,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
         path: None,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
@@ -908,6 +919,9 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         view: None,
         scene: Some(sid),
         include_ids: true,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
         path: None,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
@@ -974,6 +988,9 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         view: None,
         scene: Some(sid),
         include_ids: true,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
         path: None,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
@@ -1015,6 +1032,9 @@ fn snapshot_scene_refuses_unknown_scene() {
         view: None,
         scene: Some(0xffff_ffff),
         include_ids: false,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
         path: None,
     };
     let err = host.snapshot(&doc, &params).unwrap_err();
@@ -1307,6 +1327,116 @@ fn library_save_list_insert_round_trips_geometry_through_a_real_library_folder()
 
     unsafe {
         std::env::remove_var("HEW_LIBRARY_DIR");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `hew.view.snapshot {include_depth, include_normals}` end to end through
+/// the dispatcher and the headless host: inline passes decode as PNGs of
+/// the declared kind, the metric range is sane, and with a `path` each
+/// pass lands in its own sidecar file.
+#[test]
+fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
+    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
+    let mut conn = Connection::new(Profile::Core, "t");
+    let mut doc = Document::new();
+    let mut host = CliHost::new();
+    let mut id = 0;
+    let mut call = |conn: &mut Connection,
+                    doc: &mut Document,
+                    host: &mut CliHost,
+                    method: &str,
+                    params: serde_json::Value| {
+        id += 1;
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(id)),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        };
+        match conn.dispatch(doc, host, request) {
+            DispatchOutcome::Reply(r) => r,
+            DispatchOutcome::Dropped => unreachable!(),
+        }
+    };
+    call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.meta.hello",
+        serde_json::json!({"protocol": 1}),
+    );
+    call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.doc.new",
+        serde_json::json!({}),
+    );
+    let built = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.doc.transact",
+        serde_json::json!({"commands":[
+            {"method":"hew.sketch.draw_rect","as":"r","params":{"plane":{"ground":true},"corner_a":[0,0,0],"corner_b":[1,1,0]}},
+            {"method":"hew.solid.extrude","params":{"region":{"$ref":"r#/region_id"},"distance":1.0}}]}),
+    );
+    assert!(built.error.is_none(), "{:?}", built.error);
+
+    // Inline.
+    let r = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.snapshot",
+        serde_json::json!({"width": 64, "height": 64, "view": "iso", "include_depth": true, "depth_bits": 16, "include_normals": true}),
+    );
+    let out = r.result.expect("renders");
+    let png_header =
+        |b64: &str| -> Vec<u8> { api::commands::doc::decode_base64(b64).expect("base64") };
+    let depth = png_header(out["depth_png_base64"].as_str().expect("depth inline"));
+    assert_eq!(&depth[1..4], b"PNG");
+    assert_eq!(&depth[24..26], &[16, 0], "16-bit grayscale");
+    let normals = png_header(out["normals_png_base64"].as_str().expect("normals inline"));
+    assert_eq!(&normals[24..26], &[8, 2], "8-bit RGB");
+    let (near, far) = (
+        out["depth_near"].as_f64().unwrap(),
+        out["depth_far"].as_f64().unwrap(),
+    );
+    assert!(near > 0.0 && near < far, "{near} {far}");
+    assert_eq!(out["depth_bits"], 16);
+
+    // Sidecars next to a written snapshot.
+    let dir = scratch_dir("depth-passes");
+    let path = dir.join("shot.png");
+    let r = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        "hew.view.snapshot",
+        serde_json::json!({"width": 64, "height": 64, "view": "front", "include_depth": true, "include_normals": true, "path": path.to_str().unwrap()}),
+    );
+    let out = r.result.expect("renders");
+    assert!(path.exists());
+    assert!(std::path::Path::new(out["depth_path"].as_str().unwrap()).exists());
+    assert!(std::path::Path::new(out["normals_path"].as_str().unwrap()).exists());
+    assert!(
+        out["depth_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("shot.png.depth.png")
+    );
+    assert!(out.get("depth_png_base64").is_none());
+
+    // Validation: 12 bits is not a depth format; depth_bits needs include_depth.
+    for params in [
+        serde_json::json!({"include_depth": true, "depth_bits": 12}),
+        serde_json::json!({"depth_bits": 16}),
+    ] {
+        let r = call(&mut conn, &mut doc, &mut host, "hew.view.snapshot", params);
+        assert_eq!(r.error.expect("invalid").code, api::codes::INVALID_PARAMS);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

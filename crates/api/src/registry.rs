@@ -103,9 +103,12 @@ impl Profile {
         match self {
             Profile::App => true,
             Profile::Core => {
-                command.name == "hew.view.snapshot"
-                    || command.name == "hew.view.line_drawing"
-                    || !command.name.starts_with("hew.view.")
+                // Closing or raising a window is a live-application effect
+                // with nothing to act on headlessly, like `hew.view.*`.
+                !matches!(command.name, "hew.doc.close" | "hew.doc.focus")
+                    && (command.name == "hew.view.snapshot"
+                        || command.name == "hew.view.line_drawing"
+                        || !command.name.starts_with("hew.view."))
             }
         }
     }
@@ -121,6 +124,41 @@ pub struct Registry {
 /// each command tightens when its conformance tests land.
 fn obj() -> serde_json::Value {
     serde_json::json!({ "type": "object" })
+}
+
+/// One entry of `hew.meta.documents` / the `hello` response
+/// (docs/agents/HEW_API.md §4.2).
+fn document_info_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "id": { "type": "string", "description": "doc_N, unique for the host's lifetime and never reused" },
+            "title": { "type": "string" },
+            "path": { "type": ["string", "null"], "description": "the file last opened from or saved to; null while unsaved" },
+            "dirty": { "type": "boolean" },
+            "label": { "type": "string", "description": "the client-chosen label given at hew.doc.new/open, if any" },
+            "front": { "type": "boolean", "description": "this is the user's front-most document window" },
+            "attached": { "type": "boolean", "description": "this is the connection's current document" }
+        },
+        "required": ["id", "title", "path", "dirty"]
+    })
+}
+
+/// `focus` on `hew.doc.new` / `hew.doc.open`.
+fn window_focus_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["background", "front"],
+        "description": "where the new window goes; background (the default) never takes the user's focus"
+    })
+}
+
+/// `label` on `hew.doc.new` / `hew.doc.open`.
+fn window_label_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "description": "a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents"
+    })
 }
 
 /// The `hew.library` metadata fields every `hew.library.*` result carries
@@ -217,7 +255,7 @@ impl Registry {
             R,
             Host,
             Req,
-            "The host's open documents.",
+            "The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.",
         );
         // hew.doc — lifecycle and the transaction container.
         add(
@@ -225,7 +263,7 @@ impl Registry {
             S,
             Kernel,
             Req,
-            "Bind this connection to one open document.",
+            "Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.",
         );
         add(
             "hew.doc.transact",
@@ -239,14 +277,28 @@ impl Registry {
             S,
             Host,
             Req,
-            "Create a fresh document (headless hosts; live hosts advertise via capabilities).",
+            "Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.",
         );
         add(
             "hew.doc.open",
             S,
             Host,
             Req,
-            "Open a .hew document (headless hosts; live hosts advertise via capabilities).",
+            "Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.",
+        );
+        add(
+            "hew.doc.close",
+            S,
+            Host,
+            Std,
+            "Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.",
+        );
+        add(
+            "hew.doc.focus",
+            S,
+            Host,
+            Std,
+            "Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.",
         );
         add("hew.doc.save", S, Host, Req, "Save the attached document.");
         add(
@@ -261,7 +313,7 @@ impl Registry {
             S,
             Host,
             Std,
-            "Merge a foreign-format file into the attached document through the shared healing pipeline.",
+            "Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.",
         );
         add(
             "hew.doc.purge_unused",
@@ -851,7 +903,7 @@ impl Registry {
                     },
                     "profile": { "type": "string", "enum": ["core", "app"] },
                     "encoding": { "type": "string" },
-                    "documents": { "type": "array" }
+                    "documents": { "type": "array", "items": document_info_schema() }
                 },
                 "required": ["protocol", "app", "profile", "encoding", "documents"]
             });
@@ -902,9 +954,19 @@ impl Registry {
             let cmd = commands.get_mut("hew.doc.attach").expect("declared above");
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "document": { "type": "string" } }
+                "properties": {
+                    "document": {
+                        "type": "string",
+                        "description": "a document id (doc_N), or its exact path, label, or title when unambiguous"
+                    }
+                },
+                "additionalProperties": false
             });
-            cmd.result_schema = serde_json::json!({ "type": "object" });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "document": document_info_schema() }
+            });
+            cmd.refusals = vec!["unknown_document", "ambiguous_document"];
         }
         // The transaction container itself (dispatch-inline, §6): its own
         // refusals are the runtime $ref failure plus whatever its inner
@@ -961,7 +1023,9 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "documents": { "type": "array" } },
+                "properties": {
+                    "documents": { "type": "array", "items": document_info_schema() }
+                },
                 "required": ["documents"]
             });
             cmd.refusals = Vec::new();
@@ -1136,39 +1200,104 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "focus": window_focus_schema(),
+                    "label": window_label_schema()
+                },
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": {},
-                "additionalProperties": false
+                "properties": { "document": document_info_schema() }
             });
-            cmd.refusals = vec!["host_capability_missing"];
+            cmd.refusals = vec!["host_capability_missing", "window_not_ready"];
         }
         {
             let cmd = commands.get_mut("hew.doc.open").expect("declared above");
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "focus": window_focus_schema(),
+                    "label": window_label_schema()
+                },
                 "required": ["path"],
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "document": document_info_schema(),
+                    "already_open": {
+                        "type": "boolean",
+                        "description": "the file was already open in a window; the connection was attached to it instead of opening a second copy"
+                    }
+                }
+            });
+            cmd.refusals = vec!["host_capability_missing", "load_failed", "window_not_ready"];
+        }
+        {
+            let cmd = commands.get_mut("hew.doc.close").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "document": { "type": "string" },
+                    "discard": {
+                        "type": "boolean",
+                        "description": "close even with unsaved changes (they are lost); default false"
+                    }
+                },
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["host_capability_missing", "load_failed"];
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "closed": document_info_schema() }
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_document",
+                "ambiguous_document",
+                "unsaved_changes",
+                "last_document",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.doc.focus").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "document": { "type": "string" } },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "document": document_info_schema() }
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_document",
+                "ambiguous_document",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.save").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Save the attached document — written by hosts with filesystem access, bytes base64 by those without.";
+            cmd.summary = "Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "path": { "type": "string" } },
+                "properties": {
+                    "path": { "type": "string" },
+                    "copy": {
+                        "type": "boolean",
+                        "description": "write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path`"
+                    },
+                    "return_bytes": {
+                        "type": "boolean",
+                        "description": "hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path`"
+                    }
+                },
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
@@ -1176,7 +1305,12 @@ impl Registry {
                 "properties": { "bytes_base64": { "type": "string" } },
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["host_capability_missing", "path_required", "save_failed"];
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "path_required",
+                "save_failed",
+                "file_open_elsewhere",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.export").expect("declared above");
@@ -1218,7 +1352,16 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string" },
-                    "units": { "type": "string", "enum": ["m", "mm", "cm", "in"] }
+                    "units": { "type": "string", "enum": ["m", "mm", "cm", "in"] },
+                    "bytes_base64": {
+                        "type": "string",
+                        "description": "the file's bytes, for a host with no filesystem (the desktop app); `path` then only names the file. hew-cli supplies this for you"
+                    },
+                    "images": {
+                        "type": "object",
+                        "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+                        "additionalProperties": { "type": "object" }
+                    }
                 },
                 "required": ["path"],
                 "additionalProperties": false
@@ -1299,6 +1442,19 @@ impl Registry {
                         "type": "string",
                         "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0."
                     },
+                    "include_depth": {
+                        "type": "boolean",
+                        "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect"
+                    },
+                    "depth_bits": {
+                        "type": "integer",
+                        "enum": [8, 16],
+                        "description": "bits per pixel of the depth PNG (default 8); only with include_depth"
+                    },
+                    "include_normals": {
+                        "type": "boolean",
+                        "description": "defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255)"
+                    },
                     "include_ids": {
                         "type": "boolean",
                         "description": "defaults to false; when true, also returns a per-pixel id-buffer and its palette"
@@ -1312,7 +1468,7 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "description": "two shapes depending on whether path was given: bytes base64 inline (default), or a path plus, when include_ids was true, a sidecar path for the id-buffer",
+                "description": "two shapes depending on whether path was given: bytes base64 inline (default), or a path plus a sidecar path for each extra pass asked for (id-buffer, depth, normals)",
                 "properties": {
                     "png_base64": {
                         "type": "string",
@@ -1336,6 +1492,25 @@ impl Registry {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "public ids; id_palette[i] is what the id-buffer (inline or on disk) reports as index i+1"
+                    },
+                    "depth_png_base64": {
+                        "type": "string",
+                        "description": "present only when include_depth was true and path was not given"
+                    },
+                    "depth_path": {
+                        "type": "string",
+                        "description": "present only when include_depth and path were both given: \"<path>.depth.png\""
+                    },
+                    "depth_near": { "type": "number", "description": "with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface" },
+                    "depth_far": { "type": "number", "description": "with a depth pass: the farthest drawn surface" },
+                    "depth_bits": { "type": "integer", "description": "with a depth pass: 8 or 16" },
+                    "normals_png_base64": {
+                        "type": "string",
+                        "description": "present only when include_normals was true and path was not given"
+                    },
+                    "normals_path": {
+                        "type": "string",
+                        "description": "present only when include_normals and path were both given: \"<path>.normals.png\""
                     }
                 },
                 "required": ["width", "height"]
@@ -3038,7 +3213,7 @@ impl Registry {
                     "plane": plane_schema,
                     "center": point_schema,
                     "radius": { "type": "number", "exclusiveMinimum": 0 },
-                    "sides": { "type": "integer", "minimum": 3 }
+                    "sides": { "type": "integer", "minimum": 3, "maximum": 120 }
                 },
                 "required": ["plane", "center", "radius", "sides"]
             });
@@ -3056,6 +3231,7 @@ impl Registry {
                     "ambiguous_locator",
                     "loop_not_strictly_inside",
                     "loop_self_intersects",
+                    "sides_above_cap",
                 ],
                 face_imprint_common_refusals(),
             ]
@@ -3451,6 +3627,9 @@ impl Registry {
             "hew.history.redo",
             "hew.doc.new",
             "hew.doc.open",
+            // Additive, but a real mutation: it merges a file's objects in
+            // (an `Imported` undo entry) — a live host must resync after it.
+            "hew.doc.import",
             // ReadOnly class (no undo bracket, no `$ref`-blocking transact
             // requirement) but a real mutation: it stamps `hew.library`
             // source provenance on the saved selection's nodes
@@ -3548,16 +3727,18 @@ mod tests {
 
     /// Core is App minus `hew.view.*`, except the view commands with a
     /// headless render path (§10) — `hew.view.snapshot` and
-    /// `hew.view.line_drawing` — which core grants too. A narrowable
-    /// maximum, not a different protocol.
+    /// `hew.view.line_drawing` — which core grants too, and minus the
+    /// window commands (`hew.doc.close`/`focus`), which have no headless
+    /// meaning. A narrowable maximum, not a different protocol.
     #[test]
     fn core_profile_grants_snapshot_but_withholds_other_view_commands() {
         let reg = Registry::protocol_1();
         for cmd in reg.commands() {
             assert!(Profile::App.grants(cmd));
-            let expected = cmd.name == "hew.view.snapshot"
+            let expected = (cmd.name == "hew.view.snapshot"
                 || cmd.name == "hew.view.line_drawing"
-                || !cmd.name.starts_with("hew.view.");
+                || !cmd.name.starts_with("hew.view."))
+                && !matches!(cmd.name, "hew.doc.close" | "hew.doc.focus");
             assert_eq!(
                 Profile::Core.grants(cmd),
                 expected,

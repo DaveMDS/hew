@@ -10,7 +10,7 @@
 
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::{CmdError, Ctx, Handler};
-use crate::host::SnapshotParams;
+use crate::host::{ImportImage, ImportOptions, SnapshotParams};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -19,6 +19,8 @@ pub fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.doc.new" => Some(new_doc),
         "hew.doc.open" => Some(open_doc),
+        "hew.doc.close" => Some(close_doc),
+        "hew.doc.focus" => Some(focus_doc),
         "hew.doc.save" => Some(save_doc),
         "hew.doc.export" => Some(export_doc),
         "hew.doc.import" => Some(import_doc),
@@ -33,28 +35,93 @@ fn parse<T: for<'de> Deserialize<'de>>(params: &Value) -> Result<T, CmdError> {
 
 // -------------------------------------------------------------- hew.doc.new
 
+/// `focus` and `label` steer a multi-window host's new window (the desktop
+/// app handles them before the command reaches the dispatcher); a
+/// single-document host has no window to place and ignores them.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct NewParams {}
+#[allow(dead_code)] // validated here, acted on by a multi-window host
+struct NewParams {
+    #[serde(default)]
+    focus: Option<WindowFocus>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WindowFocus {
+    Background,
+    Front,
+}
 
 fn new_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    let NewParams {} = parse(params)?;
+    let NewParams { .. } = parse(params)?;
     ctx.host.new_document(ctx.doc).map_err(CmdError::Refusal)?;
-    Ok(serde_json::json!({}))
+    Ok(document_result(ctx))
+}
+
+/// `{document: <the host's only/working document>}` — what a
+/// single-document host answers `new`/`open` with; the multi-window
+/// desktop host answers these itself with the new window's entry.
+fn document_result(ctx: &Ctx) -> Value {
+    match ctx.host.documents(ctx.doc).into_iter().next() {
+        Some(document) => serde_json::json!({ "document": document }),
+        None => serde_json::json!({}),
+    }
 }
 
 // ------------------------------------------------------------- hew.doc.open
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[allow(dead_code)] // `focus`/`label`: validated here, acted on by a multi-window host
 struct OpenParams {
     path: String,
+    #[serde(default)]
+    focus: Option<WindowFocus>,
+    #[serde(default)]
+    label: Option<String>,
 }
 
 fn open_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    let OpenParams { path } = parse(params)?;
+    let OpenParams { path, .. } = parse(params)?;
     ctx.host
         .open_document(ctx.doc, &path)
+        .map_err(CmdError::Refusal)?;
+    Ok(document_result(ctx))
+}
+
+// ------------------------------------------------------ hew.doc.close / focus
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseParams {
+    #[serde(default)]
+    document: Option<String>,
+    #[serde(default)]
+    discard: bool,
+}
+
+fn close_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let CloseParams { document, discard } = parse(params)?;
+    ctx.host
+        .close_document(document.as_deref(), discard)
+        .map_err(CmdError::Refusal)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FocusParams {
+    #[serde(default)]
+    document: Option<String>,
+}
+
+fn focus_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let FocusParams { document } = parse(params)?;
+    ctx.host
+        .focus_document(document.as_deref())
         .map_err(CmdError::Refusal)?;
     Ok(serde_json::json!({}))
 }
@@ -66,10 +133,43 @@ fn open_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 struct SaveParams {
     #[serde(default)]
     path: Option<String>,
+    /// Write a copy: the document is not rebound to `path` and keeps its
+    /// unsaved mark. Requires `path`.
+    #[serde(default)]
+    copy: bool,
+    /// Serialize and hand the bytes back — nothing is written anywhere, the
+    /// document is not bound to a file and is not marked saved. Works the
+    /// same on every host; it is how a client reads a document it does not
+    /// own (hew-cli's live render fallback).
+    #[serde(default)]
+    return_bytes: bool,
 }
 
 fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    let SaveParams { path } = parse(params)?;
+    let SaveParams {
+        path,
+        copy,
+        return_bytes,
+    } = parse(params)?;
+    if return_bytes {
+        if path.is_some() || copy {
+            return Err(CmdError::Params(
+                "`return_bytes` takes neither `path` nor `copy`".into(),
+            ));
+        }
+        return Ok(serde_json::json!({
+            "bytes_base64": encode_base64(&ctx.doc.save_for_persistence())
+        }));
+    }
+    if copy {
+        let Some(path) = path else {
+            return Err(CmdError::Params("`copy` needs a `path`".into()));
+        };
+        ctx.host
+            .save_copy(ctx.doc, &path)
+            .map_err(CmdError::Refusal)?;
+        return Ok(serde_json::json!({}));
+    }
     let written = ctx
         .host
         .save_document(ctx.doc, path.as_deref())
@@ -140,11 +240,55 @@ struct ImportParams {
     /// note); formats that do (glTF, COLLADA, `.skp`) ignore it.
     #[serde(default)]
     units: Option<String>,
+    /// The file's bytes, for a host with no filesystem of its own (the
+    /// desktop app); `path` then only names the file — its extension picks
+    /// the format and its stem names STL objects. `hew-cli` fills this in
+    /// for you. A host with a filesystem ignores it only if absent: given,
+    /// it is used instead of reading `path`.
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    /// COLLADA texture images the file refers to, by the uri it uses.
+    #[serde(default)]
+    images: Option<std::collections::BTreeMap<String, ImportImageParam>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportImageParam {
+    bytes_base64: String,
+    #[serde(default)]
+    format: Option<String>,
 }
 
 fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    let ImportParams { path, units } = parse(params)?;
-    let options = serde_json::json!({ "units": units });
+    let ImportParams {
+        path,
+        units,
+        bytes_base64,
+        images,
+    } = parse(params)?;
+    let mut options = ImportOptions {
+        units,
+        ..ImportOptions::default()
+    };
+    if let Some(b64) = bytes_base64 {
+        options.bytes = Some(
+            decode_base64(&b64)
+                .ok_or_else(|| CmdError::Params("bytes_base64 is not valid base64".into()))?,
+        );
+    }
+    for (uri, image) in images.unwrap_or_default() {
+        let bytes = decode_base64(&image.bytes_base64).ok_or_else(|| {
+            CmdError::Params(format!("images[{uri}].bytes_base64 is not valid base64"))
+        })?;
+        options.images.insert(
+            uri,
+            ImportImage {
+                bytes,
+                format: image.format,
+            },
+        );
+    }
     let report = ctx
         .host
         .import_document(ctx.doc, &path, &options)
@@ -176,6 +320,12 @@ struct RawSnapshotParams {
     scene: Option<String>,
     #[serde(default)]
     include_ids: Option<bool>,
+    #[serde(default)]
+    include_depth: Option<bool>,
+    #[serde(default)]
+    depth_bits: Option<u32>,
+    #[serde(default)]
+    include_normals: Option<bool>,
     #[serde(default)]
     path: Option<String>,
 }
@@ -210,6 +360,22 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         .unwrap_or(SNAPSHOT_DEFAULT_SIZE)
         .clamp(SNAPSHOT_MIN_SIZE, SNAPSHOT_MAX_SIZE);
 
+    let include_depth = raw.include_depth.unwrap_or(false);
+    let depth_bits = match raw.depth_bits {
+        None => 8,
+        Some(_) if !include_depth => {
+            return Err(CmdError::Params(
+                "depth_bits only applies with include_depth".to_string(),
+            ));
+        }
+        Some(bits @ (8 | 16)) => bits as u8,
+        Some(other) => {
+            return Err(CmdError::Params(format!(
+                "depth_bits is 8 or 16, not {other}"
+            )));
+        }
+    };
+
     let snapshot_params = SnapshotParams {
         width,
         height,
@@ -217,6 +383,9 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         view,
         scene,
         include_ids: raw.include_ids.unwrap_or(false),
+        include_depth,
+        depth_bits,
+        include_normals: raw.include_normals.unwrap_or(false),
         path: raw.path,
     };
     let result = ctx
@@ -248,6 +417,21 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 out["id_buffer_path"] = Value::String(id_buffer_path);
                 out["id_palette"] = serde_json::json!(result.id_palette);
             }
+            if let Some(depth) = &result.depth {
+                let depth_path = format!("{path}.depth.png");
+                ctx.host
+                    .write_snapshot(&depth_path, &depth.png)
+                    .map_err(CmdError::Refusal)?;
+                out["depth_path"] = Value::String(depth_path);
+                add_depth_range(&mut out, depth);
+            }
+            if let Some(normals) = &result.normals_png {
+                let normals_path = format!("{path}.normals.png");
+                ctx.host
+                    .write_snapshot(&normals_path, normals)
+                    .map_err(CmdError::Refusal)?;
+                out["normals_path"] = Value::String(normals_path);
+            }
             Ok(out)
         }
         None => {
@@ -260,9 +444,24 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 out["id_buffer_base64"] = Value::String(encode_base64(id_buffer));
                 out["id_palette"] = serde_json::json!(result.id_palette);
             }
+            if let Some(depth) = &result.depth {
+                out["depth_png_base64"] = Value::String(encode_base64(&depth.png));
+                add_depth_range(&mut out, depth);
+            }
+            if let Some(normals) = &result.normals_png {
+                out["normals_png_base64"] = Value::String(encode_base64(normals));
+            }
             Ok(out)
         }
     }
+}
+
+/// The metric range and depth of a depth pass, the same fields whether the
+/// image is inline or in a file.
+fn add_depth_range(out: &mut Value, depth: &crate::host::DepthPass) {
+    out["depth_near"] = serde_json::json!(depth.near);
+    out["depth_far"] = serde_json::json!(depth.far);
+    out["depth_bits"] = serde_json::json!(depth.bits);
 }
 
 // ------------------------------------------------------------------- base64
@@ -271,7 +470,7 @@ fn snapshot(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 /// the whole point of `hew.doc.export`'s inline-bytes path and
 /// `hew.view.snapshot`'s PNG result is a few dozen lines nobody needs a
 /// crate for.
-pub(super) fn encode_base64(bytes: &[u8]) -> String {
+pub fn encode_base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -300,7 +499,7 @@ pub(super) fn encode_base64(bytes: &[u8]) -> String {
 /// param is the only caller today. `None` on any character outside the
 /// alphabet, a bad length, or misplaced padding: a malformed payload is
 /// refused typed (`CmdError::Params`), never guessed at.
-pub(super) fn decode_base64(s: &str) -> Option<Vec<u8>> {
+pub fn decode_base64(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let s = s.trim().as_bytes();
     if !s.len().is_multiple_of(4) {

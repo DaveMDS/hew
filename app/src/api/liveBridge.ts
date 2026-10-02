@@ -41,8 +41,35 @@ import type { Scene } from '../wasm/loader'
 import type { StandardView, ViewportApi } from '../viewport/Viewport'
 import { setLengthUnit, type LengthFormat } from '../settings/units'
 
+/** What a webview-side live operation answers (`hew://api-op-reply`'s body
+ * beside its `opId`). `refusal` names a typed API refusal the shell turns
+ * into the client's reply. `afterReply` runs once the answer is on its way —
+ * for an operation whose success destroys this very window. */
+export interface LiveOpOutcome {
+  ok: boolean
+  refusal?: string
+  message?: string
+  afterReply?: () => Promise<void>
+}
+
+/** Runs one shell-requested operation that needs this window's real
+ * document state: `open` (`{path}`: load a file into this fresh window) and
+ * `close` (`{discard}`: close this window, refusing `unsaved_changes`
+ * unless discarding). Wire: Rust -> JS `hew://api-op` `{opId, op, args}`,
+ * JS -> Rust `hew://api-op-reply` `{opId, ...LiveOpOutcome}`. */
+export type LiveOpRunner = (op: string, args: Record<string, unknown>) => Promise<LiveOpOutcome>
+
 export interface LiveBridgeDeps {
   getScene: () => Scene | null
+  /** Writes the viewport's current camera into the document (the same step
+   * Save does), so a `hew.doc.save` that hands bytes back carries "what the
+   * user is looking at" — which is what a client-side snapshot of this
+   * document then renders from when the request names no camera. Optional. */
+  pushCameraState?: (scene: Scene) => void
+  /** The webview half of the shell's window-management operations
+   * (`hew.doc.open`/`close`) — optional; absent answers every op as
+   * unsupported. */
+  runOp?: LiveOpRunner
   getViewportApi: () => ViewportApi | null
   /** Reconcile + re-render after a mutation when no `Viewport` is mounted
    * — mirrors `HarnessDeps.reconcile` (`test/harness.ts`), the app's own
@@ -294,6 +321,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
   let unlistenOpen: (() => void) | undefined
   let unlistenClose: (() => void) | undefined
   let unlistenFrame: (() => void) | undefined
+  let unlistenOp: (() => void) | undefined
   let tauriEmit: ((event: string, payload?: unknown) => Promise<void>) | null = null
 
   const emitReply = (connId: number, frame: string): void => {
@@ -314,6 +342,41 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       })
   }
 
+  const handleOp = (opId: number, op: string, args: Record<string, unknown>): void => {
+    // Resolves once the reply has actually been handed to the shell, so an
+    // operation that destroys this window afterwards cannot outrun it.
+    const answer = async (outcome: Omit<LiveOpOutcome, 'afterReply'>): Promise<void> => {
+      const payload = { opId, ...outcome }
+      try {
+        if (tauriEmit === null) {
+          const { emit } = await import('@tauri-apps/api/event')
+          tauriEmit = emit
+        }
+        await tauriEmit('hew://api-op-reply', payload)
+      } catch {
+        /* not in Tauri, or emission failed — the shell's own op timeout covers it */
+      }
+    }
+    if (deps.runOp === undefined) {
+      void answer({
+        ok: false,
+        refusal: 'host_capability_missing',
+        message: 'this window cannot run that operation',
+      })
+      return
+    }
+    deps
+      .runOp(op, args)
+      .then(async (outcome) => {
+        const { afterReply, ...rest } = outcome
+        await answer(rest)
+        if (afterReply !== undefined) await afterReply()
+      })
+      .catch(async (err: unknown) => {
+        await answer({ ok: false, message: err instanceof Error ? err.message : String(err) })
+      })
+  }
+
   const refreshAfterMutation = (): void => {
     const api = deps.getViewportApi()
     if (api !== null) api.refreshScene()
@@ -322,6 +385,11 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
 
   const handleOpen = (connId: number): void => {
     openConnIds.add(connId)
+    // Idempotent: the shell re-announces a connection while it waits for a
+    // freshly created window to come up (the first announcement can land
+    // before this listener exists), so a repeat must not open a second wasm
+    // connection and orphan the first.
+    if (wasmConnOf.has(connId)) return
     const scene = deps.getScene()
     if (scene === null) return // not ready yet — handleFrame lazily opens on the first frame instead
     wasmConnOf.set(connId, scene.api_connection_open())
@@ -361,6 +429,15 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       wasmId = scene.api_connection_open()
       wasmConnOf.set(connId, wasmId)
     }
+    // A save that hands bytes to a client (the render fallback's way of
+    // reading this document) should see the user's current camera.
+    try {
+      if ((JSON.parse(frame) as { method?: unknown }).method === 'hew.doc.save') {
+        deps.pushCameraState?.(scene)
+      }
+    } catch {
+      /* an unparseable frame is answered by the dispatcher below */
+    }
     const reply = scene.api_dispatch(wasmId, frame)
     if (reply === undefined) return // a notification: no reply, per §4.1
     emitReply(connId, reply)
@@ -396,18 +473,26 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
         win.listen<{ connId: number; frame: string }>('hew://api-frame', (event) => {
           handleFrame(event.payload.connId, event.payload.frame)
         }),
+        win.listen<{ opId: number; op: string; args: Record<string, unknown> }>(
+          'hew://api-op',
+          (event) => {
+            handleOp(event.payload.opId, event.payload.op, event.payload.args ?? {})
+          },
+        ),
       ])
     })
-    .then(([openFn, closeFn, frameFn]) => {
+    .then(([openFn, closeFn, frameFn, opFn]) => {
       if (cancelled) {
         openFn()
         closeFn()
         frameFn()
+        opFn()
         return
       }
       unlistenOpen = openFn
       unlistenClose = closeFn
       unlistenFrame = frameFn
+      unlistenOp = opFn
     })
     .catch(() => {
       /* not in Tauri (shouldn't happen — gated by isTauri above), or registration failed */
@@ -418,5 +503,6 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     unlistenOpen?.()
     unlistenClose?.()
     unlistenFrame?.()
+    unlistenOp?.()
   }
 }

@@ -15,6 +15,8 @@ export interface JsonRpcRequest {
   id: number | string
   method: string
   params?: unknown
+  /** The one document this request addresses (§4.2): an id, path, label, or title. */
+  document?: string
 }
 
 /** One JSON-RPC 2.0 response frame: exactly one of `result` / `error`
@@ -206,15 +208,33 @@ export interface ContextExitParams {}
 export interface ContextExitResult {}
 
 /**
- * `hew.doc.attach` (v1) — Bind this connection to one open document.
+ * `hew.doc.attach` (v1) — Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.
  * Tier: Required · Class: solitary · Served: kernel
- * Refusals: none.
+ * Refusals: unknown_document, ambiguous_document
  */
 export interface DocAttachParams {
+  /** a document id (doc_N), or its exact path, label, or title when unambiguous */
   document?: string
 }
 
-export type DocAttachResult = UnspecifiedShape
+export interface DocAttachResult {
+  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
+
+/**
+ * `hew.doc.close` (v1) — Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, unknown_document, ambiguous_document, unsaved_changes, last_document
+ */
+export interface DocCloseParams {
+  /** close even with unsaved changes (they are lost); default false */
+  discard?: boolean
+  document?: string
+}
+
+export interface DocCloseResult {
+  closed?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
 
 /**
  * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.
@@ -234,11 +254,28 @@ export interface DocExportResult {
 }
 
 /**
- * `hew.doc.import` (v1) — Merge a foreign-format file into the attached document through the shared healing pipeline.
+ * `hew.doc.focus` (v1) — Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, unknown_document, ambiguous_document
+ */
+export interface DocFocusParams {
+  document?: string
+}
+
+export interface DocFocusResult {
+  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
+
+/**
+ * `hew.doc.import` (v1) — Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, units_required, load_failed, unsupported_format
  */
 export interface DocImportParams {
+  /** the file's bytes, for a host with no filesystem (the desktop app); `path` then only names the file. hew-cli supplies this for you */
+  bytes_base64?: string
+  /** COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg} */
+  images?: UnspecifiedShape
   path: string
   units?: "m" | "mm" | "cm" | "in"
 }
@@ -248,24 +285,39 @@ export interface DocImportResult {
 }
 
 /**
- * `hew.doc.new` (v1) — Create a fresh document (headless hosts; live hosts advertise via capabilities).
+ * `hew.doc.new` (v1) — Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing
+ * Refusals: host_capability_missing, window_not_ready
  */
-export interface DocNewParams {}
+export interface DocNewParams {
+  /** where the new window goes; background (the default) never takes the user's focus */
+  focus?: "background" | "front"
+  /** a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents */
+  label?: string
+}
 
-export interface DocNewResult {}
+export interface DocNewResult {
+  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
 
 /**
- * `hew.doc.open` (v1) — Open a .hew document (headless hosts; live hosts advertise via capabilities).
+ * `hew.doc.open` (v1) — Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, load_failed
+ * Refusals: host_capability_missing, load_failed, window_not_ready
  */
 export interface DocOpenParams {
+  /** where the new window goes; background (the default) never takes the user's focus */
+  focus?: "background" | "front"
+  /** a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents */
+  label?: string
   path: string
 }
 
-export interface DocOpenResult {}
+export interface DocOpenResult {
+  /** the file was already open in a window; the connection was attached to it instead of opening a second copy */
+  already_open?: boolean
+  document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
 
 /**
  * `hew.doc.purge_unused` (v1) — Delete every unused material and component definition, as one undo entry.
@@ -280,12 +332,16 @@ export interface DocPurgeUnusedResult {
 }
 
 /**
- * `hew.doc.save` (v1) — Save the attached document — written by hosts with filesystem access, bytes base64 by those without.
+ * `hew.doc.save` (v1) — Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, path_required, save_failed
+ * Refusals: host_capability_missing, path_required, save_failed, file_open_elsewhere
  */
 export interface DocSaveParams {
+  /** write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path` */
+  copy?: boolean
   path?: string
+  /** hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path` */
+  return_bytes?: boolean
 }
 
 export interface DocSaveResult {
@@ -702,14 +758,14 @@ export interface MetaCapabilitiesResult {
 }
 
 /**
- * `hew.meta.documents` (v1) — The host's open documents.
+ * `hew.meta.documents` (v1) — The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.
  * Tier: Required · Class: read-only · Served: host
  * Refusals: none.
  */
 export interface MetaDocumentsParams {}
 
 export interface MetaDocumentsResult {
-  documents: unknown[]
+  documents: ({ attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
 }
 
 /**
@@ -726,7 +782,7 @@ export interface MetaHelloParams {
 
 export interface MetaHelloResult {
   app: { name: string; version: string }
-  documents: unknown[]
+  documents: ({ attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string })[]
   encoding: string
   profile: "core" | "app"
   protocol: number
@@ -1061,7 +1117,7 @@ export type SketchDrawLineResult = { curve_id?: string; region_id?: string; regi
 /**
  * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, loop_not_strictly_inside, loop_self_intersects, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, loop_not_strictly_inside, loop_self_intersects, sides_above_cap, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawPolygonParams {
   center: [number, number, number] | UnspecifiedShape
@@ -1414,10 +1470,16 @@ export interface ViewLineDrawingResult {
 export interface ViewSnapshotParams {
   /** mutually exclusive with view */
   camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  /** bits per pixel of the depth PNG (default 8); only with include_depth */
+  depth_bits?: 8 | 16
   /** defaults to 512; out-of-range values are clamped, not refused */
   height?: number
+  /** defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect */
+  include_depth?: boolean
   /** defaults to false; when true, also returns a per-pixel id-buffer and its palette */
   include_ids?: boolean
+  /** defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255) */
+  include_normals?: boolean
   /** when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export) */
   path?: string
   /** a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0. */
@@ -1429,6 +1491,16 @@ export interface ViewSnapshotParams {
 }
 
 export interface ViewSnapshotResult {
+  /** with a depth pass: 8 or 16 */
+  depth_bits?: number
+  /** with a depth pass: the farthest drawn surface */
+  depth_far?: number
+  /** with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface */
+  depth_near?: number
+  /** present only when include_depth and path were both given: "<path>.depth.png" */
+  depth_path?: string
+  /** present only when include_depth was true and path was not given */
+  depth_png_base64?: string
   height: number
   /** present only when include_ids was true and path was not given: u16 little-endian per pixel, index into id_palette (0 = background) */
   id_buffer_base64?: string
@@ -1436,6 +1508,10 @@ export interface ViewSnapshotResult {
   id_buffer_path?: string
   /** public ids; id_palette[i] is what the id-buffer (inline or on disk) reports as index i+1 */
   id_palette?: string[]
+  /** present only when include_normals and path were both given: "<path>.normals.png" */
+  normals_path?: string
+  /** present only when include_normals was true and path was not given */
+  normals_png_base64?: string
   /** present only when path was given: echoes it back */
   path?: string
   /** present only when path was not given */
@@ -1515,7 +1591,9 @@ export class HewApiClient {
 
   readonly doc = {
     attach: (params: DocAttachParams): Promise<DocAttachResult> => this.call('hew.doc.attach', params),
+    close: (params: DocCloseParams): Promise<DocCloseResult> => this.call('hew.doc.close', params),
     export: (params: DocExportParams): Promise<DocExportResult> => this.call('hew.doc.export', params),
+    focus: (params: DocFocusParams): Promise<DocFocusResult> => this.call('hew.doc.focus', params),
     import: (params: DocImportParams): Promise<DocImportResult> => this.call('hew.doc.import', params),
     new: (params: DocNewParams): Promise<DocNewResult> => this.call('hew.doc.new', params),
     open: (params: DocOpenParams): Promise<DocOpenResult> => this.call('hew.doc.open', params),

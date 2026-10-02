@@ -809,6 +809,11 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     Ok(draw_result(ctx, sketch, &regions, Some(curve)))
 }
 
+/// The most sides `hew.sketch.draw_polygon` accepts — the Polygon tool's own
+/// cap (`MAX_POLYGON_SIDES` in app/src/tools/PolygonTool.ts), so the API and
+/// the UI agree on what a polygon is.
+const MAX_POLYGON_SIDES: usize = 120;
+
 pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -821,6 +826,19 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     let p: P = parse_params(params)?;
     if p.sides < 3 {
         return Err(CmdError::Params("a polygon needs at least 3 sides".into()));
+    }
+    if p.sides > MAX_POLYGON_SIDES {
+        // Unbounded, the cost grows roughly cubically with the side count:
+        // 100 000 sides wedged a window for good, headless and live alike.
+        return Err(CmdError::Refusal(
+            Refusal::api(
+                "sides_above_cap",
+                &format!(
+                    "A polygon holds at most {MAX_POLYGON_SIDES} sides — beyond that a circle is the right tool (hew.sketch.draw_circle)."
+                ),
+            )
+            .with_detail(serde_json::json!({ "max_sides": MAX_POLYGON_SIDES })),
+        ));
     }
     let target = locate::resolve_plane(ctx, &p.plane)?;
     let center = locate::resolve_point(ctx, &p.center)?;
