@@ -23,6 +23,7 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { formatLength } from '../settings/units'
+import { draftMock } from './draftMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -35,50 +36,25 @@ function makeKeyEvent(key: string): KeyboardEvent {
 }
 
 function makeWasmScene() {
-  let sketchCounter = 40n
-  const planes = new Map<bigint, [number, number, number, number, number, number]>()
-  const segmentCalls: { sketch: bigint; a: [number, number, number]; b: [number, number, number] }[] = []
-  const planeCalls: [number, number, number, number, number, number][] = []
-
+  const dm = draftMock()
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, [0, 0, 0, 0, 0, 1])
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planeCalls.push([px, py, pz, nx, ny, nz])
-        planes.set(sketchCounter, [px, py, pz, nx, ny, nz])
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
-    sketch_plane: vi.fn((h: bigint) => {
-      const p = planes.get(h)
-      return p === undefined ? undefined : new Float64Array(p)
-    }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array([]),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return { scene: scene as unknown as WasmScene, segmentCalls, planeCalls }
+  // Every draft is one `draft_begin_plane`; `planeCalls` is its [origin, normal] args.
+  return {
+    scene: scene as unknown as WasmScene,
+    segmentCalls: dm.log.segments,
+    get planeCalls() {
+      return dm.log.begins.map((b) => b.args.slice(0, 6) as number[])
+    },
+    log: dm.log,
+  }
 }
 
 function makeTool(scene: WasmScene) {
@@ -105,7 +81,8 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
   })
 
   it('clicking straight up from a ground anchor while Z-locked commits a real vertical segment instead of refusing every click', () => {
-    const { scene, segmentCalls, planeCalls } = makeWasmScene()
+    const w = makeWasmScene()
+    const { scene, segmentCalls } = w
     const { tool, onToast, onCommit } = makeTool(scene)
 
     tool.onPointerDown(makeSnap([2, 3, 0]), RAY) // first click: ground anchor
@@ -115,7 +92,7 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
     expect(onToast).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(segmentCalls).toHaveLength(1)
-    expect(segmentCalls[0]).toEqual({ sketch: segmentCalls[0].sketch, a: [2, 3, 0], b: [2, 3, 4] })
+    expect(segmentCalls[0]).toEqual([2, 3, 0, 2, 3, 4])
 
     // The vertical segment leaves the ground plane, so it re-homes onto a
     // genuine (non-ground) plane through the anchor — same machinery as
@@ -125,12 +102,14 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
     // segment (the view-facing fallback degenerates too), `rehomePlaneNormal`
     // lands in its last-resort arbitrary-plane branch: normal (0, 1, 0),
     // any genuine vertical plane containing the drawn line.
-    expect(planeCalls).toHaveLength(1)
-    expect(planeCalls[0]).toEqual([2, 3, 0, 0, 1, 0])
+    // (One draft, begun directly on the re-homed plane.)
+    expect(w.planeCalls).toHaveLength(1)
+    expect(w.planeCalls[0]).toEqual([2, 3, 0, 0, 1, 0])
   })
 
   it('an ordinary unlocked ground click is completely unaffected — same exact z = 0 coordinates as before', () => {
-    const { scene, segmentCalls, planeCalls } = makeWasmScene()
+    const w = makeWasmScene()
+    const { scene, segmentCalls } = w
     const { tool, onCommit } = makeTool(scene)
 
     tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
@@ -138,7 +117,8 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
 
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(segmentCalls).toHaveLength(1)
-    expect(segmentCalls[0]).toEqual({ sketch: segmentCalls[0].sketch, a: [2, 3, 0], b: [9, 3, 0] })
-    expect(planeCalls).toHaveLength(0) // never re-homed — stayed on the shared ground sketch
+    expect(segmentCalls[0]).toEqual([2, 3, 0, 9, 3, 0])
+    // never re-homed — the one draft is on the ground plane
+    expect(w.planeCalls).toEqual([[0, 0, 0, 0, 0, 1]])
   })
 })

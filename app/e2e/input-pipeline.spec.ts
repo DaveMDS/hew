@@ -338,7 +338,7 @@ test('Rotate: X-locked 90° (arrow lock, two clicks, typed angle) stands a drawn
   await clickWorld(page, ctx, 0.5, 0, 0)
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
 
   // Rotate: lock the X axis with the arrow key (the tilt no ground hover

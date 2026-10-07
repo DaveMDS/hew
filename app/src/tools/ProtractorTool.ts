@@ -88,6 +88,7 @@
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
+import { displayedAngleDeg, isFreePick } from './displayedValue'
 import {
   screenConstantWorldHalf,
   screenConstantWorldHalfFromWorldPerPixel,
@@ -161,6 +162,9 @@ type Stage =
       baselineDir: [number, number, number]
       /** Last computed signed angle (radians), for VCB sign + readout continuity. */
       lastAngle: number
+      /** The last pointer move was a FREE pick off every drawing axis, so a
+       *  click commits the DISPLAYED angle (displayedValue.ts). */
+      quantize: boolean
       /** Last swept direction (post axis-snap if applicable) — what commit uses. */
       sweptDir: [number, number, number]
     }
@@ -319,6 +323,7 @@ export class ProtractorTool implements Tool {
         : angle
 
       this.stage.lastAngle = angle
+      this.stage.quantize = match === null && isFreePick(snap, this.stage.apex)
       this.stage.sweptDir = sweptDir
       this._updatePreviewLine(this.stage.apex, sweptDir, previewColor)
       this._reportAngleOrTyped(reportedAngle)
@@ -364,12 +369,21 @@ export class ProtractorTool implements Tool {
         planeNormal: this.stage.planeNormal,
         baselineDir,
         lastAngle: 0,
+        quantize: false,
         sweptDir: baselineDir,
       }
       return
     }
 
     if (this.stage.kind === 'sweeping') {
+      // A free, un-axis-snapped sweep commits the DISPLAYED angle through the
+      // typed path (side from the sweep, magnitude from the readout). An
+      // axis-snapped or hard-snapped sweep keeps its exact direction.
+      if (this.stage.quantize) {
+        const shown = displayedAngleDeg(Math.abs((this.stage.lastAngle * 180) / Math.PI))
+        this._commitFromTyped(shown)
+        return
+      }
       this._commitGuide(this.stage.apex, this.stage.sweptDir)
     }
   }

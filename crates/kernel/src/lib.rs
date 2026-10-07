@@ -16,6 +16,7 @@
 mod boolean;
 mod build;
 mod geom2d;
+mod retrace;
 mod validate;
 
 pub mod annotation;
@@ -38,16 +39,18 @@ pub mod sketch;
 pub mod tol;
 pub mod topo;
 pub mod transform;
+pub mod unit_key;
 
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
 pub use camera::{CameraProjection, CameraState};
 pub use document::{
-    AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, EntityRef,
+    AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun,
+    DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
     FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, InsertOptions, InsertReport,
-    LibraryProvenance, LoopImprintReport, LoopImprintRoute, MAX_COMPONENT_DEPTH, MaterialScope,
-    NodeId, PendingActionKind, PurgeReport, TransformChordReport,
+    LibraryProvenance, MAX_COMPONENT_DEPTH, MaterialScope, NodeId, PendingActionKind, PlaneUnits,
+    PurgeReport,
 };
 pub use error::TopologyError;
 pub use guide::Guide;
@@ -69,11 +72,12 @@ pub use offset::{
     FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
 };
 pub use ops::{
-    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt, FaceFeature,
+    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
     LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError,
     TransformSubFaceReport,
 };
+pub use retrace::{FaceRetraceReport, RetracePath};
 pub use scenes::{DisplayState, ResolvedScene, Scene, SceneDrift, SceneProps, SectionPlaneState};
 pub use serialize::{
     DecodeError, GEOMETRY_FORMAT_VERSION, ItemSummary, LoadError, MANIFEST_FORMAT_VERSION,
@@ -85,6 +89,8 @@ pub use sketch::{
     MIN_CIRCLE_SEGMENTS, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
     SketchCurveId, SketchCurveKind, SketchCurveRim, SketchEdge, SketchEdgeId, SketchError,
     SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
+    VertexMoved,
 };
 pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};
+pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

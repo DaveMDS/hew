@@ -61,7 +61,7 @@ describe('SnapService — fallback tier', () => {
     expect(snap).toBeNull()
   })
 
-  it('forwards offPlanePoints to Scene.snap as the trailing argument (false when omitted)', () => {
+  it('forwards offPlanePoints to Scene.snap as argument 13 (false when omitted)', () => {
     // The 3d-line staircase fix rides entirely on this bit reaching the
     // engine: LineTool opts in via `snapConstraint().offPlanePoints` and the
     // Viewport passes it through here.
@@ -70,25 +70,26 @@ describe('SnapService — fallback tier', () => {
     const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
-    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(false)
+    expect(snapFn.mock.calls.at(-1)?.[13]).toBe(false)
 
     const constraintPlane = { point: [0, 1, 1] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
     svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 1, 1], undefined, constraintPlane, true)
-    expect(snapFn.mock.calls.at(-1)?.at(-1)).toBe(true)
+    expect(snapFn.mock.calls.at(-1)?.[13]).toBe(true)
   })
 })
 
 describe('SnapService — precision mode', () => {
-  it('passes the precision flag through to Scene.snap() as the fourth-to-last argument (cylinder, soft_axis_aperture_scale, off_plane_points trail it)', () => {
+  it('passes the precision flag through to Scene.snap() as argument 10 (cylinder, soft_axis_aperture_scale, off_plane_points, pick trail it)', () => {
     const scene = fakeScene()
     const svc = new SnapService(scene)
     const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
-    const precisionArg = () => snapFn.mock.calls.at(-1)?.at(-4)
+    const precisionArg = () => snapFn.mock.calls.at(-1)?.[10]
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
     // The kernel owns the weighting; only this boolean crosses the boundary.
     // (The trailing arguments after precision are `cylinder`, then
-    // `soft_axis_aperture_scale` — finding E — then `off_plane_points`.)
+    // `soft_axis_aperture_scale` — finding E — then `off_plane_points`,
+    // then `pick`.)
     expect(precisionArg()).toBe(false)
 
     expect(svc.setPrecision(true)).toBe(true)
@@ -223,9 +224,9 @@ describe('SnapService — precision mode', () => {
 
     expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('on-axis')
     // The acquire query passes no scale (unscaled — the ordinary behavior).
-    // The scale is the second-to-last positional arg of `Scene.snap`; the
-    // trailing one is `off_plane_points`.
-    expect(snapFn.mock.calls[0].at(-2)).toBeNull()
+    // The scale is positional arg 12 of `Scene.snap`; `off_plane_points`
+    // and `pick` follow it.
+    expect((snapFn.mock.calls[0] as unknown[])[SCALE_ARG]).toBeNull()
 
     hit = false
     snapFn.mockClear()
@@ -233,10 +234,45 @@ describe('SnapService — precision mode', () => {
     // Two queries: acquire (unscaled), then the wider release-resist query,
     // which must ALSO widen the soft-axis candidate's own tolerance.
     expect(snapFn.mock.calls.length).toBe(2)
-    expect(snapFn.mock.calls[0].at(-2)).toBeNull()
-    expect(snapFn.mock.calls[1].at(-2)).toBe(SOFT_AXIS_BREAK_APERTURE_SCALE)
+    expect((snapFn.mock.calls[0] as unknown[])[SCALE_ARG]).toBeNull()
+    expect((snapFn.mock.calls[1] as unknown[])[SCALE_ARG]).toBe(SOFT_AXIS_BREAK_APERTURE_SCALE)
+  })
+
+  it('passes `pick` to both the acquire and the release query, and false by default', () => {
+    const held = {
+      x: () => 0, y: () => 0, z: () => 0,
+      kind: () => 'midpoint',
+      direction: () => undefined,
+      projected_from: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => undefined,
+      element_kind: () => undefined,
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+    let hit = true
+    const snapFn = vi.fn(() => (hit ? held : undefined))
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect(snapFn.mock.calls[0].at(-1)).toBe(true)
+    hit = false
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect(snapFn.mock.calls.length).toBe(2)
+    expect(snapFn.mock.calls[1].at(-1)).toBe(true)
   })
 })
+
+/** `Scene.snap`'s `soft_axis_aperture_scale` position. */
+const SCALE_ARG = 12
 
 describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §1)', () => {
   // A held (sticky) endpoint snap the kernel returns whenever it's asked,

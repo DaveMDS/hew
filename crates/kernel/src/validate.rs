@@ -368,16 +368,36 @@ impl Object {
             return Err(TopologyError::WatertightFlagMismatch { expected });
         }
 
+        // Last, after every structural check: the file loader recomputes a
+        // face's plane from its outer loop, and a face it could not
+        // recompute would make the saved document unopenable — so the
+        // loader's own predicate holds for every live face.
+        for (f, face) in &self.faces {
+            let outer_ring: Vec<crate::math::Point3> =
+                self.loop_positions(face.outer_loop).collect();
+            if crate::serialize::outer_ring_plane(&outer_ring).is_err() {
+                return Err(TopologyError::FaceTooSmallToReopen { face: f });
+            }
+        }
+
         Ok(())
     }
 
     /// Debug-build invariant check; call as the last step of every public
     /// mutation. Compiles to nothing in release builds.
+    ///
+    /// A face too small to reopen from a file is not a broken invariant but
+    /// geometry user input can reach (a cut a fraction of a micron from a
+    /// corner, a tiny scale): every mutation's always-on `validate()`
+    /// backstop refuses it typed, so this debug check lets it through to
+    /// that refusal. It is reported last, so nothing structural hides
+    /// behind it.
     #[inline]
     pub(crate) fn check_invariants(&self) {
         #[cfg(debug_assertions)]
-        if let Err(violation) = self.validate() {
-            panic!("kernel invariant violated after mutation: {violation}");
+        match self.validate() {
+            Ok(()) | Err(TopologyError::FaceTooSmallToReopen { .. }) => {}
+            Err(violation) => panic!("kernel invariant violated after mutation: {violation}"),
         }
     }
 }

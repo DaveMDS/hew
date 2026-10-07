@@ -1,15 +1,16 @@
 /**
  * ArcTool unit tests — mirrors CircleTool.test.ts' fake-WasmScene
  * pattern: drive the 3-click gesture (A, B, bulge) and assert the exact
- * kernel calls the tool commits.
+ * kernel calls the tool commits (one draft per commit, unified drafting).
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
-import { makeSketchPlaneCache } from './sketchGesture'
-import { groundDrawPlane, planeKey } from './drawPlane'
+import { draftMock } from './draftMock'
 import { arcFromChord, arcSegmentCount } from './arcMath'
 import type { Snap } from './types'
+import { setLengthUnit, getLengthUnit, parseLengthToMeters } from '../settings/units'
+import { sagittaForDisplayedRadius } from './displayedValue'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -44,9 +45,24 @@ function makePick(object: bigint, face: bigint, instance?: bigint) {
 
 type SegmentCall = [number, number, number, number, number, number]
 
+/** The loop a face/plane draft carried: the START point of every segment, as
+ *  a flat xyz Float64Array (a closed loop closes implicitly back to the
+ *  first point). */
+function loopOf(segments: SegmentCall[]): Float64Array {
+  return new Float64Array(segments.flatMap((s) => [s[0], s[1], s[2]]))
+}
+
+/** The open path a draft carried: every segment start plus the last segment's
+ *  end). */
+function pathOf(segments: SegmentCall[]): Float64Array {
+  const last = segments[segments.length - 1]
+  return new Float64Array([...loopOf(segments), last[3], last[4], last[5]])
+}
+
 /**
- * Minimal WasmScene stub — only the members ArcTool calls. Records every
- * sketch_add_segment endpoint pair and every split_face path.
+ * Minimal WasmScene stub — only the members ArcTool calls. Every commit is
+ * one draft (plane or face); `segments` records every `draft_add_segment`
+ * endpoint pair across the mock's life.
  */
 function makeWasmScene(opts: {
   pick?: ReturnType<typeof makePick>
@@ -54,106 +70,34 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
-  /** Handles whose sketch has gone stale/hidden — `sketch_plane` reads
-   *  `undefined` for them, so `runSketchGesture`'s pre-check retargets a
-   *  fresh sketch (as after undoing the sketch's creating gesture). */
-  staleSketchHandles?: bigint[]
 } = {}) {
   const segments: SegmentCall[] = []
-  const splitPaths: Float64Array[] = []
-  const innerLoops: Float64Array[] = []
-  let sketchCounter = 41n
+  const fail = opts.addSegmentThrows
+    ? new Error('PathNotSimple: edges cross')
+    : opts.splitFaceThrows
+      ? new Error('BadLoop: invalid cut path')
+      : null
+  const dm = draftMock({ failSegmentAt: () => fail })
+  const baseAdd = dm.members.draft_add_segment.getMockImplementation()!
+  dm.members.draft_add_segment.mockImplementation((d, ax, ay, az, bx, by, bz) => {
+    const r = baseAdd(d, ax, ay, az, bx, by, bz)
+    segments.push([ax, ay, az, bx, by, bz])
+    return r
+  })
   const scene = {
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
     // Every picked object is plain/ungrouped by default (top-level eligibility).
     node_parent: vi.fn(() => undefined),
-    // Every non-stale sketch lies on the ground plane (origin point, +Z).
-    sketch_plane: vi.fn((sketch: bigint) =>
-      (opts.staleSketchHandles ?? []).includes(sketch)
-        ? undefined
-        : new Float64Array([0, 0, 0, 0, 0, 1]),
-    ),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_begin_curve: vi.fn(() => 91n),
-    sketch_begin_curve_with: vi.fn(() => 91n),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn((_sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-      if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
-      segments.push([ax, ay, az, bx, by, bz])
-      return {
-        new_edges: () => new BigUint64Array([]),
-        regions_created: () => new BigUint64Array([]),
-        regions_removed: () => new BigUint64Array([]),
-        free: vi.fn(),
-      }
-    }),
+    // Every sketch lies on the ground plane (origin point, +Z).
+    sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+    ...dm.members,
     pick_face: vi.fn(() => opts.pick),
     pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 1, 0, 0, 1])),
-    split_face: vi.fn((_object: bigint, _face: bigint, path: Float64Array) => {
-      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
-      splitPaths.push(path)
-      return { free: vi.fn() }
-    }),
-    split_face_inner: vi.fn((_object: bigint, _face: bigint, loopPts: Float64Array) => {
-      innerLoops.push(loopPts)
-    }),
-    split_face_in_instance: vi.fn((_instance: bigint, _object: bigint, _face: bigint, path: Float64Array) => {
-      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
-      splitPaths.push(path)
-      return { free: vi.fn() }
-    }),
-    split_face_inner_in_instance: vi.fn((_instance: bigint, _object: bigint, _face: bigint, loopPts: Float64Array) => {
-      innerLoops.push(loopPts)
-    }),
-    // Arc-carrying variants (editable-imprints): the face-mode commit path
-    // prefers these whenever the arc's center resolves, falling back to the
-    // plain calls above only when it can't (see `_commitFace`).
-    split_face_with_arc: vi.fn((
-      _object: bigint, _face: bigint, path: Float64Array,
-      _center: Float64Array, _radius: number, _arcSegments: number,
-    ) => {
-      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
-      splitPaths.push(path)
-      return { free: vi.fn() }
-    }),
-    split_face_inner_with_arc: vi.fn((
-      _object: bigint, _face: bigint, loopPts: Float64Array,
-      _center: Float64Array, _radius: number, _arcSegments: number,
-    ) => {
-      innerLoops.push(loopPts)
-    }),
-    split_face_with_arc_in_instance: vi.fn((
-      _instance: bigint, _object: bigint, _face: bigint, path: Float64Array,
-      _center: Float64Array, _radius: number, _arcSegments: number,
-    ) => {
-      if (opts.splitFaceThrows) throw new Error('BadLoop: invalid cut path')
-      splitPaths.push(path)
-      return { free: vi.fn() }
-    }),
-    split_face_inner_with_arc_in_instance: vi.fn((
-      _instance: bigint, _object: bigint, _face: bigint, loopPts: Float64Array,
-      _center: Float64Array, _radius: number, _arcSegments: number,
-    ) => {
-      innerLoops.push(loopPts)
-    }),
-    begin_sketch_on_plane_in_instance: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   }
-  return { scene: scene as unknown as WasmScene, segments, splitPaths, innerLoops }
+  return { scene: scene as unknown as WasmScene, segments, dm }
 }
 
 function makeTool(scene: WasmScene) {
@@ -206,32 +150,23 @@ describe('ArcTool — ground mode', () => {
 
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onToast).not.toHaveBeenCalled()
-    // The whole faceted-chain commit is bracketed in exactly one gesture.
-    expect((scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect((scene as unknown as { sketch_end_gesture: ReturnType<typeof vi.fn> }).sketch_end_gesture).toHaveBeenCalledTimes(1)
+    // The whole faceted-chain commit is exactly one draft.
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
   })
 
-  it('a stale cached sketch handle (sketch_plane reads undefined) is retargeted onto a fresh sketch before the gesture opens', () => {
-    const { scene, segments } = makeWasmScene({ staleSketchHandles: [7n] })
-    const preview = new THREE.Group()
+  it('there is no cached sketch handle to go stale: a commit opens one fresh plane draft on the ground', () => {
+    const { scene, segments } = makeWasmScene()
     const onCommit = vi.fn()
     const onToast = vi.fn()
-    // Seed the shared cache with a handle whose creating gesture was undone.
-    const cache = makeSketchPlaneCache()
-    cache.set(planeKey(groundDrawPlane()), 7n)
-    const tool = new ArcTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
+    const tool = new ArcTool(scene, new THREE.Group(), onCommit, onToast, vi.fn(), vi.fn())
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)   // A
     tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)   // B
     tool.onPointerDown(makeSnap({ x: 1, y: 0.5 }), RAY) // commit
 
-    const beginGroundSketch = (scene as unknown as { begin_ground_sketch: ReturnType<typeof vi.fn> }).begin_ground_sketch
-    const beginGesture = (scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture
-    // The pre-check minted ONE fresh sketch up front; the stale handle never
-    // even opened a gesture (no failure-driven retry).
-    expect(beginGroundSketch).toHaveBeenCalledTimes(1)
-    expect(beginGesture).toHaveBeenCalledTimes(1)
-    expect(beginGesture).toHaveBeenCalledWith(42n)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(segments.length).toBeGreaterThan(0)
     expect(onToast).not.toHaveBeenCalled()
@@ -290,7 +225,7 @@ describe('ArcTool — ground mode', () => {
     expect(tool.capturingInput()).toBe(false)
   })
 
-  it('reuses the same ground sketch across commits', () => {
+  it('each commit is its own draft on the same ground plane (no shared sketch cache)', () => {
     const { scene } = makeWasmScene()
     const { tool } = makeTool(scene)
 
@@ -302,13 +237,16 @@ describe('ArcTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 6, y: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 5, y: 1 }), RAY)
 
-    expect((scene as unknown as { begin_ground_sketch: ReturnType<typeof vi.fn> }).begin_ground_sketch).toHaveBeenCalledTimes(1)
+    const begins = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls
+    expect(begins).toHaveLength(2)
+    for (const b of begins) expect(b.slice(0, 6)).toEqual([0, 0, 0, 0, 0, 1])
+    expect(scene.draft_end).toHaveBeenCalledTimes(2)
   })
 
-  it('drops the cached sketch handle on onDocumentReset', () => {
+  it('onDocumentReset leaves nothing stale: the next commit opens a fresh plane draft', () => {
     const { scene } = makeWasmScene()
     const { tool } = makeTool(scene)
-    const beginSketch = (scene as unknown as { begin_ground_sketch: ReturnType<typeof vi.fn> }).begin_ground_sketch
+    const beginSketch = scene.draft_begin_plane as ReturnType<typeof vi.fn>
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 2, y: 0 }), RAY)
@@ -323,7 +261,7 @@ describe('ArcTool — ground mode', () => {
     expect(beginSketch).toHaveBeenCalledTimes(2)
   })
 
-  it('surfaces a kernel error from sketch_add_segment as a toast', () => {
+  it('surfaces a kernel error from draft_add_segment as a toast', () => {
     const { scene } = makeWasmScene({ addSegmentThrows: true })
     const { tool, onCommit, onToast } = makeTool(scene)
 
@@ -334,6 +272,9 @@ describe('ArcTool — ground mode', () => {
     expect(onCommit).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onToast.mock.calls[0][1]).toBe('PathNotSimple')
+    // The refused draft is cancelled, never ended.
+    expect(scene.draft_cancel).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).not.toHaveBeenCalled()
   })
 
   it('reports the radius through onMeasurement while pulling the bulge', () => {
@@ -384,9 +325,9 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     expect(last[4]).toBe(segments[0][1])
     expect(last[5]).toBe(segments[0][2])
 
-    // Arc AND closing segments land in ONE gesture — a single undo step.
-    expect((scene as unknown as { sketch_begin_gesture: ReturnType<typeof vi.fn> }).sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect((scene as unknown as { sketch_end_gesture: ReturnType<typeof vi.fn> }).sketch_end_gesture).toHaveBeenCalledTimes(1)
+    // Arc AND closing segments land in ONE draft — a single undo step.
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
   })
 
   it('segment (two Alts) closes with the chord B → A as one extra segment', () => {
@@ -520,9 +461,9 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     expect(last).toContain('· Pie')
   })
 
-  it('face mode: pie imprints a closed loop via split_face_inner_with_arc with the center appended', () => {
+  it('face mode: pie draws a closed loop in one face draft with the center appended', () => {
     const pick = makePick(7n, 3n)
-    const { scene, splitPaths, innerLoops } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
+    const { scene, segments } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
     tool.setEditContext({ kind: 'object', id: 7n })
 
@@ -532,11 +473,12 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     tool.onKey(makeKeyEvent('Alt'))                            // open → pie
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)  // commit
 
-    expect(splitPaths.length).toBe(0) // no boundary-to-boundary cut
-    expect(innerLoops.length).toBe(1)
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1) // ONE draft
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
 
-    const loop = innerLoops[0]
+    // The loop is the segments' start points (the last segment runs center → A).
+    const loop = loopOf(segments)
     const nPts = loop.length / 3
     // First point is exactly A; the appended last point is the arc center —
     // on the face plane, and past the chord on the side opposite the bulge.
@@ -546,9 +488,9 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     expect(loop[(nPts - 1) * 3 + 1]).toBeGreaterThan(2)
   })
 
-  it('face mode: segment imprints the bare arc loop via split_face_inner_with_arc (implicit chord close)', () => {
+  it('face mode: segment draws the arc plus the chord back to A in one face draft', () => {
     const pick = makePick(7n, 3n)
-    const { scene, splitPaths, innerLoops } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
+    const { scene, segments } = makeWasmScene({ pick, facePlane: [0, 0, 1, 0, 0, 1], faceNormal: [0, 0, 1] })
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'object', id: 7n })
 
@@ -559,12 +501,12 @@ describe('ArcTool — completion modes (Alt cycles open → pie → segment)', (
     tool.onKey(makeKeyEvent('Alt')) // pie → segment
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)
 
-    expect(splitPaths.length).toBe(0)
-    expect(innerLoops.length).toBe(1)
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
 
-    const loop = innerLoops[0]
+    // The loop (segment starts) is the arc itself, A…B — the last segment is
+    // the explicit chord B → A.
+    const loop = loopOf(segments)
     const nPts = loop.length / 3
-    // The loop is the arc itself, A…B — the chord closes implicitly.
     expect(loop[0]).toBe(0.5)
     expect(loop[1]).toBe(2)
     expect(loop[(nPts - 1) * 3 + 0]).toBe(1.5)
@@ -705,19 +647,27 @@ describe('ArcTool — face mode', () => {
     return { ...made, ...t }
   }
 
-  it('three clicks commit one split_face_with_arc whose path endpoints are exactly A and B', () => {
-    const { tool, onFaceImprint, splitPaths, scene } = primeFaceTool()
+  it('three clicks commit one face draft whose open path endpoints are exactly A and B, carrying the curve bracket of the arc', () => {
+    const { tool, onFaceImprint, segments, scene } = primeFaceTool()
 
     // All snaps on the z=1 face plane.
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)   // A on the boundary
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), RAY)   // B on the boundary
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)   // bulge into the face
 
-    expect((scene as unknown as { split_face_with_arc: ReturnType<typeof vi.fn> }).split_face_with_arc).toHaveBeenCalledTimes(1)
-    expect((scene as unknown as { split_face: ReturnType<typeof vi.fn> }).split_face).not.toHaveBeenCalled()
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    const [object, face] = (scene.draft_begin_face as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(object).toBe(7n)
+    expect(face).toBe(3n)
+    // The whole arc rides ONE curve bracket carrying its analytic circle.
+    expect(scene.draft_begin_curve_with).toHaveBeenCalledTimes(1)
+    const [, center, radius] = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect((center as Float64Array).length).toBe(3)
+    expect(radius).toBeGreaterThan(0)
+    expect(scene.draft_end_curve).toHaveBeenCalledTimes(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
 
-    const path = splitPaths[0]
+    const path = pathOf(segments)
     expect(path.length % 3).toBe(0)
     const nPts = path.length / 3
     expect(nPts).toBeGreaterThanOrEqual(3)
@@ -744,7 +694,7 @@ describe('ArcTool — face mode', () => {
     expect(tool.capturingInput()).toBe(false)
   })
 
-  it('surfaces a kernel error from split_face as a toast', () => {
+  it('surfaces a kernel error from a face draft as a toast', () => {
     const { tool, onFaceImprint, onToast } = primeFaceTool({ splitFaceThrows: true })
 
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)
@@ -783,27 +733,26 @@ describe('ArcTool — instance editing context (component-edit-parity.md phase A
     return { ...made, ...t }
   }
 
-  it('an OPEN (boundary-to-boundary) face cut routes to split_face_with_arc_in_instance, never the world split_face_with_arc', () => {
-    const { tool, onFaceImprint, splitPaths, scene } = primeInstanceFaceTool()
+  it('an OPEN face arc routes to draft_begin_face_in_instance, never a world call', () => {
+    const { tool, onFaceImprint, scene } = primeInstanceFaceTool()
 
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)
 
-    expect(scene.split_face_with_arc_in_instance).toHaveBeenCalledTimes(1)
-    const [instance, object, face] = (scene.split_face_with_arc_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.draft_begin_face_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(instance).toBe(INSTANCE)
     expect(object).toBe(7n)
     expect(face).toBe(3n)
-    expect(scene.split_face_with_arc).not.toHaveBeenCalled()
-    expect(scene.split_face_in_instance).not.toHaveBeenCalled()
-    expect(scene.split_face).not.toHaveBeenCalled()
-    expect(splitPaths.length).toBe(1)
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('a CLOSED (pie) face cut routes to split_face_inner_with_arc_in_instance, never the world split_face_inner_with_arc', () => {
-    const { tool, onFaceImprint, innerLoops, scene } = primeInstanceFaceTool()
+  it('a CLOSED (pie) face arc routes to draft_begin_face_in_instance, never the world draft_begin_face', () => {
+    const { tool, onFaceImprint, scene } = primeInstanceFaceTool()
 
     tool.onPointerDown(makeSnap({ x: 0.5, y: 2, z: 1 }), RAY)
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), RAY)
@@ -811,19 +760,17 @@ describe('ArcTool — instance editing context (component-edit-parity.md phase A
     tool.onKey(makeKeyEvent('Alt')) // open → pie
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), RAY)
 
-    expect(scene.split_face_inner_with_arc_in_instance).toHaveBeenCalledTimes(1)
-    const [instance, object, face] = (scene.split_face_inner_with_arc_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.draft_begin_face_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(instance).toBe(INSTANCE)
     expect(object).toBe(7n)
     expect(face).toBe(3n)
-    expect(scene.split_face_inner_with_arc).not.toHaveBeenCalled()
-    expect(scene.split_face_inner_in_instance).not.toHaveBeenCalled()
-    expect(scene.split_face_inner).not.toHaveBeenCalled()
-    expect(innerLoops.length).toBe(1)
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('plane mode on empty space mints a def-owned sketch via begin_sketch_on_plane_in_instance', () => {
+  it('plane mode on empty space opens a plane draft in the instance via draft_begin_plane_in_instance', () => {
     const { scene } = makeWasmScene()
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
@@ -832,8 +779,12 @@ describe('ArcTool — instance editing context (component-edit-parity.md phase A
     tool.onPointerDown(makeSnap({ x: 9, y: 1, z: 0 }), { origin: [9, 1, 5], direction: [0, 0, -1] })
     tool.onPointerDown(makeSnap({ x: 7.5, y: 2, z: 0 }), { origin: [7.5, 2, 5], direction: [0, 0, -1] })
 
-    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect((scene.draft_begin_plane_in_instance as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(INSTANCE)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    // World-space points go straight through (no pose mapping in the tool).
+    const xs = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[1] as number)
+    expect(Math.min(...xs)).toBeGreaterThanOrEqual(6)
   })
 })
 
@@ -863,14 +814,12 @@ describe('ArcTool — retype the bulge after the third click', () => {
   function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
     const base = makeWasmScene(opts).scene as unknown as Record<string, unknown>
     let gen = 1n
-    let changed = 0
-    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const baseEnd = base.draft_end as (...args: unknown[]) => unknown
     const scene = {
       ...base,
       history_generation: vi.fn(() => gen),
-      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
-      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
-      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      // A draft that ends records one history step.
+      draft_end: vi.fn((...args: unknown[]) => { const r = baseEnd(...args); gen += 1n; return r }),
       scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
       scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
     }
@@ -878,7 +827,7 @@ describe('ArcTool — retype the bulge after the third click', () => {
   }
   const key = (tool: ArcTool, k: string) => tool.onKey(makeKeyEvent(k))
   const typeIn = (tool: ArcTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
-  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  const addCalls = (scene: WasmScene) => (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
   /** Extreme y among the segment endpoints committed since `from` — the apex of a chord on y=0. */
   const apexY = (scene: WasmScene, from: number, sign: 1 | -1) => {
     const ys = addCalls(scene).slice(from).flatMap((k) => [k[2] as number, k[5] as number])
@@ -948,7 +897,7 @@ describe('ArcTool — boundary clicks (FacePickCache.faceThrough)', () => {
   }
 
   it('a click on a midpoint snap (pick_face misses the exact ray) still anchors FACE mode, not the ground', () => {
-    const { scene, segments, splitPaths } = makeBoundaryScene(makePick(7n, 3n))
+    const { scene } = makeBoundaryScene(makePick(7n, 3n))
     const { tool, onFaceImprint, onCommit } = makeTool(scene)
 
     const boundarySnap = makeSnap({ x: 0.5, y: 2, z: 1, kind: 'midpoint', object: 7n, element: 5n, elementKind: 'edge' })
@@ -958,8 +907,8 @@ describe('ArcTool — boundary clicks (FacePickCache.faceThrough)', () => {
     tool.onPointerDown(makeSnap({ x: 1.5, y: 2, z: 1 }), { origin: [1.5, 2, 5], direction: [0, 0, -1] }) // B
     tool.onPointerDown(makeSnap({ x: 1, y: 1.6, z: 1 }), { origin: [1, 1.6, 5], direction: [0, 0, -1] }) // bulge → commit
 
-    expect(splitPaths.length).toBe(1) // the FACE split path
-    expect(segments.length).toBe(0) // never fell through to a ground/plane sketch
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1) // the FACE draft
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled() // never fell through to a plane draft
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onCommit).not.toHaveBeenCalled()
   })
@@ -973,7 +922,7 @@ describe('ArcTool — boundary clicks (FacePickCache.faceThrough)', () => {
 describe('ArcTool — snapped face cursor (honours the chip, not ray∩plane)', () => {
   it('the chord endpoint B lands on the snap, not the sub-millimeter-off ray∩plane point', () => {
     const pick = makePick(7n, 3n)
-    const { scene, splitPaths } = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { scene, segments } = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'object', id: 7n })
 
@@ -987,8 +936,8 @@ describe('ArcTool — snapped face cursor (honours the chip, not ray∩plane)', 
     ) // B
     tool.onPointerDown(makeSnap({ x: 2, y: 1, z: 1 }), { origin: [2, 1, 5], direction: [0, 0, -1] }) // bulge → commit
 
-    expect(splitPaths.length).toBe(1)
-    const path = splitPaths[0]
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    const path = pathOf(segments)
     const n = path.length / 3
     // `arcPolylineOnPlane` always ends the chain on the EXACT chord endpoint
     // it was built with, so the committed path's last vertex reflects
@@ -1026,8 +975,12 @@ describe('ArcTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onPointerDown(makeSnap({ x: 13, y: 10, z: 1 }), { origin: [13, 10, 5], direction: [0, 0, -1] }) // B
     tool.onPointerDown(makeSnap({ x: 11.5, y: 11, z: 1 }), { origin: [11.5, 11, 5], direction: [0, 0, -1] }) // bulge
 
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // z=1 is not the ground plane
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    // One plane draft on the pinned z = 1 plane (not the ground, not a face).
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const begin = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(begin[2]).toBeCloseTo(1, 9)
+    expect(begin.slice(3, 6)).toEqual([0, 0, 1])
     expect(segments.length).toBeGreaterThan(0) // a real plane-mode chain committed
     expect(onCommit).toHaveBeenCalledTimes(1)
   })
@@ -1062,5 +1015,94 @@ describe('ArcTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onKey(makeKeyEvent('Escape'))
     expect(tool.statusHint()).not.toContain('Pinned')
     expect(tool.hasArmedGesture()).toBe(false)
+  })
+})
+
+
+describe('ArcTool — clicked chord and radius are exactly the displayed values', () => {
+  const prev = getLengthUnit()
+  const at = (x: number, y: number, kind = 'ground') => makeSnap({ x, y, z: 0, kind })
+  // Chord shows "20 mm" exactly when B is at 0.0200041 (off-grid); bulge cursor off-grid.
+  const B = 0.0200041
+  const CUR = { x: 0.0100021, y: 0.0043217 }
+
+  function shownRadius(measure: ReturnType<typeof vi.fn>): number {
+    const texts = measure.mock.calls.map((c) => String(c[0])).filter((t) => t.startsWith('R '))
+    return parseLengthToMeters(texts[texts.length - 1].slice(2))!
+  }
+
+  it('free clicks commit the same arc as typing the shown chord then the sagitta of the shown radius', () => {
+    setLengthUnit('mm')
+    try {
+      const { scene, segments } = makeWasmScene()
+      const { tool, onMeasurement } = makeTool(scene)
+      tool.onPointerDown(at(0, 0), RAY)
+      tool.onPointerMove(at(B, 0), RAY)
+      tool.onPointerDown(at(B, 0), RAY)
+      tool.onPointerMove(at(CUR.x, CUR.y), RAY)
+      const R = shownRadius(onMeasurement)
+      tool.onPointerDown(at(CUR.x, CUR.y), RAY)
+
+      // Reference: the typed path with the converted values.
+      const c = 20 * 0.001
+      const sd = sagittaForDisplayedRadius(c, CUR.y, CUR.y > c / 2)!
+      const { scene: ref, segments: refSegments } = makeWasmScene()
+      const r = makeTool(ref)
+      r.tool.onPointerDown(at(0, 0), RAY)
+      r.tool.onPointerMove(at(B, 0), RAY)
+      typeDigits(r.tool, '20')
+      r.tool.onKey(makeKeyEvent('Enter'))
+      r.tool.onPointerMove(at(CUR.x, CUR.y), RAY)
+      typeDigits(r.tool, String(sd / 0.001))
+      r.tool.onKey(makeKeyEvent('Enter'))
+
+      expect(segments.length).toBeGreaterThan(2)
+      expect(segments).toEqual(refSegments)
+      // The committed arc's radius is the displayed one.
+      expect(arcFromChord([0, 0], [c, 0], sd)!.radius).toBeCloseTo(R, 12)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('hard-snapped (endpoint) chord and bulge clicks keep their exact points', () => {
+    setLengthUnit('mm')
+    try {
+      const { scene, segments } = makeWasmScene()
+      const { tool } = makeTool(scene)
+      tool.onPointerDown(at(0, 0), RAY)
+      tool.onPointerDown(at(B, 0, 'endpoint'), RAY)
+      tool.onPointerMove(at(CUR.x, CUR.y, 'midpoint'), RAY)
+      tool.onPointerDown(at(CUR.x, CUR.y, 'midpoint'), RAY)
+      // Chord end B is exactly the snapped x (the arc's final vertex).
+      expect([segments[0][0], segments[0][1]]).toEqual([0, 0])
+      expect(segments[segments.length - 1][3]).toBe(B)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+})
+
+describe('ArcTool — a flat (circle-less) arc', () => {
+  const FLAT = { chain: [[0, 0, 0], [1, 0, 0], [2, 0, 0]] as [number, number, number][], curveSegments: 2, geom: null }
+  type Runner = { _runArcDraft(target: unknown, chain: unknown): boolean }
+
+  it('commits as ONE curve chain with no circle, on a face', () => {
+    const { scene, segments, dm } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    expect((tool as unknown as Runner)._runArcDraft({ kind: 'face', object: 1n, face: 2n, instance: null }, FLAT)).toBe(true)
+    expect(segments).toHaveLength(2)
+    expect(dm.members.draft_begin_curve).toHaveBeenCalledTimes(1)
+    expect(dm.members.draft_begin_curve_with).not.toHaveBeenCalled()
+    expect(dm.log.curves.map((c) => c.kind)).toEqual(['curve', 'end'])
+  })
+
+  it('closes the bracket before a plain closing edge, on a plane context', () => {
+    const { scene, segments, dm } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const chain = { ...FLAT, chain: [...FLAT.chain, [0, 0, 0] as [number, number, number]] }
+    expect((tool as unknown as Runner)._runArcDraft({ kind: 'ctx', ctx: '{"plane":[0,0,0,0,0,1]}' }, chain)).toBe(true)
+    expect(segments).toHaveLength(3)
+    expect(dm.log.curves.map((c) => c.kind)).toEqual(['curve', 'end'])
   })
 })

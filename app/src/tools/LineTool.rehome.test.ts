@@ -33,6 +33,7 @@ import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { draftMock } from './draftMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -44,85 +45,44 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
 }
 
-const PLANE_DIST = 1e-9
-
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
-type PlaneCall = [number, number, number, number, number, number]
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
+type PlaneCall = number[]
 
 /**
- * A mock kernel scene whose `sketch_add_segment` enforces plane membership
- * exactly like the real `Sketch::add_segment_inner`
- * (`crates/kernel/src/sketch.rs:2078-2084`) — throwing an Error whose
- * message starts with `PointOffPlane` (the toast path's convention,
- * `kernelErrors.ts`) for either endpoint farther than `PLANE_DIST` from the
- * target sketch's plane. `enforcePlanarity: false` reproduces the OLD
- * (pre-fix) unconditional-accept mock behavior other LineTool test files
- * use, for the one test that needs to observe what would happen WITHOUT any
- * kernel-side check at all (none of the fixtures here need that, but the
- * flag documents the difference for a future reader).
+ * A mock kernel scene on the shared draft mock with `enforcePlane`: it throws
+ * `PointOffPlane` (the toast path's convention, `kernelErrors.ts`) for an
+ * endpoint of a plane draft farther than the kernel's plane tolerance from
+ * the draft's plane. `segmentCalls` / `planeCalls` are live views of the
+ * draft log: every segment, and the [origin, normal] of every
+ * `draft_begin_plane` (one per commit).
  */
 function makeWasmScene() {
-  const planes = new Map<bigint, [number, number, number, number, number, number]>()
-  const segmentCalls: SegmentCall[] = []
-  const planeCalls: PlaneCall[] = []
-  let sketchCounter = 90n
-
-  const distanceToPlane = (p: readonly [number, number, number], plane: readonly number[]): number => {
-    const [ox, oy, oz, nx, ny, nz] = plane
-    return nx * (p[0] - ox) + ny * (p[1] - oy) + nz * (p[2] - oz)
-  }
-
+  const dm = draftMock({ enforcePlane: true })
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, [0, 0, 0, 0, 0, 1])
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planeCalls.push([px, py, pz, nx, ny, nz])
-        planes.set(sketchCounter, [px, py, pz, nx, ny, nz])
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined), // never an eligible face in these fixtures
     pick_sketch: vi.fn(() => undefined), // never a hoverable sketch either
-    sketch_plane: vi.fn((h: bigint) => {
-      const p = planes.get(h)
-      return p === undefined ? undefined : new Float64Array(p)
-    }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        const plane = planes.get(sketch)
-        if (plane === undefined) throw new Error('UnknownSketch: no such sketch')
-        const da = distanceToPlane([ax, ay, az], plane)
-        const db = distanceToPlane([bx, by, bz], plane)
-        if (Math.abs(da) > PLANE_DIST) throw new Error('PointOffPlane: point 0 is off the sketch plane')
-        if (Math.abs(db) > PLANE_DIST) throw new Error('PointOffPlane: point 1 is off the sketch plane')
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array([]),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return {
-    scene: scene as unknown as WasmScene,
-    segmentCalls,
-    planeCalls,
-    beginGestureCalls: scene.sketch_begin_gesture as unknown as ReturnType<typeof vi.fn>,
-    endGestureCalls: scene.sketch_end_gesture as unknown as ReturnType<typeof vi.fn>,
-  }
+  const segmentCalls = new Proxy([] as SegmentCall[], {
+    get(_t, k) {
+      const live: SegmentCall[] = dm.log.segments.map((sg) => ({
+        a: sg.slice(0, 3) as SegmentCall['a'],
+        b: sg.slice(3, 6) as SegmentCall['b'],
+      }))
+      return Reflect.get(live, k)
+    },
+  })
+  const planeCalls = new Proxy([] as PlaneCall[], {
+    get(_t, k) {
+      const live: PlaneCall[] = dm.log.begins.map((b) => b.args.slice(0, 6) as number[])
+      return Reflect.get(live, k)
+    },
+  })
+  return { scene: scene as unknown as WasmScene, segmentCalls, planeCalls, log: dm.log, members: dm.members }
 }
 
 function makeTool(scene: WasmScene) {
@@ -167,12 +127,13 @@ describe('LineTool — chain re-homing when a lock leaves the frozen plane (desi
     expect(planeCalls).toHaveLength(2)
     expect(planeCalls[0]).toEqual([2, 3, 4, 1, 0, 0]) // the original x=2 plane (idle-locked)
 
-    // Two segments committed, into TWO DIFFERENT sketches — the first
-    // segment's sketch is untouched by the second (re-homed) commit.
+    // Two segments committed, in TWO DIFFERENT drafts on two different
+    // planes — the first segment's draft is untouched by the second
+    // (re-homed) commit.
     expect(segmentCalls).toHaveLength(2)
-    expect(segmentCalls[0]).toEqual({ sketch: segmentCalls[0].sketch, a: [2, 3, 4], b: [2, 3, 9] })
-    expect(segmentCalls[1].sketch).not.toBe(segmentCalls[0].sketch)
-    expect(segmentCalls[1]).toEqual({ sketch: segmentCalls[1].sketch, a: [2, 3, 9], b: [7, 3, 9] })
+    expect(segmentCalls[0]).toEqual({ a: [2, 3, 4], b: [2, 3, 9] })
+    expect(planeCalls[1]).not.toEqual(planeCalls[0])
+    expect(segmentCalls[1]).toEqual({ a: [2, 3, 9], b: [7, 3, 9] })
 
     // The re-homed plane genuinely contains the segment just drawn (its own
     // commit succeeded against the mock's plane-membership check) AND the
@@ -182,20 +143,18 @@ describe('LineTool — chain re-homing when a lock leaves the frozen plane (desi
   })
 
   it('undo granularity: each commit — including the re-homing one — is exactly one begin/end gesture bracket, same as any other segment', () => {
-    const { scene, beginGestureCalls, endGestureCalls } = makeWasmScene()
+    const { scene, members } = makeWasmScene()
     const { tool } = makeTool(scene)
 
     driveOffPlaneChain(tool)
 
     // Two commits (segment 1 on the original plane, segment 2 re-homed) —
-    // two gesture brackets, not three or four. The re-homing commit opens
-    // exactly the SAME single bracket `runSketchGesture` opens for every
-    // other commit (it happens to also mint a sketch inside that bracket,
-    // on a plane-cache miss, exactly like any other first commit onto a
-    // fresh plane) — so undoing the re-homed segment costs exactly one
-    // Cmd+Z, identical to undoing any other single LineTool segment.
-    expect(beginGestureCalls).toHaveBeenCalledTimes(2)
-    expect(endGestureCalls).toHaveBeenCalledTimes(2)
+    // two drafts (each begun and ended once), not three or four. The
+    // re-homing commit is exactly the SAME single draft every other commit
+    // is — so undoing the re-homed segment costs exactly one Cmd+Z,
+    // identical to undoing any other single LineTool segment.
+    expect(members.draft_begin_plane).toHaveBeenCalledTimes(2)
+    expect(members.draft_end).toHaveBeenCalledTimes(2)
   })
 
   it('the first (pre-lock) segment stays a plain on-plane commit — re-homing only engages when the lock actually leaves the plane', () => {
@@ -247,7 +206,7 @@ describe('LineTool — honest refusal when a re-homed chain closes onto an EARLI
     // than being dropped outright — the refusal is about the CLOSURE, not
     // the placement.
     expect(segmentCalls).toHaveLength(3)
-    expect(segmentCalls[2]).toEqual({ sketch: segmentCalls[2].sketch, a: [7, 3, 9], b: [2, 3, 4] })
+    expect(segmentCalls[2]).toEqual({ a: [7, 3, 9], b: [2, 3, 4] })
   })
 
   it('an ordinary NOT-YET-closed chain (no coincident earlier-sketch point) stays silent, as before', () => {
@@ -329,7 +288,7 @@ describe('LineTool — chain re-homing against a MOVED drawing-axes frame', () =
     expect(planeCalls[0]).toEqual([2, 3, 4, 0, 1, 0])
     expect(planeCalls[1]).toEqual([2, 3, 9, -1, 0, 0]) // spanned by Z (seg 1) and Y (seg 2, the lock)
     expect(segmentCalls).toHaveLength(2)
-    expect(segmentCalls[1].sketch).not.toBe(segmentCalls[0].sketch)
-    expect(segmentCalls[1]).toEqual({ sketch: segmentCalls[1].sketch, a: [2, 3, 9], b: [2, 7, 9] })
+    expect(planeCalls[1]).not.toEqual(planeCalls[0])
+    expect(segmentCalls[1]).toEqual({ a: [2, 3, 9], b: [2, 7, 9] })
   })
 })

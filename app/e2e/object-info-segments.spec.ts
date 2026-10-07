@@ -25,11 +25,10 @@ test('Object Info: changing a circle\'s Segments redraws it on screen', async ({
   // the hexagon but inside the 48-sided circle it becomes. All three sample
   // points sit on that one ray, clear of the axis lines.
   const at = (r: number): [number, number, number] => [r * Math.cos(Math.PI / 6), r * Math.sin(Math.PI / 6), 0]
-  const { sketch } = await page.evaluate(() => {
+  await page.evaluate(() => {
     const t = window.__hew_test!
-    const drawn = t.drawCircle([0, 0, 0], 1, 6)
+    t.drawCircle([0, 0, 0], 1, 6)
     t.setCamera({ position: [0, 0, 6], target: [0, 0, 0], up: [0, 1, 0] })
-    return drawn
   })
   const pixels = () =>
     page.evaluate(([inside, probe, outside]) => {
@@ -41,10 +40,13 @@ test('Object Info: changing a circle\'s Segments redraws it on screen', async ({
   expect(near(before.fill, before.outside)).toBe(false)
   expect(near(before.probe, before.outside)).toBe(true)
 
-  await page.evaluate((sk) => {
+  // Select the drawn circle (its shape) on the ground plane.
+  await page.evaluate(() => {
     const t = window.__hew_test!
-    t.selectNodes([{ kind: 'sketch-curve', id: t.getSketchEdgeIds(sk)[0], sketch: sk }])
-  }, sketch)
+    const ctx = t.ctxGround()
+    const unit = t.getPlaneUnits(ctx).units[0]
+    t.selectNodes([{ kind: 'draft-island', id: '0', ctx, key: unit.key }])
+  })
   const segments = page.getByLabel('Segments')
   await segments.fill('48')
   await segments.press('Enter')

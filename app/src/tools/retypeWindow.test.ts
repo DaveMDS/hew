@@ -52,6 +52,29 @@ describe('RetypeWindow', () => {
     expect(scene.scene_undo).toHaveBeenCalledTimes(2)
   })
 
+  it('a bracketed re-commit counts as ONE step by undo depth, though the generation moved several times', () => {
+    // The kernel's generation counts every push: a bracket's inner edits
+    // plus the compound it drains them into. The depth moves by one.
+    let gen = 1n
+    let depth = 5
+    const scene = {
+      history_generation: vi.fn(() => gen),
+      undo_depth: vi.fn(() => depth),
+      scene_undo: vi.fn(() => { gen += 1n; depth -= 1; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; depth += 1; return { free: vi.fn() } }),
+    }
+    const bracketed = () => { gen += 4n; depth += 1 }
+    const w = new RetypeWindow<Spec>(scene)
+    bracketed()
+    w.arm({ size: 1 })
+    const recommit = vi.fn((_s: Spec) => { bracketed(); return true })
+    expect(w.apply(recommit, () => true, () => ({ size: 2 }))).toBe('ok')
+    expect(w.apply(recommit, () => true, () => ({ size: 3 }))).toBe('ok')
+    // Two retypes, one undo each: earlier history (depth 5) is untouched.
+    expect(scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(depth).toBe(6)
+  })
+
   it('stale: an intervening recorded action closes the window and nothing is undone', () => {
     const scene = makeScene()
     const w = new RetypeWindow<Spec>(scene)
@@ -196,6 +219,43 @@ describe('idleRetypeCapturesKey', () => {
     expect(idleRetypeCapturesKey('.', '5', grammar)).toBe(true)
     expect(idleRetypeCapturesKey('p', '5', grammar)).toBe(false)
     expect(idleRetypeCapturesKey('q', '5', grammar)).toBe(false)
+  })
+})
+
+describe('RetypeWindow — refusal rollback by generation', () => {
+  /** A history that also reports its stack depth. */
+  function makeDepthScene() {
+    let gen = 1n
+    let depth = 0
+    return {
+      history_generation: () => gen,
+      undo_depth: () => depth,
+      scene_undo: vi.fn(() => { gen += 1n; depth -= 1; return { free: vi.fn() } }),
+      scene_redo: vi.fn(() => { gen += 1n; depth += 1; return { free: vi.fn() } }),
+      record: () => { gen += 1n; depth += 1 },
+    }
+  }
+
+  it('a refusal that never moved the generation redoes the retracted steps', () => {
+    const scene = makeDepthScene()
+    scene.record()
+    const w = new RetypeWindow<Spec>(scene)
+    w.arm({ size: 1 })
+    expect(w.apply(() => false, () => true, (s) => s)).toBe('failed')
+    expect(scene.scene_redo).toHaveBeenCalledTimes(1)
+    expect(scene.undo_depth()).toBe(1)
+    expect(w.isOpen).toBe(true)
+  })
+
+  it('a refusal that recorded (net) steps retracts exactly those, then restores', () => {
+    const scene = makeDepthScene()
+    scene.record()
+    const w = new RetypeWindow<Spec>(scene)
+    w.arm({ size: 1 })
+    const restore = vi.fn(() => { scene.record(); return true })
+    expect(w.apply(() => { scene.record(); return false }, restore, (s) => s)).toBe('failed')
+    expect(restore).toHaveBeenCalledTimes(1)
+    expect(scene.undo_depth()).toBe(1)
   })
 })
 

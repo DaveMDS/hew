@@ -18,11 +18,23 @@
 
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
+import { setLengthUnit, getLengthUnit } from '../settings/units'
 import { MoveTool } from './MoveTool'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
+import { applyAffineToPoint } from './transformMath'
+
+const CTX = ctxGround()
+/** Kernel keys are 16-hex strings. */
+const hex = (n: bigint): string => n.toString(16).padStart(16, '0')
+/** A `draft-island` ref of the ground plane's drawing. */
+const di = (key: bigint): NodeRef => draftRef('draft-island', CTX, hex(key))
+
+type Seg = { key: bigint; a: number[]; b: number[] }
+type Unit = { key: bigint; edges: Seg[] }
 
 vi.mock('../platform', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../platform')>()
@@ -67,9 +79,93 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
   let nextId = 100n
   let nextEdge = 500n
   const state = { hash: 1n, gen: 1n }
+  // --- drawing surface (drafting engine). The ground plane's listing holds
+  // two single-edge units: 40 (edge 10) and 41 (edge 20). A draft's
+  // `draft_transform_edges` moves the listed edges; `draft_copy_edges` lands
+  // a fresh unit 77 holding the copies. Mutate `drawing.units` (and bump
+  // `state.gen`) to simulate an arranging landing or an undo.
+  const drawing: { units: Unit[] } = {
+    units: [
+      { key: 40n, edges: [{ key: 10n, a: [0, 0, 0], b: [1, 0, 0] }] },
+      { key: 41n, edges: [{ key: 20n, a: [5, 5, 0], b: [6, 5, 0] }] },
+    ],
+  }
+  const undoCalls = (): number => scene.scene_undo.mock.calls.length
+  // History bracket: open snapshots the identity tokens and the drawing;
+  // abort restores them exactly (the kernel restores the whole document,
+  // history included); commit folds everything recorded since open into ONE
+  // entry (the generation moves by one).
+  const brackets = { open: null as null | { gen: bigint; hash: bigint; units: Unit[] }, labels: [] as string[], aborted: 0 }
   const scene = {
+    history_bracket_open: vi.fn(() => {
+      if (brackets.open !== null) throw new Error('StaleReference: a history bracket is already open')
+      brackets.open = { gen: state.gen, hash: state.hash, units: structuredClone(drawing.units) }
+    }),
+    history_bracket_commit: vi.fn((label: string) => {
+      const b = brackets.open
+      brackets.open = null
+      if (b === null) throw new Error('StaleReference: no history bracket')
+      if (state.gen === b.gen) return false
+      state.gen = b.gen + 1n
+      state.hash += 1n
+      brackets.labels.push(label)
+      return true
+    }),
+    history_bracket_abort: vi.fn(() => {
+      const b = brackets.open
+      brackets.open = null
+      if (b === null) return
+      brackets.aborted += 1
+      state.gen = b.gen
+      state.hash = b.hash
+      drawing.units = b.units
+    }),
     axes: vi.fn(() => new Float64Array(frame)),
-    // --- sketch replay surface (Move+Alt sketch copies). One sketch with
+    plane_units_json: vi.fn((_ctx: string) =>
+      JSON.stringify({
+        units: drawing.units.map((u) => ({
+          key: hex(u.key),
+          edges: u.edges.map((e) => ({
+            key: hex(e.key), a: e.a, b: e.b, store: { kind: 'free', sketch: 3 }, curve: null,
+          })),
+        })),
+        regions: [],
+      }),
+    ),
+    draft_begin_ctx: vi.fn((_ctx: string, _label: string) => 1n),
+    draft_transform_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
+      const set = new Set([...keys].map(hex))
+      for (const u of drawing.units) {
+        for (const e of u.edges) {
+          if (!set.has(hex(e.key))) continue
+          e.a = applyAffineToPoint(affine, e.a as [number, number, number])
+          e.b = applyAffineToPoint(affine, e.b as [number, number, number])
+        }
+      }
+    }),
+    draft_copy_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
+      const set = new Set([...keys].map(hex))
+      const edges: Seg[] = []
+      for (const u of drawing.units) {
+        for (const e of u.edges) {
+          if (!set.has(hex(e.key))) continue
+          edges.push({
+            key: nextEdge++,
+            a: applyAffineToPoint(affine, e.a as [number, number, number]),
+            b: applyAffineToPoint(affine, e.b as [number, number, number]),
+          })
+        }
+      }
+      drawing.units.push({ key: 77n, edges })
+    }),
+    // Ending a draft is a commit: both identity tokens move, as the kernel's would.
+    draft_end: vi.fn((_d: bigint) => {
+      state.hash++
+      state.gen++
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[]}'
+    }),
+    draft_cancel: vi.fn(),
+    // --- sketch replay surface (whole-sketch Move+Alt copies). One sketch with
     // two single-edge islands: 40 (edge 10) and 41 (edge 20); replayed
     // edges get fresh ids >= 500 and land in island 77.
     sketch_island_ids: vi.fn(() => [40n, 41n]),
@@ -86,6 +182,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     sketch_curve_geom: vi.fn(() => undefined),
     sketch_plane: vi.fn(() => [0, 0, 0, 0, 0, 1]),
     sketch_island_lines: vi.fn(() => new Float32Array(0)),
+    sketch_lines: vi.fn(() => new Float32Array(0)),
     sketch_begin_gesture: vi.fn(),
     sketch_end_gesture: vi.fn(() => { state.hash++; state.gen++ }),
     sketch_cancel_gesture: vi.fn(),
@@ -98,7 +195,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     }),
     transform_sketch: vi.fn(() => { state.hash++; state.gen++ }),
     transform_sketch_island: vi.fn(() => { state.hash++; state.gen++ }),
-    can_transform_sketch_island: vi.fn(() => true),
+    transform_sketch_islands: vi.fn(() => { state.hash++; state.gen++ }),
     duplicate_selection_array: vi.fn(
       (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
         const out: { kind: string; id: bigint }[] = []
@@ -121,11 +218,13 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     ),
     state_hash: vi.fn(() => state.hash),
     history_generation: vi.fn(() => state.gen),
+    // The undo stack's size: records minus undos plus redos = gen - 2 * undos.
+    undo_depth: vi.fn(() => Number(state.gen) - 1 - 2 * undoCalls()),
     max_array_count: vi.fn(() => 1000),
     scene_undo: vi.fn(() => { state.hash++; state.gen++; return { free: () => { /* no-op */ } } }),
     scene_redo: vi.fn(() => { state.hash++; state.gen++; return { free: () => { /* no-op */ } } }),
   }
-  return { scene, state }
+  return { scene, state, drawing, brackets }
 }
 
 function makeTool(selection?: NodeRef[], frame?: number[]) {
@@ -135,7 +234,7 @@ function makeTool(selection?: NodeRef[], frame?: number[]) {
   const onToast = vi.fn()
   const onMeasurement = vi.fn()
   const onCopyModeChange = vi.fn()
-  const { scene, state } = makeWasmScene(frame)
+  const { scene, state, drawing, brackets } = makeWasmScene(frame)
   const tool = new MoveTool(
     scene as never,
     preview,
@@ -148,7 +247,7 @@ function makeTool(selection?: NodeRef[], frame?: number[]) {
     onCopyModeChange,
     onArrayCommit,
   )
-  return { tool, scene, state, onCommit, onArrayCommit, onToast, onMeasurement, onCopyModeChange }
+  return { tool, scene, state, drawing, brackets, onCommit, onArrayCommit, onToast, onMeasurement, onCopyModeChange }
 }
 
 /** Start a gesture at the origin and lock the X axis. */
@@ -176,6 +275,18 @@ describe('MoveTool — movable drawing axes (arrow-key lock)', () => {
     const [, , , affine] = scene.transform_selection.mock.calls[0]
     // 2 units along the frame's red axis [0,1,0] — NOT world X [1,0,0].
     expect(translationOf(affine as Float64Array)).toEqual([0, 2, 0])
+  })
+})
+
+describe('MoveTool — typed distance before the cursor has a direction', () => {
+  it('moves nothing and says to move the cursor or lock an axis', () => {
+    const { tool, scene, onToast } = makeTool()
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0)) // base, no move, no lock
+    typeKeys(tool, '2')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('lock an axis'))
   })
 })
 
@@ -388,46 +499,91 @@ describe('MoveTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is)'
   })
 })
 
-describe('MoveTool — sketch copy (playtest: "you can\'t Copy a Sketch")', () => {
-  it('Alt copy of a sketch island REPLAYS it at the offset instead of moving it', () => {
-    const t = makeTool([{ kind: 'sketch-island', id: 40n, sketch: 3n }])
+describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")', () => {
+  it('Alt copy of a drawn unit COPIES it through one draft at the offset instead of moving it', () => {
+    const t = makeTool([di(40n)])
     t.tool.onKey(makeKeyEvent('Alt'))
     beginGestureLockedX(t.tool)
     typeKeys(t.tool, '2')
     t.tool.onKey(makeKeyEvent('Enter'))
 
-    // One gesture bracket, the island's edge re-drawn translated by +2 X.
-    expect(t.scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect(t.scene.sketch_add_segment).toHaveBeenCalledTimes(1)
-    expect(t.scene.sketch_add_segment).toHaveBeenCalledWith(3n, 2, 0, 0, 3, 0, 0)
-    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
-    // A COPY, not a move — and no object-duplicate call for a pure sketch
+    // One draft on the shape's plane, the unit's edge copied translated by +2 X.
+    expect(t.scene.draft_begin_ctx).toHaveBeenCalledTimes(1)
+    expect(t.scene.draft_begin_ctx).toHaveBeenCalledWith(CTX, 'Copy')
+    expect(t.scene.draft_copy_edges).toHaveBeenCalledTimes(1)
+    const [, keys, affine] = t.scene.draft_copy_edges.mock.calls[0]
+    expect([...keys]).toEqual([10n])
+    expect(translationOf(affine as Float64Array)).toEqual([2, 0, 0])
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(t.scene.sketch_begin_gesture).not.toHaveBeenCalled()
+    // A COPY, not a move — and no object-duplicate call for a pure drawing
     // selection.
+    expect(t.scene.draft_transform_edges).not.toHaveBeenCalled()
     expect(t.scene.transform_sketch_island).not.toHaveBeenCalled()
+    expect(t.scene.transform_sketch_islands).not.toHaveBeenCalled()
     expect(t.scene.transform_sketch).not.toHaveBeenCalled()
     expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
-    // The new island becomes the committed selection.
-    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 3n }])
+    // The new unit becomes the committed selection (found by geometry).
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
-  it('a sketch copy does not arm the ×N array window (scoped out until a kernel duplicate op exists)', () => {
-    const t = makeTool([{ kind: 'sketch-island', id: 40n, sketch: 3n }])
+  it('Alt copy of a WHOLE sketch still REPLAYS it at the offset (one gesture bracket)', () => {
+    const t = makeTool([{ kind: 'sketch', id: 3n }])
     t.tool.onKey(makeKeyEvent('Alt'))
     beginGestureLockedX(t.tool)
     typeKeys(t.tool, '2')
     t.tool.onKey(makeKeyEvent('Enter'))
 
-    typeKeys(t.tool, 'x3')
-    t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
+    expect(t.scene.sketch_add_segment).toHaveBeenCalledWith(3n, 2, 0, 0, 3, 0, 0)
+    expect(t.scene.sketch_add_segment).toHaveBeenCalledWith(3n, 7, 5, 0, 8, 5, 0)
+    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    expect(t.scene.draft_begin_ctx).not.toHaveBeenCalled()
+    expect(t.scene.transform_sketch).not.toHaveBeenCalled()
     expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
   })
 
-  it('a mixed selection duplicates objects AND replays sketches, without arming the array', () => {
+  it('a drawn-shape copy arms the ×N window: 3x retracts the copy and lays 3 in ONE draft', () => {
+    const t = makeTool([di(40n)])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    // The single copy's one history entry is retracted, then ONE new draft
+    // lays all three reps at 1x, 2x, 3x the step.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.draft_begin_ctx).toHaveBeenCalledTimes(2)
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(2)
+    const calls = t.scene.draft_copy_edges.mock.calls.slice(1)
+    expect(calls).toHaveLength(3)
+    expect(calls.map((c) => translationOf(c[2] as Float64Array))).toEqual([[2, 0, 0], [4, 0, 0], [6, 0, 0]])
+    for (const c of calls) expect([...c[1]]).toEqual([10n])
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('/3 on a drawn-shape copy divides the committed distance into 3 steps', () => {
+    const t = makeTool([di(40n)])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    typeKeys(t.tool, '/3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const calls = t.scene.draft_copy_edges.mock.calls.slice(1)
+    expect(calls.map((c) => translationOf(c[2] as Float64Array))).toEqual([[1, 0, 0], [2, 0, 0], [3, 0, 0]])
+  })
+
+  it('a mixed selection arrays objects AND drawn shapes together', () => {
     const t = makeTool([
       { kind: 'object', id: 1n },
-      { kind: 'sketch-island', id: 40n, sketch: 3n },
+      di(40n),
     ])
     t.tool.onKey(makeKeyEvent('Alt'))
     beginGestureLockedX(t.tool)
@@ -435,16 +591,24 @@ describe('MoveTool — sketch copy (playtest: "you can\'t Copy a Sketch")', () =
     t.tool.onKey(makeKeyEvent('Enter'))
 
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
-    expect(t.scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(1)
     expect(t.onCommit).toHaveBeenCalledWith([
-      { kind: 'sketch-island', id: 77n, sketch: 3n },
+      di(77n),
       { kind: 'object', id: 100n },
     ])
+    // The drawn and object halves are ONE undo step (a history bracket).
+    expect(t.scene.undo_depth()).toBe(1)
+    expect(t.brackets.labels).toEqual(['Copy'])
 
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.scene.scene_undo).not.toHaveBeenCalled()
-    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    // One entry for the whole gesture (was one per half): one undo retracts it
+    // and the array is reissued as one entry again.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.undo_depth()).toBe(1)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_array.mock.calls[1][3]).toBe(3)
+    expect(t.scene.draft_copy_edges.mock.calls.slice(1)).toHaveLength(3)
   })
 })
 
@@ -951,6 +1115,89 @@ describe('MoveTool — retype the distance after the commit', () => {
   })
 })
 
+describe('MoveTool — retype after an arranging drawn-shape move', () => {
+  it('re-commits with the PRE-commit shape refs (the undo restores the original keys), while the visible selection is the re-resolved unit', () => {
+    const sel: NodeRef[] = [di(40n)]
+    const t = makeTool(sel)
+    const scene = t.scene as unknown as Record<string, ReturnType<typeof vi.fn>>
+    const original = JSON.parse(JSON.stringify(t.drawing.units, (_k, v) => (typeof v === 'bigint' ? `${v}n` : v)))
+    const restore = () => {
+      t.drawing.units = original.map((u: { key: string; edges: { key: string; a: number[]; b: number[] }[] }) => ({
+        key: BigInt(u.key.slice(0, -1)),
+        edges: u.edges.map((e) => ({ key: BigInt(e.key.slice(0, -1)), a: [...e.a], b: [...e.b] })),
+      }))
+    }
+    // The first landing arranges (unit 40 merges into fresh unit 99 holding
+    // the moved edge under a new key); the undo the retype window runs
+    // restores the original keys.
+    const applyImpl = scene.draft_transform_edges.getMockImplementation() as (...a: unknown[]) => void
+    scene.draft_transform_edges.mockImplementation((...args: unknown[]) => {
+      applyImpl(...args)
+      // EVERY landing arranges: the moved edge re-keys into fresh unit 99.
+      t.drawing.units = [
+        { key: 99n, edges: [{ key: 60n, a: t.drawing.units[0].edges[0].a, b: t.drawing.units[0].edges[0].b }] },
+        t.drawing.units[1],
+      ]
+    })
+    const undo = scene.scene_undo.getMockImplementation() as () => unknown
+    scene.scene_undo.mockImplementation(() => {
+      restore()
+      return undo()
+    })
+
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.draft_transform_edges).toHaveBeenCalledTimes(2)
+    // Both commits name the ORIGINAL unit's edge, never the dead merged key 60.
+    expect([...(scene.draft_transform_edges.mock.calls[0][1] as BigUint64Array)]).toEqual([10n])
+    expect([...(scene.draft_transform_edges.mock.calls[1][1] as BigUint64Array)]).toEqual([10n])
+    expect(translationOf(scene.draft_transform_edges.mock.calls[1][2] as Float64Array)).toEqual([3, 0, 0])
+    // The visible selection after the retype is the re-resolved unit again.
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+  })
+})
+
+describe('MoveTool — drawing plane constraint for drawn selections', () => {
+  const withStore = (t: ReturnType<typeof makeTool>, store: object) => {
+    ;(t.scene.plane_units_json as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      JSON.stringify({
+        units: [{
+          key: hex(40n),
+          edges: [{ key: hex(10n), a: [0, 0, 0], b: [1, 0, 0], store, curve: null }],
+        }],
+        regions: [],
+      }),
+    )
+  }
+
+  it('a drawn shape with a face edge slides ON its plane (constraintPlane from its context)', () => {
+    const t = makeTool([di(40n)])
+    withStore(t, { kind: 'topology', object: 1 })
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(t.tool.snapConstraint()?.constraintPlane).toEqual({ point: [0, 0, 0], normal: [0, 0, 1] })
+  })
+
+  it('a shape drawn wholly over the void is NOT constrained (it may detach out of its plane)', () => {
+    const t = makeTool([di(40n)])
+    withStore(t, { kind: 'free', sketch: 3 })
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(t.tool.snapConstraint()?.constraintPlane).toBeUndefined()
+  })
+
+  it('a mixed object + drawn selection is not constrained', () => {
+    const t = makeTool([{ kind: 'object', id: 1n }, di(40n)])
+    withStore(t, { kind: 'topology', object: 1 })
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(t.tool.snapConstraint()?.constraintPlane).toBeUndefined()
+  })
+})
+
 describe('MoveTool — retype window edge cases', () => {
   it('a half-typed post-commit value does not leak into the next gesture', () => {
     const t = makeTool()
@@ -1018,5 +1265,210 @@ describe('MoveTool — a typed distance after an array re-spaces the array', () 
     const dup = t.scene.duplicate_selection_array.mock.calls
     expect(dup[dup.length - 1][3]).toBe(4)
     expect(translationOf(dup[dup.length - 1][2] as Float64Array)[0]).toBeCloseTo(2, 9) // 8 / 4
+  })
+})
+
+
+describe('MoveTool — a clicked distance is exactly the displayed distance', () => {
+  const prev = getLengthUnit()
+  const target: [number, number] = [0.0093987, 0.0037873] // |.| = 10.134 mm, shows "10.1 mm"
+
+  function drag(kind: string, typed: string | null, locked = false) {
+    const { tool, scene, onMeasurement } = makeTool()
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    if (locked) tool.onKey(makeKeyEvent('ArrowRight'))
+    const s = { ...makeSnap(locked ? target[0] : target[0], locked ? 0 : target[1], 0), kind }
+    tool.onPointerMove(s, rayThrough(s.x, s.y))
+    if (typed === null) tool.onPointerDown(s, rayThrough(s.x, s.y))
+    else {
+      typeKeys(tool, typed)
+      tool.onKey(makeKeyEvent('Enter'))
+    }
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    return { t: translationOf(scene.transform_selection.mock.calls[0][3] as Float64Array), onMeasurement }
+  }
+
+  it('a free click moves by the same vector as typing the shown distance', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = drag('ground', null)
+      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.1 mm')
+      expect(clicked.t).toEqual(drag('ground', '10.1').t)
+      expect(Math.hypot(...clicked.t)).toBeCloseTo(10.1 * 0.001, 15)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a free click under an axis lock moves by the shown signed distance along the axis', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = drag('on-axis', null, true)
+      expect(clicked.t).toEqual(drag('on-axis', '9.4', true).t)
+      expect(clicked.t[0]).toBe(9.4 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a hard-snapped (endpoint) click moves exactly to the snapped point', () => {
+    setLengthUnit('mm')
+    try {
+      expect(drag('endpoint', null).t).toEqual([target[0], target[1], 0])
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+})
+
+describe('MoveTool — a refused mixed array resolve is atomic', () => {
+  it('aborts the attempt (drawn half included) and redoes the previous copy', () => {
+    const t = makeTool([{ kind: 'object', id: 1n }, di(40n)])
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+
+    t.scene.duplicate_selection_array.mockImplementationOnce(() => {
+      throw new Error('Transform: refused')
+    })
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    // One undo retracted the previous commit (its single entry); the refused
+    // attempt's bracket aborted — restoring the document and the redo stack
+    // exactly — so ONE redo brings the previous copy back. Nothing is re-laid.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.scene_redo).toHaveBeenCalledTimes(1)
+    expect(t.brackets.aborted).toBe(1)
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(2) // first copy + the aborted attempt's draft
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(t.scene.undo_depth()).toBe(1)
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(0)
+
+    // The window is still hot and re-stamped: another count resolves.
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(2)
+  })
+})
+
+describe('MoveTool — array history edge cases', () => {
+  const STALE = /changed|again|stale|Retype|retype/i
+
+  it('a refused xN that recorded nothing keeps the typed-distance window armed', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+    t.scene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+    typeKeys(t.tool, 'x3'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_redo).toHaveBeenCalledTimes(1) // nothing recorded: redo, not a re-lay
+    t.onToast.mockClear()
+    typeKeys(t.tool, '5'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast.mock.calls.map((c) => c[0] as string).filter((m) => STALE.test(m))).toEqual([])
+    const dup = t.scene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(translationOf(dup[2] as Float64Array)[0]).toBeCloseTo(5, 9)
+  })
+
+  it('a refused relay that recorded nothing re-stamps the array window so the next xN is accepted', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
+    t.scene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+    typeKeys(t.tool, '4'); t.tool.onKey(makeKeyEvent('Enter')) // relay refused
+    t.onToast.mockClear()
+    typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).not.toHaveBeenCalledWith(expect.stringContaining('Array entry ended'), undefined)
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(5)
+  })
+
+  describe('a relay whose second drawn context refuses (the bracket aborts: history and stack are put back exactly)', () => {
+    const CTX2 = ctxOfPlane([0, 5, 0], [0, 1, 0]) as string
+    const di2 = (key: bigint): NodeRef => draftRef('draft-island', CTX2, hex(key))
+
+    it('does not over-undo unrelated history on a refused retype', () => {
+      const t = makeTool([{ kind: 'object', id: 1n }, di(40n), di2(41n)])
+      const ctxOf = new Map<bigint, string>()
+      let nextD = 1n
+      let failsLeft = 0
+      t.scene.draft_begin_ctx.mockImplementation(((ctx: string) => {
+        const d = nextD++
+        ctxOf.set(d, ctx)
+        return d
+      }) as never)
+      t.scene.draft_end.mockImplementation(((d: bigint) => {
+        if (ctxOf.get(d) === CTX2 && failsLeft > 0) {
+          failsLeft -= 1
+          throw new Error('WouldRetopologize: refused')
+        }
+        t.state.hash++
+        t.state.gen++
+        return '{"objects":[],"sketches":[],"kept_as_sketch":[]}'
+      }) as never)
+      t.tool.onKey(makeKeyEvent('Alt'))
+      beginGestureLockedX(t.tool)
+      typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+      typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
+      const depth = t.scene.undo_depth()
+      expect(depth).toBe(1) // two drawn contexts + the object array = ONE step (was 3)
+      // The relay: context 1 records, context 2 refuses (batch + per-rep
+      // fallback), and the bracket aborts, taking context 1's draft with it.
+      failsLeft = 2
+      typeKeys(t.tool, '4'); t.tool.onKey(makeKeyEvent('Enter'))
+      // The refused retype put back exactly what was there: nothing popped
+      // beyond the window's own steps.
+      expect(t.scene.undo_depth()).toBe(depth)
+    })
+
+    it('the drawn half succeeding and the object half refusing during a relay also nets out', () => {
+      const t = makeTool([{ kind: 'object', id: 1n }, di(40n)])
+      t.tool.onKey(makeKeyEvent('Alt'))
+      beginGestureLockedX(t.tool)
+      typeKeys(t.tool, '2'); t.tool.onKey(makeKeyEvent('Enter'))
+      typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
+      const depth = t.scene.undo_depth()
+      t.scene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+      typeKeys(t.tool, '4'); t.tool.onKey(makeKeyEvent('Enter'))
+      expect(t.scene.undo_depth()).toBe(depth)
+    })
+  })
+})
+
+describe('MoveTool — one gesture, one undo step (history bracket)', () => {
+  it('Select All + Move (an object and drawing together) records exactly ONE undo step labeled Move', () => {
+    const t = makeTool([{ kind: 'object', id: 1n }, di(40n), di(41n)])
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.scene.undo_depth()).toBe(1) // draft + object move folded into one entry
+    expect(t.brackets.labels).toEqual(['Move'])
+    expect(t.brackets.aborted).toBe(0)
+    // And one typed re-distance retracts exactly that one step.
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.undo_depth()).toBe(1)
+  })
+
+  it('a refusal mid-gesture (object move after the drawing landed) aborts: nothing moved, nothing recorded', () => {
+    const t = makeTool([{ kind: 'object', id: 1n }, di(40n)])
+    const before = structuredClone(t.drawing.units)
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('NothingToMove: refused') })
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.brackets.aborted).toBe(1)
+    expect(t.scene.undo_depth()).toBe(0)
+    expect(t.drawing.units).toEqual(before) // the drawing moved by the landed draft came back
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
   })
 })

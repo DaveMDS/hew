@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest'
 import { DRAG_MOVE_THRESHOLD_PX, exceedsDragThreshold, dragMoveTargets } from './dragMove'
 import type { NodeRef } from '../panels/treeModel'
+import { ctxGround, draftRef } from '../tools/planeUnits'
 
 const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
 const group = (id: bigint): NodeRef => ({ kind: 'group', id })
-const island = (id: bigint, sketch: bigint): NodeRef => ({ kind: 'sketch-island', id, sketch })
+const CTX = ctxGround()
+const hex = (n: bigint): string => n.toString(16).padStart(16, '0')
+const island = (id: bigint, ctx: string = CTX): NodeRef => draftRef('draft-island', ctx, hex(id))
+const OTHER_CTX = JSON.stringify({ plane: [0, 0, 1, 0, 0, 1] })
 
 describe('exceedsDragThreshold (click ≠ drag)', () => {
   it('a sub-threshold wiggle is still a click', () => {
@@ -31,16 +35,16 @@ describe('dragMoveTargets (what a drag moves)', () => {
   })
 
   it('dragging a member of the current selection moves the WHOLE selection (OS convention)', () => {
-    const selection = [obj(1n), group(3n), island(4n, 9n)]
+    const selection = [obj(1n), group(3n), island(4n)]
     expect(dragMoveTargets(obj(1n), selection)).toEqual(selection)
     expect(dragMoveTargets(group(3n), selection)).toEqual(selection)
   })
 
-  it('sketch sub-entities compare by sketch AND id (nodeKey), not id alone', () => {
-    const selection = [island(4n, 9n)]
-    // Same island id under a DIFFERENT sketch is a different node.
-    expect(dragMoveTargets(island(4n, 8n), selection)).toEqual([island(4n, 8n)])
-    expect(dragMoveTargets(island(4n, 9n), selection)).toEqual(selection)
+  it('drawn sub-entities compare by plane context AND key (nodeKey), not key alone', () => {
+    const selection = [island(4n)]
+    // Same unit key under a DIFFERENT plane context is a different node.
+    expect(dragMoveTargets(island(4n, OTHER_CTX), selection)).toEqual([island(4n, OTHER_CTX)])
+    expect(dragMoveTargets(island(4n), selection)).toEqual(selection)
   })
 
   it('returns a copy, never the live selection array', () => {

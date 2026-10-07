@@ -1,3 +1,5 @@
+import { draftRefAlive, type PlaneUnitsScene } from '../tools/planeUnits'
+
 /**
  * Pure model helpers for the document tree + editing context ( navigation).
  *
@@ -25,58 +27,62 @@ export function stripTagSuffix(name: string): string {
 }
 
 /**
- * Kind of a document node. `'sketch'` is a free-standing,
- * not-yet-extruded sketch and `'sketch-edge'` one individual line of one —
- * neither has a kernel `NodeId`/FFI `node_id` ('s NodeId enumerates only
- * Object/Group/Instance), so both deliberately stay out of
- * `nodeKindToNumber`'s mapping; their delete/pick route through dedicated
- * wasm methods (`delete_sketch`/`sketch_remove_edge`/`pick_sketch`/
- * `pick_sketch_edge`) instead of `delete_node`.
+ * Kind of a document node. `'sketch'` is a whole free-standing sketch (a row
+ * of the Outliner) with no kernel `NodeId`/FFI `node_id` ('s NodeId
+ * enumerates only Object/Group/Instance), so it deliberately stays out of
+ * `nodeKindToNumber`'s mapping.
+ *
+ * The four `draft-*` kinds are the DRAWING on a plane (unified-drafting
+ * design §8): every line, curve, and shape drawn on a plane — whether it
+ * lives in a solid's face topology, an object-owned sketch, or a free
+ * sketch — is addressed by the plane's context string and a kernel unit
+ * key, never by a store handle. `'draft-island'` is one connected shape (the
+ * user-facing unit), `'draft-curve'` a drawn circle's facets, `'draft-edge'`
+ * one line, `'draft-region'` one filled region. None has a kernel NodeId;
+ * see `app/src/tools/planeUnits.ts`.
  */
 export type NodeKind =
   | 'object'
   | 'group'
   | 'instance'
   | 'sketch'
-  | 'sketch-island'
-  | 'sketch-curve'
-  | 'sketch-edge'
-  | 'imprint'
-  | 'imprint-chord'
+  | 'draft-island'
+  | 'draft-curve'
+  | 'draft-edge'
+  | 'draft-region'
 
-/** A reference to a document node: kind + opaque handle. The sketch-scoped
- * kinds (`'sketch-island'` — one connected shape, the user-facing unit;
- * `'sketch-curve'` — a drawn arc/circle's facet chain; `'sketch-edge'` — one
- * line) additionally carry their owning sketch, since their ids are only
- * unique within one sketch. */
+/** A reference to a document node: kind + opaque handle. The draft kinds
+ * additionally carry the canonical plane context string and the unit's key
+ * (16 lowercase hex digits); `id` is that key as a bigint. */
 export interface NodeRef {
   kind: NodeKind
   id: bigint
-  /** Owning sketch handle — set iff `kind` is a sketch-scoped sub-entity. */
-  sketch?: bigint
-  /** Owning object handle — set iff `kind` is an imprint kind
-   *  (`'imprint'`: a drawn sub-face, `id` its face handle; `'imprint-chord'`:
-   *  a drawn run up to the face's edge, `id` its first edge handle). Neither
-   *  has a kernel NodeId; see `app/src/tools/imprints.ts`. */
-  object?: bigint
+  /** Canonical plane context (`{"plane":[…]}` + optional `"instance"`) —
+   *  set iff `kind` is a draft kind. */
+  ctx?: string
+  /** The kernel unit/edge/curve/region key, hex — set iff a draft kind. */
+  key?: string
+}
+
+/** Whether `kind` is one of the draft (drawing-on-a-plane) kinds. */
+export function isDraftKind(kind: NodeKind): kind is 'draft-island' | 'draft-curve' | 'draft-edge' | 'draft-region' {
+  return kind === 'draft-island' || kind === 'draft-curve' || kind === 'draft-edge' || kind === 'draft-region'
+}
+
+/** Whether `kind` has no kernel NodeId: a whole sketch or any draft kind. */
+export function isSketchScopedKind(kind: NodeKind): kind is 'sketch' | 'draft-island' | 'draft-curve' | 'draft-edge' | 'draft-region' {
+  return kind === 'sketch' || isDraftKind(kind)
 }
 
 /** Return true when two NodeRefs refer to the same node. */
 export function nodeEq(a: NodeRef, b: NodeRef): boolean {
-  return a.kind === b.kind && a.id === b.id && a.sketch === b.sketch && a.object === b.object
+  return a.kind === b.kind && a.id === b.id && a.ctx === b.ctx
 }
 
 /** Stable string key for a NodeRef, usable in a Set or Map. */
 export function nodeKey(n: NodeRef): string {
-  if (n.sketch !== undefined) return `${n.kind}:${n.sketch}:${n.id}`
-  if (n.object !== undefined) return `${n.kind}:${n.object}:${n.id}`
+  if (n.ctx !== undefined) return `${n.kind}:${n.ctx}:${n.key ?? n.id}`
   return `${n.kind}:${n.id}`
-}
-
-/** Whether `kind` is one of the imprint kinds (a drawn shape on a solid's
- *  face, selectable and movable on that face but not a node of its own). */
-export function isImprintKind(kind: NodeKind): boolean {
-  return kind === 'imprint' || kind === 'imprint-chord'
 }
 
 /** Convert a NodeJs FFI value (has .kind and .id) to a plain NodeRef. */
@@ -103,13 +109,7 @@ export function collectLeafIds(
 ): { objectIds: bigint[]; instanceIds: bigint[] } {
   if (node.kind === 'object') return { objectIds: [node.id], instanceIds: [] }
   if (node.kind === 'instance') return { objectIds: [], instanceIds: [node.id] }
-  if (
-    node.kind === 'sketch' ||
-    node.kind === 'sketch-island' ||
-    node.kind === 'sketch-curve' ||
-    node.kind === 'sketch-edge' ||
-    isImprintKind(node.kind)
-  ) {
+  if (isSketchScopedKind(node.kind)) {
     return { objectIds: [], instanceIds: [] }
   }
   // Group: recurse into members (may themselves be nested groups).
@@ -702,22 +702,18 @@ export function mergeSelection(
   return [...kept, ...fresh]
 }
 
-/** The slice of the wasm `Scene` that `pruneDeadSelection` reads. Sub-entity
- * probes follow the kernel's own contracts: `sketch_edge_island` returns
- * undefined for a stale edge, while the curve/island queries throw typed
- * errors — the prune treats a throw as "dead". */
+/** The slice of the wasm `Scene` that `pruneDeadSelection` reads. A draft
+ * ref is alive while its plane's listing still holds its key
+ * (`plane_units_json`); a scene without the listing treats every draft ref
+ * as dead. */
 export interface SelectionLivenessView {
   object_ids(): ArrayLike<bigint>
   group_ids(): ArrayLike<bigint>
   instance_ids(): ArrayLike<bigint>
   sketch_ids(): ArrayLike<bigint>
-  sketch_edge_island(sketch: bigint, edge: bigint): bigint | undefined
-  sketch_curve_chain(sketch: bigint, edge: bigint): ArrayLike<bigint>
-  sketch_island_edges(sketch: bigint, island: bigint): ArrayLike<bigint>
-  /** The object's imprints as `face_features` JSON (see imprints.ts).
-   *  Optional so older test doubles still satisfy the view; an imprint ref
-   *  is then treated as dead. */
-  face_features?(object: bigint): string
+  plane_units_json?(ctx: string): string
+  pick_plane_unit?(ctx: string, ray: Float64Array, tolerance: number): string
+  history_generation?(): bigint
 }
 
 /**
@@ -759,43 +755,12 @@ export function pruneDeadSelection(
         return (instances ??= new Set(Array.from(scene.instance_ids()))).has(n.id)
       case 'sketch':
         return sketchSet().has(n.id)
-      case 'sketch-edge':
-        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
-        return scene.sketch_edge_island(n.sketch, n.id) !== undefined
-      case 'sketch-curve':
-        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
-        try {
-          return scene.sketch_curve_chain(n.sketch, n.id).length > 0
-        } catch {
-          return false
-        }
-      case 'sketch-island':
-        if (n.sketch === undefined || !sketchSet().has(n.sketch)) return false
-        try {
-          return scene.sketch_island_edges(n.sketch, n.id).length > 0
-        } catch {
-          return false
-        }
-      case 'imprint':
-      case 'imprint-chord': {
-        // An imprint is alive while its object still reports it: a dissolve,
-        // a push into a boss, or a chord re-cut all retire the handle.
-        if (n.object === undefined || scene.face_features === undefined) return false
-        if (!(objects ??= new Set([...Array.from(scene.object_ids()), ...scopedObjects])).has(n.object)) {
-          return false
-        }
-        let json: string
-        try {
-          json = scene.face_features(n.object)
-        } catch {
-          return false
-        }
-        const key = n.kind === 'imprint' ? '"face":' : '"edge":'
-        // Cheap membership test on the JSON text: the kernel writes handles
-        // as bare integers, so `"face":<id>,` (or `"edge":<id>,`) appears
-        // exactly for a live feature keyed by that handle.
-        return json.includes(`${key}${n.id.toString()},`) || json.includes(`${key}${n.id.toString()}}`)
-      }
+      case 'draft-island':
+      case 'draft-curve':
+      case 'draft-edge':
+      case 'draft-region':
+        if (scene.plane_units_json === undefined) return false
+        return draftRefAlive(scene as PlaneUnitsScene, n)
     }
   }
 

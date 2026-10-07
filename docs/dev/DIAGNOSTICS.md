@@ -176,7 +176,11 @@ A recording is one JSON object.
 
 Each entry in `calls` is a tagged object: `method` selects the call, and the
 remaining fields are its arguments. `sketch`/`region`/`object`/`id` are the
-literal internal handles from the recording session.
+literal internal handles from the recording session. Drawing on a face is
+recorded as `draft_*` calls; recordings made before the drafting engine,
+which held the retired face calls (`split_face_inner`, `split_face`,
+`merge_faces`, `dissolve_imprint`, `transform_imprint`, and the rest), no
+longer replay.
 
 | `method` | Arguments | Effect |
 |---|---|---|
@@ -201,7 +205,13 @@ literal internal handles from the recording session.
 | `group_nodes` | `kinds[]`/`ids[]` (parallel node lists, kind as `delete_node`) | form a merge group |
 | `duplicate_node` | `kind`, `id`, `affine[12]` (row-major 3×4) | deep-copy a node (Move+Alt) at the affine offset |
 | `slice_object` | `object`, `plane[6]` (`[px,py,pz,nx,ny,nz]`) | slice an Object by a plane |
-| `split_face_inner` | `object`, `face`, `loop_pts[]` (xyz triples), optional `curve[4]` (`[cx,cy,cz,radius]`), optional `curve_segments`, optional `curves[]` (`[cx,cy,cz,radius]` or `null` per loop edge) | imprint a closed loop on a solid face (draw-on-face); `curve` present ⇒ the loop's edges carry that circle (every edge, or the first `curve_segments` for a pie/segment's arc); `curves` present ⇒ an explicit per-edge claim list (the Offset tool's inset), taking precedence |
+| `draft_begin_plane` / `draft_begin_face` / `draft_begin_sketch` / `draft_begin_ctx` | `draft` (the handle replay re-mints), the plane (`px..nz`), `object`/`face`, `sketch`, or `ctx` (JSON), `label` | open a drafting gesture on a plane (draw on the ground or on a face); `_in_instance` forms also carry `instance` and take world coordinates |
+| `draft_add_segment` | `draft`, `a[3]`, `b[3]` | add a segment to the open draft's drawing |
+| `draft_begin_curve` / `draft_begin_curve_with` / `draft_begin_polygon_with` / `draft_end_curve` | `draft`, plus `center[3]`, `radius` for the `_with` forms | bracket segments into one curve chain (a plain run such as a flat arc), circle, or regular polygon |
+| `draft_remove_edges` / `draft_transform_edges` / `draft_copy_edges` | `draft`, `keys[]` (edge keys), `affine[12]` | erase, move, or copy drawing by edge key |
+| `draft_move_vertex` / `draft_offset_region` / `draft_refacet_curve` | `draft` plus the point, region key and distance, or curve key and segment count | the vertex, offset, and re-facet edits |
+| `draft_end` / `draft_cancel` | `draft` | lower the draft as one undo step / drop it |
+| `history_bracket_open` / `history_bracket_commit` / `history_bracket_abort` | `label` (commit) | bracket a multi-edit gesture (a selection transform that moves objects and drawing) into one undo step, or restore the document as it was at open |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
@@ -224,8 +234,6 @@ literal internal handles from the recording session.
 | `explode_instance` | `instance` | bake an instance into independent world objects |
 | `make_unique` | `instance` | detach an instance onto a private definition copy |
 | `push_pull_in_component` | `component`, `object`, `face`, `distance` | push/pull a face inside a component definition |
-| `split_face` | `object`, `face`, `path[]` (xyz triples), optional `curve[4]` + `curve_segments` | cut a face along a drawn path; `curve` present ⇒ the first `curve_segments` path edges are facets of that circle (an arc drawn edge to edge) |
-| `merge_faces` | `object`, `edge` | dissolve the boundary between two coplanar faces |
 | `set_node_name` | `kind`, `id`, `name` (string or null) | rename a node / clear its name |
 | `add_node_tag` / `remove_node_tag` | `kind`, `id`, `path[]` (segments) | assign / unassign a tag path on a node |
 | `set_tag_hidden` | `path` (`/`-joined), `hidden` | set a tag's hidden-by-default flag (persisted view state) |

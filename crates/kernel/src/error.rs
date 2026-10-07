@@ -95,6 +95,13 @@ pub enum TopologyError {
         /// The offending face.
         face: FaceId,
     },
+    /// A face's outer loop encloses too little area for its plane to be
+    /// recomputed from its vertices, as the file loader does: the state
+    /// could be saved but never reopened, so it is never committed.
+    FaceTooSmallToReopen {
+        /// The offending face.
+        face: FaceId,
+    },
     /// A face's inner (hole) loop lies entirely outside the face's outer
     /// boundary: the hole belongs to some other region of the plane, so the
     /// face's ring structure does not describe its geometry.
@@ -190,6 +197,12 @@ impl std::fmt::Display for TopologyError {
             }
             FaceGeometryNotPlanar { face } => {
                 write!(f, "face {face:?} has vertices off its stored plane")
+            }
+            FaceTooSmallToReopen { face } => {
+                write!(
+                    f,
+                    "face {face:?} encloses too little area to recompute its plane on load"
+                )
             }
             HoleOutsideFace { face, loop_id } => {
                 write!(

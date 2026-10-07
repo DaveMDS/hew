@@ -4,26 +4,24 @@
 //! Every drawing command resolves a plane spec (docs/agents/HEW_API.md §7) into
 //! one of three targets: a fresh sketch (`{"ground": true}` /
 //! `{origin, normal}`), an existing one (`{"sketch": id}`), or a solid's
-//! face (`{"face": <locator>}` — the face-imprint path, drawing directly
-//! on a face instead of into a sketch). The first two bracket their
-//! edits in exactly one [`kernel::Document::begin_sketch_gesture`] /
+//! face (`{"face": <locator>}`). The first two bracket their edits in
+//! exactly one [`kernel::Document::begin_sketch_gesture`] /
 //! `end_sketch_gesture` pair — the only way a sketch mutation becomes
 //! undo-visible (api-kernel-map.md §1.1, gap 7) — and return
-//! `{sketch, region_ids, …}`. The face-imprint path never touches a
-//! sketch at all: it goes straight through
-//! [`kernel::Document::apply_object_op`] with `KernelOp::SplitFace`
-//! (an open, boundary-to-boundary cut — `draw_line`, and `draw_arc` when
-//! it does not close on itself) or `KernelOp::SplitFaceInner` (a closed
-//! loop strictly inside the face — `draw_rect`/`draw_circle`/
-//! `draw_polygon`, and `draw_arc` when its sweep is a full turn),
-//! returning `{object_id}` plus transaction-scoped face tokens (§5.2,
-//! §5.4) — a solid's faces have no public id of their own, so tokens are
-//! the only way a later command in the same transaction can address
-//! what this one just cut. A face resolving to a component-DEFINITION
-//! member routes through [`kernel::Document::apply_def_op`] instead of
-//! `apply_object_op` (same `KernelOp` construction, def-scoped) — the
-//! edit lands on the shared definition, so every instance of the
-//! component picks it up at once (see [`apply_face_op`]).
+//! `{sketch, region_ids, …}`. A face target goes through the drafting
+//! engine instead (`draft.rs`, [`kernel::Document::draft`]): the face's
+//! plane is the drafting context, the shape is drawn into the arrangement
+//! of everything on that plane, and each edge lands where it can be stored
+//! (the solid's face structure, the solid's owned sketch, or a free
+//! sketch) as one undo step. A loose line, an open path touching no edge,
+//! and a shape overhanging the face edge are therefore all accepted. The
+//! result is `{object_id, units}` plus transaction-scoped face tokens
+//! (§5.2, §5.4) for the faces the draw produced — a solid's faces have no
+//! public id of their own, so tokens are the only way a later command in
+//! the same transaction can address what this one just cut. A face
+//! resolving to a component-DEFINITION member drafts in the definition's
+//! frame, so the edit lands on the shared definition and every instance
+//! of the component picks it up at once.
 //!
 //! Coordinate frame (v1, deliberate, not a gap): a face locator (§5.2)
 //! always names an OBJECT (`{object, at|ray}` or a `$face` token), never
@@ -56,14 +54,14 @@
 //! (api-kernel-map.md §1.2); on a face the same analytic claim travels
 //! as `SplitFaceInner`'s `curve` field instead.
 
+use super::draft::{self, Run};
 use super::{CmdError, Ctx, Handler};
-use crate::geom;
 use crate::ids;
-use crate::locate::{self, FaceRef, PlaneTarget};
+use crate::locate::{self, PlaneTarget};
 use crate::refusal::Refusal;
 use kernel::{
-    CurveGeom, EntityRef, KernelOp, KernelOpReport, ObjectId, Plane, Point3, SketchCurveId,
-    SketchCurveKind, SketchId, SketchRegionId, Vec3,
+    CurveGeom, EntityRef, Plane, Point3, SketchCurveId, SketchCurveKind, SketchId, SketchRegionId,
+    Vec3,
 };
 use serde_json::Value;
 
@@ -129,199 +127,6 @@ fn commit_target(ctx: &mut Ctx, target: PlaneTarget) -> Result<(SketchId, Plane)
                 .into(),
         )),
     }
-}
-
-// --------------------------------------------------- face-imprint plumbing
-
-/// Applies a face-imprint `KernelOp` (`SplitFace`/`SplitFaceInner`) to
-/// `object`, routing through the shared-definition path
-/// ([`kernel::Document::apply_def_op`]) when `object` is a
-/// component-definition member, so every instance of the component
-/// picks up the cut at once — otherwise the plain world path
-/// ([`kernel::Document::apply_object_op`]). Both take the identical
-/// `KernelOp`; only the document method (and which entities a
-/// `DocChange` names) differs (api-kernel-map.md §1.3). See the module
-/// doc comment for the coordinate-frame decision this deliberately does
-/// NOT do (no world→def-local remap through any instance pose).
-fn apply_face_op(
-    ctx: &mut Ctx,
-    object: ObjectId,
-    op: KernelOp,
-) -> Result<KernelOpReport, CmdError> {
-    let (report, _change) = match ctx.doc.object_owner_component(object) {
-        Some(component) => ctx.doc.apply_def_op(component, object, op)?,
-        None => ctx.doc.apply_object_op(object, op)?,
-    };
-    Ok(report)
-}
-
-/// A resolved face's supporting plane — the face-imprint analog of a
-/// sketch's `plane()`, used to build the same in-plane (u, v) basis
-/// [`plane_basis`] gives sketch mode.
-fn face_plane(ctx: &Ctx, face: FaceRef) -> Result<Plane, CmdError> {
-    let object = ctx.doc.object(face.object).ok_or_else(|| {
-        CmdError::Internal("object vanished between face resolution and use".into())
-    })?;
-    let f = object
-        .faces()
-        .get(face.face)
-        .ok_or_else(|| CmdError::Internal("face vanished between resolution and use".into()))?;
-    Ok(f.plane)
-}
-
-/// The `loop_not_strictly_inside` refusal, built the same way any other
-/// kernel-sourced refusal is (`Refusal::from_document_error`) so its name
-/// and UI copy stay identical to the kernel's own — this is the API
-/// minting the SAME refusal the kernel would eventually raise itself,
-/// just earlier and more reliably (see [`require_strictly_inside_face`]).
-fn loop_not_strictly_inside_early() -> CmdError {
-    CmdError::from(kernel::DocumentError::Op(kernel::KernelOpError::Sticky(
-        kernel::StickyError::LoopNotStrictlyInside { index: 0 },
-    )))
-}
-
-/// Every point in a would-be face-imprint loop is strictly inside the
-/// target face — clear of its outer boundary and every hole, not merely
-/// on the correct side of it.
-///
-/// This exists because the kernel's own equivalent check
-/// (`split_face_inner_impl`'s per-vertex `point_inside_polygon` gate,
-/// `ops.rs`) is an unguarded even-odd ray cast with no tolerance band: a
-/// point landing within a few ULPs of a boundary edge — exactly what
-/// happens when a caller-supplied point (`draw_arc`'s `close: "pie"`
-/// center, say) sits exactly ON the face's boundary — resolves to inside
-/// or outside by whichever way two independently rounded floating-point
-/// computations happen to fall, not by geometry. Left unguarded, that can
-/// let a hole loop through that touches the parent face's outer loop at a
-/// vertex: pinched, degenerate topology committed as a false "Ok".
-///
-/// The fix is a distance-to-boundary guard ahead of the ordinary
-/// containment test: a point within [`geom::API_SURFACE_TOL`] of any
-/// edge of the outer loop or a hole counts as "on" it (the same
-/// tolerance — and the same "on a surface" concept — `locate::resolve_face`
-/// already uses for point-based face resolution), refused before it ever
-/// reaches the kernel. Uses [`geom::face_contains`] for the ordinary
-/// inside/outside half of the test and `crate::locate::face_rings` to
-/// fetch the face's loops — both already-public, already-used API
-/// helpers; nothing kernel-side changes.
-fn require_strictly_inside_face(
-    ctx: &Ctx,
-    face: FaceRef,
-    normal: Vec3,
-    pts: &[Point3],
-) -> Result<(), CmdError> {
-    let (outer, holes) = locate::face_rings(ctx, face)?;
-    let near_ring = |ring: &[Point3], p: Point3| {
-        let n = ring.len();
-        (0..n).any(|i| {
-            geom::point_segment_distance(p, ring[i], ring[(i + 1) % n]).0 <= geom::API_SURFACE_TOL
-        })
-    };
-    for &p in pts {
-        let strictly_inside = !near_ring(&outer, p)
-            && !holes.iter().any(|h| near_ring(h, p))
-            && geom::face_contains(&outer, &holes, normal, p);
-        if !strictly_inside {
-            return Err(loop_not_strictly_inside_early());
-        }
-    }
-    Ok(())
-}
-
-/// The face-imprint creation result (docs/agents/HEW_API.md §5.4): a solid's
-/// faces have no public id of their own (§5.2), so — unlike sketch
-/// mode's `{sketch, region_ids, …}` — this is just the object's public
-/// id; whichever faces the cut produced are addressed through the face
-/// tokens the caller mints alongside this.
-fn face_imprint_result(ctx: &Ctx, object: ObjectId) -> Value {
-    serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) })
-}
-
-fn public_id_of(ctx: &Ctx, entity: EntityRef) -> String {
-    let sid = ctx
-        .doc
-        .sid_of(&entity)
-        .expect("an object this command just touched always carries a stable id");
-    ids::public_id(&entity, sid)
-}
-
-/// Face-imprint path for an OPEN, boundary-to-boundary path: `draw_line`
-/// always, `draw_arc` when its sweep does not close a full turn
-/// (api-kernel-map.md §1.2's per-tool table: Line/Arc face mode →
-/// `split_face`). Mints two face tokens, `"a"`/`"b"`, naming the two
-/// faces the cut produced — cheap, since
-/// [`kernel::FaceSplitReport::new_faces`] names them directly.
-/// `curves[k]` is the circle path edge `k` is a chord facet of (an open arc
-/// claims every edge of its chain), or `None`; empty claims nothing.
-fn draw_chain_on_face(
-    ctx: &mut Ctx,
-    face: FaceRef,
-    path: Vec<Point3>,
-    curves: Vec<Option<CurveGeom>>,
-) -> Result<Value, CmdError> {
-    let op = KernelOp::SplitFace {
-        face: face.face,
-        path,
-        restore: None,
-        curves,
-    };
-    let report = apply_face_op(ctx, face.object, op)?;
-    let KernelOpReport::FaceSplit(r) = report else {
-        return Err(CmdError::Internal(
-            "apply_object_op(SplitFace) returned an unexpected report kind".into(),
-        ));
-    };
-    ctx.mint_face_token("a", face.object, r.new_faces[0]);
-    ctx.mint_face_token("b", face.object, r.new_faces[1]);
-    Ok(face_imprint_result(ctx, face.object))
-}
-
-/// Face-imprint path for a CLOSED loop strictly inside the face:
-/// `draw_rect`/`draw_circle`/`draw_polygon` always, `draw_arc` when its
-/// sweep closes a full turn (api-kernel-map.md §1.2's per-tool table).
-/// `curve` carries the drawn circle's analytic identity (`Some`) so a
-/// later push-through re-attributes the tunnel walls as a cylinder
-/// (mirrors [`kernel::Document`]'s `split_face_inner_with_curve`
-/// wasm-side counterpart); `None` for rect/polygon/open-turn arcs, which
-/// have no such claim. Mints `"face"` (the new sub-face) and `"parent"`
-/// (the reshaped parent, now carrying the loop as a hole) — both directly
-/// named by [`kernel::FaceSplitInnerReport`], so equally cheap to mint.
-fn draw_loop_on_face(
-    ctx: &mut Ctx,
-    face: FaceRef,
-    loop_path: Vec<Point3>,
-    curve: Option<CurveGeom>,
-) -> Result<Value, CmdError> {
-    let curves = curve
-        .map(|g| vec![Some(g); loop_path.len()])
-        .unwrap_or_default();
-    draw_loop_on_face_with_curves(ctx, face, loop_path, curves)
-}
-
-/// [`draw_loop_on_face`] with a per-edge claim (`curves[k]` for loop edge
-/// `k`, the last closing the loop): a pie or segment claims its arc's edges
-/// and leaves the closing lines plain, so the shape keeps its arc on the
-/// face exactly as it does in a ground sketch.
-fn draw_loop_on_face_with_curves(
-    ctx: &mut Ctx,
-    face: FaceRef,
-    loop_path: Vec<Point3>,
-    curves: Vec<Option<CurveGeom>>,
-) -> Result<Value, CmdError> {
-    // `Document::imprint_loop_on_face` routes a loop clear of the boundary
-    // to a sub-face and one running along part of it to chord splits, and
-    // reports the face carrying the drawn region either way.
-    let scope = ctx.doc.object_owner_component(face.object);
-    let (report, _change) = ctx.doc.imprint_loop_on_face_with_curves(
-        scope,
-        face.object,
-        face.face,
-        loop_path,
-        curves,
-    )?;
-    ctx.mint_face_token("face", face.object, report.region);
-    ctx.mint_face_token("parent", face.object, report.other);
-    Ok(face_imprint_result(ctx, face.object))
 }
 
 /// `n` evenly spaced points around a circle's circumference in `plane`'s
@@ -469,7 +274,7 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         .collect::<Result<_, _>>()?;
 
     if let PlaneTarget::Face(face_ref) = target {
-        return draw_chain_on_face(ctx, face_ref, pts, Vec::new());
+        return draft::draw_on_face(ctx, face_ref, "Draw line", vec![Run::plain(pts)]);
     }
     let (sketch, _plane) = commit_target(ctx, target)?;
 
@@ -499,9 +304,10 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let b = locate::resolve_point(ctx, &p.corner_b)?;
 
     if let PlaneTarget::Face(face_ref) = target {
-        let plane = face_plane(ctx, face_ref)?;
+        let plane = draft::face_plane(ctx, face_ref)?;
         let corners = rect_corners(&plane, a, b);
-        return draw_loop_on_face(ctx, face_ref, corners.to_vec(), None);
+        let ring = draft::closed(corners.to_vec());
+        return draft::draw_on_face(ctx, face_ref, "Draw rectangle", vec![Run::plain(ring)]);
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let [a, p2, b, p4] = rect_corners(&plane, a, b);
@@ -554,9 +360,14 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
     };
 
     if let PlaneTarget::Face(face_ref) = target {
-        let plane = face_plane(ctx, face_ref)?;
-        let ring = ring_points(&plane, center, p.radius, n);
-        return draw_loop_on_face(ctx, face_ref, ring, Some(geom));
+        let plane = draft::face_plane(ctx, face_ref)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        return draft::draw_on_face(
+            ctx,
+            face_ref,
+            "Draw circle",
+            vec![Run::curve(ring, geom, SketchCurveKind::Circle)],
+        );
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
@@ -721,58 +532,33 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     };
 
     if let PlaneTarget::Face(face_ref) = target {
-        let plane = face_plane(ctx, face_ref)?;
+        let plane = draft::face_plane(ctx, face_ref)?;
         let mut pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
+        let circle = SketchCurveKind::Circle;
         if closes_a_full_turn {
             pts.pop(); // last point coincides with the first at a full turn
-            return draw_loop_on_face(ctx, face_ref, pts, Some(geom));
+            let ring = draft::closed(pts);
+            return draft::draw_on_face(
+                ctx,
+                face_ref,
+                "Draw arc",
+                vec![Run::curve(ring, geom, circle)],
+            );
         }
-        // The arc's own edges carry its circle (the first `n` edges of the
-        // chain or loop); the closing edges of a pie or segment are plain
-        // lines — exactly the sketch-mode `curveSegments` split below, so
-        // the shape keeps its arc on a face as it does on the ground.
-        let arc_claims = |edges: usize| -> Vec<Option<CurveGeom>> {
-            (0..edges).map(|k| (k < n).then_some(geom)).collect()
+        // The arc's own chain carries its circle; the closing edges of a
+        // pie or segment are plain lines, so the shape keeps its arc on a
+        // face as it does on the ground.
+        let first = pts[0];
+        let last = pts[pts.len() - 1];
+        let runs = match close {
+            ArcClose::Open => vec![Run::curve(pts, geom, circle)],
+            ArcClose::Segment => vec![Run::curve(pts, geom, circle), Run::plain(vec![last, first])],
+            ArcClose::Pie => vec![
+                Run::curve(pts, geom, circle),
+                Run::plain(vec![last, center, first]),
+            ],
         };
-        return match close {
-            // Open, boundary-to-boundary.
-            ArcClose::Open => {
-                let claims = arc_claims(pts.len() - 1);
-                draw_chain_on_face(ctx, face_ref, pts, claims)
-            }
-            // A closed loop strictly inside the face — the implicit
-            // last→first edge is the closing chord (arc-end → arc-start),
-            // a plain line.
-            ArcClose::Segment => {
-                require_strictly_inside_face(ctx, face_ref, plane.normal(), &pts)?;
-                let claims = arc_claims(pts.len());
-                draw_loop_on_face_with_curves(ctx, face_ref, pts, claims)
-            }
-            // Same, plus the two explicit radii: append the exact same
-            // `center` value used to build the arc's own points (no
-            // recomputation drift), so the implicit closing edge
-            // (center → arc-start) plus the appended edge (arc-end →
-            // center) form the wedge.
-            ArcClose::Pie => {
-                pts.push(center);
-                // `center` is caller-supplied, unlike the arc's own
-                // points — nothing upstream guarantees it is clear of
-                // the face's own boundary. The kernel's own
-                // `SplitFaceInner` validation would ordinarily be the
-                // backstop for that (every loop vertex must sit
-                // strictly inside), but its point-in-polygon test is a
-                // bare even-odd ray cast with no tolerance band: a
-                // center placed exactly ON the face's outer loop can
-                // resolve to "inside" by whichever way two
-                // independently rounded floats happen to fall, letting
-                // a pinched, boundary-touching hole loop through as a
-                // false "Ok". Checked here, before dispatch, with a
-                // tolerance-aware test the kernel's has none of.
-                require_strictly_inside_face(ctx, face_ref, plane.normal(), &pts)?;
-                let claims = arc_claims(pts.len());
-                draw_loop_on_face_with_curves(ctx, face_ref, pts, claims)
-            }
-        };
+        return draft::draw_on_face(ctx, face_ref, "Draw arc", runs);
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
@@ -849,9 +635,14 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     let n = p.sides;
 
     if let PlaneTarget::Face(face_ref) = target {
-        let plane = face_plane(ctx, face_ref)?;
-        let ring = ring_points(&plane, center, p.radius, n);
-        return draw_loop_on_face(ctx, face_ref, ring, None);
+        let plane = draft::face_plane(ctx, face_ref)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        return draft::draw_on_face(
+            ctx,
+            face_ref,
+            "Draw polygon",
+            vec![Run::curve(ring, geom, SketchCurveKind::Polygon)],
+        );
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
@@ -881,8 +672,13 @@ pub(super) fn offset(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     struct P {
         region: String,
         distance: f64,
+        #[serde(default)]
+        plane: Option<Value>,
     }
     let p: P = parse_params(params)?;
+    if let Some(plane) = &p.plane {
+        return draft::offset_region_by_key(ctx, plane, &p.region, p.distance);
+    }
     let (sketch, region) = ctx
         .resolver()
         .resolve_region(&p.region)

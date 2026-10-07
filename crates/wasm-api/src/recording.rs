@@ -37,16 +37,6 @@ use serde::{Deserialize, Serialize};
 /// exact version equality.
 pub const RECORDING_FORMAT_VERSION: u32 = 2;
 
-/// How a loop imprint's per-edge circle claims are logged: a whole-loop or
-/// leading-arc circle (`curve` + `curve_segments`) or an explicit per-edge
-/// list (`curves`). See [`RecordedCall::SplitFaceInner`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct LoopClaims {
-    pub curve: Option<[f64; 4]>,
-    pub curve_segments: Option<usize>,
-    pub curves: Option<Vec<Option<[f64; 4]>>>,
-}
-
 /// One committed `Scene` mutation, captured with the exact arguments needed to
 /// re-issue it. `#[serde(tag = "method")]` gives a self-describing JSON object
 /// per call (`{"method":"extrude_region","sketch":…,"region":…,"distance":…}`).
@@ -273,31 +263,6 @@ pub enum RecordedCall {
         affine: [f64; 12],
         count: u32,
     },
-    /// `split_face_inner(object, face, loop_pts)` — imprint a closed loop on a
-    /// solid face (draw-on-face). `curve`, when present, is the drawn circle's
-    /// analytic identity `[center.x, center.y, center.z, radius]` and routes to
-    /// `split_face_inner_with_curve` so a later push-through stamps the tunnel
-    /// walls (the true-curves design, playtest fix C3). Additive variant:
-    /// recordings that never imprint on a face replay on older builds
-    /// unchanged; one that does fails to parse there (loudly, never silently
-    /// divergent), the same posture as `SketchBeginCurveWith`.
-    SplitFaceInner {
-        object: u64,
-        face: u64,
-        loop_pts: Vec<f64>,
-        curve: Option<[f64; 4]>,
-        /// How many leading loop edges are facets of `curve` (a pie or
-        /// segment's arc); absent = every edge (a circle). Additive: older
-        /// recordings carry no field and replay as whole-loop claims.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve_segments: Option<usize>,
-        /// An explicit per-edge claim list (`[cx, cy, cz, r]` or `null` per
-        /// loop edge) for loops whose claims are not one leading arc — the
-        /// Offset tool's face commit, whose inset arcs sit wherever the
-        /// boundary's arcs were. Takes precedence over `curve` on replay.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curves: Option<Vec<Option<[f64; 4]>>>,
-    },
     /// `push_pull(object, face, distance)` — the user-level push/pull of a
     /// solid face. Replay re-issues it and the kernel re-derives the routing
     /// (translate, coplanar-aware, whole-wall radial offset, boss/recess, or
@@ -352,6 +317,14 @@ pub enum RecordedCall {
     TransformSketchIsland {
         sketch: u64,
         island: u64,
+        affine: [f64; 12],
+    },
+    /// `transform_sketch_islands(sketch, islands, affine)` — additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture): the
+    /// multi-island move that arranges like a draw.
+    TransformSketchIslands {
+        sketch: u64,
+        islands: Vec<u64>,
         affine: [f64; 12],
     },
     /// `copy_sketch_islands(sketch, islands, affine)` — additive variant (the
@@ -426,22 +399,6 @@ pub enum RecordedCall {
         face: u64,
         distance: f64,
     },
-    /// `split_face(object, face, path)` — `path` is xyz triples — or, with
-    /// `curve` set, `split_face_with_arc(…, center, radius, arc_segments)`:
-    /// `curve` is `[center.x, center.y, center.z, radius]` and
-    /// `curve_segments` how many leading path edges are its facets (absent =
-    /// all). Additive fields: older recordings replay unchanged.
-    SplitFace {
-        object: u64,
-        face: u64,
-        path: Vec<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve: Option<[f64; 4]>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve_segments: Option<usize>,
-    },
-    /// `merge_faces(object, edge)`.
-    MergeFaces { object: u64, edge: u64 },
     /// `set_node_name(kind, id, name)`.
     SetNodeName {
         kind: u8,
@@ -809,39 +766,6 @@ pub enum RecordedCall {
         region: u64,
         distance: f64,
     },
-    /// `split_face_in_instance(instance, object, face, path)` — `path` is
-    /// xyz triples, in WORLD space (mapped through the instance's pose⁻¹ at
-    /// call time, so replay reproduces the exact same mapping).
-    SplitFaceInInstance {
-        instance: u64,
-        object: u64,
-        face: u64,
-        path: Vec<f64>,
-        /// See [`RecordedCall::SplitFace`]: a drawn arc's circle and facet
-        /// count (`split_face_with_arc_in_instance`), WORLD-space like `path`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve: Option<[f64; 4]>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve_segments: Option<usize>,
-    },
-    /// `split_face_inner_in_instance(instance, object, face, loop_pts)` /
-    /// `split_face_inner_with_curve_in_instance(…, center, radius)` — the
-    /// definition-member analog of [`RecordedCall::SplitFaceInner`]
-    /// (Rectangle/Circle/Polygon's face-mode draw inside a component;
-    /// component-edit-parity.md phase A2). `loop_pts` is xyz triples in
-    /// WORLD space (mapped through the instance's pose⁻¹ at call time, same
-    /// as `SplitFaceInInstance`'s `path`).
-    SplitFaceInnerInInstance {
-        instance: u64,
-        object: u64,
-        face: u64,
-        loop_pts: Vec<f64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve: Option<[f64; 4]>,
-        /// See [`RecordedCall::SplitFaceInner`]'s `curve_segments`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        curve_segments: Option<usize>,
-    },
     /// `delete_def_member(component, object)`.
     DeleteDefMember { component: u64, object: u64 },
     /// `delete_definition(component)` — deletes a component definition and
@@ -1013,53 +937,126 @@ pub enum RecordedCall {
         ids: Vec<u64>,
         group: Option<u64>,
     },
-    /// `transform_imprint(object, face, affine)` — slide/turn/scale an
-    /// imprint sub-face on its face (editable imprints). Additive variant
-    /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
-    /// replay unchanged; one that edits an imprint fails to parse on older
-    /// builds — loudly, never silently divergent.
-    TransformImprint {
+    // ---------------------------------------------------------------------
+    // Unified drafting (docs/design/unified-drafting.md §4/§6). Additive
+    // variants (the `SketchBeginCurveWith` posture): a recording that never
+    // drafts replays on older builds unchanged; one that does fails to
+    // parse there, loudly. Every point is WORLD space as called; `draft` is
+    // the handle the call carried (a begin variant re-mints exactly it).
+    // ---------------------------------------------------------------------
+    /// `draft_begin_plane(px..nz, label)`.
+    DraftBeginPlane {
+        draft: u64,
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        label: String,
+    },
+    /// `draft_begin_plane_in_instance(instance, px..nz, label)`.
+    DraftBeginPlaneInInstance {
+        draft: u64,
+        instance: u64,
+        px: f64,
+        py: f64,
+        pz: f64,
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        label: String,
+    },
+    /// `draft_begin_face(object, face, label)`.
+    DraftBeginFace {
+        draft: u64,
         object: u64,
         face: u64,
-        affine: [f64; 12],
+        label: String,
     },
-    /// `transform_imprint_in_instance(instance, object, face, affine)` —
-    /// the definition-member analog; `affine` is the WORLD gesture affine.
-    TransformImprintInInstance {
+    /// `draft_begin_face_in_instance(instance, object, face, label)`.
+    DraftBeginFaceInInstance {
+        draft: u64,
         instance: u64,
         object: u64,
         face: u64,
+        label: String,
+    },
+    /// `draft_begin_sketch(sketch, label)`.
+    DraftBeginSketch {
+        draft: u64,
+        sketch: u64,
+        label: String,
+    },
+    /// `draft_begin_ctx(ctx_json, label)`.
+    DraftBeginCtx {
+        draft: u64,
+        ctx: String,
+        label: String,
+    },
+    /// `draft_end(draft)`.
+    DraftEnd { draft: u64 },
+    /// `draft_cancel(draft)`.
+    DraftCancel { draft: u64 },
+    /// `draft_add_segment(draft, a, b)`.
+    DraftAddSegment {
+        draft: u64,
+        a: [f64; 3],
+        b: [f64; 3],
+    },
+    /// `draft_begin_curve_with(draft, center, radius)`.
+    DraftBeginCurveWith {
+        draft: u64,
+        center: [f64; 3],
+        radius: f64,
+    },
+    /// `draft_begin_polygon_with(draft, center, radius)`.
+    DraftBeginPolygonWith {
+        draft: u64,
+        center: [f64; 3],
+        radius: f64,
+    },
+    /// `draft_end_curve(draft)`.
+    DraftEndCurve { draft: u64 },
+    /// `draft_begin_curve(draft)`.
+    DraftBeginCurve { draft: u64 },
+    /// `history_bracket_open()`.
+    HistoryBracketOpen,
+    /// `history_bracket_commit(label)`.
+    HistoryBracketCommit { label: String },
+    /// `history_bracket_abort()`.
+    HistoryBracketAbort,
+    /// `draft_remove_edges(draft, keys)`.
+    DraftRemoveEdges { draft: u64, keys: Vec<u64> },
+    /// `draft_transform_edges(draft, keys, affine)`.
+    DraftTransformEdges {
+        draft: u64,
+        keys: Vec<u64>,
         affine: [f64; 12],
     },
-    /// `transform_chord(object, edge, affine)` — move a chord run (merge +
-    /// re-cut as one undo step). Additive variant.
-    TransformChord {
-        object: u64,
-        edge: u64,
+    /// `draft_copy_edges(draft, keys, affine)`.
+    DraftCopyEdges {
+        draft: u64,
+        keys: Vec<u64>,
         affine: [f64; 12],
     },
-    /// `transform_chord_in_instance(instance, object, edge, affine)`.
-    TransformChordInInstance {
-        instance: u64,
-        object: u64,
-        edge: u64,
-        affine: [f64; 12],
+    /// `draft_move_vertex(draft, at, to)`.
+    DraftMoveVertex {
+        draft: u64,
+        at: [f64; 3],
+        to: [f64; 3],
     },
-    /// `dissolve_imprint(object, face)` — Delete on a selected imprint
-    /// (nested ones go too, one undo step). Additive variant.
-    DissolveImprint { object: u64, face: u64 },
-    /// `dissolve_imprint_in_instance(instance, object, face)`.
-    DissolveImprintInInstance {
-        instance: u64,
-        object: u64,
-        face: u64,
+    /// `draft_offset_region(draft, region, distance)` — `region` is a key.
+    DraftOffsetRegion {
+        draft: u64,
+        region: u64,
+        distance: f64,
     },
-    /// `merge_faces_in_instance(instance, object, edge)` — Delete on a
-    /// chord imprint inside a component. Additive variant.
-    MergeFacesInInstance {
-        instance: u64,
-        object: u64,
-        edge: u64,
+    /// `draft_refacet_curve(draft, curve, segments)` — `curve` is a key.
+    DraftRefacetCurve {
+        draft: u64,
+        curve: u64,
+        segments: u32,
     },
 }
 

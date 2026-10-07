@@ -1,14 +1,10 @@
 /**
  * ArcTool — SketchUp-style 2-point arc, drawn as a faceted polyline chain.
- * Mirrors CircleTool: the arc decomposes into N chained `sketch_add_segment`
- * calls (plane mode) or one `split_face_with_arc`/`split_face_inner_with_arc`
- * call with the polyline path and the arc's analytic circle (face mode —
- * the arc is an OPEN chain by default, so it uses LineTool's
- * boundary-to-boundary `split_face_with_arc`, not CircleTool's closed-loop
- * `split_face_inner_with_arc`, unless a completion mode closes it — see
- * `_commitFace`). Like plane mode's curve-chain bracket, the circle rides
- * only the arc's own leading edges; any pie/segment closing edges are plain
- * lines.
+ * Mirrors CircleTool: the arc decomposes into N chained segments inside a
+ * curve bracket carrying the arc's analytic circle, committed as one draft
+ * on the plane or face (`runDraft`) — an open chain by default, closed only
+ * by a completion mode (see `_commitFace`). The circle rides only the arc's
+ * own leading edges; any pie/segment closing edges are plain lines.
  *
  * Three-click gesture (both modes):
  *   1. Click endpoint A (with inference snapping).
@@ -42,10 +38,9 @@
  *   one, ray∩plane.
  *
  * Face mode (an eligible Object face is under the cursor): all three points
- * lie in the picked face's plane via `snapConstraint`; commits imprint the
- * face (`split_face_with_arc`/`split_face_inner_with_arc`, carrying the
- * arc's analytic circle — see `_commitFace`) instead of drawing into a
- * sketch.
+ * lie in the picked face's plane via `snapConstraint`; the commit is one
+ * draft on that face (carrying the arc's analytic circle — see
+ * `_commitFace`), which the engine lowers into the face or keeps as drawing.
  *
  * Degenerate guards (constants in arcMath.ts — no inline epsilons):
  *   - zero/short chord (B on A): the B click is ignored.
@@ -85,8 +80,8 @@
  * close): pressing Alt mid-gesture cycles open → pie → segment. `open`
  * commits the bare arc as today. `pie` closes it to the arc center with two
  * radii; `segment` closes it with the chord — both commit a closed profile,
- * so a region (plane mode) or a face imprint (face mode, via
- * `split_face_inner` like CircleTool) appears immediately and push/pull
+ * so a region (plane mode) or a face imprint (face mode, a
+ * draft on the face like CircleTool) appears immediately and push/pull
  * works. The live preview draws the closing edges and the radius readout
  * names the mode. The mode persists across commits until the tool is
  * switched (tools are recreated on every switch, so a fresh Arc tool always
@@ -102,14 +97,16 @@ import type { V3 } from '../viewport/geoHelpers'
 import { facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { displayedLength, isFreePick, sagittaForDisplayedRadius } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
-import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import type { SketchTarget } from './sketchGesture'
+import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { PlanePin } from './planePin'
 import {
   ARC_MIN_CHORD_M,
@@ -251,11 +248,6 @@ export class ArcTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached plane-mode sketch handles — the Viewport passes one cache
-   *  shared by every draw tool, so mixed-tool profiles land in a single
-   *  sketch per plane. */
-  private readonly sketchCache: SketchPlaneCache
-
   /** The currently active editing context (entered object), or null at top level. */
   private _editContext: EditContext = { kind: 'top' }
 
@@ -325,7 +317,6 @@ export class ArcTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -333,7 +324,6 @@ export class ArcTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
-    this.sketchCache = sketchCache
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -402,8 +392,8 @@ export class ArcTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
   }
 
   /**
@@ -421,6 +411,8 @@ export class ArcTool implements Tool {
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+      () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
+      snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
     )
   }
 
@@ -553,7 +545,7 @@ export class ArcTool implements Tool {
         if (drawPlane !== null) return drawPlane
       }
     }
-    return this._resolveIdleTarget(ray).plane
+    return this._resolveIdleTarget(ray, snap).plane
   }
 
   /**
@@ -870,7 +862,6 @@ export class ArcTool implements Tool {
    * all and reset. Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchCache.clear()
     this.completion = 'open' // a fresh document starts with the default close
     this.cancel()
   }
@@ -1172,6 +1163,13 @@ export class ArcTool implements Tool {
 
     if (this.planeStage.kind === 'chord') {
       // Second click: endpoint B (the chord). Ignore a degenerate chord.
+      // A free pick places B at the DISPLAYED chord length, as if typed.
+      const shown = displayedLength(segmentLength(this.planeStage.a, cursor))
+      if (isFreePick(snap, this.planeStage.a) && shown >= ARC_MIN_CHORD_M) {
+        this._lastPlaneCursor = cursor
+        this._commitTypedPlaneChord(shown)
+        return
+      }
       this._placePlaneB(cursor)
       return
     }
@@ -1185,6 +1183,15 @@ export class ArcTool implements Tool {
     if (chain === null || s === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
+    }
+    // A free pick commits the sagitta of the DISPLAYED radius, as if typed.
+    if (isFreePick(snap)) {
+      const sd = sagittaForDisplayedRadius(segmentLength(a, b), Math.abs(s), Math.abs(s) > segmentLength(a, b) / 2)
+      if (sd !== null && sd >= ARC_MIN_SAGITTA_M) {
+        this._lastPlaneCursor = cursor
+        this._commitTypedPlaneBulge(sd)
+        return
+      }
     }
 
     const committed = this._commitPlaneChain(target, chain)
@@ -1304,72 +1311,48 @@ export class ArcTool implements Tool {
       : this._nonGroundChain(a, b, plane.normal, s)
   }
 
-  /** Commit the polyline chain as N sketch segments into `target`'s sketch;
-   *  the first `curveSegments` of them are bracketed as ONE curve chain (the
-   *  arc), so clicking any facet later selects the whole arc. When the arc's
-   *  analytic circle is known it rides on the chain (durable center/radius —
-   *  the true-curves design). Used by plane mode — ground AND any other
-   *  plane (sketch mode) — via `runSketchGesture`; real face mode instead
-   *  imprints via `split_face`/`split_face_inner` (see `_commitFace`). */
-  private _commitPlaneChain(target: SketchTarget, { chain: verts, curveSegments, geom }: ArcChain): boolean {
+  /** Commit the polyline chain as ONE draft on `target`'s plane: the first
+   *  `curveSegments` segments are bracketed as ONE curve chain (the arc), so
+   *  clicking any facet later selects the whole arc; pie/segment closing
+   *  edges stay plain lines. When the arc's analytic circle is known it
+   *  rides on the chain (durable center/radius — the true-curves design).
+   *  Used by plane mode — ground AND any other plane (sketch mode); real
+   *  face mode commits through `_commitFace`. */
+  private _commitPlaneChain(target: SketchTarget, chain: ArcChain): boolean {
+    return this._runArcDraft(draftTargetFromSketchTarget(target), chain)
+  }
+
+  private _runArcDraft(
+    target: Parameters<typeof runDraft>[1],
+    { chain: verts, curveSegments, geom }: ArcChain,
+  ): boolean {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
-        let lastRegionsCreated: bigint[] = []
-        // `toLocal`: identity for a world target, pose⁻¹ for a definition-
-        // owned one (component-edit-parity.md phase A2) — see
-        // `runSketchGesture`'s doc.
+      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, 'Arc', (d) => {
+        let last: bigint[] = []
+        // A chain with no analytic circle (a degenerate, straight arc) still
+        // commits as ONE curve chain, bracketed without a circle.
         if (geom !== null) {
-          const localCenter = toLocal(geom.center)
-          // World target: the radius as computed upstream (world space).
-          // Definition-owned target: measured LOCALLY, to the first arc
-          // vertex mapped the same way (matches CircleTool's identical fix)
-          // — correct under a uniformly-scaled instance pose too, not just
-          // translation/rotation/mirror; a non-uniform scale turns the local
-          // arc into an ellipse no single radius describes exactly, and the
-          // kernel refuses that mismatched claim typed rather than accept a
-          // wrong analytic identity.
-          const radius = target.instance === null
-            ? geom.radius
-            : (() => {
-                const localRim = toLocal(verts[0])
-                return Math.hypot(
-                  localRim[0] - localCenter[0],
-                  localRim[1] - localCenter[1],
-                  localRim[2] - localCenter[2],
-                )
-              })()
-          this.wasmScene.sketch_begin_curve_with(
-            sketch,
-            localCenter[0], localCenter[1], localCenter[2],
-            radius,
-          )
+          this.wasmScene.draft_begin_curve_with(d, new Float64Array(geom.center), geom.radius)
         } else {
-          this.wasmScene.sketch_begin_curve(sketch)
+          this.wasmScene.draft_begin_curve(d)
         }
+        let open = true
         try {
           for (let i = 0; i < verts.length - 1; i++) {
-            if (i === curveSegments) this.wasmScene.sketch_end_curve(sketch)
-            const p = toLocal(verts[i])
-            const q = toLocal(verts[i + 1])
-            const report = this.wasmScene.sketch_add_segment(
-              sketch,
-              p[0], p[1], p[2],
-              q[0], q[1], q[2],
-            )
-            try {
-              const rc = report.regions_created()
-              lastRegionsCreated = Array.from(rc)
-            } finally {
-              report.free()
+            if (open && i === curveSegments) {
+              this.wasmScene.draft_end_curve(d)
+              open = false
             }
+            last = addDraftSegment(this.wasmScene, d, verts[i], verts[i + 1])
           }
         } finally {
-          // The kernel also force-closes the bracket at gesture end; this
-          // just keeps the tool honest on a mid-chain error.
-          this.wasmScene.sketch_end_curve(sketch)
+          if (open) this.wasmScene.draft_end_curve(d)
         }
-
-        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+        return last
+      })
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
       return true
     } catch (err) {
@@ -1504,7 +1487,14 @@ export class ArcTool implements Tool {
     if (cursor === null) return
 
     if (this.faceStage.kind === 'chord') {
-      // Second click: endpoint B. Ignore a degenerate chord.
+      // Second click: endpoint B. Ignore a degenerate chord. A free pick
+      // places B at the DISPLAYED chord length, as if typed.
+      const shown = displayedLength(segmentLength(this.faceStage.a, cursor))
+      if (isFreePick(snap, this.faceStage.a) && shown >= ARC_MIN_CHORD_M) {
+        this._lastFaceCursor = cursor
+        this._commitTypedFaceChord(shown)
+        return
+      }
       this._placeFaceB(cursor)
       return
     }
@@ -1517,6 +1507,16 @@ export class ArcTool implements Tool {
     if (verts === null || s === null) {
       this.onMeasurementCb(FLAT_BULGE_HINT)
       return
+    }
+    // A free pick commits the sagitta of the DISPLAYED radius, as if typed.
+    if (isFreePick(snap)) {
+      const c = segmentLength(a, b)
+      const sd = sagittaForDisplayedRadius(c, Math.abs(s), Math.abs(s) > c / 2)
+      if (sd !== null && sd >= ARC_MIN_SAGITTA_M) {
+        this._lastFaceCursor = cursor
+        this._commitTypedFaceBulge(sd)
+        return
+      }
     }
 
     this.faceStage = { kind: 'idle' }
@@ -1545,125 +1545,29 @@ export class ArcTool implements Tool {
     this.onMeasurementCb('')
   }
 
-  /** Commit the face cut for the current completion mode: an open arc cuts
-   * boundary-to-boundary (`split_face_with_arc`); pie/segment close into a
-   * loop and imprint like CircleTool (`split_face_inner_with_arc`). A pie
+  /** Commit the arc on the face as ONE draft, for the current completion
+   * mode: an open arc is just its polyline; pie/segment add their closing
+   * vertices (a pie's center, or the chord back to the start). The arc's own
+   * analytic circle (center via `_faceCenter`, radius the distance from that
+   * center to `verts[0]` — mirrors `_nonGroundChain`) rides the leading
+   * `verts.length - 1` edges; closing edges stay plain lines. The engine
+   * lowers whatever crosses the face's edges or other drawing — an open arc
+   * need not reach an edge, and one that does simply splits the face. A pie
    * whose center is unresolvable (degenerate basis — cannot happen when
-   * `verts` built) falls back to the open cut. The arc's own analytic circle
-   * (center via `_faceCenter`, radius the distance from that center to
-   * `verts[0]` — mirrors `_nonGroundChain`) rides the leading
-   * `verts.length - 1` edges of whichever call is made; any pie/segment
-   * closing edges stay plain lines. When the center can't be resolved, the
-   * plain (curve-less) `split_face`/`split_face_inner` calls are used
-   * instead. */
+   * `verts` built) falls back to the open arc. When the center can't be
+   * resolved there is no analytic circle to carry. */
   private _commitFace(object: bigint, face: bigint, normal: V3, verts: V3[], s: number): boolean {
     const center = this._faceCenter(verts[0], verts[verts.length - 1], normal, s)
-    const radius = center === null ? 0 : segmentLength(center, verts[0])
     const arcSegments = verts.length - 1
-
-    if (this.completion === 'open') {
-      return this._commitFaceChain(object, face, verts, center, radius, arcSegments)
-    }
-    let loop = verts
-    if (this.completion === 'pie') {
-      if (center === null) {
-        return this._commitFaceChain(object, face, verts, center, radius, arcSegments)
-      }
-      loop = verts.concat([center])
-    }
-    return this._commitFaceLoop(object, face, loop, center, radius, arcSegments)
-  }
-
-  /** Imprint `verts` on `face` as a closed loop (the loop closes implicitly
-   * from the last vertex back to the first — same convention as CircleTool's
-   * `split_face_inner` commit). When `center` is resolvable, the loop's
-   * leading `arcSegments` edges carry the arc's analytic circle
-   * (`split_face_inner_with_arc`); otherwise falls back to the plain,
-   * curve-less `split_face_inner`. */
-  private _commitFaceLoop(
-    object: bigint, face: bigint, verts: V3[],
-    center: V3 | null, radius: number, arcSegments: number,
-  ): boolean {
-    const loopPts = new Float64Array(verts.length * 3)
-    for (let i = 0; i < verts.length; i++) {
-      loopPts[i * 3 + 0] = verts[i][0]
-      loopPts[i * 3 + 1] = verts[i][1]
-      loopPts[i * 3 + 2] = verts[i][2]
-    }
-
-    try {
-      // Inside a component instance's editing context (component-edit-
-      // parity.md phase A2), `object` is a definition member — route
-      // through the instance-aware wrapper.
-      if (center !== null) {
-        const centerArr = new Float64Array(center)
-        if (this._activeInstance !== null) {
-          this.wasmScene.split_face_inner_with_arc_in_instance(
-            this._activeInstance, object, face, loopPts, centerArr, radius, arcSegments,
-          )
-        } else {
-          this.wasmScene.split_face_inner_with_arc(object, face, loopPts, centerArr, radius, arcSegments)
-        }
-      } else if (this._activeInstance !== null) {
-        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
-      } else {
-        this.wasmScene.split_face_inner(object, face, loopPts)
-      }
-      this.onFaceImprint(object)
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-      return false
-    }
-  }
-
-  /** Cut `face` along the arc polyline (open, boundary-to-boundary — the
-   * same family `split_face` LineTool's face chain commits with). When
-   * `center` is resolvable, the path's leading `arcSegments` edges carry the
-   * arc's analytic circle (`split_face_with_arc`); otherwise falls back to
-   * the plain, curve-less `split_face`. */
-  private _commitFaceChain(
-    object: bigint, face: bigint, verts: V3[],
-    center: V3 | null, radius: number, arcSegments: number,
-  ): boolean {
-    const path = new Float64Array(verts.length * 3)
-    for (let i = 0; i < verts.length; i++) {
-      path[i * 3 + 0] = verts[i][0]
-      path[i * 3 + 1] = verts[i][1]
-      path[i * 3 + 2] = verts[i][2]
-    }
-
-    try {
-      if (center !== null) {
-        const centerArr = new Float64Array(center)
-        if (this._activeInstance !== null) {
-          const report = this.wasmScene.split_face_with_arc_in_instance(
-            this._activeInstance, object, face, path, centerArr, radius, arcSegments,
-          )
-          report.free()
-        } else {
-          const report = this.wasmScene.split_face_with_arc(object, face, path, centerArr, radius, arcSegments)
-          report.free()
-        }
-      } else if (this._activeInstance !== null) {
-        const report = this.wasmScene.split_face_in_instance(this._activeInstance, object, face, path)
-        report.free()
-      } else {
-        const report = this.wasmScene.split_face(object, face, path)
-        report.free()
-      }
-      this.onFaceImprint(object)
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-      return false
-    }
+    const chain = verts.concat(this._closingVerts(verts, center))
+    return this._runArcDraft(
+      { kind: 'face', object, face, instance: this._activeInstance },
+      {
+        chain,
+        curveSegments: arcSegments,
+        geom: center === null ? null : { center, radius: segmentLength(center, verts[0]) },
+      },
+    )
   }
 
   // ------------------------------------------------------------------ measurement

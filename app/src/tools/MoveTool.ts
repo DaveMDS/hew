@@ -30,11 +30,11 @@
  * `duplicate_selection_array` call (count 1, ONE undo step for the whole
  * selection's copies), the clones becoming the new selection so follow-up
  * moves chain copies. Object/group copies are independent baked geometry; an
- * instance copy shares its definition at the offset pose. Sketch selections
- * copy too: each planned island replays into its sketch at the offset
- * (`duplicateSketchSelection`) — one gesture per sketch, one undo step per
- * sketch, curve identity preserved. Tapping the modifier again returns to
- * plain Move. Holding it through a drag still works: the keydown/clean-tap
+ * instance copy shares its definition at the offset pose. Drawn shapes
+ * copy too: one draft per plane context copies the shapes at the offset
+ * (`duplicateSketchSelection`, on a face or over the void alike), curve
+ * identity preserved; the whole copy — drawing and objects — is ONE undo
+ * step, atomic. Tapping the modifier again returns to plain Move. Holding it through a drag still works: the keydown/clean-tap
  * on entry toggles copy on.
  *
  * Array copy (SketchUp's N× / N÷): immediately after a copy commits, typing
@@ -44,8 +44,10 @@
  * committed distance. While the gesture stays "hot" (no
  * new action begun) a different `xN`/`/N` can be re-entered and the array
  * re-resolves — implemented as one scene undo of the previous array commit
- * plus a fresh `duplicate_selection_array`, so the final history holds ONE
- * step for the whole array. The retracting undo is guarded by the document's
+ * plus a fresh `duplicate_selection_array` (drawn shapes:
+ * `duplicateSketchSelectionByAffineArray` over cumulative translations, all
+ * reps of one plane context in ONE draft), the whole array one history
+ * bracket, so the final history holds ONE step for it. The retracting undo is guarded by the document's
  * HISTORY GENERATION (undo-stack identity, not a content hash): any recorded
  * action, undo, or redo in between ends the window with a toast, while
  * non-undoable view-state toggles (hide, tag visibility) leave it open. The
@@ -68,7 +70,7 @@
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
-import { findImprint, imprintFace, imprintNodes } from './imprints'
+import { allFree, isDraftRef, planeOfCtx } from './planeUnits'
 import { worldFacePlane } from './faceDraw'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -79,7 +81,8 @@ import { clearPreview } from './transformPreview'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
-  duplicateSketchSelection,
+  dropRidingDrafts,
+  copyOwnersAndDrawing,
 } from './transformSelection'
 import {
   arrowToAxis,
@@ -91,7 +94,8 @@ import {
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import type { NodeRef } from '../panels/treeModel'
-import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
+import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
+import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
@@ -187,7 +191,10 @@ export class MoveTool implements Tool {
    * without invalidating the window at all.
    */
   private arrayHot: {
+    /** The ORIGINAL object/group/instance sources (one `duplicate_selection_array` call). */
     sources: NodeRef[]
+    /** The ORIGINAL drawn shapes / sketches (`duplicateSketchSelectionByAffineArray`). */
+    sketchSources: NodeRef[]
     vector: [number, number, number]
     historyGen: string
   } | null = null
@@ -309,39 +316,27 @@ export class MoveTool implements Tool {
     if (this.lockAxis !== null) {
       result.lockAxis = this.lockAxis
     }
-    // A selection of imprints on one face slides ON that face: constrain
-    // the destination snap to the face's plane so a corner snapped on some
-    // other face never lands the shape off its own (which the kernel would
-    // refuse `NotInPlane`). Mixed selections and imprints on different
-    // faces stay unconstrained — the kernel still refuses honestly.
-    const plane = this._imprintPlane(this.selection)
+    // A selection of drawn shapes with a face edge slides ON its plane: constrain the destination snap to it so a corner
+    // snapped on some other face never lands the shape off its own (which the
+    // kernel would refuse `NotInPlane`). Mixed selections and shapes on
+    // different planes stay unconstrained — the kernel still refuses honestly.
+    const plane = this._drawingPlane(this.selection)
     if (plane !== null) result.constraintPlane = plane
     return result
   }
 
-  /** The one world plane every imprint in `nodes` lies on, when the
-   *  selection is imprints only and they share it; else null. */
-  private _imprintPlane(nodes: readonly NodeRef[]): { point: [number, number, number]; normal: [number, number, number] } | null {
-    const imprints = imprintNodes(nodes)
-    if (imprints.length === 0 || imprints.length !== nodes.length) return null
-    let plane: { point: [number, number, number]; normal: [number, number, number] } | null = null
-    for (const node of imprints) {
-      const feature = findImprint(this.wasmScene, node)
-      if (feature === null) return null
-      const p = worldFacePlane(this.wasmScene, node.object, imprintFace(feature), this._activeInstance)
-      if (p === null) return null
-      if (plane === null) {
-        plane = p
-        continue
-      }
-      const dot = plane.normal[0] * p.normal[0] + plane.normal[1] * p.normal[1] + plane.normal[2] * p.normal[2]
-      const off =
-        (p.point[0] - plane.point[0]) * plane.normal[0] +
-        (p.point[1] - plane.point[1]) * plane.normal[1] +
-        (p.point[2] - plane.point[2]) * plane.normal[2]
-      if (dot < 1 - 1e-9 || Math.abs(off) > 1e-6) return null
-    }
-    return plane
+  /** The one world plane every drawn shape in `nodes` lies on, when the
+   *  selection is drawn shapes only and they share it (one plane context);
+   *  else null. */
+  private _drawingPlane(nodes: readonly NodeRef[]): { point: [number, number, number]; normal: [number, number, number] } | null {
+    if (nodes.length === 0 || !nodes.every(isDraftRef)) return null
+    const ctx = nodes[0].ctx
+    if (ctx === undefined || !nodes.every((n) => n.ctx === ctx)) return null
+    // A shape drawn wholly over the void may leave its plane (it detaches);
+    // only a selection with a face edge in it is held to the plane.
+    if (nodes.every((n) => allFree(this.wasmScene, n))) return null
+    const pl = planeOfCtx(ctx)
+    return pl === null ? null : { point: [...pl.point], normal: [...pl.normal] }
   }
 
   capturingInput(): boolean {
@@ -550,6 +545,20 @@ export class MoveTool implements Tool {
         return
       }
 
+      // A free pick commits the DISPLAYED distance through the typed path
+      // (direction from base -> cursor, or the locked axis, as when typed).
+      if (isFreePick(snap, base)) {
+        const len = this.lockAxis !== null
+          ? Math.abs(tx * this.axisDir(this.lockAxis)[0] + ty * this.axisDir(this.lockAxis)[1] + tz * this.axisDir(this.lockAxis)[2])
+          : Math.hypot(tx, ty, tz)
+        const shown = displayedLength(len)
+        if (shown > 0) {
+          this.stage.dest = [snap.x, snap.y, snap.z]
+          this._commitFromTyped(shown)
+          return
+        }
+      }
+
       this._commitAndReset(nodes, tx, ty, tz)
     }
   }
@@ -689,7 +698,12 @@ export class MoveTool implements Tool {
     const tz = endpoint[2] - base[2]
 
     if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
+      // A distance typed before the cursor left the base point has no
+      // direction to go in; say so rather than silently doing nothing.
       this._resetToIdle()
+      if (dist !== 0) {
+        this.onToast('Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.')
+      }
       return
     }
 
@@ -716,95 +730,62 @@ export class MoveTool implements Tool {
   /** True when the kernel accepted the commit (false = refused, toasted).
    *  Opens the retype window on the result either way it commits — a plain
    *  move or a copy (whose array window opens alongside). */
-  private _commit(nodes: NodeRef[], tx: number, ty: number, tz: number): boolean {
-    if (this.copyMode && imprintNodes(nodes).length > 0) {
-      // A shape drawn on a face has no copy path yet (it would need an
-      // on-face replay of its loop); refuse rather than silently MOVE the
-      // shape the user asked to copy.
-      this.onToast("Shapes drawn on a face can't be copied yet — move them, or redraw the copy.")
-      return false
-    }
+  private _commit(allNodes: NodeRef[], tx: number, ty: number, tz: number): boolean {
     try {
-      const genBefore = this.wasmScene.history_generation()
+      // Drawn shapes on a selected object ride with it (see `dropRidingDrafts`).
+      const nodes = dropRidingDrafts(this.wasmScene, allNodes)
       this.arrayLast = null
       const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
       const copyables = nodes.filter(
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
       )
-      const hasSketchNodes = nodes.some(
-        (n) =>
-          n.kind === 'sketch' ||
-          n.kind === 'sketch-island' ||
-          n.kind === 'sketch-edge' ||
-          n.kind === 'sketch-curve',
-      )
+      const hasSketchNodes = nodes.some((n) => isSketchScopedKind(n.kind))
       if (this.copyMode && (copyables.length > 0 || hasSketchNodes)) {
         // Copy mode: duplicate at the offset instead of moving. Each copy is
         // the same kind as its source; the copies become the selection so a
         // follow-up move chains off them.
         //
-        // Sketch geometry copies by replaying its islands into the same
-        // sketch at the offset (`duplicateSketchSelection`): one drawing
-        // gesture per sketch, so one undo removes that sketch's whole copy,
-        // and curve chains keep their analytic identity (a copied circle is
-        // a true circle). It goes FIRST, then all duplicable nodes clone in
-        // ONE `duplicate_selection_array` call (count 1) — the array action
-        // lands last on the undo stack, so an ×N / /N refinement can retract
-        // exactly it with one scene undo, and a single Cmd+Z after a
-        // multi-copy removes every clone at once.
-        //
-        // `duplicateSketchSelection` is atomic: a refused replay retracts
-        // every gesture it had already recorded, so a throw from it means no
-        // sketch copy landed and there is nothing of its to reselect. The
-        // finally block covers the OTHER order — the sketch copies committed
-        // and `_duplicateArray` then threw (atomic in its own right,
-        // kernel-side) — where whatever did land still has to become the
-        // selection so the viewport never renders a scene that diverges from
-        // the kernel. Either way the error surfaces as a toast.
+        // The whole copy is ONE undo step and atomic (`copyOwnersAndDrawing`
+        // brackets the history when drawing and objects copy together): the
+        // drawn shapes copy through the drafting engine, then all duplicable
+        // nodes clone in ONE `duplicate_selection_array` call (count 1), so a
+        // single Cmd+Z removes everything and an ×N / /N refinement retracts
+        // exactly one step. A refusal changes nothing; the finally block only
+        // reselects whatever did land.
         const committed: NodeRef[] = []
         try {
-          const sketchCopies = duplicateSketchSelection(this.wasmScene, nodes, [tx, ty, tz])
-          committed.push(...sketchCopies)
-          if (copyables.length > 0) {
-            const created = this._duplicateArray(copyables, affineF64, 1)
-            committed.push(...created)
-            // The copy gesture is now "hot" for an ×N / /N array refinement
-            // — but only when the copy was purely objects/groups/instances:
-            // the array retracts and re-issues exactly ONE
-            // duplicate_selection_array step, and sketch copies live in
-            // separate gesture steps it cannot retract, so arraying a mixed
-            // copy would multiply the objects while the sketch copies stayed
-            // at one. Sketch ×N arrays are out of scope until a kernel-side
-            // sketch duplicate op exists.
-            if (sketchCopies.length === 0) {
-              this.arrayHot = {
-                sources: copyables,
-                vector: [tx, ty, tz],
-                historyGen: this.wasmScene.history_generation().toString(),
-              }
-              this.arrayTyped = ''
-            } else {
-              this.arrayHot = null
-            }
-          } else {
-            this.arrayHot = null
+          const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
+          committed.push(
+            ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
+              this._duplicateArray(copyables, affineF64, 1),
+            ),
+          )
+          // The copy gesture is now "hot" for an ×N / /N array refinement,
+          // whichever kinds were copied; the resolve retracts its one step.
+          this.arrayHot = {
+            sources: copyables,
+            sketchSources,
+            vector: [tx, ty, tz],
+            historyGen: this.wasmScene.history_generation().toString(),
           }
+          this.arrayTyped = ''
         } finally {
           if (committed.length > 0) {
             this.selection = committed
             this.onCommit(committed)
           }
         }
-        this.retype.armFrom({ nodes, vector: [tx, ty, tz], copy: true }, genBefore)
+        this.retype.arm({ nodes, vector: [tx, ty, tz], copy: true })
       } else {
-        const committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        // The whole selection: the planner leaves riding shapes to their
+        // owner and hands them back re-found where they landed.
+        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance)
         this.onCommit(committed)
-        // A moved chord's run is re-cut on every commit AND on the undo the
-        // retype window would run first, so its handle cannot survive a
-        // re-commit — no typed-distance window for a selection holding one.
-        if (!committed.some((n) => n.kind === 'imprint-chord')) {
-          this.retype.armFrom({ nodes: committed, vector: [tx, ty, tz], copy: false }, genBefore)
-        }
+        // The window is armed with the PRE-commit `nodes`, not `committed`:
+        // its apply() undoes the commit first, which restores the drawing
+        // with its ORIGINAL unit keys (they are geometry hashes), and an
+        // arranging landing's re-resolved refs name the moved geometry.
+        this.retype.arm({ nodes: allNodes, vector: [tx, ty, tz], copy: false })
       }
       return true
     } catch (err) {
@@ -835,6 +816,16 @@ export class MoveTool implements Tool {
       (hot) => ({ ...hot, vector: v }),
     )
     if (outcome === 'stale') this.onToast(retypeStaleMessage('move'))
+    else if (outcome === 'failed') this._restampArrayWindow()
+  }
+
+  /** After a refused retype whose window survived (the document was put
+   *  back as it was), the array window's history stamp is stale: the attempt's
+   *  undo/redo moved the generation. Re-stamp it so the next ×N is not
+   *  rejected as 'model changed'. */
+  private _restampArrayWindow(): void {
+    if (this.arrayHot === null || !this.retype.isOpen) return
+    this.arrayHot = { ...this.arrayHot, historyGen: this.wasmScene.history_generation().toString() }
   }
 
   /**
@@ -847,16 +838,14 @@ export class MoveTool implements Tool {
   private _relayArray(hot: RetypeSpec, v: [number, number, number]): boolean {
     const spec = this.arrayLast
     if (spec === null) return this._commitHot(hot, v)
+    const arr = this.arrayHot
+    if (arr === null) return this._commitHot(hot, v)
     const step: [number, number, number] =
       spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
     try {
-      const created = this._duplicateArray(
-        hot.nodes,
-        affineToFloat64(translationAffine(step[0], step[1], step[2])),
-        spec.count,
-      )
+      const created = this._arrayAt(arr, step, spec.count)
       this.arrayHot = {
-        sources: hot.nodes,
+        ...arr,
         vector: v,
         historyGen: this.wasmScene.history_generation().toString(),
       }
@@ -906,6 +895,46 @@ export class MoveTool implements Tool {
     if (this.typed === '') return ''
     const arrayish = /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
     return arrayish ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
+  }
+
+  /**
+   * A refused x N resolve. The previous commit's one entry was already
+   * retracted and the refused attempt aborted its own history bracket, which
+   * restores the document, redo stack included, exactly: one redo brings the
+   * previous array (or the single copy) back.
+   */
+  private _restoreAfterRefusedArray(hot: NonNullable<MoveTool['arrayHot']>, genBefore: bigint): void {
+    try {
+      if (this.wasmScene.history_generation() !== genBefore) throw new Error('history moved during a refused array')
+      this.wasmScene.scene_redo().free()
+      this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
+      // The undo + redo moved the generation: re-arm the retype window on
+      // the restored entry, or a distance typed next reports 'stale'.
+      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], vector: hot.vector, copy: true })
+    } catch {
+      this.arrayHot = null
+    }
+  }
+
+  /** Lay `count` copies of the hot sources at multiples of `step`: the
+   *  drawn shapes through cumulative translations, the objects through one
+   *  `duplicate_selection_array` call. */
+  private _arrayAt(
+    arr: NonNullable<MoveTool['arrayHot']>,
+    step: [number, number, number],
+    count: number,
+  ): NodeRef[] {
+    const affines: Float64Array[] = []
+    for (let k = 1; k <= count; k += 1) {
+      affines.push(affineToFloat64(translationAffine(step[0] * k, step[1] * k, step[2] * k)))
+    }
+    return copyOwnersAndDrawing(
+      this.wasmScene,
+      arr.sources,
+      arr.sketchSources,
+      affines,
+      () => this._duplicateArray(arr.sources, affineToFloat64(translationAffine(step[0], step[1], step[2])), count),
+    )
   }
 
   /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
@@ -969,29 +998,14 @@ export class MoveTool implements Tool {
         ? [tx / spec.count, ty / spec.count, tz / spec.count]
         : [tx, ty, tz]
 
-    // Retract the previous array commit (count 1 on the first refinement).
+    // Retract the previous commit/resolve: always exactly one entry.
     this.wasmScene.scene_undo().free()
+    const genBefore = this.wasmScene.history_generation()
     let created: NodeRef[]
     try {
-      created = this._duplicateArray(
-        hot.sources,
-        affineToFloat64(translationAffine(step[0], step[1], step[2])),
-        spec.count,
-      )
+      created = this._arrayAt(hot, step, spec.count)
     } catch (err) {
-      // Put the retracted copies back so a refused refinement never eats
-      // the committed copy. The undo+redo pair moved the history
-      // generation, so re-stamp the token — the state is the recorded one
-      // again and another count can be tried.
-      try {
-        this.wasmScene.scene_redo().free()
-        this.arrayHot = {
-          ...hot,
-          historyGen: this.wasmScene.history_generation().toString(),
-        }
-      } catch {
-        this.arrayHot = null
-      }
+      this._restoreAfterRefusedArray(hot, genBefore)
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
@@ -999,14 +1013,13 @@ export class MoveTool implements Tool {
     }
 
     this.arrayHot = {
-      sources: hot.sources,
-      vector: hot.vector,
+      ...hot,
       historyGen: this.wasmScene.history_generation().toString(),
     }
     this.arrayLast = spec
     // A distance typed now re-spaces THIS array (see `_relayArray`); the
-    // array is one `duplicate_selection_array` step, so one undo retracts it.
-    this.retype.arm({ nodes: hot.sources, vector: hot.vector, copy: true }, 1)
+    // array is one undo step, so one undo retracts it.
+    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], vector: hot.vector, copy: true })
     this.selection = created
     this.onArrayCommit(created)
   }

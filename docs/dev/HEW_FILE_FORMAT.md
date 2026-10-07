@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `16`**, and **geometry buffer format version `6`**. Both are covered
+version `17`**, and **geometry buffer format version `7`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,7 +59,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 16,
+  "format_version": 17,
   "geometry_version": 6,
   "app": "hew",
   "app_version": "0.1.0",
@@ -105,8 +105,10 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ],
       "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75,
                      "kind":"polygon"} ], // v10+; "kind" is v12+, optional
-      "owner":    0   // v13+, optional; dense `components[]` id. Omitted =
+      "owner":    0,  // v13+, optional; dense `components[]` id. Omitted =
                        // world-owned (the only possibility before v13)
+      "owner_object": 0 // v17+, optional; dense `objects[]` id. Omitted =
+                       // not owned by an Object (the only possibility before v17)
     }
   ],
   "guides": [
@@ -162,9 +164,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `16`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `17`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `6`.
+  used by every entry under `geometry/` in this file. Current: `7`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -269,6 +271,7 @@ of the manifest:
 | `components[].members` as `NodeRef`s, and `groups[].owner` / `instances[].owner` | 15 | pre-v15: members are bare object dense ids (the only member kind that existed) and every node is world-owned |
 | `section_plane` (top-level object) | 16 | absent — no section plane placed |
 | `scenes` (top-level array) | 16 | empty list (no Scenes) |
+| `sketches[].owner_object` | 17 | absent — no sketch is owned by an Object (the only kind before v17) |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -397,7 +400,19 @@ offset  type                field
         u8                  edge curve flag: 0 = plain edge, 1 = circle claim follows
         f64[4]              edge curve, present only when the flag above is 1:
                              center.x .y .z  radius
+        u8                  edge_polygons flag (v7): 0 = no edge of this face is a regular polygon's side, 1 = per-edge claims follow
+        --- present only when the edge_polygons flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  edge polygon flag: 0 = plain edge, 1 = polygon claim follows
+        f64[4]              edge polygon, present only when the flag above is 1:
+                             circumcircle center.x .y .z  radius
 ```
+
+An edge polygon claim (v7) marks an edge as a side, or a piece of a side,
+of a regular polygon drawn on the face, naming the polygon's circumcircle.
+The sides are the geometry, so the claim implies no surface or smoothing;
+it lets an editor show the polygon as one shape with a center. Both faces
+of a shared edge store it and must agree within 1e-9 m.
 
 Each face's outer loop and each of its hole loops is a closed polygon: the
 last index does not repeat the first (the loop is implicitly closed by
@@ -422,7 +437,8 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
   under the f64 total order), then the per-edge circle claims (v5; the outer
   loop's claim sequence in canonical vertex order, then each hole's, each
   compared by length then entry — claim-less before claim-bearing, then by
-  `center.x y z radius`). Coincident faces on disjoint shells can tie on
+  `center.x y z radius`), then the per-edge polygon claims (v7; compared
+  the same way). Coincident faces on disjoint shells can tie on
   geometry alone, so every emitted payload — ring, holes, material, UV
   frame, surface, and edge-curve claims — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
@@ -456,14 +472,14 @@ or watertightness.
 The per-face **edge-curve claims** (v5+) are the solid-edge mirror of the
 sketch-edge curve chains: an edge marked with a circle is a chord facet of
 the infinite circle through `center` with the given `radius` (each endpoint
-within tolerance of `radius` from `center`). They carry a circle imprinted
-on a solid face (drawn but not yet pushed) so a later push-through can
+within tolerance of `radius` from `center`). They carry a circle drawn
+on a solid face (lowered to topology by the drafting engine, not yet pushed) so a later push-through can
 re-attribute the tunnel walls as cylinder surfaces. The claims are stored
 per face parallel to that face's loop edges; a shared edge appears in both
 incident faces and carries the same claim in each. The leading `edge_curves`
 flag is `0` for the overwhelmingly common face that carries no such edge
 (one byte), so plain solids grow by exactly one byte per face. A reader that
-ignores the block loses only the imprint's analytic identity, never shape.
+ignores the block loses only the drawn circle's analytic identity, never shape.
 
 ### 3.2 Field availability by version
 
@@ -480,6 +496,7 @@ present at every version:
 | per-face `surface` flag + payload | 4 | flag byte and payload are not present at all — `outer_count` follows the `uv_frame` block directly | no analytic surface |
 | per-face `edge_curves` flag + payload | 5 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the last hole loop directly | no edge carries an analytic circle |
 | per-face `soft_edges` flag + payload | 6 | flag byte and payload are not present at all — the `edge_curves` flag (v5) follows the last hole loop directly | no edge is soft |
+| per-face `edge_polygons` flag + payload | 7 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the `edge_curves` block directly | no edge is a polygon's side |
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -506,9 +523,13 @@ contents do not describe valid geometry.
   claim whose endpoints are not within tolerance of `radius` from `center`,
   exactly as it rejects a lying `surface`.)
 - **Face plane recomputation.** Planes are *not* stored; a reader must
-  recompute each face's best-fit plane from its outer-loop vertices and
-  reject a loop that doesn't span a plane within tolerance (gated by
-  `imported`). This is safe because a baked object's transform is always
+  recompute each face's best-fit plane from its outer-loop vertices (Newell's
+  method over the loop in the order the writer emits it, rotated to its
+  canonical start) and reject a loop that doesn't span a plane — a Newell
+  vector (twice the enclosed area) shorter than 1e-12 m² — or whose vertices
+  stray from it beyond tolerance (gated by `imported`). The kernel's
+  validator holds every live face to the same predicate, so no operation
+  commits a face, however small, that a saved file could not reopen. This is safe because a baked object's transform is always
   orientation-preserving (), so the recomputed plane's normal always
   matches how the geometry was authored.
 - **Watertightness cross-check.** The stored `watertight` byte must equal
@@ -745,6 +766,23 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   reaches the scene only through that definition's instances, at each
   instance's pose, exactly like a member object. A reader MUST reject an
   out-of-range `owner`, like any other dangling reference.
+- `owner_object` (v17+, optional) — the dense `objects[]` id of the Object
+  this sketch belongs to: drawing over that object's faces that is not face
+  topology, which rides with the object (moves with it, lives and dies with
+  it). Absent means the sketch belongs to no Object: the only kind of
+  sketch before v17. The sketch lives in its owner's frame, so the owner
+  object's definition must be exactly the sketch's own `owner`: a sketch
+  owned by a world object has no `owner`, and a sketch owned by a member of
+  component `C` has `owner` = `C` (an `owner_object` naming a definition
+  member while `owner` is absent, or naming a member of a different
+  component, is inconsistent). A reader MUST reject an out-of-range
+  `owner_object` like any other dangling reference, MUST reject an
+  `owner_object` whose object's definition disagrees with the sketch's
+  `owner` as a malformed manifest, and MUST reject a file declaring
+  `format_version < 17` that carries the field at all (reject-not-repair: a
+  pre-v17 writer could not have produced it). A sketch whose owner object
+  is not saved (deleted, or consumed by a boolean) is not saved either; a
+  writer never emits an `owner_object` that names an unsaved object.
 
 ### 4.7 Guides
 

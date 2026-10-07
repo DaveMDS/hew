@@ -70,8 +70,76 @@ below.
   sides run along part of the face boundary (a rectangle from one edge's
   midpoint to another's, or flush against an edge) imprints as one or more
   boundary-to-boundary chords — one undo entry — and the drawn region is
-  a real face to push, pull, or paint; only a loop that merely touches the
-  boundary at a point is still refused
+  a real face to push, pull, or paint. A profile that touches the edges
+  of the face and its imprints at two or more isolated points (a circle
+  inscribed in an imprinted rectangle, tangent to three of its sides; a
+  circle whose rim was snapped onto an edge; a polygon with corners on
+  edges; a shape crossing a chord), or that crosses an imprint's
+  boundary or runs flush against it from outside, splits every face it
+  crosses, exactly as the same shapes do in a ground sketch, with circle
+  claims intact wherever a tangency falls on a facet vertex
+  (the drafting engine, ARCHITECTURE.md 2.4, lowering the drawing into
+  ordinary `split_face` cuts and re-traces; a piece outside an imprint
+  cuts the face around it from the imprint's hole back to it). A circle overshooting a rectangle drawn a
+  few microns short leaves a sliver, as on the ground; a sliver too small
+  for a saved file to reopen (under about half a square micron) is
+  refused, and the validator holds every operation to the same limit. A
+  shape whose pieces join two different boundaries of one face (a circle
+  overlapping two separate imprints, a rectangle from the face's edge
+  across an imprint, a rectangle flush between two imprints) cuts that
+  face with all of its pieces at once through a local re-trace
+  (`Object::retrace_face`: several paths inserted or removed in one step,
+  loops rebuilt by rotational order at each vertex, its own inverse with
+  the arguments swapped), so the boundaries it joins become one, as on
+  the ground; bridges exist only inside the re-trace, never in a
+  committed face, so the file format is unchanged. A loop touching at a
+  single point is kept as drawing owned by the object (a pinched face
+  cannot be pushed, and Push/Pull says so)
+- Deleting lines on a face merges the regions on both sides, as on the
+  ground, including a region and the face it was drawn in: selecting a
+  corner leftover's rectangle edges (between a rectangle imprint and a
+  circle inscribed in it) and pressing Delete dissolves the leftover into
+  the face, rounding that corner of the rectangle; doing both corners and
+  deleting the arc to the rest leaves one imprint with rounded corners
+  that pushes and pulls with smooth (cylinder-claimed) walls. One Delete
+  dissolves the whole run the two faces share — every run, when they meet
+  along several (the merged face gains a hole where they enclosed
+  another, or a hole splits in two; the re-trace again) — and the face
+  holding the hole keeps its paint. Underneath, `merge_faces` accepts a run between an
+  outer loop and a hole loop and `split_face` a cut from a hole loop back
+  to the same hole — exact inverses, so undo and redo are exact — and
+  every such run is a selectable chord imprint. Booleans keep every
+  coplanar edge of a drawn shape, whichever loops it lies between, and a
+  click selects a drawn line within 8 screen pixels whatever the model's
+  scale, even where a guide lies along it. Cuts that close on one point,
+  cross themselves, or repeat a point, and merges that would pinch a
+  loop, refuse typed; undo and redo restore paint exactly
+- A drawn circle or arc stays one shape after other shapes cut it apart
+  on a face: its runs (chord runs whose edges are all facets of one
+  circle; now the engine's curve units, keyed by geometry in
+  `unit_key.rs`) list once in the outliner ("Circle",
+  "Arc"), a double-click on any run (or the ground's triple-click)
+  selects the whole curve, and Delete merges every run's faces in one
+  undo entry (a draft delete of the curve's edge keys) — a circle drawn across a
+  rectangle deletes back to the rectangle — refusing whole when the
+  delete would leave two shapes touching at a point. Clicking one line
+  whose two faces meet along several runs highlights every run Delete
+  will remove. The Line tool on a face hands its whole chain to the
+  kernel (now one `Document::draft` gesture, ARCHITECTURE.md 2.4):
+  it is cut wherever it meets an edge, crossing imprints and running
+  from the face's edge across them, as one undo entry, and a dangling
+  end (refused at the time) is now kept as a loose owned edge. This completes the face-arrangement
+  program: shapes and lines drawn on a face split, merge, and delete as
+  the same lines do on the ground. Known limits: a shape touching an
+  edge or another shape at a single point is kept as drawing owned by the
+  object, and Push/Pull explains why it cannot be pushed; a
+  facet a crossing cuts mid-way keeps no circle claim in the solid (the
+  drafting engine still lists it with its circle), so pushing that
+  region leaves one flat wall among the cylinder's; and a sliver under
+  about half a square micron is refused. The Arc tool's open arc, and the API's
+  face-mode `draw_line` and open `draw_arc`, go through the same drafting
+  engine, so they cross shapes on a face too; `hew.solid.imprints`
+  lists cut-apart curves in `curve_units`
 - Push/pull past a co-facing wall: an inward push whose swept column would
   cross the plane of a face pointing the same way (the bowl of a P-shaped
   slab pushed past the stem's end) routes to the subtract path and carves
@@ -94,15 +162,15 @@ below.
   one click away anywhere else), fills blue like a ground sketch, lists in
   the Outliner under its object as a named child row (Circle, Rectangle,
   Shape, Arc shape, Line, Arc, Edge shape), and moves, rotates, scales, and deletes ON its
-  face — Move constrains the drop to the face's plane; an edit that would
-  tilt it off the face, mirror it, stretch it non-uniformly, or slide it
-  off the face refuses with a typed message. Shapes drawn up to a face's
-  edge (chords) select by their line, slide along that edge, and delete
-  the same way. A shape drawn, offset, moved, or scaled all the way around
+  face — Move constrains the drop to the face's plane. (Superseded by
+  unified drafting, above: on a face every transform arranges as it does
+  on the ground, a shape may slide off the edge and split, and copies are
+  supported; what stays refused is tilting a shape off its plane.) Shapes
+  drawn up to a face's edge (chords) select by their line and delete the
+  same way. A shape drawn, offset, moved, or scaled all the way around
   other shapes, bosses, recesses, or holes adopts them — they move with it,
-  and deleting it leaves them on the face — while one that would cross or
-  touch another shape refuses; a shape holding a boss or recess cannot
-  slide until that is undone. Circles and arcs drawn on a face keep their
+  and deleting it leaves them on the face; a shape holding a boss or
+  recess cannot slide until that is undone. Circles and arcs drawn on a face keep their
   circle on the solid's edges (per-edge `Edge::curve` claims through
   `split_face_with_curves` / `split_face_inner_with_curves`, an arc's
   facets claimed and its closing lines plain), offer center and quadrant
@@ -115,18 +183,59 @@ below.
   and hands it to the fresh rim of a wall it builds; the Offset tool's face
   commit imprints each offset arc facet with its concentric circle, so a
   recessed inset's inner curve is smooth too. Recovered structurally from the solid's topology on
-  demand (no file-format change) — `Object::face_features`,
-  `transform_sub_face`, `Document::transform_chord` /
-  `dissolve_imprint`, and the `hew.solid.imprints` / `*_imprint` API
-  commands. Copying an imprint is not yet supported (Move/Rotate/Scale in
-  copy mode refuse with a toast), and instanced geometry gets the
-  selection highlight but no blue fill overlay
+  demand (no file-format change). The legacy imprint planner that once did
+  this (`face_features`, `transform_sub_face`, `transform_chord` /
+  `dissolve_imprint`) is gone: the drafting engine (ARCHITECTURE.md 2.4)
+  lists and edits the same drawing as plane units, and the
+  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no blue
+  fill overlay
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
   and deletes as one curve, and each connected shape is an independent
   island — selected, deleted, and transformed (moved, rotated, scaled;
   out-of-plane rotations included, detaching the shape into its own
-  sketch when it shares one) without touching anything else
+  sketch when it shares one) without touching anything else. A shape
+  moved, rotated, or scaled onto other shapes, or a point dragged onto
+  other lines, joins them exactly as drawing it there would — lines split
+  and merge and regions re-form, on every plane, in one undo step — and
+  line contact is measured in metres at every scale
+- Unified drafting: the ground and every solid face are drafting planes
+  driven by ONE engine (`kernel::draft`), so a gesture performed on a box
+  top leaves the same drawing as on the ground (the app's parity E2E
+  holds both to equal units, curve runs, edges, and region rings). After
+  every edit each edge is stored where it can be: over a face and part of
+  a region the solid can hold, as that face's topology (an imprint, as
+  before); over a face but loose (a free end) or part of a region the
+  solid cannot hold (a pinch, a sliver), in a sketch OWNED by that object
+  on that plane; over the void, in the plane's shared world sketch. A
+  loose line on a face is kept; a shape straddling a face edge splits into
+  a face part (Push/Pull grows or carves the solid) and a free part
+  (Push/Pull extrudes a new object), in either order; moving, copying,
+  arraying, scaling, rotating, offsetting, or dragging a vertex of a shape
+  on a face arranges exactly as drawing it there would, and the ground's
+  "would make lines cross or merge" refusal is gone too. Selection works on
+  plane units (shape, curve run, line, region) on every plane, and a
+  solid's own edges are never drawing: they cannot be moved or erased by
+  drawing edits. Owned drawing follows its object (push/pull ride,
+  booleans, slices, duplicates, explodes, and library copies copy it;
+  deleting the object takes it, undo brings it back) and reconciles after
+  every action. A region a face cannot hold says why on Push/Pull. A
+  clicked value equals the displayed one for free picks (snapped picks
+  keep their exact point). A regular polygon drawn on a face keeps its
+  polygon mark on the face's edges, so it selects as one polygon and
+  offers its centre snap there as on the ground, and a shape slid past a
+  face's edge and back is whole again (the split points it gained where it
+  crossed are healed once they sit off every solid edge). Two polygons
+  inscribed in one circle stay two polygons (their curve keys hash their
+  corners). A selection transform or copy that moves objects together
+  with drawing (Select All, then Move) is one undo step and all-or-nothing
+  (a wasm history bracket over the kernel's transaction): drawing that
+  rides on a selected object's face moves with it, and the free half of a
+  shape straddling that face's edge is redrawn where it lands. Native format
+  v17 adds the optional `owner_object` on sketches, and geometry buffer v7
+  the per-edge polygon mark (`docs/dev/HEW_FILE_FORMAT.md`); the wasm and
+  Hew API surfaces address drawing by plane context and unit key
+  (`plane_units`, `draft_*`)
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a
@@ -336,7 +445,12 @@ below.
   axis line. Candidates within a pixel of each other on screen rank by
   depth, nearest first, so a stack of corners seen from a nearly-vertical
   Top view — top plate, sole plate, slab — resolves to the one in front
-  rather than to whichever the camera's slight tilt happens to lean toward
+  rather than to whichever the camera's slight tilt happens to lean toward.
+  Named points (endpoints, midpoints, centers, quadrants) capture from
+  1.75 times as far as lines, so a corner on an edge or axis wins near it,
+  and the soft axis is capped on screen to an edge's pick radius rather
+  than reaching by angle alone; Select's clicks and hover get no extra
+  point reach, so a small face's middle still selects the face
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
@@ -870,7 +984,7 @@ below.
   Push/Pull and Paint cover the common editing cases without exposing raw
   mesh topology; an operation that would tear open a solid is refused
   rather than allowed. The one sub-element that IS editable is a drawn,
-  unpushed shape on a face (an imprint, see Shipped): every edit it
-  allows is a coplanar surgery that cannot open the shell, and it is
+  unpushed shape on a face (drawing, see Shipped): every edit it
+  allows lowers to a coplanar surgery that cannot open the shell, and it is
   still not a general face or edge editor — a boss's wall or a solid's
   own corner cannot be dragged.

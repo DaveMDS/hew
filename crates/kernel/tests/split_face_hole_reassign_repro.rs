@@ -120,3 +120,58 @@ fn concave_hole_is_assigned_to_the_containing_face() {
     let decoded = Object::decode(&bytes, &|_| None).expect("round-trip decodes");
     decoded.validate().expect("round-trip validates");
 }
+
+/// A face whose normal splits evenly between two axes (a vertical wall
+/// running at 45°) takes a rectangle loop strictly inside it: the hole
+/// check's crossing test measures every orientation along one common
+/// normal, so same-side points never read as a crossing.
+#[test]
+fn a_loop_inside_a_diagonal_wall_splits_it() {
+    use kernel::{Document, KernelOp, Plane, Point3, Vec3};
+    let a = Point3::new(-3.9548952703015607, 5.419604672537572, -2.176461726410028);
+    let b = Point3::new(-3.9227148743424785, 5.451785068496655, -2.176461726410028);
+    let n = Vec3::new(1.0, -1.0, 0.0) * (1.0 / 2f64.sqrt());
+    let (c, d) = (b + n * 0.5, a + n * 0.5);
+    let mut doc = Document::new();
+    let plane = Plane::from_polygon(&[a, b, c]).unwrap();
+    let s = doc.add_sketch(plane);
+    for (p, q) in [(a, b), (b, c), (c, d), (d, a)] {
+        doc.sketch_mut(s).unwrap().add_segment(p, q).unwrap();
+    }
+    let r = doc.sketch(s).unwrap().regions().keys().next().unwrap();
+    let h = if plane.normal().z > 0.0 {
+        2.176461726410028
+    } else {
+        -2.176461726410028
+    };
+    let (o, _) = doc.extrude_region(s, r, h).unwrap();
+    let obj = doc.object(o).unwrap();
+    let face = obj
+        .faces()
+        .keys()
+        .find(|&f| {
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            ring.len() == 4
+                && ring.iter().any(|p| p.approx_eq(a, 1e-12))
+                && ring.iter().any(|p| p.approx_eq(b, 1e-12))
+                && ring.iter().any(|p| p.z.abs() < 1e-12)
+        })
+        .expect("the diagonal wall");
+    let loop_path = vec![
+        Point3::new(-3.9500682109076983, 5.424431731931435, -1.632346294807521),
+        Point3::new(-3.9420231119179276, 5.432476830921205, -1.632346294807521),
+        Point3::new(-3.9420231119179276, 5.432476830921205, -0.544115431602507),
+        Point3::new(-3.9500682109076983, 5.424431731931435, -0.544115431602507),
+    ];
+    doc.apply_object_op(
+        o,
+        KernelOp::SplitFaceInner {
+            face,
+            loop_path,
+            restore: None,
+            curves: Vec::new(),
+        },
+    )
+    .expect("the loop splits the wall");
+    assert_eq!(doc.object(o).unwrap().faces()[face].inner_loops.len(), 1);
+}

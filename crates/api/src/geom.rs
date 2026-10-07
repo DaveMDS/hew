@@ -170,7 +170,8 @@ const INTERIOR_POINT_TOL: f64 = 1e-9;
 ///
 /// Scanline method: pick the plane-axis-horizontal line whose ordinate is
 /// the midpoint of the widest gap between distinct vertex ordinates
-/// (maximally far from every vertex, so no edge is grazed), intersect it
+/// (maximally far from every vertex, so no edge is grazed; a narrower gap
+/// when the widest crosses no material), intersect it
 /// with every ring, and take the midpoint of the widest inside interval
 /// under the even-odd rule. Deterministic, and correct for a concave
 /// outer ring or an off-center hole — unlike an area centroid
@@ -205,49 +206,55 @@ pub fn interior_point_of_loops(
     ys.sort_by(f64::total_cmp);
     ys.dedup_by(|a, b| (*a - *b).abs() <= INTERIOR_POINT_TOL);
 
-    // Widest vertex-free ordinate band, clamped to the outer loop's range
-    // so the scanline is guaranteed to cross it.
-    let mut band: Option<(f64, f64)> = None; // (gap, midpoint)
+    // Vertex-free ordinate bands, clamped to the outer loop's range so the
+    // scanline is guaranteed to cross it, tried widest first until one
+    // finds material: the widest band can lie wholly inside a hole that
+    // spans the outer ring's full width (the kernel's
+    // `geom2d::interior_point_of_loops` does the same).
+    let mut bands: Vec<(f64, f64)> = Vec::new(); // (gap, midpoint)
     for pair in ys.windows(2) {
         let (lo, hi) = (pair[0].max(outer_min), pair[1].min(outer_max));
         let gap = hi - lo;
-        if gap > INTERIOR_POINT_TOL && band.is_none_or(|(g, _)| gap > g) {
-            band = Some((gap, (lo + hi) * 0.5));
+        if gap > INTERIOR_POINT_TOL {
+            bands.push((gap, (lo + hi) * 0.5));
         }
     }
-    let (_, y_star) = band?;
+    // Widest first; equal gaps keep their ordinate order (stable sort), so
+    // the first band tried is the one a single-band search would pick.
+    bands.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let (x_star, y_star) = bands.into_iter().find_map(|(_, y_star)| {
+        // Every crossing of the scanline with every ring edge, in plane-x.
+        let mut xs: Vec<f64> = Vec::new();
+        let mut collect = |lp: &[Point3]| {
+            let n = lp.len();
+            for i in 0..n {
+                let (a, b) = (lp[i], lp[(i + 1) % n]);
+                let (ax, ay) = (pick(a, ua), pick(a, va));
+                let (bx, by) = (pick(b, ua), pick(b, va));
+                if (ay > y_star) != (by > y_star) {
+                    xs.push(ax + (bx - ax) * (y_star - ay) / (by - ay));
+                }
+            }
+        };
+        collect(outer);
+        for h in holes {
+            collect(h);
+        }
+        if xs.len() < 2 {
+            return None;
+        }
+        xs.sort_by(f64::total_cmp);
 
-    // Every crossing of the scanline with every ring edge, in plane-x.
-    let mut xs: Vec<f64> = Vec::new();
-    let mut collect = |lp: &[Point3]| {
-        let n = lp.len();
-        for i in 0..n {
-            let (a, b) = (lp[i], lp[(i + 1) % n]);
-            let (ax, ay) = (pick(a, ua), pick(a, va));
-            let (bx, by) = (pick(b, ua), pick(b, va));
-            if (ay > y_star) != (by > y_star) {
-                xs.push(ax + (bx - ax) * (y_star - ay) / (by - ay));
+        // Even-odd: intervals (xs[0], xs[1]), (xs[2], xs[3]), … are material.
+        let mut best: Option<(f64, f64)> = None; // (width, midpoint)
+        for pair in xs.chunks_exact(2) {
+            let width = pair[1] - pair[0];
+            if width > INTERIOR_POINT_TOL && best.is_none_or(|(g, _)| width > g) {
+                best = Some((width, (pair[0] + pair[1]) * 0.5));
             }
         }
-    };
-    collect(outer);
-    for h in holes {
-        collect(h);
-    }
-    if xs.len() < 2 {
-        return None;
-    }
-    xs.sort_by(f64::total_cmp);
-
-    // Even-odd: intervals (xs[0], xs[1]), (xs[2], xs[3]), … are material.
-    let mut best: Option<(f64, f64)> = None; // (width, midpoint)
-    for pair in xs.chunks_exact(2) {
-        let width = pair[1] - pair[0];
-        if width > INTERIOR_POINT_TOL && best.is_none_or(|(g, _)| width > g) {
-            best = Some((width, (pair[0] + pair[1]) * 0.5));
-        }
-    }
-    let (_, x_star) = best?;
+        best.map(|(_, x_star)| (x_star, y_star))
+    })?;
 
     // Reconstruct the dropped axis's coordinate from the plane equation
     // n·p = d — every ring point shares the same offset since they're

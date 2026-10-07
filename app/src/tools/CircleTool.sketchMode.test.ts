@@ -2,14 +2,14 @@
  * CircleTool — sketch mode (sketches on any plane, Phase 2 wave B): hovering
  * a committed sketch that is NOT on the ground plane, at top level, adopts
  * that sketch's plane and targets it directly (`SketchTarget.existing`)
- * instead of the shared per-plane ground cache. See
+ * as one `draft_begin_sketch` draft. See
  * the sketch-planes design §1/§4 and `drawPlane.ts`/`sketchGesture.ts`.
  * Mirrors LineTool.sketchMode.test.ts / RectangleTool.sketchMode.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { CircleTool } from './CircleTool'
-import { makeSketchPlaneCache, type SketchPlaneCache } from './sketchGesture'
+import { draftMock } from './draftMock'
 import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -43,12 +43,11 @@ function makeSnap(overrides: Partial<Snap> = {}): Snap {
  *  so any drawn geometry has non-trivial Z coordinates. */
 const TILTED_SKETCH = 55n
 const TILTED_PLANE = new Float64Array([0, 0, 0, 0, 1, 0])
-const GROUND_PLANE_ARR = new Float64Array([0, 0, 0, 0, 0, 1])
 /** Plane-membership tolerance mirroring drawPlane.ts's GROUND_PLANE_EPS. */
 const PLANE_EPS = 1e-9
 
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
-type CurveWithCall = { sketch: bigint; cx: number; cy: number; cz: number; radius: number }
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
+type CurveWithCall = { cx: number; cy: number; cz: number; radius: number }
 
 function makeWasmScene(opts: {
   /** `pick_sketch` result for every ray — a fixed handle (hit) or undefined (miss). */
@@ -59,22 +58,25 @@ function makeWasmScene(opts: {
   const planes = opts.planes ?? new Map<bigint, Float64Array | undefined>([[TILTED_SKETCH, TILTED_PLANE]])
   const segmentCalls: SegmentCall[] = []
   const curveWithCalls: CurveWithCall[] = []
-  let sketchCounter = 90n
   let nextRegionsCreated: bigint[] = []
+  // CircleTool reports the LAST segment's regions_created, so setting this
+  // before the commit and never resetting it is enough (mirrors
+  // RectangleTool.sketchMode.test.ts).
+  const dm = draftMock({ regionsCreated: () => nextRegionsCreated })
+  const baseAdd = dm.members.draft_add_segment.getMockImplementation()!
+  dm.members.draft_add_segment.mockImplementation((d, ax, ay, az, bx, by, bz) => {
+    segmentCalls.push({ a: [ax, ay, az], b: [bx, by, bz] })
+    return baseAdd(d, ax, ay, az, bx, by, bz)
+  })
+  const baseCurve = dm.members.draft_begin_curve_with.getMockImplementation()!
+  dm.members.draft_begin_curve_with.mockImplementation((d, center, radius) => {
+    curveWithCalls.push({ cx: center[0], cy: center[1], cz: center[2], radius })
+    return baseCurve(d, center, radius)
+  })
 
   const scene = {
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, GROUND_PLANE_ARR)
-      return sketchCounter
-    }),
-    // Not exercised by these fixtures (sketch mode never mints a
-    // non-ground plane sketch — see sketchGesture.ts) but present so this
-    // fake matches the real WasmScene signature (Phase 3).
-    begin_sketch_on_plane: vi.fn(() => {
-      throw new Error('begin_sketch_on_plane should not be called in sketch mode')
-    }),
+    ...dm.members,
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => opts.sketchPick),
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
@@ -84,31 +86,10 @@ function makeWasmScene(opts: {
       if (planes.get(h) === undefined) throw new Error('UnknownSketch')
       return SKETCH_LINES
     }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_begin_curve: vi.fn(() => 91n),
-    sketch_begin_curve_with: vi.fn((sketch: bigint, cx: number, cy: number, cz: number, radius: number) => {
-      curveWithCalls.push({ sketch, cx, cy, cz, radius })
-      return 91n
-    }),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        // CircleTool reports the LAST segment's regions_created, so setting
-        // this before the commit and never resetting it is enough (mirrors
-        // RectangleTool.sketchMode.test.ts).
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array(nextRegionsCreated),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
   }
   return {
     scene: scene as unknown as WasmScene,
+    dm,
     segmentCalls,
     curveWithCalls,
     setNextRegionsCreated: (rc: bigint[]) => { nextRegionsCreated = rc },
@@ -116,14 +97,14 @@ function makeWasmScene(opts: {
   }
 }
 
-function makeTool(scene: WasmScene, cache: SketchPlaneCache = makeSketchPlaneCache()) {
+function makeTool(scene: WasmScene) {
   const preview = new THREE.Group()
   const onCommit = vi.fn()
   const onToast = vi.fn()
   const onFaceImprint = vi.fn()
   const onMeasurement = vi.fn()
-  const tool = new CircleTool(scene, preview, onCommit, onToast, onFaceImprint, onMeasurement, cache)
-  return { tool, onCommit, onToast, onFaceImprint, onMeasurement, cache }
+  const tool = new CircleTool(scene, preview, onCommit, onToast, onFaceImprint, onMeasurement)
+  return { tool, onCommit, onToast, onFaceImprint, onMeasurement }
 }
 
 describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', () => {
@@ -135,8 +116,8 @@ describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', 
 
     expect(tool.capturingInput()).toBe(true)
     expect(scene.pick_sketch).toHaveBeenCalled()
-    // Sketch mode targets the EXISTING handle — no ground sketch minted.
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    // Sketch mode targets the EXISTING handle — no plane draft opened.
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
   })
 
   it('a GRAZING pick the ray does not land on draws on the ground, not the tilted sketch', () => {
@@ -154,26 +135,29 @@ describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', 
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), grazing) // center
     tool.onPointerDown(makeSnap({ x: 4, y: 1, z: 0 }), grazing) // rim — commits
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).not.toHaveBeenCalledWith(TILTED_SKETCH)
+    // Ground draft on the z = 0 plane, never a draft on the tilted sketch.
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_sketch).not.toHaveBeenCalled()
   })
 
-  it('a committed circle sends sketch_begin_curve_with an on-plane center and every segment endpoint on-plane, with non-trivial tilted-axis (Z) coordinates', () => {
-    const { scene, segmentCalls, curveWithCalls } = makeWasmScene({ sketchPick: TILTED_SKETCH })
+  it('a committed circle sends draft_begin_curve_with an on-plane center and every segment endpoint on-plane, with non-trivial tilted-axis (Z) coordinates', () => {
+    const { scene, dm, segmentCalls, curveWithCalls } = makeWasmScene({ sketchPick: TILTED_SKETCH })
     const { tool, onCommit } = makeTool(scene)
 
     tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 2 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 2 }), RAY) // rim, radius 3
 
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    // One draft, opened on the hovered sketch.
+    expect(dm.log.begins).toHaveLength(1)
+    expect(dm.log.begins[0].kind).toBe('sketch')
+    expect(dm.log.begins[0].args[0]).toBe(TILTED_SKETCH)
     expect(curveWithCalls).toHaveLength(1)
-    expect(curveWithCalls[0].sketch).toBe(TILTED_SKETCH)
     // The curve's own center lies on the tilted plane (y ~ 0).
     expect(Math.abs(curveWithCalls[0].cy)).toBeLessThan(PLANE_EPS)
     expect(curveWithCalls[0].radius).toBeCloseTo(3, 9)
 
     expect(segmentCalls.length).toBe(segmentsPerTurn(3))
-    expect(segmentCalls.every((s) => s.sketch === TILTED_SKETCH)).toBe(true)
     // Every endpoint satisfies |(p - origin)·normal| < 1e-9 — origin is
     // [0,0,0], normal is [0,1,0], so this is exactly "y ~ 0".
     for (const s of segmentCalls) {
@@ -186,7 +170,7 @@ describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', 
     const zValues = segmentCalls.flatMap((s) => [s.a[2], s.b[2]])
     expect(zValues.some((z) => Math.abs(z) > 1e-6)).toBe(true)
 
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: TILTED_SKETCH, regionsCreated: [] })
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: expect.any(BigInt), regionsCreated: [] })
   })
 
   it('a region-closing final segment fires onCommit with the created region handles', () => {
@@ -198,10 +182,10 @@ describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', 
     tool.onPointerDown(makeSnap({ x: 4, y: 0, z: 2 }), RAY) // rim — commits
 
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: TILTED_SKETCH, regionsCreated: [77n] })
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: expect.any(BigInt), regionsCreated: [77n] })
   })
 
-  it('a stale hovered sketch mid-gesture toasts and does NOT create a ground sketch', () => {
+  it('a stale hovered sketch mid-gesture toasts and does NOT open a draft', () => {
     const { scene, planes } = makeWasmScene({ sketchPick: TILTED_SKETCH })
     const { tool, onToast, onCommit } = makeTool(scene)
 
@@ -212,26 +196,29 @@ describe('CircleTool — sketch mode (drawing on a hovered non-ground sketch)', 
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onCommit).not.toHaveBeenCalled()
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // never a silent retarget
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled() // never a silent retarget
+    expect(scene.draft_begin_sketch).not.toHaveBeenCalled()
+    expect(scene.draft_add_segment).not.toHaveBeenCalled()
   })
 
-  it('ground drawing (no sketch under the cursor) still shares the per-plane cache across tool instances', () => {
-    const { scene, segmentCalls } = makeWasmScene({ sketchPick: undefined })
-    const cache = makeSketchPlaneCache()
-    const { tool: circle1 } = makeTool(scene, cache)
+  it('ground drawing (no sketch under the cursor): each commit is its own draft on the same ground plane', () => {
+    const { scene, dm, segmentCalls } = makeWasmScene({ sketchPick: undefined })
+    const { tool: circle1 } = makeTool(scene)
 
     circle1.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     circle1.onPointerDown(makeSnap({ x: 2, y: 0, z: 0 }), RAY)
 
-    // A fresh tool instance (as after a tool switch) sharing the same cache
-    // commits into the SAME ground sketch.
-    const { tool: circle2 } = makeTool(scene, cache)
+    // A fresh tool instance (as after a tool switch): no shared cache, its
+    // commit is another draft on the same ground plane.
+    const { tool: circle2 } = makeTool(scene)
     circle2.onPointerDown(makeSnap({ x: 5, y: 5, z: 0 }), RAY)
     circle2.onPointerDown(makeSnap({ x: 7, y: 5, z: 0 }), RAY)
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(new Set(segmentCalls.map((s) => s.sketch)).size).toBe(1)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(2)
+    for (const b of dm.log.begins) {
+      expect(b.kind).toBe('plane')
+      expect(b.args.slice(0, 6)).toEqual([0, 0, 0, 0, 0, 1])
+    }
     // The ground fast path: committed z is exactly 0.
     expect(segmentCalls.every((s) => s.a[2] === 0 && s.b[2] === 0)).toBe(true)
   })

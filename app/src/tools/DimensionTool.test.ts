@@ -14,6 +14,8 @@ import { kernelErrorMessage } from '../kernelErrors'
 import { antipodalTolerance, distPointToLine } from '../viewport/annotationLayout'
 import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
+import { ctxOfPlane } from './planeUnits'
+import { planeUnitsMock, type MockListing, type MockUnit } from './planeUnitsMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -1043,6 +1045,117 @@ describe('DimensionTool — radial dimension gesture', () => {
   })
 })
 
+// The plane is the drafting context: a circle drawn ON A SOLID'S FACE has no
+// free sketch to ask, so its center and radius come from the face plane's
+// listing (curve runs) — a radial dimension works on every plane.
+describe('DimensionTool — radial dimension on a circle drawn on a face', () => {
+  const FACE_CTX = ctxOfPlane([0, 0, 1], [0, 0, 1]) as string
+  const ring: [number, number, number][] = Array.from({ length: 12 }, (_, i) => [
+    0.5 * Math.cos((i * Math.PI) / 6), 0.5 * Math.sin((i * Math.PI) / 6), 1,
+  ])
+  const circleUnit: MockUnit = {
+    key: 1,
+    edges: ring.map((a, i) => ({ key: 10 + i, a, b: ring[(i + 1) % 12], store: { kind: 'topology', object: 5 } })),
+    curves: [{ key: 50, curveKey: 51, center: [0, 0, 1], radius: 0.5, edges: ring.map((_, i) => 10 + i) }],
+  }
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 6], direction: [0, 0, -1] })
+
+  function faceScene(listing: MockListing) {
+    const { scene, radialCalls } = makeWasmScene()
+    const s = scene as unknown as Record<string, unknown>
+    s.history_generation = vi.fn(() => 1n)
+    s.pick_face = vi.fn(() => ({ object: () => 5n, face: () => 6n, depth: () => 5, instance: () => undefined, free: vi.fn() }))
+    s.face_plane = vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1]))
+    s.face_normal = vi.fn(() => new Float64Array([0, 0, 1]))
+    Object.assign(s, planeUnitsMock({ [FACE_CTX]: listing }))
+    return { scene, radialCalls }
+  }
+
+  it('reads the circle from the listing and commits a radial dimension from it', () => {
+    const { scene, radialCalls } = faceScene({ units: [circleUnit] })
+    const { tool, onCreated, onToast } = makeTool(scene)
+
+    // Click the rim of the face circle, then drag the leader off it.
+    tool.onPointerDown(makeSnap({ x: 0.5, y: 0, z: 1, kind: 'on-edge', object: 5n }), down(0.5, 0))
+    expect(tool.statusHint()).toMatch(/leader/i)
+    tool.onPointerMove(makeSnap({ x: 1.2, y: 0, z: 1 }), down(1.2, 0))
+    tool.onPointerDown(makeSnap({ x: 1.2, y: 0, z: 1 }), down(1.2, 0))
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCreated).toHaveBeenCalledTimes(1)
+    const [anchorKind, , anchorPoint, kind, center, radius] = radialCalls[0] as [
+      number, bigint, Float64Array, string, Float64Array, number,
+    ]
+    expect(anchorKind).toBe(-1)
+    expect(Array.from(center)).toEqual([0, 0, 1])
+    expect(radius).toBe(0.5)
+    expect(kind).toBe('diameter') // a whole circle defaults to its diameter
+    expect(anchorPoint[2]).toBeCloseTo(1, 9)
+    expect(Math.hypot(anchorPoint[0], anchorPoint[1])).toBeCloseTo(0.5, 6)
+  })
+
+  it('a circle with a null radius (an ellipse in a stretched instance) offers no radial dimension', () => {
+    const ellipse: MockUnit = {
+      ...circleUnit,
+      curves: [{ key: 50, curveKey: 51, center: [0, 0, 1], radius: null, edges: ring.map((_, i) => 10 + i) }],
+    }
+    const { scene, radialCalls } = faceScene({ units: [ellipse] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0.5, y: 0, z: 1, kind: 'on-edge', object: 5n }), down(0.5, 0))
+    expect(tool.statusHint()).not.toMatch(/leader/i)
+    tool.onPointerDown(makeSnap({ x: 1.2, y: 0, z: 1 }), down(1.2, 0))
+    expect(radialCalls).toHaveLength(0)
+  })
+
+  it('a listed ARC (a run that does not close) defaults to a radius', () => {
+    const arc: MockUnit = {
+      ...circleUnit,
+      curves: [{ key: 50, curveKey: 51, center: [0, 0, 1], radius: 0.5, edges: [10, 11, 12, 13, 14, 15] }],
+    }
+    const { scene, radialCalls } = faceScene({ units: [arc] })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0.5, y: 0, z: 1, kind: 'on-edge', object: 5n }), down(0.5, 0))
+    tool.onPointerDown(makeSnap({ x: 1.2, y: 0, z: 1 }), down(1.2, 0))
+
+    expect((radialCalls[0] as unknown[])[3]).toBe('radius')
+  })
+
+  it('a rim click at a facet MIDPOINT of a 48-facet circle (on the chord, off the circle) still resolves the circle', () => {
+    const n = 48
+    const pts: [number, number, number][] = Array.from({ length: n }, (_, i) => [
+      0.5 * Math.cos((i * 2 * Math.PI) / n), 0.5 * Math.sin((i * 2 * Math.PI) / n), 1,
+    ])
+    const unit48: MockUnit = {
+      key: 1,
+      edges: pts.map((a, i) => ({ key: 100 + i, a, b: pts[(i + 1) % n], store: { kind: 'topology', object: 5 } })),
+      curves: [{ key: 50, curveKey: 51, center: [0, 0, 1], radius: 0.5, edges: pts.map((_, i) => 100 + i) }],
+    }
+    const mid: [number, number, number] = [
+      (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2, 1,
+    ]
+    // The sagitta puts the midpoint well beyond the 1e-5 on-circle check.
+    expect(Math.abs(Math.hypot(mid[0], mid[1]) - 0.5)).toBeGreaterThan(1e-4)
+    const { scene, radialCalls } = faceScene({ units: [unit48] })
+    const { tool, onCreated } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: mid[0], y: mid[1], z: 1, kind: 'midpoint', object: 5n }), down(mid[0], mid[1]))
+    expect(tool.statusHint()).toMatch(/leader/i)
+    tool.onPointerDown(makeSnap({ x: 1.2, y: 0.1, z: 1 }), down(1.2, 0.1))
+    expect(onCreated).toHaveBeenCalledTimes(1)
+    const [, , , , center, radius] = radialCalls[0] as [number, bigint, Float64Array, string, Float64Array, number]
+    expect(Array.from(center)).toEqual([0, 0, 1])
+    expect(radius).toBe(0.5)
+  })
+
+  it('a snap that lies on no listed circle starts no radial gesture', () => {
+    const { scene } = faceScene({ units: [circleUnit] })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0.9, y: 0, z: 1, kind: 'on-face', object: 5n }), down(0.9, 0))
+    expect(tool.statusHint()).not.toMatch(/leader/i)
+  })
+})
+
 describe('DimensionTool — sameCurve compares planes too (playtest-2 review finding 3)', () => {
   // Two concentric, same-radius circles on PERPENDICULAR planes (sketch 11n
   // in the z=0 plane, sketch 22n in the y=0 plane) — an ordinary modelling
@@ -1148,6 +1261,27 @@ describe('DimensionTool — radial second-click disambiguation (dimensions-playt
     expect(Array.from(anchorPoint)).toEqual([2, 0, 0])
     expect(Array.from(center)).toEqual([0, 0, 0])
     expect(radius).toBe(2)
+  })
+
+  it('rim then the bare interior of a solid\'s face -> the same radial dimension as on the ground', () => {
+    const { scene, radialCalls, linearCalls } = makeWasmScene()
+    const { tool, onCreated } = makeTool(scene)
+    tool.onPointerDown(makeSnap(RIM_0), RAY)
+    tool.onPointerDown(makeSnap({ x: 6, y: 6, z: 0, kind: 'on-face', object: 42n, element: 3n, elementKind: 'face' }), RAY)
+    expect(onCreated).toHaveBeenCalledTimes(1)
+    expect(radialCalls.length).toBe(1)
+    expect(linearCalls.length).toBe(0)
+  })
+
+  it('rim then a face OFF the curve\'s plane (a side wall, another solid) -> a linear dimension', () => {
+    const { scene, radialCalls, linearCalls } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap(RIM_0), RAY)
+    tool.onPointerDown(makeSnap({ x: 6, y: 6, z: 1.5, kind: 'on-face', object: 77n, element: 4n, elementKind: 'face' }), RAY)
+    expect(radialCalls.length).toBe(0)
+    // The linear dimension waits for its offset drag; nothing radial was made.
+    expect(linearCalls.length).toBe(0)
+    expect(tool.statusHint()).toMatch(/drag/i) // reached the linear offset stage
   })
 
   it('rim then the curve\'s centre -> Radius, anchored at the FIRST click\'s rim point', () => {

@@ -7,9 +7,12 @@
 //! and push-through.
 
 use kernel::{
-    CurveGeom, Document, FaceFeature, FaceId, KernelOp, Object, Plane, Point3, StickyError,
-    SurfaceRef, Transform, Vec3, tol,
+    CurveGeom, Document, FaceId, KernelOp, Object, Plane, Point3, StickyError, SurfaceRef,
+    Transform, Vec3, tol,
 };
+
+mod face_arrangement_support;
+use face_arrangement_support::{delete_unit_at, draw_loop_curves, move_unit_at, units_on};
 
 // ---------------------------------------------------------------- helpers
 
@@ -202,16 +205,16 @@ fn a_segment_bosses_smooth_arc_walls_and_a_flat_chord() {
         .sub_face;
     obj.validate().unwrap();
     assert_eq!(claims_centered(&obj, center), 12, "the arc's facets claim");
-    let feats = obj.face_features();
-    let Some(FaceFeature::SubFace { curve, curves, .. }) = feats
-        .iter()
-        .find(|f| matches!(f, FaceFeature::SubFace { face, .. } if *face == disk))
-    else {
-        panic!("the segment is a sub-face feature");
-    };
-    assert!(curve.is_none(), "a segment is not a whole drawn circle");
-    assert_eq!(curves.iter().filter(|c| c.is_some()).count(), 12);
-    assert_eq!(curves.len(), 13);
+    let loop_claims: Vec<Option<CurveGeom>> = obj
+        .loop_half_edges(obj.faces()[disk].outer_loop)
+        .map(|h| obj.edges()[obj.half_edges()[h].edge].curve)
+        .collect();
+    assert_eq!(loop_claims.len(), 13);
+    assert_eq!(
+        loop_claims.iter().filter(|c| c.is_some()).count(),
+        12,
+        "the arc's 12 facets claim the circle, the chord does not"
+    );
 
     obj.extrude_sub_face(disk, 0.2).expect("boss the segment");
     obj.validate().unwrap();
@@ -342,57 +345,56 @@ fn a_segment_drawn_up_to_the_edge_is_an_arc_chord_that_moves_and_undoes() {
     let pts = arc(0.5, 0.0, 0.3, 0.0, std::f64::consts::PI, 18);
     let mut curves = vec![Some(g); 18];
     curves.push(None);
-    doc.imprint_loop_on_face_with_curves(None, id, t, pts, curves)
-        .expect("a segment up to the edge");
-    let chord = |doc: &Document| -> (kernel::EdgeId, Vec<Option<CurveGeom>>) {
-        doc.face_features(id)
-            .unwrap()
-            .into_iter()
-            .find_map(|f| match f {
-                FaceFeature::Chord { edge, curves, .. } => Some((edge, curves)),
-                _ => None,
-            })
-            .expect("one chord feature")
+    let top_pt = pts[9];
+    let plane = face_arrangement_support::face_plane(&doc, id, t);
+    draw_loop_curves(&mut doc, None, id, t, &pts, &curves).expect("a segment up to the edge");
+    // The drawing unit is the arc's 18 facets (the chord lies on the edge,
+    // which is the solid's own); its one curve run claims the circle.
+    let run = |doc: &Document| -> kernel::DraftCurveRun {
+        let units = units_on(doc, None, id, plane);
+        assert_eq!(units.units.len(), 1, "one drawing unit");
+        assert_eq!(units.units[0].curves.len(), 1, "one curve run");
+        units.units[0].curves[0].clone()
     };
-    let (edge, curves) = chord(&doc);
-    assert_eq!(curves.len(), 18, "the chord is the arc's 18 facets");
-    assert!(
-        curves.iter().all(|c| c.is_some()),
-        "each carries the circle"
-    );
+    let first = run(&doc);
+    assert_eq!(first.edges.len(), 18, "the chord is the arc's 18 facets");
+    assert!(first.geom.center.approx_eq(center, tol::POINT_MERGE));
+    assert!((first.geom.radius - 0.3).abs() < tol::POINT_MERGE);
 
     // Slide it east along the edge: the circle's center slides with it.
-    doc.transform_chord(
+    move_unit_at(
+        &mut doc,
         None,
         id,
-        edge,
-        Transform::translation(Vec3::new(0.1, 0.0, 0.0)),
+        plane,
+        top_pt,
+        &Transform::translation(Vec3::new(0.1, 0.0, 0.0)),
     )
     .expect("slide the arc along the edge");
-    let (_, moved) = chord(&doc);
-    assert!(moved.iter().all(|c| {
-        c.is_some_and(|g| {
-            g.center
-                .approx_eq(Point3::new(0.6, 0.0, 1.0), tol::POINT_MERGE)
-        })
-    }));
+    let moved = run(&doc);
+    assert_eq!(moved.edges.len(), 18);
+    assert!(
+        moved
+            .geom
+            .center
+            .approx_eq(Point3::new(0.6, 0.0, 1.0), tol::POINT_MERGE)
+    );
     doc.object(id).unwrap().validate().unwrap();
 
     doc.undo().unwrap();
-    let (_, back) = chord(&doc);
+    let back = run(&doc);
     assert!(
-        back.iter()
-            .all(|c| c.is_some_and(|g| g.center.approx_eq(center, tol::POINT_MERGE))),
+        back.geom.center.approx_eq(center, tol::POINT_MERGE),
         "undo restores the original circle"
     );
     doc.redo().unwrap();
-    let (_, again) = chord(&doc);
-    assert!(again.iter().all(|c| {
-        c.is_some_and(|g| {
-            g.center
-                .approx_eq(Point3::new(0.6, 0.0, 1.0), tol::POINT_MERGE)
-        })
-    }));
+    let again = run(&doc);
+    assert!(
+        again
+            .geom
+            .center
+            .approx_eq(Point3::new(0.6, 0.0, 1.0), tol::POINT_MERGE)
+    );
 }
 
 /// Deleting a segment and undoing gives the segment back with its arc, not a
@@ -408,33 +410,29 @@ fn dissolving_a_segment_and_undoing_restores_its_arc() {
     let pts = arc(0.5, 0.5, 0.3, 0.0, 2.0 * std::f64::consts::PI / 3.0, 12);
     let mut curves = vec![Some(g); 12];
     curves.push(None);
-    let (report, _) = doc
-        .apply_object_op(
-            id,
-            KernelOp::SplitFaceInner {
-                face: t,
-                loop_path: pts,
-                restore: None,
-                curves,
-            },
-        )
-        .unwrap();
-    let kernel::KernelOpReport::FaceSplitInner(r) = report else {
-        panic!("a sub-face");
-    };
+    let mid = pts[6];
+    doc.apply_object_op(
+        id,
+        KernelOp::SplitFaceInner {
+            face: t,
+            loop_path: pts,
+            restore: None,
+            curves,
+        },
+    )
+    .unwrap();
+    let plane = face_arrangement_support::face_plane(&doc, id, t);
+    // The arc's claimed facets, as the curve run the drawing unit carries.
     let arc_count = |doc: &Document| {
-        doc.face_features(id)
-            .unwrap()
-            .into_iter()
-            .find_map(|f| match f {
-                FaceFeature::SubFace { curves, .. } => {
-                    Some(curves.iter().filter(|c| c.is_some()).count())
-                }
-                _ => None,
-            })
+        units_on(doc, None, id, plane)
+            .units
+            .iter()
+            .flat_map(|u| u.curves.iter())
+            .map(|r| r.edges.len())
+            .next()
     };
     assert_eq!(arc_count(&doc), Some(12));
-    doc.dissolve_imprint(None, id, r.sub_face).unwrap();
+    delete_unit_at(&mut doc, None, id, plane, mid).unwrap();
     assert_eq!(arc_count(&doc), None, "gone");
     doc.undo().unwrap();
     assert_eq!(arc_count(&doc), Some(12), "the arc is back");

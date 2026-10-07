@@ -1,33 +1,32 @@
 /**
- * OffsetTool — SketchUp-style Offset: click a solid face or a sketch region,
- * drag inward/outward to preview a concentric copy of its boundary, click
- * (or type an exact distance) to commit.
+ * OffsetTool — SketchUp-style Offset: click a region of the drawing on a
+ * solid's face, a sketch, or the ground, drag inward/outward to preview a
+ * concentric copy of its boundary, click (or type an exact distance) to
+ * commit.
+ *
+ * The plane is the drafting context (docs/design/unified-drafting.md): the
+ * tool picks the plane under the cursor (the face struck, else the free
+ * sketch's plane — the ground included), reads that plane's
+ * `plane_units_json` listing, and works on the REGION the ray lands in. A
+ * click ON a region's boundary edge (the fill pick is interior-only) resolves
+ * the edge to the region it bounds, so one click on an edge OR the interior
+ * starts the gesture.
  *
  * Gesture:
- *   1. Idle: hover; first click picks the target under the cursor —
- *      an object face (Path A, `pick_face`) or a sketch region (Path B,
- *      `pick_sketch_region`), the same two-path pick Push/Pull uses. A
- *      click landing ON a region's boundary edge (the region pick is
- *      interior-only) falls back to the edge pick and resolves the edge
- *      to its owning region, so one click on an edge OR the interior
- *      starts the gesture.
- *   2. Drag: the cursor's position on the target plane sets a SIGNED
+ *   1. Idle: hover; first click picks the region under the cursor.
+ *   2. Drag: the cursor's position on the region's plane sets a SIGNED
  *      distance — negative inside the boundary (inset), positive outside
- *      (outset). The kernel computes the true offset loop each move
- *      (`sketch_offset_region_preview` / `offset_face_preview`); the tool
- *      renders it as viewport ephemera. An impossible distance (collapse)
- *      simply shows no loop.
- *   3. Second click (or a typed distance + Enter) commits:
- *      - region → `sketch_offset_region` inside a sketch gesture bracket
- *        (one undo step); both the original and offset regions stay
- *        extrudable.
- *      - face → `offset_face`, which imprints the loop like drawing on the
- *        face does (boss/recess workflow). Only inward offsets can land on
- *        a face; an outward commit is refused by the kernel with a toast.
+ *      (outset). The ghost is the kernel's exact offset of the region
+ *      (`offset_region_preview`); an impossible distance (collapse) shows none.
+ *   3. Second click (or a typed distance + Enter) commits ONE draft on the
+ *      region's context: `draft_offset_region(regionKey, distance)` — one
+ *      undo step, on faces and on the ground alike. An outward offset past a
+ *      face's edge is accepted: the loop splits into a face part and a free
+ *      part. Concentric circles keep their analytic claim in the kernel.
  *   4. Esc cancels.
  *
  * The kernel owns truth: nothing partial ever reaches it, and every commit
- * is a single Scene mutation. Typed kernel errors surface as toasts.
+ * is a single draft. Typed kernel errors surface as toasts.
  */
 
 import * as THREE from 'three'
@@ -39,9 +38,14 @@ import { rayPlaneIntersect, type V3 } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
+import { displayedLength } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
-import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs, boundaryContainsEdge } from './offsetMath'
+import { signedOffsetDistance, decodeOffsetLoops, loopToSegmentPairs } from './offsetMath'
+import { runDraft, refreshAfterDraft } from './draftCommit'
+import { defaultFaceEligible, ineligibleFaceHint, type FaceEligible } from './faceDraw'
+import { ctxOfFace, ctxOfSketch, keyToId, type PlaneUnitsScene } from './planeUnits'
+import { regionUnderRay, regionOfFreeProfile, regionOfSegment, type PickedRegion } from './regionPick'
 
 /** Snap kinds whose point is a deliberate reference for the offset distance
  * (mirrors PushPull's set). `on-face` is excluded: it fires continuously
@@ -58,9 +62,19 @@ const HARD_SNAP_KINDS = new Set([
   'on-axis',
 ])
 
-export type OffsetTarget =
-  | { kind: 'region'; sketchHandle: bigint; regionHandle: bigint }
-  | { kind: 'face'; objectHandle: bigint; faceHandle: bigint }
+/** The region an offset works on: the plane context it lies in (the exact
+ *  string `plane_units_json` listed it under), its listing key, and whether
+ *  it lies over a solid's face (an offset there defaults inward). */
+export interface OffsetTarget {
+  ctx: string
+  regionKey: string
+  onFace: boolean
+}
+
+/** World tolerance, as a fraction of the ray depth, within which a click
+ *  counts as ON a drawn boundary line (about eight pixels at the default
+ *  view). */
+const EDGE_PICK_FRACTION = 0.01
 
 export type OnOffsetCommit = (target: OffsetTarget) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -74,6 +88,8 @@ type Stage =
       target: OffsetTarget
       /** The target's outer boundary loop, flat [x,y,z,…] world coords. */
       boundary: Float32Array
+      /** The region's rings (world), for the ghost loop. */
+      region: PickedRegion
       /** The target plane (drag constraint + distance measurement). */
       planePoint: V3
       planeNormal: V3
@@ -199,23 +215,27 @@ export class OffsetTool implements Tool {
 
   /** The entered OBJECT id, or null. When set, Offset only acts on that
    *  object's faces (scoped editing) — unchanged from the old field. */
+  /** The Viewport's context-path-aware face eligibility (same predicate the
+   *  draw tools and Push/Pull take); `null` falls back to the default. */
+  private _faceEligible: FaceEligible | null = null
+  setFaceEligibility(pred: FaceEligible | null): void {
+    this._faceEligible = pred
+  }
+  private _isEligible(object: bigint, instance: bigint | undefined): boolean {
+    if (this._faceEligible !== null) return this._faceEligible(object, instance)
+    return defaultFaceEligible(this.wasmScene, this._activeContext, object, instance)
+  }
+
   private get _activeContext(): bigint | null {
     return this._editContext.kind === 'object' ? this._editContext.id : null
   }
 
   /**
-   * The entered component INSTANCE id, or null (component-edit-parity.md
-   * phase A2). Offset's REGION path (`sketch_offset_region`) is pure
-   * sketch-to-sketch geometry with no world-frame math (K1's own design
-   * note), but reaching a def-owned sketch still needs the same routing
-   * fix push/pull needed: `pick_sketch_region` only ever walks
-   * `Document::sketch_ids()` (world-tree sketches), so `_pickTarget`'s
-   * Path B calls `pick_sketch_region_in_instance` instead whenever this is
-   * non-null — exactly like `PushPullTool`'s Path B. Offset's FACE path
-   * (`offset_face`) has no `_in_component`/`_in_instance` wasm entry point,
-   * unlike push/pull's — a member face is refused here with a clear hint
-   * instead of reaching the kernel's raw `is_world` refusal (see
-   * `_pickTarget`'s Path A).
+   * The entered component INSTANCE id, or null. `pick_sketch_region` only
+   * walks world-tree sketches, so Path B of `_pickTarget` calls
+   * `pick_sketch_region_in_instance` instead whenever this is non-null —
+   * exactly like `PushPullTool`'s Path B — and the sketch's context carries
+   * the instance so the draft opens inside it.
    */
   private get _activeInstance(): bigint | null {
     return this._editContext.kind === 'instance' ? this._editContext.id : null
@@ -255,8 +275,18 @@ export class OffsetTool implements Tool {
     // Second click: commit at the click's own distance. A click while the
     // cursor is off the plane (no live distance) commits nothing — the drag
     // stays open until the cursor is back over the plane or Esc cancels.
-    const final = this._dragDistance(snap, ray) ?? this.stage.distance
+    const fresh = this._dragDistance(snap, ray)
+    const final = fresh ?? this.stage.distance
     if (final === null) return
+    // A distance that follows the cursor (not borrowed from a hard snap)
+    // commits the DISPLAYED value through the typed path — sign rules
+    // included — exactly as if typed. A hard-snap distance stays exact.
+    const shown = displayedLength(Math.abs(final))
+    if (fresh !== null && !(snap !== null && HARD_SNAP_KINDS.has(snap.kind)) && shown >= 1e-6) {
+      this.stage = { ...this.stage, distance: fresh, lastValidDistance: fresh }
+      this._commitFromTyped(shown)
+      return
+    }
     this._commit(final)
   }
 
@@ -306,8 +336,10 @@ export class OffsetTool implements Tool {
   // ── Stage 1: pick ──────────────────────────────────────────────────────────
 
   private _pickTarget(ray: Ray): void {
+    const scene = this.wasmScene as unknown as PlaneUnitsScene
     // Path A: nearest object face (scoped to the editing context, like
-    // Push/Pull — inside a context only the entered object is editable).
+    // Push/Pull — inside a context only the entered object is editable). The
+    // face names the plane; the plane's listing names the region.
     const pick = this.wasmScene.pick_face(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
@@ -316,35 +348,29 @@ export class OffsetTool implements Tool {
       try {
         const objectHandle = pick.object()
         const instanceHandle = pick.instance()
-        // Offset's face path (`offset_face`) has no `_in_component`/
-        // `_in_instance` wasm entry point (component-edit-parity.md phase
-        // A2 — unlike push/pull's) — refuse a member face with a clear hint
-        // rather than reach the kernel's raw `is_world` refusal. ALWAYS
-        // toast, regardless of context: the far more common case is a
-        // top-level click on an ordinary placed instance (`_activeInstance
-        // === null`), which used to hit this same branch and return with
-        // zero feedback — no drag, no toast, nothing — unlike every other
-        // refusal path in this tool and unlike PushPullTool's equivalent
-        // (`_ineligibleFaceHint`), which always surfaces a toast.
+        // A component member's face is refused with a hint rather than
+        // silently ignored — ALWAYS toast, regardless of context: the far
+        // more common case is a top-level click on an ordinary placed
+        // instance, which must not swallow the click with no feedback
+        // (PushPullTool's `_ineligibleFaceHint` is the precedent).
         if (instanceHandle !== undefined) {
           this.onToast(
             'Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.',
           )
           return
         }
+        // The draw tools' and Push/Pull's eligibility policy: a face inside a
+        // group (not entered) or outside the editing scope refuses with the
+        // same hint, never a silent no-op.
+        if (!this._isEligible(objectHandle, instanceHandle)) {
+          this.onToast(ineligibleFaceHint('Offset', this._editContext.kind !== 'top', instanceHandle))
+          return
+        }
         if (this._activeContext === null || objectHandle === this._activeContext) {
-          const faceHandle = pick.face()
-          try {
-            const boundary = this.wasmScene.face_boundary(objectHandle, faceHandle)
-            const plane = this.wasmScene.face_plane(objectHandle, faceHandle)
-            this._beginDrag(
-              { kind: 'face', objectHandle, faceHandle },
-              boundary,
-              [plane[0], plane[1], plane[2]],
-              [plane[3], plane[4], plane[5]],
-            )
-          } catch {
-            // Degenerate/stale face — stay idle.
+          const ctx = ctxOfFace(this.wasmScene, objectHandle, pick.face(), null)
+          if (ctx !== null) {
+            const hit = regionUnderRay(scene, ctx, ray, EDGE_PICK_FRACTION * Math.max(pick.depth(), 0))
+            if (hit !== null) this._beginRegionDrag(hit)
           }
           return
         }
@@ -353,13 +379,12 @@ export class OffsetTool implements Tool {
       }
     }
 
-    // Path B: no object face — a sketch region (top-level OR instance-
-    // context act — an instance context has its own def-owned regions too,
-    // component-edit-parity.md phase A2). `pick_sketch_region` only ever
-    // walks `Document::sketch_ids()` (world-tree sketches) — it can NEVER
-    // find a region drawn inside a component's own definition, so an
-    // instance context calls the `_in_instance` sibling instead, exactly
-    // like `PushPullTool`'s identical Path B.
+    // Path B: no object face — a free sketch's region (top-level OR
+    // instance-context act — an instance context has its own def-owned
+    // regions too). `pick_sketch_region` only walks world-tree sketches, so an
+    // instance context calls the `_in_instance` sibling, exactly like
+    // `PushPullTool`'s Path B. The sketch names the plane (the ground for a
+    // ground sketch); the listing names the region.
     if (this._activeContext !== null) return
     const activeInstance = this._activeInstance
     const regionPick =
@@ -376,132 +401,72 @@ export class OffsetTool implements Tool {
     if (regionPick === undefined) {
       // The region pick is interior-only, so a click landing ON the visible
       // boundary line — exactly where Offset invites clicking — always
-      // missed (maintainer playtest: "the first click is always swallowed").
-      // Fall back to the edge pick (which has the proper pixel tolerance)
-      // and resolve the edge to the region whose boundary carries it. This
-      // fallback stays world-only — `pick_sketch_edge`/`sketch_edge_endpoints`
-      // have no `_in_instance` sibling — so a def-owned sketch's BOUNDARY
-      // line still misses inside an instance context; only the interior
-      // click this finding tracks is fixed here. Its find is ALWAYS a WORLD
-      // sketch (never pose-mapped below), even while `activeInstance` is
-      // non-null — a nearby world sketch remains reachable this way while
-      // editing an instance, same as before this fix.
+      // missed. Fall back to the edge pick (which has the proper tolerance)
+      // and resolve the edge to the region whose boundary carries it. World
+      // sketches only: `pick_sketch_edge` has no `_in_instance` sibling.
       const viaEdge = this._pickRegionViaEdge(ray)
-      if (viaEdge !== null) {
-        this._beginRegionDrag(viaEdge.sketchHandle, viaEdge.regionHandle, false)
-      }
+      if (viaEdge !== null) this._beginRegionDrag(viaEdge)
       return
     }
     try {
-      this._beginRegionDrag(regionPick.sketch(), regionPick.region(), activeInstance !== null)
+      const sketch = regionPick.sketch()
+      const ctx = ctxOfSketch(this.wasmScene, sketch, activeInstance)
+      if (ctx === null) return // stale handle — stay idle
+      const hit =
+        regionOfFreeProfile(scene, ctx, sketch, regionPick.region()) ??
+        regionUnderRay(scene, ctx, ray, 0)
+      if (hit !== null) this._beginRegionDrag(hit)
     } finally {
       regionPick.free()
     }
   }
 
-  /**
-   * Start the drag on a picked sketch region (both region-pick arms).
-   * `isDefOwned` — true only when `sketchHandle` came back from
-   * `pick_sketch_region_in_instance` (so it is genuinely one of the active
-   * instance's own definition-member sketches) — gates whether `boundary`/
-   * the plane normal need mapping through the pose at all: the edge-pick
-   * fallback above is world-only, so a region it finds is ALREADY in world
-   * space and must NOT be re-mapped, even while `activeInstance` is
-   * non-null (editing an instance doesn't stop a nearby world sketch from
-   * being reachable this way).
-   */
-  private _beginRegionDrag(sketchHandle: bigint, regionHandle: bigint, isDefOwned: boolean): void {
-    try {
-      let boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-      if (boundary.length < 9) return
-      // Anchor the plane at the boundary's first vertex; the normal comes
-      // from the sketch's own plane (sketches on any plane — Phase 1) so a
-      // rotated sketch still measures its offset in-plane.
-      const plane = this.wasmScene.sketch_plane(sketchHandle)
-      if (plane === undefined) return // stale handle — stay idle
-      let normal: V3 = [plane[3], plane[4], plane[5]]
-      const activeInstance = this._activeInstance
-      if (isDefOwned && activeInstance !== null) {
-        // A def-owned sketch's `region_boundary`/`sketch_plane` both answer
-        // in DEFINITION-LOCAL space (component-edit-parity.md phase A2) —
-        // `Stage['boundary']` is documented WORLD coords (this drag's own
-        // preview/measurement math needs it), so every boundary vertex is
-        // mapped through the pose here (exact — a point maps unambiguously
-        // under any invertible affine, unlike a normal or a scalar length).
-        // The normal is mapped the same approximate way PushPullTool's
-        // Path B does (linear part, re-normalized): exact for rotation/
-        // uniform-scale/mirror/translation, and even a non-uniform-scale
-        // pose can only skew the drag axis/preview, never the actual
-        // commit — `sketch_offset_region` is pure sketch-local geometry
-        // with no world-frame math at all.
-        const pose = this.wasmScene.instance_pose(activeInstance)
-        if (pose === undefined) return // stale instance — stay idle
-        const mapped = new Float32Array(boundary.length)
-        for (let i = 0; i + 2 < boundary.length; i += 3) {
-          mapped[i] = pose[0] * boundary[i] + pose[1] * boundary[i + 1] + pose[2] * boundary[i + 2] + pose[3]
-          mapped[i + 1] = pose[4] * boundary[i] + pose[5] * boundary[i + 1] + pose[6] * boundary[i + 2] + pose[7]
-          mapped[i + 2] = pose[8] * boundary[i] + pose[9] * boundary[i + 1] + pose[10] * boundary[i + 2] + pose[11]
-        }
-        boundary = mapped
-        const [nx, ny, nz] = normal
-        const rnx = pose[0] * nx + pose[1] * ny + pose[2] * nz
-        const rny = pose[4] * nx + pose[5] * ny + pose[6] * nz
-        const rnz = pose[8] * nx + pose[9] * ny + pose[10] * nz
-        const len = Math.hypot(rnx, rny, rnz)
-        if (len <= 1e-12) return
-        normal = [rnx / len, rny / len, rnz / len]
-      }
-      this._beginDrag(
-        { kind: 'region', sketchHandle, regionHandle },
-        boundary,
-        [boundary[0], boundary[1], boundary[2]],
-        normal,
-      )
-    } catch {
-      // Stale region — stay idle.
-    }
-  }
-
-  /**
-   * Resolve a click that landed on a sketch EDGE to the region whose outer
-   * boundary contains that edge. Returns the first matching region in the
-   * kernel's (deterministic) region order — for the common case, a lone
-   * closed profile, that is the only one; for a shared boundary edge either
-   * neighbor is a reasonable pick and an interior click disambiguates.
-   * Null when nothing usable is under the cursor (open-line edge, stale
-   * handles, no sketch at all).
-   */
-  private _pickRegionViaEdge(
-    ray: Ray,
-  ): { sketchHandle: bigint; regionHandle: bigint } | null {
+  /** Resolve a click that landed on a free sketch EDGE to the region whose
+   *  boundary carries it. Null when nothing usable is under the cursor
+   *  (open-line edge, stale handles, no sketch at all). */
+  private _pickRegionViaEdge(ray: Ray): PickedRegion | null {
     const edgePick = this.wasmScene.pick_sketch_edge(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
     if (edgePick === undefined) return null
     try {
-      const sketchHandle = edgePick.sketch()
-      const endpoints = this.wasmScene.sketch_edge_endpoints(sketchHandle, edgePick.edge())
-      if (endpoints === undefined) return null
-      try {
-        for (const regionHandle of Array.from(this.wasmScene.sketch_regions(sketchHandle))) {
-          const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-          if (boundaryContainsEdge(boundary, endpoints)) {
-            return { sketchHandle, regionHandle }
-          }
-        }
-      } catch {
-        // A region vanished between the queries — treat as a miss.
-      }
-      return null
+      const sketch = edgePick.sketch()
+      const ends = this.wasmScene.sketch_edge_endpoints(sketch, edgePick.edge())
+      if (ends === undefined || ends.length < 6) return null
+      const ctx = ctxOfSketch(this.wasmScene, sketch, null)
+      if (ctx === null) return null
+      return regionOfSegment(
+        this.wasmScene as unknown as PlaneUnitsScene,
+        ctx,
+        [ends[0], ends[1], ends[2]],
+        [ends[3], ends[4], ends[5]],
+      )
     } finally {
       edgePick.free()
     }
   }
 
+  /** Start the drag on a picked region: the drag plane is the region's own
+   *  plane (the context's), anchored at its first outer vertex. */
+  private _beginRegionDrag(hit: PickedRegion): void {
+    const { outer } = hit.region
+    if (outer.length < 3) return
+    const boundary = new Float32Array(outer.length * 3)
+    outer.forEach((p, i) => boundary.set(p, i * 3))
+    this._beginDrag(
+      { ctx: hit.ctx, regionKey: hit.region.key, onFace: hit.region.over !== null },
+      boundary,
+      hit,
+      hit.point,
+      hit.normal,
+    )
+  }
+
   private _beginDrag(
     target: OffsetTarget,
     boundary: Float32Array,
+    region: PickedRegion,
     planePoint: V3,
     planeNormal: V3,
   ): void {
@@ -510,6 +475,7 @@ export class OffsetTool implements Tool {
       kind: 'dragging',
       target,
       boundary,
+      region,
       planePoint,
       planeNormal,
       distance: null,
@@ -552,28 +518,17 @@ export class OffsetTool implements Tool {
   private _drawPreview(distance: number): void {
     this._clearPreview()
     if (this.stage.kind !== 'dragging' || Math.abs(distance) < 1e-6) return
-    const { target } = this.stage
+    const { region } = this.stage
 
-    // The kernel computes the true offset loops; an impossible distance
-    // (collapse, degenerate) throws and simply draws nothing — the vanished
-    // preview IS the feedback, and a commit would surface the typed error.
+    // The ghost is the kernel's own offset of the region (exact: arcs keep
+    // their circle); an impossible distance (collapse, spiked corner) draws
+    // nothing — the vanished preview IS the feedback, and a commit would
+    // surface the kernel's typed error.
     let loops: number[][]
     try {
-      if (target.kind === 'region') {
-        const data = this.wasmScene.sketch_offset_region_preview(
-          target.sketchHandle,
-          target.regionHandle,
-          distance,
-        )
-        loops = decodeOffsetLoops(data)
-      } else {
-        const data = this.wasmScene.offset_face_preview(
-          target.objectHandle,
-          target.faceHandle,
-          distance,
-        )
-        loops = [Array.from(data)]
-      }
+      loops = decodeOffsetLoops(
+        this.wasmScene.offset_region_preview(region.ctx, keyToId(region.region.key), distance),
+      )
     } catch {
       return
     }
@@ -615,7 +570,7 @@ export class OffsetTool implements Tool {
         ? -1
         : directional !== null && directional > 0
           ? 1
-          : target.kind === 'face'
+          : target.onFace
             ? -1
             : 1
     this._commit(Math.abs(meters) * sign)
@@ -662,28 +617,17 @@ export class OffsetTool implements Tool {
     if (outcome === 'stale') this.onToast(retypeStaleMessage('offset'))
   }
 
-  /** The kernel commit for `target` at `distance` — a region offset as one
-   *  sketch gesture, a face offset as one op. True when accepted (false =
-   *  refused, toasted). */
+  /** The kernel commit for `target` at `distance` — ONE draft on the
+   *  region's context. True when accepted (false = refused, toasted). */
   private _commitTarget(target: OffsetTarget, distance: number): boolean {
     try {
-      if (target.kind === 'region') {
-        this.wasmScene.sketch_begin_gesture(target.sketchHandle)
-        try {
-          const report = this.wasmScene.sketch_offset_region(
-            target.sketchHandle,
-            target.regionHandle,
-            distance,
-          )
-          report.free()
-        } finally {
-          this.wasmScene.sketch_end_gesture(target.sketchHandle)
-        }
-        this.onCommit(target)
-      } else {
-        this.wasmScene.offset_face(target.objectHandle, target.faceHandle, distance)
-        this.onFaceImprint(target.objectHandle)
-      }
+      const { report } = runDraft(this.wasmScene, { kind: 'ctx', ctx: target.ctx }, 'Offset', (d) => {
+        this.wasmScene.draft_offset_region(d, keyToId(target.regionKey), distance)
+      })
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: () => this.onCommit(target),
+      })
       return true
     } catch (err) {
       const code = parseKernelErrorCode(err)

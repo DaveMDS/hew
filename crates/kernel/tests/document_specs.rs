@@ -14,9 +14,8 @@ use kernel::{
     Anchor, Annotation, AxesFrame, AxesFrameError, BooleanError, BooleanOp, CapturedCurve,
     Document, DocumentError, FaceId, GroupId, Guide, ImageFormat, ImportNode, ImportScene,
     KernelOp, KernelOpReport, Material, MaterialId, MaterialScope, MeshRecipe, NodeId, Object,
-    ObjectId, Operand, Plane, Point3, RadialKind, Rgba8, SketchEdgeId, SketchError, SketchId,
-    SketchRegionId, SketchVertexId, Texture, Transform, TransformError, UvFrame, Vec3,
-    WatertightState,
+    ObjectId, Operand, Plane, Point3, RadialKind, Rgba8, SketchEdgeId, SketchId, SketchRegionId,
+    SketchVertexId, Texture, Transform, TransformError, UvFrame, Vec3, WatertightState,
 };
 use proptest::prelude::*;
 use std::collections::HashSet;
@@ -709,26 +708,56 @@ fn move_sketch_vertex_moves_and_round_trips() {
     ));
 }
 
-/// A drag that would re-topologize the sketch (corner swept across the far
-/// side) is refused as a typed `Sketch` error, leaving the document untouched.
+/// A drag that re-topologizes the sketch (corner swept across the far side)
+/// lands exactly as the same lines DRAWN there would (unified-drafting
+/// decision 4): the swept edge splits the side it crosses, regions
+/// re-derive, and one undo step restores the square byte-exactly.
 #[test]
-fn move_sketch_vertex_rejects_a_retopologizing_drag() {
+fn move_sketch_vertex_arranges_a_retopologizing_drag_like_a_draw() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     draw_rect(&mut doc, s, 0.0, 0.0, 2.0, 2.0);
     let v = sketch_vertex_at(&doc, s, Point3::new(0.0, 0.0, 0.0));
+    let before = doc.save();
 
+    doc.move_sketch_vertex(s, v, Point3::new(3.0, 1.0, 0.0))
+        .expect("a retopologizing drag arranges");
+
+    // The same four lines drawn fresh.
+    let mut drawn = Document::new();
+    let d = drawn.add_sketch(ground());
+    {
+        let sk = drawn.sketch_mut(d).unwrap();
+        for (a, b) in [
+            ((3.0, 1.0), (2.0, 0.0)),
+            ((2.0, 0.0), (2.0, 2.0)),
+            ((2.0, 2.0), (0.0, 2.0)),
+            ((0.0, 2.0), (3.0, 1.0)),
+        ] {
+            sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+                .unwrap();
+        }
+    }
+    let got = doc.sketch(s).unwrap();
+    let want = drawn.sketch(d).unwrap();
+    assert_eq!(got.edges().len(), want.edges().len(), "drag == draw: edges");
     assert_eq!(
-        doc.move_sketch_vertex(s, v, Point3::new(3.0, 1.0, 0.0)),
-        Err(DocumentError::Sketch(SketchError::WouldRetopologize))
+        got.regions().len(),
+        want.regions().len(),
+        "drag == draw: regions"
     );
     assert!(
-        approx_pt(
-            doc.sketch(s).unwrap().vertices()[v].position,
-            Point3::new(0.0, 0.0, 0.0)
-        ),
-        "sketch untouched after a refused drag"
+        got.vertices()
+            .values()
+            .any(|vx| approx_pt(vx.position, Point3::new(2.0, 4.0 / 3.0, 0.0))),
+        "the swept edge split the side it crossed"
     );
+
+    let after = doc.save();
+    doc.undo().expect("undo the arranging drag");
+    assert_eq!(doc.save(), before, "undo restores byte-exactly");
+    doc.redo().expect("redo the arranging drag");
+    assert_eq!(doc.save(), after, "redo restores byte-exactly");
 }
 
 /// A vertex drag stays reversible after an extrusion of its sketch is undone
@@ -3673,8 +3702,8 @@ fn region_with_interior_spur_extrudes_and_spur_survives() {
 }
 
 /// Moving one island of a two-shape sketch is undoable and leaves the other
-/// island untouched; landing on the neighbor refuses with a typed error and
-/// records nothing.
+/// island untouched; landing on the neighbor arranges with it, as drawing
+/// the same shape there would, in one undo step.
 #[test]
 fn island_transform_is_undoable_and_scoped() {
     let mut doc = Document::new();
@@ -3711,11 +3740,18 @@ fn island_transform_is_undoable_and_scoped() {
     doc.redo().expect("redo");
     assert!(max_y(&doc, left) >= 5.0, "redo re-applied");
 
-    // Refusal records nothing: undo after a refused move undoes the redo.
+    // Landing exactly on the neighbor: the two coincide, as a rectangle
+    // drawn over an identical one does — one shape, one region.
+    let before = doc.save();
     let onto = Transform::translation(Vec3::new(3.0, -5.0, 0.0));
-    assert!(doc.transform_sketch_island(s, left, &onto).is_err());
-    doc.undo().expect("undo the redo, not the refusal");
-    assert!(max_y(&doc, left) <= 1.0 + 1e-9);
+    doc.transform_sketch_island(s, left, &onto)
+        .expect("the landing arranges");
+    let sk = doc.sketch(s).expect("live");
+    assert_eq!(sk.islands().len(), 1, "merged with the neighbor");
+    assert_eq!(sk.edges().len(), 4, "coincident edges merged");
+    assert_eq!(sk.regions().len(), 1);
+    doc.undo().expect("one undo step restores both shapes");
+    assert_eq!(doc.save(), before, "undo is byte-exact");
 }
 
 /// A rotation about `axis` through `pivot` (Rodrigues, as the Rotate tool

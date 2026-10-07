@@ -21,8 +21,8 @@ import {
  *   passing through to the ground/box beneath.
  * FIX B — an interior click on a closed region selects the whole island, not
  *   its nearest edge. Clicking the standing rectangle's fill selects the
- *   rectangle island (kind 'sketch-island'); before the fix the same click at
- *   this zoom selected a single boundary segment ('sketch-edge'). The circle
+ *   rectangle island (kind 'draft-island'); before the fix the same click at
+ *   this zoom selected a single boundary segment ('draft-edge'). The circle
  *   already worked and still does.
  */
 
@@ -137,10 +137,10 @@ test('FIX B: clicking the standing rectangle fill selects the whole island, not 
   // The whole rectangle island is selected — NOT a single boundary segment.
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-island'
+    return sel.length === 1 && sel[0].kind === 'draft-island'
   })
   const sel = await page.evaluate(() => window.__hew_test!.getSelection())
-  expect(sel[0].kind).toBe('sketch-island')
+  expect(sel[0].kind).toBe('draft-island')
 })
 
 test('FIX B: clicking the standing circle fill still selects the whole island', async ({
@@ -170,7 +170,7 @@ test('FIX B: clicking the standing circle fill still selects the whole island', 
   await page.mouse.up()
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-island'
+    return sel.length === 1 && sel[0].kind === 'draft-island'
   })
 })
 
@@ -219,7 +219,7 @@ test('FINDING 1: clicking a partition line SHARED between two regions selects th
   await page.mouse.up()
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
 
   // And it stays deletable-to-merge: deleting the selected partition leaves a
@@ -300,18 +300,18 @@ test('DELTA-2 FIX: dragging a bare OPEN sketch line arms a Move of the line ISLA
   const islands = await page.evaluate((s) => window.__hew_test!.getSketchIslands(s), line.sketch)
   expect(islands.length).toBe(1)
 
-  // Press ON the line (a sketch-edge snap) and drag past the 5px threshold.
+  // Press ON the line (a drawn-edge snap) and drag past the 5px threshold.
   const p = px(ctx, 0.3, 0, 0)
   await page.mouse.move(p.x, p.y)
   await page.mouse.down()
   await page.mouse.move(p.x + 24, p.y)
   await page.mouse.move(p.x + 24, p.y + 6)
-  // The drag armed a Move of the LINE — a sketch-edge (which the transform
+  // The drag armed a Move of the LINE — a draft-edge (which the transform
   // layer moves at island granularity), matching what a CLICK selects — NOT
   // the box beneath it (which would select as 'object').
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
   await page.mouse.up()
 })

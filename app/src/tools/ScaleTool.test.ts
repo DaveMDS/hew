@@ -4,6 +4,7 @@ import { ScaleTool } from './ScaleTool'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+import { ctxGround, draftRef } from './planeUnits'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 
 /** `updateGripScale` now takes a `worldPerPixel` callback (the CameraRig
@@ -738,6 +739,117 @@ describe('ScaleTool — retype the factor or dimension after the commit', () => 
   })
 })
 
+describe('ScaleTool — retype after an arranging drawn-shape scale', () => {
+  it('re-commits with the PRE-commit shape refs (the undo restores the original keys), while the visible selection is the re-resolved unit', () => {
+    const ctx = ctxGround()
+    const hex = (n: bigint): string => n.toString(16).padStart(16, '0')
+    const di = (key: bigint): NodeRef => draftRef('draft-island', ctx, hex(key))
+    const sel: NodeRef[] = [di(40n)]
+    const t = makeTool(sel)
+    let gen = 1n
+    let ids: bigint[] = [40n, 41n]
+    // The listing of the ground plane: unit 40 is a free shape (so the
+    // z-scale that leaves the plane DETACHES it through the island op).
+    let units: { key: bigint; edge: bigint; a: number[]; b: number[] }[] = [
+      { key: 40n, edge: 10n, a: [0, 0, 0], b: [2, 2, 1] },
+      { key: 41n, edge: 20n, a: [5, 5, 0], b: [6, 5, 0] },
+    ]
+    const scene = t.wasmScene as unknown as Record<string, ReturnType<typeof vi.fn>>
+    Object.assign(scene, {
+      history_generation: vi.fn(() => gen),
+      plane_units_json: vi.fn((_c: string) =>
+        JSON.stringify({
+          units: units.map((u) => ({
+            key: hex(u.key),
+            edges: [{ key: hex(u.edge), a: u.a, b: u.b, store: { kind: 'free', sketch: 3 }, curve: null }],
+          })),
+          regions: [],
+        }),
+      ),
+      sketch_island_ids: vi.fn(() => ids),
+      // The shape's island handle, found by its edge's own position.
+      sketch_island_at_edge_positions: vi.fn(() => 40n),
+      // The first landing arranges: island 40 merges into fresh island 99
+      // (its edge re-keyed, found by geometry afterwards).
+      transform_sketch_islands: vi.fn((_s: bigint, _i: BigUint64Array, affine: Float64Array) => {
+        gen += 1n
+        ids = [99n, 41n]
+        units = [
+          { key: 99n, edge: 60n, a: [0, 0, 0], b: [2, 2, affine[10]] },
+          units[1],
+        ]
+      }),
+      scene_undo: vi.fn(() => {
+        gen += 1n
+        ids = [40n, 41n]
+        units = [
+          { key: 40n, edge: 10n, a: [0, 0, 0], b: [2, 2, 1] },
+          units[1],
+        ]
+        return { free: vi.fn() }
+      }),
+      scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    })
+
+    // Drag the +Z face grip of the shape's box to double its height.
+    const top: [number, number, number] = [1, 1, 1]
+    t.tool.onPointerDown(makeSnap({ x: top[0], y: top[1], z: top[2] }), rayAt(top))
+    const dragged: [number, number, number] = [1, 1, 2]
+    t.tool.onPointerMove(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    t.tool.onPointerDown(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    expect(scene.transform_sketch_islands).toHaveBeenCalledTimes(1)
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+
+    for (const ch of '3') t.tool.onKey({ key: ch } as KeyboardEvent)
+    t.tool.onKey({ key: 'Enter' } as KeyboardEvent)
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.transform_sketch_islands).toHaveBeenCalledTimes(2)
+    expect([...(scene.transform_sketch_islands.mock.calls[1][1] as BigUint64Array)]).toEqual([40n])
+    expect((scene.transform_sketch_islands.mock.calls[1][2] as Float64Array)[10]).toBeCloseTo(3, 9)
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+  })
+
+  it('an in-plane scale of a drawn unit drafts it over ALL its edge keys, and the gizmo is built from the unit\'s own geometry', () => {
+    const ctx = ctxGround()
+    const hex = (n: bigint): string => n.toString(16).padStart(16, '0')
+    const t = makeTool([draftRef('draft-island', ctx, hex(40n))])
+    const scene = t.wasmScene as unknown as Record<string, ReturnType<typeof vi.fn>>
+    let gen = 1n
+    Object.assign(scene, {
+      history_generation: vi.fn(() => gen),
+      plane_units_json: vi.fn((_c: string) =>
+        JSON.stringify({
+          units: [{
+            key: hex(40n),
+            edges: [
+              { key: hex(10n), a: [0, 0, 0], b: [2, 0, 0], store: { kind: 'free', sketch: 3 }, curve: null },
+              { key: hex(11n), a: [2, 0, 0], b: [2, 2, 0], store: { kind: 'free', sketch: 3 }, curve: null },
+            ],
+          }],
+          regions: [],
+        }),
+      ),
+      draft_begin_ctx: vi.fn(() => 1n),
+      draft_transform_edges: vi.fn(),
+      draft_end: vi.fn(() => { gen += 1n; return '{"objects":[],"sketches":[],"kept_as_sketch":[]}' }),
+      draft_cancel: vi.fn(),
+    })
+    // The flat unit's +X face grip (at the box's far X side) dragged 2 → 4:
+    // an in-plane scale along X.
+    const grip: [number, number, number] = [2, 1, 0]
+    t.tool.onPointerDown(makeSnap({ x: grip[0], y: grip[1], z: grip[2] }), rayAt(grip))
+    const dragged: [number, number, number] = [4, 1, 0]
+    t.tool.onPointerMove(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    t.tool.onPointerDown(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
+    expect(scene.draft_begin_ctx).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_ctx).toHaveBeenCalledWith(ctx, 'Scale') // the single draft IS the history entry: labeled for the tool
+    expect([...(scene.draft_transform_edges.mock.calls[0][1] as BigUint64Array)]).toEqual([10n, 11n])
+    const a = scene.draft_transform_edges.mock.calls[0][2] as Float64Array
+    expect(a[0]).toBeCloseTo(2, 9)
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+  })
+})
+
 describe('ScaleTool — an identity retype retracts the scale', () => {
   it('typing 1 after a ×2 undoes the scale and closes the window instead of redoing the old one', () => {
     const ID = 9n
@@ -759,5 +871,29 @@ describe('ScaleTool — an identity retype retracts the scale', () => {
     expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1) // no identity re-commit
     expect(t.tool.capturesKey('2')).toBe(false) // window closed
     expect(t.onCommit).toHaveBeenCalledTimes(2) // the retract refreshed the host
+  })
+})
+
+
+describe('ScaleTool — a clicked factor is exactly the displayed factor', () => {
+  const ID = 9n
+  function drag(kind: string) {
+    const objectsGroup = makeBoxObjectsGroup(ID, [0, 0, 0], [2, 2, 1])
+    const { tool, wasmScene, onMeasurement } = makeTool([{ kind: 'object', id: ID } as NodeRef], objectsGroup)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])) // grab +Z face, anchor z=0
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 1.61374, kind }), rayAt([1, 1, 1.61374]))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1.61374, kind }), rayAt([1, 1, 1.61374]))
+    return { z: lastAffine(wasmScene)[10], onMeasurement }
+  }
+
+  it('a free click commits the shown ×1.61, not the raw ratio', () => {
+    const r = drag('ground')
+    expect(r.onMeasurement).toHaveBeenCalledWith(expect.stringContaining('×1.61'))
+    expect(r.z).toBe(1.61)
+  })
+
+  it('a hard-snapped click keeps the raw ratio', () => {
+    expect(drag('endpoint').z).toBeCloseTo(1.61374, 12)
+    expect(drag('endpoint').z).not.toBe(1.61)
   })
 })

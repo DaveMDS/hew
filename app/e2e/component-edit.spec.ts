@@ -20,7 +20,7 @@ import {
  *
  *   1. Double-click into instance A's own editing context (real dblclick).
  *   2. Draw a small rectangle on the FRONT member face with the REAL
- *      Rectangle tool (face mode: `split_face_inner_in_instance`).
+ *      Rectangle tool (face mode: `draft_begin_face_in_instance`).
  *   3. Arrow-key-lock a plane and draw a SECOND rectangle in EMPTY space
  *      with the REAL Rectangle tool — THE original axis-lock symptom: before
  *      this phase, plane-mode drawing inside a component ignored the
@@ -532,7 +532,7 @@ test('component-edit parity: a real on-face circle imprints a component member\'
   // that step is gone: Push/Pull's drag never committed a real distance
   // once reached through this non-uniformly-scaled K1/K2 fallback, in any
   // variation tried. This now verifies the REAL circle imprint itself
-  // (`split_face_inner_in_instance`) lands correctly and stays inside the
+  // (`draft_begin_face_in_instance`) lands correctly and stays inside the
   // definition — the same structural proof component-edit-parity's other
   // journey uses for its Rectangle imprint.
   await scaleInstanceYNonUniform(page, ctx, setup.instance, SCALE_Y)
@@ -685,7 +685,7 @@ test('component-edit parity: definition-sketch inference feeds selection, Rotate
   await clickWorld(page, ctx, 3.5, 0.5, 0)
   await expect.poll(async () => page.evaluate(
     () => window.__hew_test!.getSelection().map((n) => n.kind),
-  )).toEqual(['sketch-island'])
+  )).toEqual(['draft-island'])
 
   const beforeScale = await page.evaluate(() => window.__hew_test!.getStateHash())
   await page.keyboard.press('s')
@@ -709,5 +709,5 @@ test('component-edit parity: definition-sketch inference feeds selection, Rotate
   expect(await page.evaluate(() => window.__hew_test!.getLastError())).toBeNull()
   await expect.poll(async () => page.evaluate(
     () => window.__hew_test!.getSelection().map((n) => n.kind),
-  )).toEqual(['sketch-island'])
+  )).toEqual(['draft-island'])
 })

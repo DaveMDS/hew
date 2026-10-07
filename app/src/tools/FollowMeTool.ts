@@ -188,6 +188,7 @@ import {
   type StartVerdict,
   type Vec3,
 } from './followMeStart'
+import { isDraftRef, resolveDraft } from './planeUnits'
 import { seamWalk, nearestOnWalk, subWalkTo, reverseWalk, type SeamWalk } from './followMeDrag'
 
 export type PathTarget =
@@ -1270,8 +1271,8 @@ export class FollowMeTool implements Tool {
   }
 
   /**
-   * Resolve a preselection into a path. Sketch-scoped refs (edges, curves,
-   * islands) contribute their edges; they must all live in ONE sketch.
+   * Resolve a preselection into a path. Drawn refs (edges, curves, shapes)
+   * contribute their edges; they must all live in ONE free sketch.
    * Anything else (objects, groups…) yields no preselected path — the tool
    * starts at pick-path instead. Stale handles resolve to nothing.
    *
@@ -1288,22 +1289,30 @@ export class FollowMeTool implements Tool {
     let sketchHandle: bigint | null = null
     const edges = new Set<bigint>()
     for (const ref of selection) {
-      if (ref.sketch === undefined) continue
-      if (ref.kind !== 'sketch-edge' && ref.kind !== 'sketch-curve' && ref.kind !== 'sketch-island') {
-        continue
-      }
-      if (sketchHandle === null) sketchHandle = ref.sketch
-      else if (sketchHandle !== ref.sketch) return null // spans two sketches
-      try {
-        if (ref.kind === 'sketch-edge') {
-          edges.add(ref.id)
-        } else if (ref.kind === 'sketch-curve') {
-          for (const e of this.wasmScene.sketch_curve_edges(ref.sketch, ref.id)) edges.add(e)
-        } else {
-          for (const e of this.wasmScene.sketch_island_edges(ref.sketch, ref.id)) edges.add(e)
+      if (!isDraftRef(ref)) continue
+      // Only drawing in a FREE sketch is a sweepable path (a drawing on a
+      // face has no sketch handle to hand the kernel).
+      const r = resolveDraft(this.wasmScene, ref)
+      if (r === null) return null // stale handle — no usable preselection
+      for (const e of r.edges) {
+        if (e.store.kind !== 'free') return null
+        if (sketchHandle === null) sketchHandle = e.store.sketch
+        else if (sketchHandle !== e.store.sketch) return null // spans two sketches
+        try {
+          const island = this.wasmScene.sketch_island_at_edge_positions(
+            e.store.sketch, new Float64Array(e.a), new Float64Array(e.b),
+          )
+          if (island === undefined) return null
+          for (const h of this.wasmScene.sketch_island_edges(e.store.sketch, island)) {
+            const ends = this.wasmScene.sketch_edge_endpoints(e.store.sketch, h)
+            if (ends === undefined) continue
+            const same = (i: number, p: readonly number[]) =>
+              Math.abs(ends[i] - p[0]) <= 1e-6 && Math.abs(ends[i + 1] - p[1]) <= 1e-6 && Math.abs(ends[i + 2] - p[2]) <= 1e-6
+            if ((same(0, e.a) && same(3, e.b)) || (same(0, e.b) && same(3, e.a))) edges.add(h)
+          }
+        } catch {
+          return null // stale handle — no usable preselection
         }
-      } catch {
-        return null // stale handle — no usable preselection
       }
     }
     if (sketchHandle === null || edges.size === 0) return null

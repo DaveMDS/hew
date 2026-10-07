@@ -71,15 +71,11 @@
  * committed rotation land at θ, 2θ, …, Nθ about the same pivot/axis) and is
  * ONE history entry regardless of N. Sketch sources have no such kernel
  * primitive, so the array builds the N cumulative affines itself and
- * replays them into `duplicateSketchSelectionByAffineArray`, which brackets
- * every in-plane rep into ONE sketch gesture per touched sketch (also ONE
- * history entry); an out-of-plane sketch source costs one
- * `copy_sketch_islands` call per rep instead, since that primitive has no
- * count parameter. Retracting a hot array for re-resolution therefore
- * retraces exactly however many entries the LAST resolve recorded (a
- * history-generation delta, tracked as `recordedEntries`) rather than a
- * hardcoded one, so a mixed or sketch-only array retracts and reissues as
- * cleanly as a pure object array. This is MoveTool's array machinery
+ * replays them into `duplicateSketchSelectionByAffineArray`. However many
+ * kernel edits that takes (a draft per plane, one `copy_sketch_islands` per
+ * out-of-plane rep, the object array), the whole array lands as ONE history
+ * entry (a history bracket), so retracting a hot array for re-resolution is
+ * always exactly one undo, mixed or sketch-only or pure object alike. This is MoveTool's array machinery
  * (`editArrayBuffer`/`parseArraySpec`, the history-generation guard on the
  * retracting undo) — see MoveTool's doc comment for the shared reasoning.
  *
@@ -102,6 +98,7 @@
 
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
+import { displayedAngleDeg } from './displayedValue'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import {
@@ -126,13 +123,12 @@ import {
 } from './transformMath'
 import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { imprintNodes } from './imprints'
 import { clearPreview } from './transformPreview'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
-  duplicateSketchSelectionByAffine,
-  duplicateSketchSelectionByAffineArray,
+  dropRidingDrafts,
+  copyOwnersAndDrawing,
 } from './transformSelection'
 import {
   arrowToAxis,
@@ -145,7 +141,7 @@ import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
-import { nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
+import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 
 export type OnRotateCommit = (nodes: NodeRef[]) => void
@@ -316,11 +312,11 @@ export class RotateTool implements Tool {
    * the ORIGINAL duplicable object/group/instance nodes, `sketchSources` the
    * ORIGINAL duplicable sketch nodes (each kind arrays through a different
    * primitive — see the class doc comment), `pivot`/`axis`/`theta` the
-   * committed rotation, `recordedEntries` the exact number of document
-   * history entries the LAST commit/resolve produced (a history-generation
-   * delta — `_resolveArray` retracts precisely that many before reissuing at
-   * a new count), and `historyGen` the document's history generation right
-   * after the commit/resolve (the "still on top of the undo stack" guard).
+   * committed rotation, and `historyGen` the document's history generation
+   * right after the commit/resolve (the "still on top of the undo stack"
+   * guard). Every commit/resolve is exactly ONE history entry (a gesture that
+   * spans several kernel edits runs in a history bracket), so
+   * `_resolveArray` retracts one step before reissuing at a new count.
    */
   private arrayHot: {
     copySources: NodeRef[]
@@ -328,7 +324,6 @@ export class RotateTool implements Tool {
     pivot: Vec3
     axis: Vec3
     theta: number
-    recordedEntries: number
     historyGen: string
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
@@ -626,7 +621,10 @@ export class RotateTool implements Tool {
       this.onMeasurementCb(this._decorate('0.0°'))
     } else if (this.stage.kind === 'ref') {
       const { nodes, pivot, lastDelta } = this.stage
-      const delta = lastDelta
+      // The sweep is already quantized to 15° steps, so it shows exactly
+      // what it commits; re-derive it from the shown degrees the way a
+      // typed angle is (`n * PI / 180`) so it is bit-identical to typing it.
+      const delta = (displayedAngleDeg((lastDelta * 180) / Math.PI) * Math.PI) / 180
       const axis = this._effectiveAxis()
 
       this._resetToIdle()
@@ -943,62 +941,39 @@ export class RotateTool implements Tool {
   /** True when the kernel accepted the commit (false = refused, toasted).
    *  Opens the retype window on the result — a plain rotation or a copy
    *  (whose array window opens alongside). */
-  private _commit(nodes: NodeRef[], pivot: Vec3, axis: Vec3, theta: number): boolean {
+  private _commit(allNodes: NodeRef[], pivot: Vec3, axis: Vec3, theta: number): boolean {
     try {
-      const genAtStart = this.wasmScene.history_generation()
+      // Drawn shapes on a selected object ride with it (see `dropRidingDrafts`).
+      const nodes = dropRidingDrafts(this.wasmScene, allNodes)
       this.arrayLast = null
       const affine = rotateAboutPivotAxis(pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2], theta)
       const affineF64 = affineToFloat64(affine)
       const copyables = nodes.filter(
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
       )
-      const sketchSources = nodes.filter(
-        (n) =>
-          n.kind === 'sketch' ||
-          n.kind === 'sketch-island' ||
-          n.kind === 'sketch-edge' ||
-          n.kind === 'sketch-curve',
-      )
-      if (this.copyMode && imprintNodes(nodes).length > 0) {
-        // A shape drawn on a face has no copy path yet; refuse rather than
-        // silently ROTATE the shape the user asked to copy (MoveTool's rule).
-        this.onToast("Shapes drawn on a face can't be copied yet — rotate them, or redraw the copy.")
-        return false
-      }
+      const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
       if (this.copyMode && (copyables.length > 0 || sketchSources.length > 0)) {
         // Copy mode: duplicate at the rotated pose instead of rotating. Each
         // copy is the same kind as its source; the copies become the
-        // selection so a follow-up rotation chains off them. Sketch geometry
-        // copies FIRST (see `duplicateSketchSelectionByAffine` — in-plane
-        // sketches replay into themselves, everything else copies via
-        // `copy_sketch_islands`), then all duplicable nodes clone in ONE
-        // `duplicate_selection_array` call (count 1).
+        // selection so a follow-up rotation chains off them. The whole copy
+        // is ONE undo step and atomic (`copyOwnersAndDrawing`): drawn shapes
+        // copy through the drafting engine, then all duplicable nodes clone
+        // in ONE `duplicate_selection_array` call (count 1).
         const committed: NodeRef[] = []
         try {
-          const genBefore = this.wasmScene.history_generation()
-          const sketchCopies = sketchSources.length > 0
-            ? duplicateSketchSelectionByAffine(this.wasmScene, nodes, affineF64)
-            : []
-          committed.push(...sketchCopies)
-          if (copyables.length > 0) {
-            const created = this._duplicateArray(copyables, affineF64, 1)
-            committed.push(...created)
-          }
-          // The copy gesture is "hot" for an ×N / /N array refinement
-          // regardless of which kind(s) duplicated — `recordedEntries` (a
-          // history-generation delta) tells `_resolveArray` exactly how many
-          // steps to retract before reissuing at a new count, whether that
-          // turns out to be one (objects, or a single in-plane sketch),
-          // several (multiple touched sketches, or out-of-plane copies), or
-          // both kinds at once (see the class doc comment).
-          const recordedEntries = Number(this.wasmScene.history_generation() - genBefore)
+          committed.push(
+            ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
+              this._duplicateArray(copyables, affineF64, 1),
+            ),
+          )
+          // The copy gesture is "hot" for an ×N / /N array refinement,
+          // whichever kinds duplicated (see the class doc comment).
           this.arrayHot = {
             copySources: copyables,
             sketchSources,
             pivot,
             axis,
             theta,
-            recordedEntries,
             historyGen: this.wasmScene.history_generation().toString(),
           }
           this.arrayTyped = ''
@@ -1008,15 +983,16 @@ export class RotateTool implements Tool {
             this.onCommit(committed)
           }
         }
-        this.retype.armFrom({ nodes, pivot, axis, theta, copy: true }, genAtStart)
+        this.retype.arm({ nodes, pivot, axis, theta, copy: true })
       } else {
-        const committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        // The whole selection: the planner leaves riding shapes to their
+        // owner and hands them back re-found where they landed.
+        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, 'Rotate')
         this.onCommit(committed)
-        // No typed-angle window for a moved chord: its run is re-cut on
-        // every commit and on the window's own undo (see MoveTool).
-        if (!committed.some((n) => n.kind === 'imprint-chord')) {
-          this.retype.armFrom({ nodes: committed, pivot, axis, theta, copy: false }, genAtStart)
-        }
+        // Armed with the PRE-commit `nodes`: the window's undo restores the
+        // original unit keys (geometry hashes), which the re-resolved
+        // `committed` refs of an arranging landing do not name.
+        this.retype.arm({ nodes: allNodes, pivot, axis, theta, copy: false })
       }
       return true
     } catch (err) {
@@ -1044,6 +1020,16 @@ export class RotateTool implements Tool {
       (hot) => ({ ...hot, theta }),
     )
     if (outcome === 'stale') this.onToast(retypeStaleMessage('rotation'))
+    else if (outcome === 'failed') this._restampArrayWindow()
+  }
+
+  /** After a refused retype whose window survived (the document was put
+   *  back as it was), re-stamp the array window's history identity: the
+   *  attempt's undo/redo moved the generation, and the next ×N would be
+   *  rejected as 'model changed'. */
+  private _restampArrayWindow(): void {
+    if (this.arrayHot === null || !this.retype.isOpen) return
+    this.arrayHot = { ...this.arrayHot, historyGen: this.wasmScene.history_generation().toString() }
   }
 
   /**
@@ -1057,7 +1043,6 @@ export class RotateTool implements Tool {
     const arr = this.arrayHot
     if (spec === null || arr === null) return this._commitHot(hot, theta)
     const per = spec.mode === 'divide' ? theta / spec.count : theta
-    const genBefore = this.wasmScene.history_generation()
     try {
       const affines: Float64Array[] = []
       for (let k = 1; k <= spec.count; k += 1) {
@@ -1065,16 +1050,10 @@ export class RotateTool implements Tool {
           hot.pivot[0], hot.pivot[1], hot.pivot[2], hot.axis[0], hot.axis[1], hot.axis[2], per * k,
         )))
       }
-      const created = arr.sketchSources.length > 0
-        ? duplicateSketchSelectionByAffineArray(this.wasmScene, arr.sketchSources, affines)
-        : []
-      if (arr.copySources.length > 0) {
-        created.push(...this._duplicateArray(arr.copySources, affines[0], spec.count))
-      }
+      const created = this._layArray(arr, affines, spec.count)
       this.arrayHot = {
         ...arr,
         theta,
-        recordedEntries: Number(this.wasmScene.history_generation() - genBefore),
         historyGen: this.wasmScene.history_generation().toString(),
       }
       this.selection = created
@@ -1120,10 +1099,46 @@ export class RotateTool implements Tool {
     return this.arrayTyped.replace('x', '×')
   }
 
+  /** Lay `count` copies: the drawn half through cumulative affines, the
+   *  object half through one `duplicate_selection_array` call — one undo
+   *  step, atomic. */
+  private _layArray(
+    arr: { sketchSources: NodeRef[]; copySources: NodeRef[] },
+    affines: readonly Float64Array[],
+    count: number,
+  ): NodeRef[] {
+    return copyOwnersAndDrawing(
+      this.wasmScene,
+      arr.copySources,
+      arr.sketchSources,
+      affines,
+      () => this._duplicateArray(arr.copySources, affines[0], count),
+    )
+  }
+
+  /**
+   * A refused resolve. The previous commit's one entry was already
+   * retracted and the refused attempt aborted its own history bracket, which
+   * restores the document, redo stack included, exactly: one redo brings the
+   * previous array (or the single copy) back.
+   */
+  private _restoreAfterRefusedArray(hot: NonNullable<RotateTool['arrayHot']>, genBefore: bigint): void {
+    try {
+      if (this.wasmScene.history_generation() !== genBefore) throw new Error('history moved during a refused array')
+      this.wasmScene.scene_redo().free()
+      this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
+      // The undo + redo moved the generation: re-arm the retype window on
+      // the restored entry, or an angle typed next reports 'stale'.
+      this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
+    } catch {
+      this.arrayHot = null
+    }
+  }
+
   /**
    * Resolve the typed ×N / /N array against the hot copy commit — MoveTool's
    * `_resolveArray` idiom, adapted to a rotation AND to sketch sources (see
-   * the class doc comment): retract exactly `hot.recordedEntries` steps
+   * the class doc comment): retract the previous array's one step
    * (guarded by the HISTORY GENERATION), then reissue at the new count —
    * the object half through ONE `duplicate_selection_array` call (the
    * kernel composes the per-step rotation affine CUMULATIVELY, so N copies
@@ -1155,11 +1170,8 @@ export class RotateTool implements Tool {
 
     const theta = spec.mode === 'divide' ? hot.theta / spec.count : hot.theta
 
-    // Retract the previous commit/resolve — however many entries it
-    // recorded (one in-plane sketch replay per touched sketch, one
-    // out-of-plane copy per prior rep, one object-array call, or any
-    // combination — see `_commit`'s identical bookkeeping).
-    for (let i = 0; i < hot.recordedEntries; i += 1) this.wasmScene.scene_undo().free()
+    // Retract the previous commit/resolve: always exactly one entry.
+    this.wasmScene.scene_undo().free()
 
     const genBefore = this.wasmScene.history_generation()
     let created: NodeRef[]
@@ -1180,42 +1192,22 @@ export class RotateTool implements Tool {
           ),
         )
       }
-      created = hot.sketchSources.length > 0
-        ? duplicateSketchSelectionByAffineArray(this.wasmScene, hot.sketchSources, affines)
-        : []
-      if (hot.copySources.length > 0) {
-        created.push(...this._duplicateArray(hot.copySources, affines[0], spec.count))
-      }
+      created = this._layArray(hot, affines, spec.count)
     } catch (err) {
-      // Put the retracted copies back so a refused refinement never eats the
-      // committed copy — see MoveTool's identical recovery.
-      try {
-        for (let i = 0; i < hot.recordedEntries; i += 1) this.wasmScene.scene_redo().free()
-        this.arrayHot = {
-          ...hot,
-          historyGen: this.wasmScene.history_generation().toString(),
-        }
-      } catch {
-        this.arrayHot = null
-      }
+      this._restoreAfterRefusedArray(hot, genBefore)
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return
     }
 
-    const recordedEntries = Number(this.wasmScene.history_generation() - genBefore)
     this.arrayHot = {
       ...hot,
-      recordedEntries,
       historyGen: this.wasmScene.history_generation().toString(),
     }
     this.arrayLast = spec
     // An angle typed now re-spaces THIS array (see `_relayArray`).
-    this.retype.arm(
-      { nodes: [...hot.copySources, ...hot.sketchSources], pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true },
-      recordedEntries,
-    )
+    this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
     this.selection = created
     this.onArrayCommit(created)
   }

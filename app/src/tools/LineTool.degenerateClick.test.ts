@@ -16,6 +16,7 @@ import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { draftMock } from './draftMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -24,29 +25,18 @@ function makeSnap(p: readonly [number, number, number], kind: string = 'ground')
 }
 
 function makeWasmScene() {
-  let sketchCounter = 10n
+  const dm = draftMock()
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(() => ({
-      new_edges: () => new BigUint64Array([]),
-      regions_created: () => new BigUint64Array([]),
-      regions_removed: () => new BigUint64Array([]),
-      free: vi.fn(),
-    })),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return { scene: scene as unknown as WasmScene, addSegment: scene.sketch_add_segment }
+  return { scene: scene as unknown as WasmScene, addSegment: dm.members.draft_add_segment }
 }
 
 function makeTool(scene: WasmScene) {
@@ -61,19 +51,20 @@ function makeTool(scene: WasmScene) {
 
 /** A plain (ungrouped, non-instanced) top-level object's face, always under the ray. */
 function makeFaceWasmScene() {
+  const dm = draftMock()
   const pick = { object: () => 7n, face: () => 3n, depth: () => 1, instance: () => undefined, free: vi.fn() }
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
+    history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => pick),
     pick_sketch: vi.fn(() => undefined),
     node_parent: vi.fn(() => undefined), // top-level, not grouped
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
-    split_face: vi.fn(() => ({ free: vi.fn() })),
-    split_face_in_instance: vi.fn(() => ({ free: vi.fn() })),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return { scene: scene as unknown as WasmScene, splitFace: scene.split_face }
+  return { scene: scene as unknown as WasmScene, splitFace: dm.members.draft_begin_face }
 }
 
 describe('LineTool — a click that resolves back onto the anchor is refused AUDIBLY, never silently', () => {

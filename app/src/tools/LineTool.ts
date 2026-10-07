@@ -20,8 +20,9 @@
  *     SKETCH MODE — and every segment lands in that one sketch
  *     (`SketchTarget.existing`).
  *   - Otherwise the plane is the ground plane — PLANE MODE, today's
- *     behavior — and segments land in the shared per-plane cached sketch
- *     (`SketchTarget.plane`; `begin_ground_sketch()` on a cache miss).
+ *     behavior — and every segment is a draft on that plane
+ *     (`SketchTarget.plane` → `draft_begin_plane`): the plane is the drafting
+ *     context, so a segment lowers into whatever lies under it.
  *   On the ground plane with no active direction lock, every point is
  *   `[snap.x, snap.y, 0]` EXACTLY as before this generalization (no basis
  *   math) — bit-identical committed coordinates. WITH an active lock
@@ -36,7 +37,7 @@
  *
  *   1. First click: anchor the first point.
  *   2. Each subsequent click commits ONE segment from the previous point to
- *      the new point via `sketch_add_segment`. The new point becomes the
+ *      the new point via `draft_add_segment` in its own draft. The new point becomes the
  *      anchor for the next segment (chain forward).
  *   3. Rubber-band preview: a single line from the last placed point to the
  *      live cursor.
@@ -59,11 +60,16 @@
  *   2. Each click accumulates a point on that (now-locked) face plane.
  *   3. Rubber-band preview: a line from the last point to the cursor,
  *      projected onto the plane.
- *   4. On finish (Enter / double-click / Escape with >= 2 points), the
- *      accumulated path is flattened into a Float64Array and passed to
- *      split_face(object, face, path) — the boundary-to-boundary face cut.
- *      onFaceImprint(object) refreshes the viewport. A typed kernel error is
- *      surfaced via the toast callback; no geometry fix-up is attempted.
+ *   4. Each click after the first commits ONE segment as its own draft on
+ *      the face (`draft_begin_face`, one undo step), exactly like plane
+ *      mode: the engine lowers it into face topology where it separates
+ *      regions, the object's owned sketch where it is a loose line, or a
+ *      free sketch over no face. No chain has to reach a face edge. A click
+ *      back on the chain's start ends it; Enter / double-click / Escape end
+ *      it too (nothing is pending). `onFaceImprint(object)` / `onCommit`
+ *      refresh the viewport per what the draft's report says changed. A
+ *      typed kernel error is surfaced via the toast callback; no geometry
+ *      fix-up is attempted.
  *
  * VCB length entry (both modes): capturingInput() is true once at least one
  * point is placed. Typing digits/./- (and imperial tokens) feeds
@@ -78,7 +84,7 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rayPlaneIntersect, facePlaneBasis, applyAffine3x4 } from '../viewport/geoHelpers'
+import { rayPlaneIntersect, facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE, type FatSegmentsOpts } from '../viewport/fatLine'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
@@ -86,11 +92,13 @@ import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
+import { displayedLength, isFreePick } from './displayedValue'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
-import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
-import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
+import type { SketchTarget } from './sketchGesture'
+import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
+import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { PlanePin } from './planePin'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
@@ -177,52 +185,6 @@ const FROM_POINT_WEAK_SNAP_KINDS: ReadonlySet<string> = new Set(['plane', 'groun
  *  gesture could be aimed at. */
 const READOPT_PROBE_M = 1e-3
 
-/** How far above a face `_facePickAtPoint` starts its pick ray — a
- *  centimetre: comfortably past the kernel's plane tolerance, well inside
- *  any face a chain can be drawn on, and never reaching another face of
- *  the same solid before the one directly below. */
-const FACE_PICK_LIFT_M = 1e-2
-
-/** Whether `p` lies on the closed polygon `poly`'s boundary — within
- *  `FACE_PLANE_EPS_M` of one of its segments. The polygon comes from
- *  `face_boundary`, which answers in f32, so the tolerance is the plane
- *  scale, not the kernel's merge tolerance. */
-function pointOnPolygonBoundary(p: V3, poly: readonly V3[]): boolean {
-  // f32 keeps ~7 significant digits: a vertex 200 m out is only good to
-  // ~1.5e-5, so the tolerance grows with the coordinates' magnitude.
-  let extent = 0
-  for (const q of poly) extent = Math.max(extent, Math.abs(q[0]), Math.abs(q[1]), Math.abs(q[2]))
-  const eps = Math.max(FACE_BOUNDARY_EPS_M, extent * FACE_BOUNDARY_REL_EPS)
-  for (let i = 0; i < poly.length; i++) {
-    const a = poly[i]
-    const b = poly[(i + 1) % poly.length]
-    if (distanceToSegment(p, a, b) <= eps) return true
-  }
-  return false
-}
-
-/** Distance from `p` to the segment `a`–`b`. */
-function distanceToSegment(p: V3, a: V3, b: V3): number {
-  const ab: V3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
-  const len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
-  let t = 0
-  if (len2 > 0) {
-    t = ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / len2
-    t = t < 0 ? 0 : t > 1 ? 1 : t
-  }
-  return Math.hypot(p[0] - (a[0] + ab[0] * t), p[1] - (a[1] + ab[1] * t), p[2] - (a[2] + ab[2] * t))
-}
-
-/** Metres within which a placed point counts as ON the face's boundary
- *  (`_commitFacePath`'s sub-path cuts). Looser than `FACE_PLANE_EPS_M`:
- *  `face_boundary` rounds its vertices to f32, ~1e-7 at metre scale. */
-const FACE_BOUNDARY_EPS_M = 1e-5
-
-/** Relative part of that tolerance: four f32 ulps (2⁻²³ ≈ 1.2e-7 each) of
- *  the polygon's largest coordinate, so an exactly-snapped boundary point
- *  still reads as on the f32 boundary at any distance from the origin. */
-const FACE_BOUNDARY_REL_EPS = 4 * 2 ** -23
-
 /** |cos| below which a unit lock direction counts as lying IN a face plane
  *  (`_readoptFaceForLock`) — a numerical guard, not a kernel tolerance. */
 const LOCK_IN_PLANE_EPS = 1e-6
@@ -252,11 +214,6 @@ type FaceStage =
       planePoint: V3
       /** All points placed so far on the plane, in order. */
       points: V3[]
-      /** Per point: whether it was snapped to one of the object's own
-       *  edges or corners — an exact "on the boundary" the commit's
-       *  geometric test (against an f32 copy of the boundary) cannot beat
-       *  far from the origin. */
-      boundary: boolean[]
     }
 
 
@@ -270,12 +227,11 @@ type FaceStage =
  * since the commit (`RETYPE_POINTER_STILL_COS`), and the moment it moves,
  * a typed length is the NEXT segment along the cursor, exactly as before.
  *
- * Plane mode retracts and re-lays the committed segment through the shared
- * undo/re-commit cycle, restoring the chain bookkeeping (`_chainVertices`,
- * `_prevSegmentDir`, the anchor) to what it was before that segment so the
- * re-commit is indistinguishable from the original click. Face mode has
- * nothing in the kernel yet (the path commits when the chain ends), so it
- * simply moves the last appended point.
+ * Both modes retract and re-lay the committed segment through the shared
+ * undo/re-commit cycle (every click is its own draft = one undo step),
+ * restoring the chain bookkeeping (`_chainVertices`, `_prevSegmentDir`, the
+ * anchor / the face chain's points) to what it was before that segment so
+ * the re-commit is indistinguishable from the original click.
  */
 type RetypeSpec =
   | {
@@ -287,7 +243,16 @@ type RetypeSpec =
       chainLen: number
       prevSegmentDir: V3 | null
     }
-  | { mode: 'face'; index: number }
+  | {
+      mode: 'face'
+      object: bigint
+      face: bigint
+      /** The point the hot segment starts from, its far end, and the index of
+       *  that far end in the chain (the chain's length before the segment). */
+      anchor: V3
+      endpoint: V3
+      index: number
+    }
 
 /** How far, in canvas pixels, the pointer may drift after the commit and
  *  still count as "not moved" for the retype window — comfortably above a
@@ -330,11 +295,6 @@ export class LineTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached plane-mode sketch handles — the Viewport passes one cache
-   *  shared by every draw tool, so mixed-tool profiles land in a single
-   *  sketch per plane. */
-  private readonly sketchCache: SketchPlaneCache
-
   /** The current editing context (component-edit-parity.md phase A1) — a
    *  single value replacing the old `_activeContext`/`_activeComponent`
    *  duck-typed fields. `_activeContext`/`_activeInstance` below are
@@ -351,8 +311,8 @@ export class LineTool implements Tool {
   /** The entered component INSTANCE id, or null (component-edit-parity.md
    *  phase A2) — the new case this refactor adds. Plane-mode drawing routes
    *  through `begin_sketch_on_plane_in_instance`/def-owned sketches, and
-   *  face-mode cuts route through `split_face_in_instance`, whenever this is
-   *  set. */
+   *  face-mode commits open their draft with `draft_begin_face_in_instance`,
+   *  whenever this is set. */
   private get _activeInstance(): bigint | null {
     return this._editContext.kind === 'instance' ? this._editContext.id : null
   }
@@ -414,7 +374,7 @@ export class LineTool implements Tool {
    *  the kernel otherwise. Reset to `[]` at every point `_prevSegmentDir`
    *  is (a fresh chain start or a chain end), for the same reason: both
    *  describe "no committed history for the chain in progress". */
-  private _chainVertices: { point: V3; sketch: bigint }[] = []
+  private _chainVertices: { point: V3; plane: string }[] = []
 
   /** The snap last seen on hover — `Viewport.publishSnapCues`'s established
    *  `'lastSnap' in activeTool` opt-in (`DimensionTool`'s own field, same
@@ -611,7 +571,6 @@ export class LineTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -619,7 +578,6 @@ export class LineTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
-    this.sketchCache = sketchCache
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -760,7 +718,7 @@ export class LineTool implements Tool {
         if (drawPlane !== null) return drawPlane
       }
     }
-    return this._resolveIdleTarget(ray).plane
+    return this._resolveIdleTarget(ray, snap).plane
   }
 
   /** Idle hover bookkeeping: the hover point for the plane cue (arrow lock
@@ -863,8 +821,8 @@ export class LineTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
   }
 
   /**
@@ -882,6 +840,8 @@ export class LineTool implements Tool {
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+      () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
+      snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
     )
   }
 
@@ -932,10 +892,6 @@ export class LineTool implements Tool {
 
   /** Whether the last `_planeCursor` discarded a non-zero snap z. */
   private _snapProjected = false
-
-  /** The face chain's normal while `_commitFacePath` runs after the stage
-   *  has been reset — it drops the sub-face pick rays along it. */
-  private _lastFaceNormal: V3 | null = null
 
   /** Set when a single click closed a face loop (`_appendFacePoint`), so
    *  the `dblclick` that may follow it is consumed by `onDoubleClick`.
@@ -1041,21 +997,9 @@ export class LineTool implements Tool {
     const { points } = this.faceStage
     const last = points[points.length - 1]
     this._clearPreview()
-    this._drawFaceChain(points)
     this._drawRubberBandSegment(last, cursor, this._previewStyle(snap))
     this._reportMeasurement(last, cursor)
     this._publishTransient()
-  }
-
-  /** The segments a face chain has PLACED but not yet committed — nothing
-   *  reaches the kernel until the chain ends (`_commitFacePath`), so
-   *  without drawing them here a line clicked across a face was invisible
-   *  until Escape. Plane-mode chains need no equivalent: each of their
-   *  segments commits to the sketch as it is placed. */
-  private _drawFaceChain(points: readonly V3[]): void {
-    for (let i = 0; i + 1 < points.length; i++) {
-      this._drawRubberBandSegment(points[i], points[i + 1], PREVIEW_LINE_STYLE)
-    }
   }
 
   /**
@@ -1125,7 +1069,6 @@ export class LineTool implements Tool {
       normal: eligible.normal,
       planePoint: anchor,
       points: [anchor],
-      boundary: [this.faceStage.boundary[0]],
     }
     this._lastFaceCursor = null
     return true
@@ -1142,10 +1085,10 @@ export class LineTool implements Tool {
    * Publish the in-progress geometry as transient snap candidates so the
    * line being drawn can snap to its own just-placed points (Phase B).
    *
-   * - Face mode: every consecutive pair of accumulated `points` (none of
-   *   which touch the kernel sketch until `split_face` commits).
-   * - Plane mode: nothing — committed segments are already persistent via
-   *   `reconcile`/`register_sketch`.
+   * - Nothing, in either mode: every placed segment is committed as its own
+   *   draft, so the chain's points are real geometry the engine already
+   *   offers to inference. (Face-mode chains used to publish their
+   *   uncommitted points here.)
    *
    * The LIVE rubber-band segment (anchor → cursor) is deliberately NOT
    * published, in either mode. Its far endpoint IS the cursor of the
@@ -1162,18 +1105,6 @@ export class LineTool implements Tool {
    */
   private _publishTransient(): void {
     this.wasmScene.clear_transient_segments()
-
-    if (this.faceStage.kind === 'anchored') {
-      const { points } = this.faceStage
-      for (let i = 0; i < points.length - 1; i++) {
-        this._publishSegment(points[i], points[i + 1])
-      }
-    }
-  }
-
-  /** One transient segment, in the `add_transient_segment(ax,ay,az,bx,by,bz)` ffi shape. */
-  private _publishSegment(a: V3, b: V3): void {
-    this.wasmScene.add_transient_segment(a[0], a[1], a[2], b[0], b[1], b[2])
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
@@ -1337,7 +1268,6 @@ export class LineTool implements Tool {
       normal,
       planePoint: anchor,
       points: [anchor],
-      boundary: [this.faceStage.boundary[0]],
     }
     this._lastFaceCursor = null
   }
@@ -1432,8 +1362,8 @@ export class LineTool implements Tool {
 
   /**
    * End the current chain WITHOUT discarding committed sketch geometry —
-   * just resets the tool to idle, ready to start a new line. If the face
-   * stage has >= 2 accumulated points, commit the cut first.
+   * just resets the tool to idle, ready to start a new line. Every segment
+   * was already committed as it was placed, in both modes.
    */
   private _endChain(): void {
     this.retype.close()
@@ -1441,12 +1371,6 @@ export class LineTool implements Tool {
     // by a ground chain's last hover would otherwise stick to every chip
     // until the tool changed — "Ground projected" included.
     this._snapProjected = false
-    if (this.faceStage.kind === 'anchored' && this.faceStage.points.length >= 2) {
-      const { object, face, points, normal, boundary } = this.faceStage
-      this._lastFaceNormal = normal
-      this._commitFacePath(object, face, points, boundary)
-      this._lastFaceNormal = null
-    }
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
     this.typed = ''
@@ -1483,15 +1407,12 @@ export class LineTool implements Tool {
   }
 
   /**
-   * A new/loaded document replaced the Scene, so every cached plane-mode
-   * sketch handle is now stale (reusing one throws UnknownSketch). Drop them
-   * all and reset to idle. The Viewport calls this from `notifyLoaded`.
+   * A new/loaded document replaced the Scene, so reset to idle. The Viewport calls this from `notifyLoaded`.
    * Re-pressing the Line shortcut while Line is already active does NOT
    * recreate the tool, so this hook — not tool re-instantiation — is what
    * clears the stale handles.
    */
   onDocumentReset(): void {
-    this.sketchCache.clear()
     this.cancel()
   }
 
@@ -1521,6 +1442,24 @@ export class LineTool implements Tool {
       return
     }
     this.onMeasurementCb(formatLength(segmentLength(last, cursor)))
+  }
+
+  /**
+   * The point a CLICK commits: for a free pick, `from` + the cursor's
+   * direction × the length the measurement box shows — exactly what typing
+   * that length would place (`_commitTyped`). A hard snap, or a degenerate
+   * displayed length, keeps the raw point (see displayedValue.ts).
+   */
+  private _displayedEnd(from: V3, point: V3, snap: Snap | null, chain: readonly V3[]): V3 {
+    if (!isFreePick(snap, from)) return point
+    // A click that lands exactly on a vertex this chain already placed (the
+    // closing click) is a hard pick whatever the snap kind says.
+    if (chain.some((v) => segmentLength(v, point) <= DEGENERATE_SEGMENT_EPS)) return point
+    const dir = directionBetween(from, point)
+    if (dir === null) return point
+    const len = displayedLength(segmentLength(from, point))
+    if (!(len > 0)) return point
+    return pointAlong(from, dir, len)
   }
 
   /**
@@ -1574,7 +1513,7 @@ export class LineTool implements Tool {
       // promised — never the raw, un-inferred point underneath it.
       const resolved = this._resolvePlaneCursor(snap, ray, plane)
       if (resolved === null) return
-      this._commitPlaneSegment(plane, target, anchor, resolved.point)
+      this._commitPlaneSegment(plane, target, anchor, this._displayedEnd(anchor, resolved.point, resolved.snap, this._chainVertices.map((v) => v.point)))
     }
   }
 
@@ -1592,15 +1531,10 @@ export class LineTool implements Tool {
    * region); otherwise the view-facing plane containing this segment's
    * direction (`rehomePlaneNormal`, lineInput.ts — pure, unit-tested on its
    * own). The returned `target` is an ordinary PLANE-mode target
-   * (`SketchTarget.plane`), so the caller's `runSketchGesture` call mints
-   * (or reuses, via the shared `SketchPlaneCache`) a sketch for it exactly
-   * like any other plane-mode commit — from the kernel's perspective this
-   * is nothing special: begin a sketch (on a cache miss) and add one
-   * segment, both inside the SAME undo-gesture bracket `runSketchGesture`
-   * already opens per commit. A re-homing commit therefore costs no
-   * surprise extra undo step: Cmd+Z after it undoes exactly the one segment
-   * just placed (and the sketch that segment alone created, if any), same
-   * as undoing any other single LineTool segment.
+   * (`SketchTarget.plane`), so the caller's `runDraft` simply opens a draft
+   * on it like any other plane-mode commit. A re-homing commit therefore
+   * costs no surprise extra undo step: Cmd+Z after it undoes exactly the one
+   * segment just placed, same as undoing any other single LineTool segment.
    */
   private _rehomeChain(anchor: V3, cursor: V3): { plane: DrawPlane; target: SketchTarget } {
     // `cursor` was already confirmed non-degenerate with `anchor` by the
@@ -1676,83 +1610,79 @@ export class LineTool implements Tool {
     }
 
     try {
-      // Each committed segment is its own gesture — one Cmd+Z undoes exactly
+      // Each committed segment is its own draft — one Cmd+Z undoes exactly
       // that segment, matching LineTool's chain-forward-per-click semantics.
-      runSketchGesture(this.wasmScene, this.sketchCache, effectiveTarget, (sketch, toLocal) => {
-        // `toLocal` is the identity for a world target and pose⁻¹ for a
-        // definition-owned one (component-edit-parity.md phase A2) — see
-        // `runSketchGesture`'s doc for why an ordinary `sketch_add_segment`
-        // needs this and `begin_sketch_on_plane_in_instance` doesn't.
-        const a = toLocal(anchor)
-        const b = toLocal(cursor)
-        const report = this.wasmScene.sketch_add_segment(
-          sketch,
-          a[0], a[1], a[2],
-          b[0], b[1], b[2],
+      // The draft's plane is the drafting context: the segment lowers into
+      // face topology, an owned sketch, or a free sketch as the engine finds
+      // it (loose lines on a face are fine). `regions_created` in the lifted
+      // drawing is what says the chain closed a loop.
+      const { result: closed, report } = runDraft(
+        this.wasmScene,
+        draftTargetFromSketchTarget(effectiveTarget),
+        'Line',
+        (d) => addDraftSegment(this.wasmScene, d, anchor, cursor).length > 0,
+      )
+      const planeTag = effectiveTarget.kind === 'existing'
+        ? `sketch:${effectiveTarget.handle}`
+        : `plane:${effectiveTarget.instance ?? 'world'}:${planeKey(effectiveTarget.plane)}`
+
+      // Honest refusal instead of silent failure (tool-parity playtest-2
+      // review finding B): region detection is strictly PER-PLANE — there is
+      // no cross-plane vertex graph, matching the project's "no implicit
+      // welding" invariant (docs/agents/ARCHITECTURE.md). A chain that
+      // re-homed onto a NEW plane (`_rehomeChain`, §2b) and then visually
+      // returns to a point that belongs to an EARLIER plane of this same
+      // chain therefore creates a merely-coincident vertex THERE, not a weld
+      // — `closed` comes back false with no region and no error, exactly
+      // like any other still-open chain. Tell the user honestly rather than
+      // silently accepting geometry that looks closed but isn't; an
+      // ordinary "not closed yet" (no coincident earlier-plane point) is
+      // unaffected and stays silent, as intended.
+      if (!closed) {
+        const spansEarlierPlane = this._chainVertices.some(
+          (v) => v.plane !== planeTag && segmentLength(v.point, cursor) < CHAIN_VERTEX_MERGE_EPS,
         )
-        let closed: boolean
-        try {
-          closed = report.regions_created().length > 0
-        } finally {
-          report.free()
-        }
-
-        // Honest refusal instead of silent failure (tool-parity playtest-2
-        // review finding B): vertex welding (`find_or_plan_vertex`) and
-        // region detection are strictly PER-SKETCH in the kernel — there is
-        // no cross-sketch vertex graph, matching the project's "no implicit
-        // welding" invariant (docs/agents/ARCHITECTURE.md). A chain that re-homed
-        // onto a NEW sketch (`_rehomeChain`, §2b) and then visually returns
-        // to a point that belongs to an EARLIER sketch of this same chain
-        // therefore creates a merely-coincident vertex THERE, not a weld —
-        // `closed` comes back false with no region and no error, exactly
-        // like any other still-open chain. Tell the user honestly rather
-        // than silently accepting geometry that looks closed but isn't; an
-        // ordinary "not closed yet" (no coincident earlier-sketch point) is
-        // unaffected and stays silent, as intended.
-        if (!closed) {
-          const spansEarlierSketch = this._chainVertices.some(
-            (v) => v.sketch !== sketch && segmentLength(v.point, cursor) < CHAIN_VERTEX_MERGE_EPS,
+        if (spansEarlierPlane) {
+          this.onToast(
+            "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead.",
           )
-          if (spansEarlierSketch) {
-            this.onToast(
-              "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead.",
-            )
-          }
         }
-        if (this._chainVertices.length === 0) this._chainVertices.push({ point: anchor, sketch })
-        this._chainVertices.push({ point: cursor, sketch })
+      }
+      if (this._chainVertices.length === 0) this._chainVertices.push({ point: anchor, plane: planeTag })
+      this._chainVertices.push({ point: cursor, plane: planeTag })
 
-        this.onCommit(sketch)
-
-        if (closed) {
-          // The loop closed into a face — end the chain (idle, ready for a new line).
-          this.planeStage = { kind: 'idle' }
-          this.typed = ''
-          this._lastPlaneCursor = null
-          this._prevSegmentDir = null
-          this._chainVertices = []
-          this.lockAxis = null
-          this.shiftAxisLock = false
-          this._clearPreview()
-          this.onMeasurementCb('')
-          this.wasmScene.clear_transient_segments()
-        } else {
-          // Chain forward: the new point becomes the anchor for the next
-          // segment, on the (possibly just re-homed) frozen plane/target.
-          this.planeStage = { kind: 'anchored', plane: effectivePlane, target: effectiveTarget, anchor: cursor }
-          this._prevSegmentDir = directionBetween(anchor, cursor)
-          this._lastPlaneCursor = null
-          this.typed = ''
-          this._clearPreview()
-          this.onMeasurementCb('')
-          this._publishTransient()
-          armRetype = true
-        }
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketch) => this.onCommit(sketch),
       })
-      // Arm only AFTER the gesture bracket closed: `sketch_end_gesture` is
-      // what records the undo step and moves the history generation, so a
-      // stamp taken inside the gesture would already be stale.
+
+      if (closed) {
+        // The loop closed into a face — end the chain (idle, ready for a new line).
+        this.planeStage = { kind: 'idle' }
+        this.typed = ''
+        this._lastPlaneCursor = null
+        this._prevSegmentDir = null
+        this._chainVertices = []
+        this.lockAxis = null
+        this.shiftAxisLock = false
+        this._clearPreview()
+        this.onMeasurementCb('')
+        this.wasmScene.clear_transient_segments()
+      } else {
+        // Chain forward: the new point becomes the anchor for the next
+        // segment, on the (possibly just re-homed) frozen plane/target.
+        this.planeStage = { kind: 'anchored', plane: effectivePlane, target: effectiveTarget, anchor: cursor }
+        this._prevSegmentDir = directionBetween(anchor, cursor)
+        this._lastPlaneCursor = null
+        this.typed = ''
+        this._clearPreview()
+        this.onMeasurementCb('')
+        this._publishTransient()
+        armRetype = true
+      }
+      // Arm only AFTER the draft ended: `draft_end` is what records the undo
+      // step and moves the history generation, so a stamp taken before it
+      // would already be stale.
       if (armRetype && !this._retyping) {
         this.retype.arm({
           mode: 'plane', plane, target, anchor, endpoint: cursor,
@@ -1790,7 +1720,6 @@ export class LineTool implements Tool {
         normal,
         planePoint: anchor,
         points: [anchor],
-        boundary: [snapOnObjectBoundary(snap)],
       }
       this._lastFaceCursor = null
       this.typed = ''
@@ -1799,7 +1728,7 @@ export class LineTool implements Tool {
     } else {
       const cursor = this._faceCursor(snap, ray)
       if (cursor === null) return
-      this._appendFacePoint(cursor, snapOnObjectBoundary(snap))
+      this._appendFacePoint(this._displayedEnd(this.faceStage.points[this.faceStage.points.length - 1], cursor, snap, this.faceStage.points))
     }
   }
 
@@ -1816,17 +1745,22 @@ export class LineTool implements Tool {
    * the cause is an ordinary same-point re-click or a genuine
    * snap-resolution defect.
    */
-  private _appendFacePoint(point: V3, onBoundary = false): void {
-    if (this.faceStage.kind !== 'anchored') return
-    const { points, boundary } = this.faceStage
+  private _appendFacePoint(point: V3): boolean {
+    if (this.faceStage.kind !== 'anchored') return false
+    const { points, object, face } = this.faceStage
     const last = points[points.length - 1]
     if (segmentLength(last, point) <= DEGENERATE_SEGMENT_EPS) {
       this.onToast("That point is the same as the last one — move the cursor before clicking")
-      return
+      return false
     }
 
+    // Each click is its own draft on the face (one undo step), exactly like
+    // a ground chain: the segment lowers into face topology, the object's
+    // owned sketch, or — over no face — a free sketch. Nothing is waiting to
+    // "reach an edge"; a refusal leaves the chain as it was.
+    if (!this._commitFaceSegment(object, face, last, point)) return false
+
     points.push(point)
-    boundary.push(onBoundary)
     this._lastFaceCursor = null
     this.typed = ''
     this._clearPreview()
@@ -1839,14 +1773,56 @@ export class LineTool implements Tool {
     if (points.length >= 4 && segmentLength(points[0], point) <= DEGENERATE_SEGMENT_EPS) {
       this._closedByClick = true
       this._endChain()
-      return
+      return true
     }
-    this._drawFaceChain(points)
     this._publishTransient()
     if (!this._retyping) {
-      this.retype.arm({ mode: 'face', index: points.length - 1 })
+      this.retype.arm({
+        mode: 'face', object, face, anchor: last, endpoint: point, index: points.length - 1,
+      })
       this._retypeRayDir = this._lastRayDir
       this._retypeScreen = this._lastScreen
+    }
+    return true
+  }
+
+  /** Commit one face-chain segment `a` → `b` as a draft on `face`. Once an
+   *  earlier segment has split or rewritten the face, its handle may be
+   *  gone: the draft then opens on the face's PLANE instead (the plane is
+   *  the drafting context, and it lifts the same drawing). */
+  private _commitFaceSegment(object: bigint, face: bigint, a: V3, b: V3): boolean {
+    const run = (target: DraftTarget) =>
+      runDraft(this.wasmScene, target, 'Line', (d) => addDraftSegment(this.wasmScene, d, a, b))
+    try {
+      let outcome: ReturnType<typeof run>
+      try {
+        outcome = run({ kind: 'face', object, face, instance: this._activeInstance })
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        if (code !== 'UnknownFace' || this.faceStage.kind !== 'anchored') throw err
+        const { planePoint, normal } = this.faceStage
+        const basis = facePlaneBasis(normal)
+        if (basis === null) throw err
+        outcome = run({
+          kind: 'plane',
+          plane: {
+            origin: planePoint, normal, u: basis.u, v: basis.v,
+            ground: isGroundPlane(planePoint, normal),
+          },
+          instance: this._activeInstance,
+        })
+      }
+      refreshAfterDraft(outcome.report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketch) => this.onCommit(sketch),
+      })
+      return true
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+      this.onToast(message, code ?? undefined)
+      return false
     }
   }
 
@@ -1869,31 +1845,13 @@ export class LineTool implements Tool {
       this.onMeasurementCb('')
       return
     }
-    if (spec.mode === 'face') {
-      if (this.faceStage.kind !== 'anchored' || this.faceStage.points.length - 1 !== spec.index || spec.index < 1) {
-        this.retype.close()
-        return
-      }
-      const { points } = this.faceStage
-      const prev = points[spec.index - 1]
-      const dir = directionBetween(prev, points[spec.index])
-      if (dir === null) return
-      points[spec.index] = pointAlong(prev, dir, distance)
-      this.faceStage.boundary[spec.index] = false // moved along its segment: no longer a snapped edge hit
-      this.typed = ''
-      this._clearPreview()
-      this._drawFaceChain(points)
-      this.onMeasurementCb('')
-      this._publishTransient()
-      return
-    }
     const dir = directionBetween(spec.anchor, spec.endpoint)
     if (dir === null) return
     const newEnd = pointAlong(spec.anchor, dir, distance)
     const outcome = this.retype.apply(
-      (hot) => this._relayPlaneSegment(hot as Extract<RetypeSpec, { mode: 'plane' }>, newEnd),
-      (hot) => this._relayPlaneSegment(hot as Extract<RetypeSpec, { mode: 'plane' }>, (hot as Extract<RetypeSpec, { mode: 'plane' }>).endpoint),
-      (hot) => ({ ...hot, endpoint: newEnd } as RetypeSpec),
+      (hot) => this._relaySegment(hot, newEnd),
+      (hot) => this._relaySegment(hot, hot.endpoint),
+      (hot) => ({ ...hot, endpoint: newEnd }),
     )
     if (outcome === 'stale') this.onToast(retypeStaleMessage('line'))
   }
@@ -1901,9 +1859,18 @@ export class LineTool implements Tool {
   /** Re-lay the hot segment to `end` through the ordinary commit path, with
    *  the chain bookkeeping first put back to what it was before that
    *  segment (its own commit will advance it again). */
-  private _relayPlaneSegment(hot: Extract<RetypeSpec, { mode: 'plane' }>, end: V3): boolean {
+  private _relaySegment(hot: RetypeSpec, end: V3): boolean {
     this._retyping = true
     try {
+      if (hot.mode === 'face') {
+        if (this.faceStage.kind !== 'anchored') return false
+        this.faceStage.points.length = hot.index
+        this.faceStage.object = hot.object
+        this.faceStage.face = hot.face
+        this.typed = ''
+        this.onMeasurementCb('')
+        return this._appendFacePoint(end)
+      }
       this.planeStage = { kind: 'anchored', plane: hot.plane, target: hot.target, anchor: hot.anchor }
       this._chainVertices.length = hot.chainLen
       this._prevSegmentDir = hot.prevSegmentDir
@@ -1919,183 +1886,6 @@ export class LineTool implements Tool {
    *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
   disarmRetype(): void {
     this.retype.close()
-  }
-
-  /** Cut `face` along the accumulated path (boundary-to-boundary). */
-  /**
-   * Commit a face chain's placed points as face cuts.
-   *
-   * The kernel's `split_face` takes one SIMPLE boundary-to-boundary path:
-   * a chain that TOUCHES the face's boundary partway — a bisecting line
-   * continued to a third point on another edge, a corner-to-midpoint-to-
-   * corner triangle — was refused whole as `PathNotSimple`, though every
-   * piece of it is an ordinary cut. So the chain is cut into sub-paths at
-   * each point that lies on the boundary and committed one cut at a time,
-   * re-resolving which sub-face holds each sub-path after the previous
-   * split (a short pick ray dropped onto the sub-path's midpoint along the
-   * face normal — the two halves of a split are exactly the faces a pick
-   * at that spot can land on). A chain with no boundary point at all that
-   * closes onto its start is an interior loop and imprints a coplanar
-   * sub-face (`split_face_inner`) — a face drawn freehand inside a face,
-   * ready to push. Anything else (a dangling interior end, a
-   * self-touching path) is refused by the kernel with its usual typed
-   * error, one sub-path at a time; the cuts already made stay, as they
-   * are complete geometry the user drew. Every commit routes through the
-   * instance-aware sibling inside a component context.
-   */
-  private _commitFacePath(object: bigint, face: bigint, points: V3[], hints: readonly boolean[]): void {
-    // A point is on the boundary when it was SNAPPED to one of the object's
-    // edges or corners (exact, any scale) or when it lies on the face's
-    // outer loop geometrically (catches points that reached an edge by a
-    // lock projection or a typed length — tested against an f32 copy of
-    // the loop, so the tolerance follows the coordinates' magnitude).
-    const boundary = this._faceBoundaryPolygon(object, face)
-    const onBoundary = points.map((p, i) =>
-      hints[i] === true || (boundary !== null && pointOnPolygonBoundary(p, boundary)))
-    const closes = points.length >= 4 && segmentLength(points[0], points[points.length - 1]) <= DEGENERATE_SEGMENT_EPS
-
-    if (closes && !onBoundary.some(Boolean)) {
-      this._commitFaceLoop(object, face, points.slice(0, -1))
-      return
-    }
-
-    // Cut into boundary-to-boundary sub-paths. A leading or trailing run
-    // that never reaches the boundary is left to the kernel to refuse (it
-    // is a dangling edge), exactly as a whole such chain always was.
-    const subPaths: V3[][] = []
-    let current: V3[] = [points[0]]
-    for (let i = 1; i < points.length; i++) {
-      current.push(points[i])
-      if (onBoundary[i] && i < points.length - 1) {
-        subPaths.push(current)
-        current = [points[i]]
-      }
-    }
-    subPaths.push(current)
-
-    let target = face
-    for (let k = 0; k < subPaths.length; k++) {
-      const sub = subPaths[k]
-      if (k > 0) {
-        // The previous split replaced `target`: find the sub-face this
-        // path now lies on.
-        const found = this._facePickAtPoint(object, sub)
-        if (found === null) {
-          this.onToast('That line runs off the face it started on — draw it edge to edge')
-          return
-        }
-        target = found
-      }
-      if (!this._commitFaceCut(object, target, sub)) return
-    }
-  }
-
-  /** One `split_face` cut (instance-aware). False when the kernel refused
-   *  (already toasted). */
-  private _commitFaceCut(object: bigint, face: bigint, points: readonly V3[]): boolean {
-    const path = new Float64Array(points.length * 3)
-    for (let i = 0; i < points.length; i++) {
-      path[i * 3 + 0] = points[i][0]
-      path[i * 3 + 1] = points[i][1]
-      path[i * 3 + 2] = points[i][2]
-    }
-    try {
-      // Inside a component instance's editing context (component-edit-
-      // parity.md phase A2), `object` is a definition member — the world
-      // `split_face` refuses it outright (`apply_object_op`'s `is_world`
-      // guard); `split_face_in_instance` maps `path` through the instance's
-      // pose⁻¹ and routes through `apply_def_op` instead. Every instance of
-      // the definition sees the cut at once.
-      if (this._activeInstance !== null) {
-        const report = this.wasmScene.split_face_in_instance(this._activeInstance, object, face, path)
-        report.free()
-      } else {
-        const report = this.wasmScene.split_face(object, face, path)
-        report.free()
-      }
-      this.onFaceImprint(object)
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-      return false
-    }
-  }
-
-  /** An interior closed loop imprinted as a coplanar sub-face
-   *  (`split_face_inner`, instance-aware) — the same commit the shape tools
-   *  make for a rectangle or circle drawn inside a face. */
-  private _commitFaceLoop(object: bigint, face: bigint, loop: readonly V3[]): void {
-    const pts = new Float64Array(loop.length * 3)
-    for (let i = 0; i < loop.length; i++) {
-      pts[i * 3 + 0] = loop[i][0]
-      pts[i * 3 + 1] = loop[i][1]
-      pts[i * 3 + 2] = loop[i][2]
-    }
-    try {
-      if (this._activeInstance !== null) {
-        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, pts)
-      } else {
-        this.wasmScene.split_face_inner(object, face, pts)
-      }
-      this.onFaceImprint(object)
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-    }
-  }
-
-  /** The face's outer boundary as WORLD points (posed through the active
-   *  instance), or null for a stale handle. */
-  private _faceBoundaryPolygon(object: bigint, face: bigint): V3[] | null {
-    let raw: ArrayLike<number>
-    try {
-      raw = this.wasmScene.face_boundary(object, face)
-    } catch {
-      return null
-    }
-    const pose = this._activeInstance !== null ? this.wasmScene.instance_pose(this._activeInstance) : undefined
-    if (this._activeInstance !== null && pose === undefined) return null
-    const out: V3[] = []
-    for (let i = 0; i + 2 < raw.length; i += 3) {
-      const p: V3 = [raw[i], raw[i + 1], raw[i + 2]]
-      out.push(pose !== undefined ? applyAffine3x4(pose, p) : p)
-    }
-    return out.length >= 3 ? out : null
-  }
-
-  /**
-   * The eligible face of `object` under the midpoint of `path`, found by
-   * dropping a short pick ray onto it along the face chain's normal — the
-   * sub-face a just-split path now lies on. Null when nothing eligible is
-   * there (the path left the face).
-   */
-  private _facePickAtPoint(object: bigint, path: readonly V3[]): bigint | null {
-    if (this.faceStage.kind !== 'anchored' && this._lastFaceNormal === null) return null
-    const normal = this.faceStage.kind === 'anchored' ? this.faceStage.normal : this._lastFaceNormal!
-    // Probe at a SEGMENT midpoint, never the chord between the sub-path's
-    // ends: the kernel accepts a cut exactly when every segment's midpoint
-    // is inside the face, so those points are the ones guaranteed to be on
-    // it — a bent path across a concave face (an L-shaped slab) can have
-    // its end-to-end chord midpoint out in the notch.
-    const lift = FACE_PICK_LIFT_M
-    for (let i = 0; i + 1 < path.length; i++) {
-      const a = path[i]
-      const b = path[i + 1]
-      const mid: V3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2]
-      const ray: Ray = {
-        origin: [mid[0] + normal[0] * lift, mid[1] + normal[1] * lift, mid[2] + normal[2] * lift],
-        direction: [-normal[0], -normal[1], -normal[2]],
-      }
-      const pick = this._pickCache.pickFor(this.wasmScene, ray, (o, instance) =>
-        o === object && this._isEligible(o, instance))
-      if (pick !== null) return pick.face
-    }
-    return null
   }
 
   // ------------------------------------------------------------------ preview

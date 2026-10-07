@@ -1,7 +1,9 @@
 /**
- * LineTool — face chains (maintainer playtest 2 of the inference fixes):
- * boundary-touching paths commit as one cut per sub-path, interior loops
- * imprint a sub-face, placed-but-uncommitted segments are drawn, a ground
+ * LineTool — face chains: every click after the first commits its segment as
+ * its own draft on the face (`draft_begin_face` .. one `draft_add_segment`
+ * .. `draft_end`, one undo step), exactly like plane mode — the kernel
+ * lowers it into face topology (or the object's sketch) and nothing waits
+ * to "reach an edge"; a chain closing on its start ends itself; a ground
  * chain's "projected" verdict does not outlive the chain, and Shift held
  * through the end of a chain never pins a plane by autorepeat.
  */
@@ -11,6 +13,7 @@ import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { draftMock, type DraftMockOpts } from './draftMock'
 
 /** A ray straight down through world (x, y) — hits the z=1 top face. */
 function rayThrough(x: number, y: number): Ray {
@@ -25,48 +28,35 @@ function makePick(object: bigint, face: bigint) {
   return { object: () => object, face: () => face, depth: () => 1, instance: () => undefined, free: vi.fn() }
 }
 
-/** Object 7's top face 3: the unit square at z = 1. After a split, picks
- *  land on face 8 (the "new sub-face"), so a second cut is routed there. */
-function makeScene() {
-  let splits = 0
-  let sketchCounter = 41n
+/** Object 7's top face 3: the unit square at z = 1. */
+function makeScene(mockOpts: DraftMockOpts = {}) {
+  const dm = draftMock(mockOpts)
+  let gen = 1n
+  // One undo step per ended draft: the history generation moves on `draft_end`.
+  const draft_end = vi.fn((d: bigint) => {
+    const r = dm.members.draft_end(d)
+    gen += 1n
+    return r
+  })
   const scene = {
-    history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(() => ({
-      new_edges: () => new BigUint64Array([]),
-      regions_created: () => new BigUint64Array([]),
-      regions_removed: () => new BigUint64Array([]),
-      free: vi.fn(),
-    })),
-    pick_face: vi.fn((_ox: number, _oy: number, oz: number) => {
-      if (oz > 4) return makePick(7n, 3n) // a cursor ray from the camera
-      return makePick(7n, splits === 0 ? 3n : 8n) // a sub-face probe from just above the face
-    }),
+    history_generation: vi.fn(() => gen),
+    ...dm.members,
+    draft_end,
+    scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
+    pick_face: vi.fn(() => makePick(7n, 3n)),
     pick_sketch: vi.fn(() => undefined),
     sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     face_boundary: vi.fn(() => new Float32Array([0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1])),
-    split_face: vi.fn(() => {
-      splits += 1
-      return { new_faces: () => [8n, 9n], free: vi.fn() }
-    }),
-    split_face_in_instance: vi.fn(),
-    split_face_inner: vi.fn(() => 55n),
-    split_face_inner_in_instance: vi.fn(),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])),
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return scene as unknown as WasmScene & typeof scene
+  return Object.assign(scene as unknown as WasmScene & typeof scene, { log: dm.log })
 }
 
 function makeTool(scene: WasmScene) {
@@ -78,74 +68,186 @@ function makeTool(scene: WasmScene) {
 }
 
 const onEdge = (x: number, y: number): Snap => makeSnap({ x, y, z: 1, kind: 'on-edge', object: 7n, element: 11n, elementKind: 'edge' })
+/** A hard pick keeps its exact point; a free `on-face` click commits the DISPLAYED length (displayedValue.ts). */
+const hardOnFace = (x: number, y: number): Snap => makeSnap({ x, y, z: 1, kind: 'endpoint', object: 7n, element: 3n, elementKind: 'face' })
 const onFace = (x: number, y: number): Snap => makeSnap({ x, y, z: 1, kind: 'on-face', object: 7n, element: 3n, elementKind: 'face' })
 
-describe('LineTool — face chains that touch the boundary partway commit one cut per sub-path', () => {
-  it('a bisecting cut continued to a third boundary point splits twice, the second cut on the sub-face under it', () => {
+/** The chain as a flat xyz path, rebuilt from the committed segments (each
+ *  click is one draft with one segment): the first start, then every end. */
+const pathOf = (scene: ReturnType<typeof makeScene>) => {
+  const segs = scene.log.segments
+  return segs.length === 0 ? [] : [...segs[0].slice(0, 3), ...segs.flatMap((sg) => sg.slice(3, 6))]
+}
+/** Every draft was opened on object 7's face 3. */
+const expectFaceDrafts = (scene: ReturnType<typeof makeScene>, n: number) => {
+  expect(scene.draft_begin_face).toHaveBeenCalledTimes(n)
+  for (const c of (scene.draft_begin_face as unknown as ReturnType<typeof vi.fn>).mock.calls) {
+    expect(c[0]).toBe(7n)
+    expect(c[1]).toBe(3n)
+  }
+  expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+}
+
+describe('LineTool — a face chain commits each click as its own draft', () => {
+  it('a bisecting cut continued to a third boundary point is one draft per click, the whole chain committed', () => {
     const scene = makeScene()
-    const { tool, onToast } = makeTool(scene)
+    const { tool, onToast, onFaceImprint } = makeTool(scene)
     tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5)) // left edge
     tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5)) // right edge
+    expectFaceDrafts(scene, 1) // each click after the first commits NOW
     tool.onPointerDown(onEdge(0.5, 0), rayThrough(0.5, 0)) // bottom edge
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
-    expect(scene.split_face).toHaveBeenCalledTimes(2)
-    const calls = (scene.split_face as unknown as ReturnType<typeof vi.fn>).mock.calls as unknown[][]
-    const [first, second] = calls
-    expect(first[1]).toBe(3n)
-    expect(Array.from(first[2] as Float64Array)).toEqual([0, 0.5, 1, 1, 0.5, 1])
-    expect(second[1]).toBe(8n) // the sub-face the probe found after the first cut
-    expect(Array.from(second[2] as Float64Array)).toEqual([1, 0.5, 1, 0.5, 0, 1])
+    expectFaceDrafts(scene, 2) // Escape commits nothing more
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 1, 0.5, 1, 0.5, 0, 1])
+    expect(scene.draft_end).toHaveBeenCalledTimes(2)
     expect(onToast).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('corner → top-edge midpoint → corner is two cuts (a triangle), not one refused path', () => {
+  it('corner → top-edge midpoint → corner commits two drafts', () => {
     const scene = makeScene()
     const { tool, onToast } = makeTool(scene)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint', object: 7n, element: 1n, elementKind: 'vertex' }), rayThrough(0, 0))
     tool.onPointerDown(makeSnap({ x: 0.5, y: 1, z: 1, kind: 'midpoint', object: 7n, element: 12n, elementKind: 'edge' }), rayThrough(0.5, 1))
     tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 1, kind: 'endpoint', object: 7n, element: 2n, elementKind: 'vertex' }), rayThrough(1, 0))
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
-    expect(scene.split_face).toHaveBeenCalledTimes(2)
+    expectFaceDrafts(scene, 2)
+    expect(pathOf(scene)).toEqual([0, 0, 1, 0.5, 1, 1, 1, 0, 1])
     expect(onToast).not.toHaveBeenCalled()
   })
 
-  it('an interior point between two boundary points stays in ONE cut (the kernel accepts a bent edge-to-edge path)', () => {
+  it('an interior point between two boundary points is passed through unchanged', () => {
     const scene = makeScene()
     const { tool } = makeTool(scene)
     tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
-    tool.onPointerDown(onFace(0.5, 0.7), rayThrough(0.5, 0.7))
+    tool.onPointerDown(hardOnFace(0.5, 0.7), rayThrough(0.5, 0.7))
     tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5))
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
-    expect(scene.split_face).toHaveBeenCalledTimes(1)
-    expect(Array.from((scene.split_face as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2] as Float64Array)).toEqual([0, 0.5, 1, 0.5, 0.7, 1, 1, 0.5, 1])
+    expectFaceDrafts(scene, 2)
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 0.5, 0.7, 1, 1, 0.5, 1])
+  })
+
+  // FLIPPED. This pinned the OLD refusal: an open chain whose end dangles in
+  // the face's interior was refused at chain end (`EndpointNotOnBoundary`,
+  // by the old face path). A loose line on a face now simply commits.
+  it('a loose line whose end dangles in the face interior commits (no refusal, no toast)', () => {
+    const scene = makeScene()
+    const { tool, onToast, onFaceImprint } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5)) // dangling end
+    expectFaceDrafts(scene, 1)
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 0.5, 0.5, 1])
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expectFaceDrafts(scene, 1)
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+  })
+
+  // Kept intent of the old "refused chain toasts the kernel's typed refusal
+  // once": a refusal from the kernel during a click's draft is toasted once
+  // with its code, the draft is cancelled, and nothing is imprinted.
+  it('a kernel refusal during a click\'s draft toasts its typed code once and commits nothing else', () => {
+    const scene = makeScene({
+      failSegmentAt: () => new Error('PointOffPlane: point 1 is off the draft plane'),
+    })
+    const { tool, onToast, onFaceImprint } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expect(scene.draft_cancel).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('PointOffPlane')
+    expect(onFaceImprint).not.toHaveBeenCalled()
+  })
+
+  // FLIPPED. This pinned the OLD refusal wording ("doesn't split the face",
+  // from `LoopNotStrictlyInside` by the old face path): a chain from edge
+  // to edge across a face. Face mode no longer plans a path/loop at chain
+  // end; the segment just commits and there is no toast at all.
+  it('an edge-to-edge chain just commits: no "doesn\'t split the face" toast', () => {
+    const scene = makeScene()
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5))
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expectFaceDrafts(scene, 1)
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 1, 0.5, 1])
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('makes no sub-face probes of its own: the kernel locates every piece', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5))
+    tool.onPointerDown(onFace(0.95, 0.05), rayThrough(0.95, 0.05))
+    tool.onPointerDown(onEdge(0.5, 0), rayThrough(0.5, 0))
+    const picksBefore = (scene.pick_face as ReturnType<typeof vi.fn>).mock.calls.length
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    expect((scene.pick_face as ReturnType<typeof vi.fn>).mock.calls.length).toBe(picksBefore)
+    expectFaceDrafts(scene, 3) // one draft per click after the first
+  })
+
+  it('a stale face handle (UnknownFace) falls back to a draft on the face\'s plane', () => {
+    const scene = makeScene()
+    ;(scene.draft_begin_face as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+      throw new Error('UnknownFace: no such face')
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5))
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane.mock.calls[0].slice(0, 6)).toEqual([0, 0.5, 1, 0, 0, 1])
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 1, 0.5, 1])
+    expect(onToast).not.toHaveBeenCalled()
   })
 })
 
-describe('LineTool — a face chain closing on its own start inside the face imprints a sub-face', () => {
-  it('clicking the start point again ends the chain and calls split_face_inner with the loop', () => {
+describe('LineTool — a face chain closing on its own start ends itself', () => {
+  it('a closed chain that touches the face\'s edges commits one draft per click and ends on the start', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(hardOnFace(0.5, 0.2), rayThrough(0.5, 0.2))
+    tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5))
+    tool.onPointerDown(hardOnFace(0.5, 0.8), rayThrough(0.5, 0.8))
+    expect(tool.capturingInput()).toBe(true)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5)) // back to the start
+    expect(tool.capturingInput()).toBe(false)
+    expectFaceDrafts(scene, 4)
+    // The loop plus its closing segment, committed segment by segment.
+    expect(pathOf(scene)).toEqual([0, 0.5, 1, 0.5, 0.2, 1, 1, 0.5, 1, 0.5, 0.8, 1, 0, 0.5, 1])
+  })
+
+  it('clicking the start point again commits the closing segment and ends the chain', () => {
     const scene = makeScene()
     const { tool, onFaceImprint } = makeTool(scene)
     tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2))
-    tool.onPointerDown(onFace(0.8, 0.2), rayThrough(0.8, 0.2))
-    tool.onPointerDown(onFace(0.5, 0.8), rayThrough(0.5, 0.8))
+    tool.onPointerDown(hardOnFace(0.8, 0.2), rayThrough(0.8, 0.2))
+    tool.onPointerDown(hardOnFace(0.5, 0.8), rayThrough(0.5, 0.8))
     tool.onPointerDown(onFace(0.2, 0.2), rayThrough(0.2, 0.2))
     expect(tool.capturingInput()).toBe(false) // the loop ended the chain by itself
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
-    expect(Array.from((scene.split_face_inner as unknown as ReturnType<typeof vi.fn>).mock.calls[0][2] as Float64Array)).toEqual([0.2, 0.2, 1, 0.8, 0.2, 1, 0.5, 0.8, 1])
-    expect(scene.split_face).not.toHaveBeenCalled()
+    expectFaceDrafts(scene, 3)
+    expect(pathOf(scene)).toEqual([0.2, 0.2, 1, 0.8, 0.2, 1, 0.5, 0.8, 1, 0.2, 0.2, 1])
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 })
 
-describe('LineTool — placed face segments are drawn before the chain commits', () => {
-  it('after two face clicks the preview holds the placed segment plus the rubber band', () => {
+describe('LineTool — face segments are committed as they are placed', () => {
+  // The placed segment is committed geometry (it renders from the scene),
+  // not a preview line, and face-mode transient segments are no longer
+  // published: the preview holds only the live rubber band.
+  it('after two face clicks the segment is committed and the preview holds just the rubber band', () => {
     const scene = makeScene()
     const { tool, preview } = makeTool(scene)
     tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
     tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
-    expect(preview.children.length).toBeGreaterThanOrEqual(1) // the placed segment, before any move
+    expectFaceDrafts(scene, 1)
+    expect(scene.add_transient_segment).not.toHaveBeenCalled()
+    expect(preview.children.length).toBe(0) // no placed-segment preview any more
     tool.onPointerMove(onFace(0.7, 0.3), rayThrough(0.7, 0.3))
-    expect(preview.children.length).toBeGreaterThanOrEqual(2) // placed + rubber band
+    expect(preview.children.length).toBeGreaterThanOrEqual(1) // the rubber band
   })
 })
 
@@ -186,40 +288,19 @@ describe('LineTool — Shift held through the end of a chain never pins a plane 
 })
 
 describe('LineTool — review fixes on the face-chain round', () => {
-  it('re-picks a later sub-face at a SEGMENT midpoint, so a bent sub-path across a concave face is probed inside the face', () => {
-    const scene = makeScene()
-    const probes: [number, number][] = []
-    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockImplementation((ox: number, oy: number, oz: number) => {
-      if (oz > 4) return makePick(7n, 3n)
-      probes.push([ox, oy])
-      return makePick(7n, 8n)
-    })
-    const { tool } = makeTool(scene)
-    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
-    tool.onPointerDown(onEdge(1, 0.5), rayThrough(1, 0.5)) // first cut: straight across
-    tool.onPointerDown(onFace(0.95, 0.05), rayThrough(0.95, 0.05)) // a bend
-    tool.onPointerDown(onEdge(0.5, 0), rayThrough(0.5, 0)) // back to the boundary
-    tool.onKey({ key: 'Escape' } as KeyboardEvent)
-    expect(scene.split_face).toHaveBeenCalledTimes(2)
-    // The probe for the bent sub-path [(1,0.5),(0.95,0.05),(0.5,0)] is its
-    // first segment's midpoint, not the chord midpoint (0.75, 0.25).
-    expect(probes[0][0]).toBeCloseTo(0.975)
-    expect(probes[0][1]).toBeCloseTo(0.275)
-  })
-
-  it('a snapped edge point far from the origin still counts as a boundary point (the f32 boundary copy cannot say so)', () => {
+  it('a snapped edge point far from the origin reaches the kernel exactly as placed', () => {
     const scene = makeScene()
     const X = 200
     ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockImplementation(() =>
       new Float32Array([X, 0, 1, X + 1, 0, 1, X + 1, 1, 1, X, 1, 1]))
     const { tool, onToast } = makeTool(scene)
-    // f32(200.0000000123) rounds away; the snap says "edge", and that is exact.
     const edgePt = (x: number, y: number): Snap => makeSnap({ x, y, z: 1, kind: 'on-edge', object: 7n, element: 11n, elementKind: 'edge' })
     tool.onPointerDown(edgePt(X + 1.23e-5, 0.5), rayThrough(X, 0.5))
     tool.onPointerDown(edgePt(X + 1 - 1.23e-5, 0.5), rayThrough(X + 1, 0.5))
     tool.onPointerDown(edgePt(X + 0.5, 1.23e-5), rayThrough(X + 0.5, 0))
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
-    expect(scene.split_face).toHaveBeenCalledTimes(2)
+    expectFaceDrafts(scene, 2)
+    expect(pathOf(scene)).toEqual([X + 1.23e-5, 0.5, 1, X + 1 - 1.23e-5, 0.5, 1, X + 0.5, 1.23e-5, 1])
     expect(onToast).not.toHaveBeenCalled()
   })
 
@@ -241,16 +322,35 @@ describe('LineTool — review fixes on the face-chain round', () => {
     expect(tool.onDoubleClick(onFace(0.3, 0.3), rayThrough(0.3, 0.3))).toBe(false)
   })
 
-  it('retyping a face segment\'s length redraws the placed chain instead of blanking it', () => {
+  it('retyping a face segment\'s length undoes and re-commits it at the typed length', () => {
     const scene = makeScene()
-    const { tool, preview } = makeTool(scene)
+    const { tool } = makeTool(scene)
     tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
     tool.onPointerDown(onFace(0.5, 0.5), rayThrough(0.5, 0.5))
-    expect(preview.children.length).toBeGreaterThanOrEqual(1)
+    expectFaceDrafts(scene, 1)
     tool.onKey({ key: '0' } as KeyboardEvent)
     tool.onKey({ key: '.' } as KeyboardEvent)
     tool.onKey({ key: '3' } as KeyboardEvent)
     tool.onKey({ key: 'Enter' } as KeyboardEvent)
-    expect(preview.children.length).toBeGreaterThanOrEqual(1)
+    // Face mode retypes like plane mode: one undo, then the segment is
+    // re-committed at 0.3 m along the same direction (the old chain-in-
+    // preview redraw no longer exists — nothing is uncommitted).
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expectFaceDrafts(scene, 2)
+    expect(scene.log.segments[1]).toEqual([0, 0.5, 1, 0.3, 0.5, 1])
+  })
+})
+
+describe('LineTool — face chain points are the displayed length', () => {
+  it('a free on-face click is quantized to the shown length; a hard click keeps its exact point', () => {
+    const scene = makeScene()
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
+    tool.onPointerDown(onFace(0.50043, 0.5), rayThrough(0.50043, 0.5)) // shows 0.5 m
+    tool.onPointerDown(hardOnFace(0.50043, 0.80077), rayThrough(0.50043, 0.80077))
+    tool.onKey({ key: 'Escape' } as KeyboardEvent)
+    const path = pathOf(scene)
+    expect(path.slice(0, 6)).toEqual([0, 0.5, 1, 0.5, 0.5, 1])
+    expect(path.slice(6)).toEqual([0.50043, 0.80077, 1])
   })
 })

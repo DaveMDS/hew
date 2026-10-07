@@ -554,7 +554,7 @@ fn draw_arc_open_sweep_on_a_face_cuts_boundary_to_boundary_like_a_line() {
 }
 
 #[test]
-fn draw_line_on_a_face_with_interior_endpoints_refuses_endpoint_not_on_boundary() {
+fn draw_line_on_a_face_with_interior_endpoints_is_kept_as_loose_drawing() {
     let mut conn = Connection::new(Profile::Core, "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
@@ -567,7 +567,9 @@ fn draw_line_on_a_face_with_interior_endpoints_refuses_endpoint_not_on_boundary(
         0.2,
     );
 
-    let data = call_err(
+    // Unified drafting: a loose line on a face is kept (it used to refuse
+    // `endpoint_not_on_boundary`), in the object's owned sketch.
+    let result = call_ok_one_undo(
         &mut conn,
         &mut doc,
         3,
@@ -577,7 +579,12 @@ fn draw_line_on_a_face_with_interior_endpoints_refuses_endpoint_not_on_boundary(
             "points": [[0.05, 0.05, 0.2], [0.15, 0.15, 0.2]]
         }),
     );
-    assert_eq!(data["refusal"], "endpoint_not_on_boundary");
+    let units = result["results"][0]["units"].as_array().unwrap();
+    assert!(
+        units
+            .iter()
+            .any(|u| u["kind"] == "edge" && u["store"] == "owned")
+    );
 }
 
 #[test]
@@ -917,7 +924,7 @@ fn follow_me_on_a_definition_members_face_refuses_typed() {
 /// face's own edge — round-trips as a successful pie instead of a
 /// refusal.
 #[test]
-fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_refuses_loop_not_strictly_inside() {
+fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_is_accepted_as_one_undo_step() {
     let mut conn = Connection::new(Profile::Core, "test");
     let mut doc = Document::new();
     hello_attach(&mut conn, &mut doc);
@@ -982,9 +989,10 @@ fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_refuses_loop_not_st
         a[1] + (b[1] - a[1]) * t,
         a[2] + (b[2] - a[2]) * t,
     ];
-    let before = doc.save();
-
-    let data = call_err(
+    // Unified drafting: a shape touching or overhanging the face edge is
+    // kept (it used to refuse `loop_not_strictly_inside`); the draw lands
+    // as one undo step and reports the units it touched.
+    let result = call_ok_one_undo(
         &mut conn,
         &mut doc,
         3,
@@ -998,11 +1006,16 @@ fn draw_arc_pie_on_a_tilted_face_with_center_on_the_boundary_refuses_loop_not_st
             "close": "pie"
         }),
     );
-    assert_eq!(data["refusal"], "loop_not_strictly_inside");
-    assert_eq!(
-        doc.save(),
-        before,
-        "a refused envelope leaves the document untouched"
+    let units = result["results"][0]["units"].as_array().unwrap();
+    // The wedge closes a region of its own, face or free, and its arc and
+    // radii are drawing edges.
+    assert!(
+        units.iter().any(|u| u["kind"] == "region"),
+        "the pie closes a region: {units:?}"
+    );
+    assert!(
+        units.iter().filter(|u| u["kind"] == "edge").count() >= 3,
+        "the arc's facets and both radii are drawn: {units:?}"
     );
 }
 
@@ -1054,4 +1067,132 @@ fn draw_arc_segment_past_a_half_turn_on_a_face_still_imprints_a_simple_sub_face(
     );
     let pushed_id = result["results"][1]["object_id"].as_str().unwrap();
     assert_eq!(pushed_id, object_id);
+}
+
+// ------------------------------------------- open paths across imprints
+
+/// A box with a 0.1 × 0.1 rectangle drawn on its top face, x and y
+/// 0.05 → 0.15: `(object_id, …)` with the rectangle a sub-face imprint.
+fn box_with_rect_on_top(conn: &mut Connection, doc: &mut Document) -> String {
+    let object_id = build_box(conn, doc, 2, [0.0, 0.0, 0.0], [0.2, 0.2, 0.0], 0.2);
+    call_ok_one_undo(
+        conn,
+        doc,
+        3,
+        "hew.sketch.draw_rect",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "corner_a": [0.05, 0.05, 0.2],
+            "corner_b": [0.15, 0.15, 0.2]
+        }),
+    );
+    object_id
+}
+
+fn imprint_kinds(conn: &mut Connection, doc: &mut Document, object_id: &str) -> Vec<String> {
+    let listed = call_ok(
+        conn,
+        doc,
+        90,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    listed["imprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["kind"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn draw_line_on_a_face_across_a_drawn_rectangle_splits_every_face_it_crosses() {
+    // From the top face's edge across the rectangle to the far edge, as
+    // the Line tool does: the face and the rectangle both split, one undo
+    // entry, and the rectangle is no longer one sub-face.
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = box_with_rect_on_top(&mut conn, &mut doc);
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_line",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "points": [[0.0, 0.1, 0.2], [0.2, 0.1, 0.2]]
+        }),
+    );
+    let kinds = imprint_kinds(&mut conn, &mut doc, &object_id);
+    assert!(kinds.iter().all(|k| k == "chord"), "{kinds:?}");
+    assert!(kinds.len() >= 3, "{kinds:?}");
+}
+
+#[test]
+fn draw_line_on_a_face_from_its_edge_to_a_drawn_rectangle_is_kept_as_one_undo_step() {
+    // A line from the face's edge that only reaches the rectangle used to
+    // refuse (`loop_not_strictly_inside`, it would leave a slit); under
+    // unified drafting it is kept and the draw is one undo step.
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = box_with_rect_on_top(&mut conn, &mut doc);
+    let result = call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_line",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "points": [[0.0, 0.1, 0.2], [0.05, 0.1, 0.2]]
+        }),
+    );
+    assert!(!result["results"][0]["units"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn draw_arc_open_on_a_face_across_a_drawn_rectangle_splits_both_keeping_its_circle() {
+    // A half circle standing on the top face's edge, arching over the
+    // rectangle's sides: every face it crosses splits, and its facets keep
+    // the circle.
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = box_with_rect_on_top(&mut conn, &mut doc);
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_arc",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "center": [0.1, 0.0, 0.2],
+            "radius": 0.08,
+            "start_angle": 0.0,
+            "end_angle": std::f64::consts::PI
+        }),
+    );
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    let imprints = listed["imprints"].as_array().unwrap();
+    assert!(imprints.iter().all(|f| f["kind"] == "chord"));
+    let claimed = imprints
+        .iter()
+        .flat_map(|f| f["curves"].as_array().unwrap().iter())
+        .filter(|c| !c.is_null())
+        .count();
+    assert!(claimed > 0, "the arc keeps its circle");
+    // The arc across the rectangle is one drawn curve, cut in three runs.
+    let units = listed["curve_units"]
+        .as_array()
+        .expect("curve_units listed");
+    assert_eq!(units.len(), 1);
+    assert_eq!(units[0]["closed"], false);
+    assert_eq!(units[0]["runs"].as_array().unwrap().len(), 3);
 }

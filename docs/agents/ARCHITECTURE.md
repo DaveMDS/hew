@@ -113,22 +113,94 @@ anything visible in the whole scene (another Object's edge, a guide, an
 axis), because snapping is a read-only query, not a mutation. Only the
 merging of geometry into a single mesh is confined to the active Object.
 
-A shape drawn on a face and not yet pushed or pulled — an **imprint** — is
-real topology (a coplanar sub-face twinned with a hole in its parent, or a
-run of edges between two coplanar faces), never a separate overlay
-entity: that is what lets every operation (move, push/pull of the parent,
-slice, booleans) carry it along with no special code. Its editability is
-recovered the same way a sketch's islands are: derived on demand from the
-mesh, keyed by the sub-face's face handle or the run's first edge, never
-stored. An imprint selects, fills blue, lists in the outliner under its
-object, and slides, turns, scales, and deletes ON its face — each edit a
-coplanar surgery (an in-place vertex move of the loop, a dissolve, a
-merge-and-recut of a run) that cannot open the shell, refusing typed when
-it would leave the face or tilt off it. A shape drawn or moved all the
-way around others adopts them as its own holes, and deleting it hands
-them back to the face; only crossing or touching one refuses. The moment
-it is pushed or pulled
-it is solid geometry again and stops being an imprint.
+A shape drawn on a face and not yet pushed or pulled is **drawing**, and
+drawing on a face goes through the same engine as drawing on the ground
+(the drafting engine, below). Where the drawing separates regions of a
+face it is real topology (a coplanar sub-face twinned with a hole in its
+parent, or a run of edges between two coplanar faces), never a separate
+overlay entity: that is what lets every operation (move, push/pull of the
+parent, slice, booleans) carry it along with no special code. Drawing that
+is not topology (a loose chain, a dangling end, a pinch or sliver the face
+cannot hold) lives in the object's OWNED sketch (2.6), because a solid's
+face loops hold no loose edges. Nothing about the drawing is an object of
+its own: the app selects and edits it as **plane units** (below), derived
+on demand from the lifted plane and keyed by geometry, never stored. The
+moment a drawn region is pushed or pulled it is solid geometry again.
+
+Three kernel ops carry the topology half of every lowered edit and stay
+the vocabulary of history replay: `split_face` (a boundary-to-boundary cut,
+or a cut with both ends on the same hole loop), `merge_faces` (its exact
+inverse, across one run or, through the re-trace, several), and
+`retrace_face`, which inserts several paths at once and rebuilds the
+face's loops by rotational order at each vertex, the half-edge form of the
+ground's region tracer. Bridges between boundary loops are intermediate
+only: a re-trace whose result would hold a loop visiting a vertex twice, or
+two loops of one face sharing a vertex, is refused, so committed state
+never holds a pinch or a bridge and the file format carries no extra
+topology. `merge_faces` also dissolves a run between a face's outer loop
+and a **hole loop** of the face around it: the hole owner keeps its
+handle, outer loop, plane, and paint, and the hole is rerouted around what
+was dissolved. Each op records the other as its undo, so the split/merge
+identity and the history proof cover both kinds of run. These ops are no
+longer a UI entry point: the engine reaches them only through lowering.
+
+#### The drafting engine
+
+The plane is the drafting context. `Document::draft` (`crates/kernel/src/
+document/draft.rs`; `begin_draft` / `end_draft` for gestures spanning
+events) edits the whole drawing on one plane as one undo step:
+
+- **Lift** (`lift_plane`). Everything drawn on the plane is replayed into
+  ONE working `Sketch`: the face topology of every drawable object's faces
+  on it, those objects' owned sketches, and the free sketches there. A
+  solid's own edges on the plane (where its faces meet non-coplanar ones)
+  are FIXED: drafting splits them where lines meet them but never moves or
+  removes them.
+- **Edit.** Any ordinary `Sketch` method runs on the working sketch
+  (drawing, erasing, moving islands, dragging points, offsetting,
+  re-faceting), and the sticky rules arrange the edit exactly as they do
+  on the ground. This is why a shape on a face splits faces the way the
+  same shape splits a ground sketch, including a circle inscribed in an
+  imprinted rectangle or crossing shapes cutting a circle into arcs.
+- **Lower.** The edit is diffed against the lift by exact positions, and
+  each touched island is re-partitioned by where its edges lie. An edge
+  over a face that separates two regions becomes that face's topology, by
+  minimal delta (only removed edges are removed, only new ones inserted)
+  through `retrace_face` rehearsed on a copy. A loose edge over a face goes
+  to that object's OWNED sketch. An edge over no face goes to a FREE
+  sketch. Stores whose content did not change are not rewritten. A pinch
+  that would leave a face unpushable is kept as owned drawing instead of
+  refused.
+- **Materialization.** A free region may be closed partly by a solid's
+  edge (a crescent closed by a face's edge). Before any operation moves or
+  removes solid edges (transform, delete, boolean, slice, push/pull) the
+  spans that close such a region are copied into the free sketch, so the
+  void keeps what the user saw; spans backed by a face edge again are
+  dropped afterwards. A free region is thereby extrudable like any ground
+  region, and a covered region is pushed or pulled as its face.
+- **Units and keys** (`crates/kernel/src/unit_key.rs`, `Document::
+  plane_units`). Islands, curve runs, edges, and regions are keyed by
+  geometry, not slot history: FNV-1a over the `(u, v)` bit patterns in the
+  plane's frame, with axes taken from a quantized normal so one plane
+  reached two ways keys alike. An island key is its minimum edge key, a
+  curve key hashes the analytic circle (a polygon's also its corners, so
+  two polygons inscribed in one circle key apart), and a region key hashes its whole
+  outer ring, so a shape flush to a face's corner never collides with the
+  face around it. Keys survive save/load and replay; they change only when
+  the geometry they hash does. A curve run is a circle or arc whose edges
+  are covered across the plane, whole when it closes. Deleting a run
+  deletes it as one undo step; a circle drawn across a rectangle deletes
+  back to the rectangle.
+- **Surface.** `crates/wasm-api/src/draft_api.rs` exposes `draft_*` calls
+  (edits address edge keys; curve and region operations take curve and
+  region keys; `draft_begin_ctx` reopens a draft on a plane context
+  string). The app commits each draw gesture as one draft
+  (`app/src/tools/draftCommit.ts`) and lists and selects plane units
+  through `app/src/tools/planeUnits.ts`; the Hew API's face-target drawing
+  goes through the same engine.
+
+An OPEN chain on a face is legal: a dangling end is simply a loose edge
+and lives in the owned sketch.
 
 ### 2.5 Editing context, not selection, determines stickiness
 
@@ -136,7 +208,9 @@ Which Object a new stroke joins is determined by an editing context — the
 Object (or nested path of Group/Object) a user has entered, double-click
 style, the same gesture SketchUp uses. Drawing at the top level of the
 document creates or extends a Sketch; drawing after entering an Object
-applies that Object's sticky rules. Selection was considered as the
+applies that Object's sticky rules. Within either, the drawing plane is the
+drafting context (2.4): a gesture edits everything drawn on that plane,
+ground or face, as one draft. Selection was considered as the
 triggering signal and rejected: it is a weaker, more modal proxy for "what am
 I editing" than an explicit enter/exit context, and it doesn't generalize
 cleanly to nested Groups and Components. Entering a plain Object is pure
@@ -162,6 +236,29 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 - Booleans and push/pull are defined over watertight operands. Treating flat
   shapes as solids would force every operation to handle a face-versus-solid
   case in addition to solid-versus-solid, for no benefit.
+
+A Sketch has one of three owners: the world (a **free** sketch, drawn over
+no face), a component definition (in definition-local coordinates, reaching
+the scene through its instances), or an **Object** (an *owned* sketch, kept
+in `object_sketches`). An owned sketch holds exactly the drawing over the
+owner's faces that cannot be face topology (loose chains, pinched or sliver
+regions); it is expressed in the owner's frame and is in exactly one of the
+three states, never two. Its liveness is derived from the owner, so every
+hide, delete, and undo path carries it with no code of its own
+(`Document::sketch_tombstoned`). It rides with its owner: transforms
+apply to it, and push/pull moves the owned edges over the moved faces
+(`plan_face_ride` / `install_face_ride`). Booleans, slices, push-through,
+and merging sweeps copy each owned edge onto the result whose coplanar face
+lies under it (`carry_owned_sketches`), and duplicates, explodes, and
+library copies copy it to the new owner. Two invariants hold in debug
+builds: I7, no owned edge duplicates an edge of its owner on that plane;
+and I8, a coplanar same-facing owner face exists for every owned sketch. A
+reconcile pass (`reconcile_owned_drawing`) after every recorded action
+keeps them true, dropping an owned edge the owner now holds as topology,
+freeing a sketch left with no coplanar face, and deleting an emptied one,
+all inside the same undo step (`Document::complete_change` adds owned
+sketches to a change). The file records an owned sketch's owner as
+`owner_object` (HEW_FILE_FORMAT.md 4.6, v17).
 
 A Sketch is the larval form of a solid: extruding a region makes the
 drawn profile BECOME the solid's base face, so the geometry that bounded
@@ -197,7 +294,7 @@ was drawn from (center + radius), and extrusion stamps each side wall with
 the cylinder it is a chord facet of — durable metadata over the faceted
 carrier, propagated under a strict map-or-drop contract and held honest by
 the validator. The same identity follows a curve onto a solid's face: a
-circle or arc imprinted there stamps its facets' circle onto the solid's
+circle or arc drawn there (lowered to topology) stamps its facets' circle onto the solid's
 edges (`Edge::curve`, one claim per edge, so a pie or segment claims only
 its arc), every wall-raising path — boss, wall-building push/pull,
 push-through — stamps a wall per facet from its base edge's claim (gated
@@ -272,7 +369,7 @@ is designed so that watertightness can never be broken as a side effect:
   through an everyday action, reintroducing the exact failure mode the data
   model exists to prevent. Removing material or punching an opening always
   routes through push-through instead. The one sub-element a user can
-  delete is an imprint (2.4): dissolving a drawn shape merges two coplanar
+  delete is drawing (2.4): erasing a drawn shape on a face merges two coplanar
   faces back into one, which leaves the shell closed by construction, so
   the kernel accepts exactly that and still refuses any merge across
   non-coplanar faces.
@@ -601,7 +698,7 @@ ambiguous case (an edge lying exactly on a face with no area overlap) is
 refused outright rather than resolved arbitrarily. Results are also cleaned
 up: coplanar seams a boolean (or a through-cut push/pull) introduces are
 dissolved, so two joined tops read as one face — while coplanar edges the
-operands already carried (face imprints drawn but not yet extruded) are
+operands already carried (drawing on faces, not yet extruded) are
 preserved, and differing face materials are a hard stop.
 
 **A baked transform for plain geometry; a real pose only for Component

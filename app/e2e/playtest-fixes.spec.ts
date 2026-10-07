@@ -769,9 +769,11 @@ test('Tape Measure: an arrow-key axis lock in a non-ground plane matches the loc
 
   // The box's near top corner (max X/Y — closest to this camera), aimed so
   // its VERTICAL edge (runs along Z — not ground-plane-aligned) is directly
-  // visible and unoccluded by the box's own bulk.
+  // visible and unoccluded by the box's own bulk. Close enough that the edge
+  // spans about 100 px, so a plain on-edge stretch exists between its
+  // corner and its midpoint (each captures a point snap ~14 px out).
   const vCtx = await pinCamera(page, {
-    position: { x: 9, y: 7, z: 8 },
+    position: { x: 6, y: 4.5, z: 4.25 },
     target: { x: 3, y: 2, z: 0.5 },
     up: { x: 0, y: 0, z: 1 },
     fovDeg: 45,
@@ -798,7 +800,7 @@ test('Tape Measure: an arrow-key axis lock in a non-ground plane matches the loc
   // cross it.
   await page.keyboard.press('ArrowRight')
   await expect(page.getByText('Offset locked to red', { exact: false })).toBeVisible()
-  await moveTo(page, vCtx, 6, 2, 0.5)
+  await moveTo(page, vCtx, 4.5, 2, 0.5)
 
   await page.mouse.down()
   await page.mouse.up()
@@ -814,14 +816,14 @@ test('Tape Measure: an arrow-key axis lock in a non-ground plane matches the loc
   expect(Math.abs(guide.geom![5])).toBeCloseTo(1, 6)
   expect(Math.abs(guide.geom![3])).toBeLessThan(1e-6)
   expect(Math.abs(guide.geom![4])).toBeLessThan(1e-6)
-  // Offset EXACTLY along the locked red/X axis: the cursor's X (~6) drives
+  // Offset EXACTLY along the locked red/X axis: the cursor's X (~4.5) drives
   // the offset, while Y/Z are pinned to the edge's OWN Y/Z (~2, ~0.3) —
   // the cursor's OWN Z (0.5) is discarded, proving the lock (not the raw
   // cursor position) determines the offset direction. A slightly wider
   // tolerance here: the resolved point stacks TWO live picks (the edge
   // pick's own Y/Z, then a free-space pick constrained back onto that same
   // Y), so its slack compounds a bit past a single raw click's ~1 cm.
-  expect(guide.geom![0]).toBeCloseTo(6, 0)
+  expect(guide.geom![0]).toBeCloseTo(4.5, 0)
   expect(guide.geom![1]).toBeCloseTo(2, 0)
   expect(guide.geom![2]).toBeCloseTo(0.3, 1)
 

@@ -11,7 +11,10 @@ This doc answers two questions: what works now, and where Hew is going.
 ## What works now
 
 **The SketchUp moves.** Draw on any face or plane — lines, rectangles,
-circles, arcs, polygons — and push/pull the result into a solid.
+circles, arcs, polygons — and push/pull the result into a solid. A face
+behaves exactly like the ground: loose lines stay, a shape hanging over a
+face's edge splits into a part that grows the solid and a part that makes
+a new one, and moving a shape onto another arranges them.
 Orbit, pan, and zoom, same mouse buttons. Inference snapping everywhere,
 mostly the same shortcuts. Follow Me sweeps profiles into moldings,
 spheres, and goblets. Offset, Slice, through-cuts, and Move/Rotate/Scale

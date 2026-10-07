@@ -4472,6 +4472,219 @@ Re-capture a Scene's properties from the document's current state. Records no un
 
 ## hew.sketch
 
+### `hew.sketch.copy`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Copy drawing units on a plane by an offset.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "offset": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
+    "units": {
+      "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "plane",
+    "units",
+    "offset"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the plane units the edit made (new keys after the edit); empty for delete",
+  "properties": {
+    "units": {
+      "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+      "items": {
+        "properties": {
+          "key": {
+            "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "edge",
+              "region"
+            ],
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the owning solid, for topology and owned",
+            "type": "string"
+          },
+          "sketch_id": {
+            "description": "the sketch holding the drawing, for owned and free when it has one",
+            "type": "string"
+          },
+          "store": {
+            "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+            "enum": [
+              "topology",
+              "owned",
+              "free"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "key",
+          "store"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
+- `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+
+### `hew.sketch.delete`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Delete drawing units from a plane.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
+    "units": {
+      "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "plane",
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the plane units the edit made (new keys after the edit); empty for delete",
+  "properties": {
+    "units": {
+      "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+      "items": {
+        "properties": {
+          "key": {
+            "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "edge",
+              "region"
+            ],
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the owning solid, for topology and owned",
+            "type": "string"
+          },
+          "sketch_id": {
+            "description": "the sketch holding the drawing, for owned and free when it has one",
+            "type": "string"
+          },
+          "store": {
+            "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+            "enum": [
+              "topology",
+              "owned",
+              "free"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "key",
+          "store"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
+- `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+
 ### `hew.sketch.draw_arc`
 
 - **Version:** 1
@@ -4575,14 +4788,57 @@ Draw an arc on a plane spec.
       "type": "object"
     },
     {
-      "description": "on-face drawing (plane spec {\"face\": <locator>}) imprints the solid's face instead of creating a sketch region; mints transaction-scoped face tokens \"a\"/\"b\" (an open sweep — a plain boundary-to-boundary cut) or \"face\"/\"parent\" (a full-turn sweep, or a pie/segment close — closed, imprinted like a circle) (HEW_API.md §5.2/§5.4)",
+      "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" (an open sweep — a plain boundary-to-boundary cut) or \"face\"/\"parent\" (a full-turn sweep, or a pie/segment close — closed, imprinted like a circle) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
         "object_id": {
           "type": "string"
+        },
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "object_id"
+        "object_id",
+        "units"
       ],
       "type": "object"
     }
@@ -4600,11 +4856,6 @@ Draw an arc on a plane spec.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
-- `path_too_short` — The cut needs at least two points. Click a start and an end.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
 - `curve_claim_off_loop` — The drawn outline and its circle disagree, so the imprint was refused. Redraw the circle; if it keeps failing, use Report Bug.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
@@ -4696,14 +4947,57 @@ Draw a circle on a plane spec.
       "type": "object"
     },
     {
-      "description": "on-face drawing (plane spec {\"face\": <locator>}) imprints the solid's face instead of creating a sketch region; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4)",
+      "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
         "object_id": {
           "type": "string"
+        },
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "object_id"
+        "object_id",
+        "units"
       ],
       "type": "object"
     }
@@ -4722,8 +5016,6 @@ Draw a circle on a plane spec.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
 - `curve_claim_off_loop` — The drawn outline and its circle disagree, so the imprint was refused. Redraw the circle; if it keeps failing, use Report Bug.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
@@ -4810,14 +5102,57 @@ Draw a line (chain) on a plane spec.
       "type": "object"
     },
     {
-      "description": "on-face drawing (plane spec {\"face\": <locator>}) imprints the solid's face instead of creating a sketch region; mints transaction-scoped face tokens \"a\"/\"b\" naming the two faces the cut produced (HEW_API.md §5.2/§5.4)",
+      "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" naming the faces either side of the path's last cut — for a single cut, the two faces it produced (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
         "object_id": {
           "type": "string"
+        },
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "object_id"
+        "object_id",
+        "units"
       ],
       "type": "object"
     }
@@ -4833,9 +5168,6 @@ Draw a line (chain) on a plane spec.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
-- `path_too_short` — The cut needs at least two points. Click a start and an end.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
@@ -4928,14 +5260,57 @@ Draw a regular N-gon on a plane spec.
       "type": "object"
     },
     {
-      "description": "on-face drawing (plane spec {\"face\": <locator>}) imprints the solid's face instead of creating a sketch region; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4)",
+      "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
         "object_id": {
           "type": "string"
+        },
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "object_id"
+        "object_id",
+        "units"
       ],
       "type": "object"
     }
@@ -4952,8 +5327,6 @@ Draw a regular N-gon on a plane spec.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
 - `sides_above_cap`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
@@ -5053,14 +5426,57 @@ Draw an axis-aligned rectangle on a plane spec.
       "type": "object"
     },
     {
-      "description": "on-face drawing (plane spec {\"face\": <locator>}) imprints the solid's face instead of creating a sketch region; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4)",
+      "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
         "object_id": {
           "type": "string"
+        },
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
         }
       },
       "required": [
-        "object_id"
+        "object_id",
+        "units"
       ],
       "type": "object"
     }
@@ -5076,13 +5492,123 @@ Draw an axis-aligned rectangle on a plane spec.
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+
+### `hew.sketch.move`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Move drawing units (islands, edges, circles, regions) on a plane by an offset.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "offset": {
+      "description": "translation [x, y, z] in meters; must stay in the plane",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
+    "units": {
+      "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "plane",
+    "units",
+    "offset"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the plane units the edit made (new keys after the edit); empty for delete",
+  "properties": {
+    "units": {
+      "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+      "items": {
+        "properties": {
+          "key": {
+            "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "edge",
+              "region"
+            ],
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the owning solid, for topology and owned",
+            "type": "string"
+          },
+          "sketch_id": {
+            "description": "the sketch holding the drawing, for owned and free when it has one",
+            "type": "string"
+          },
+          "store": {
+            "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+            "enum": [
+              "topology",
+              "owned",
+              "free"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "key",
+          "store"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
+- `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
 
 ### `hew.sketch.offset`
 
@@ -5091,7 +5617,7 @@ Draw an axis-aligned rectangle on a plane spec.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Offset a region boundary within its sketch.
+Offset a region boundary within its sketch, or a face or plane region by its unit key.
 
 **Params schema:**
 
@@ -5102,7 +5628,12 @@ Offset a region boundary within its sketch.
       "description": "positive grows the material, negative shrinks it",
       "type": "number"
     },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
     "region": {
+      "description": "a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units (a face or plane region)",
       "type": "string"
     }
   },
@@ -5118,33 +5649,88 @@ Offset a region boundary within its sketch.
 
 ```json
 {
-  "properties": {
-    "curve_ids": {
-      "items": {
-        "type": "string"
+  "oneOf": [
+    {
+      "properties": {
+        "curve_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "region_id": {
+          "description": "present when exactly one region resulted",
+          "type": "string"
+        },
+        "region_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sketch": {
+          "type": "string"
+        }
       },
-      "type": "array"
+      "required": [
+        "sketch",
+        "region_ids",
+        "curve_ids"
+      ],
+      "type": "object"
     },
-    "region_id": {
-      "description": "present when exactly one region resulted",
-      "type": "string"
-    },
-    "region_ids": {
-      "items": {
-        "type": "string"
+    {
+      "description": "the unit-key form (`plane` given): the plane units the offset made",
+      "properties": {
+        "units": {
+          "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+          "items": {
+            "properties": {
+              "key": {
+                "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "edge",
+                  "region"
+                ],
+                "type": "string"
+              },
+              "object_id": {
+                "description": "the owning solid, for topology and owned",
+                "type": "string"
+              },
+              "sketch_id": {
+                "description": "the sketch holding the drawing, for owned and free when it has one",
+                "type": "string"
+              },
+              "store": {
+                "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+                "enum": [
+                  "topology",
+                  "owned",
+                  "free"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "key",
+              "store"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        }
       },
-      "type": "array"
-    },
-    "sketch": {
-      "type": "string"
+      "required": [
+        "units"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "sketch",
-    "region_ids",
-    "curve_ids"
-  ],
-  "type": "object"
+  ]
 }
 ```
 
@@ -5156,6 +5742,451 @@ Offset a region boundary within its sketch.
 - `offset_collapsed` — The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+
+### `hew.sketch.rotate`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Rotate drawing units on a plane about the plane normal through a point.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "angle": {
+      "description": "radians, counter-clockwise seen from the plane normal side",
+      "type": "number"
+    },
+    "axis_point": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "description": "a derived-point locator (HEW_API.md §5.3)",
+          "type": "object"
+        }
+      ]
+    },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
+    "units": {
+      "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "plane",
+    "units",
+    "axis_point",
+    "angle"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the plane units the edit made (new keys after the edit); empty for delete",
+  "properties": {
+    "units": {
+      "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+      "items": {
+        "properties": {
+          "key": {
+            "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "edge",
+              "region"
+            ],
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the owning solid, for topology and owned",
+            "type": "string"
+          },
+          "sketch_id": {
+            "description": "the sketch holding the drawing, for owned and free when it has one",
+            "type": "string"
+          },
+          "store": {
+            "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+            "enum": [
+              "topology",
+              "owned",
+              "free"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "key",
+          "store"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
+- `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+
+### `hew.sketch.scale`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Scale drawing units on a plane about a center, uniformly or per axis.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "center": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        {
+          "description": "a derived-point locator (HEW_API.md §5.3)",
+          "type": "object"
+        }
+      ]
+    },
+    "factor": {
+      "description": "uniform scale; give this or `factors`",
+      "type": "number"
+    },
+    "factors": {
+      "description": "per-axis [sx, sy, sz] in world axes; must keep the drawing in its plane",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    },
+    "units": {
+      "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "plane",
+    "units",
+    "center"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the plane units the edit made (new keys after the edit); empty for delete",
+  "properties": {
+    "units": {
+      "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+      "items": {
+        "properties": {
+          "key": {
+            "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "edge",
+              "region"
+            ],
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the owning solid, for topology and owned",
+            "type": "string"
+          },
+          "sketch_id": {
+            "description": "the sketch holding the drawing, for owned and free when it has one",
+            "type": "string"
+          },
+          "store": {
+            "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face",
+            "enum": [
+              "topology",
+              "owned",
+              "free"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "key",
+          "store"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_unit`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
+- `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+
+### `hew.sketch.units`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+
+List a plane's drawing as units: islands of edges (with where each is stored) and regions.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "plane": {
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "type": "object"
+    }
+  },
+  "required": [
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "regions": {
+      "items": {
+        "properties": {
+          "extrudable": {
+            "description": "true when the region lies over no face and hew.solid.extrude takes it as a new Object",
+            "type": "boolean"
+          },
+          "face": {
+            "description": "a face locator ({object, at}) for the region when it IS a face of that solid — pass it to hew.solid.push_pull",
+            "type": "object"
+          },
+          "holes": {
+            "items": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "key": {
+            "description": "rgn_<hex16>",
+            "type": "string"
+          },
+          "object_id": {
+            "description": "the solid under the region, when one is",
+            "type": "string"
+          },
+          "outer": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "key",
+          "outer",
+          "holes",
+          "extrudable"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "units": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "properties": {
+                "a": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "b": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "curve": {
+                  "description": "present when the edge is a facet of an analytic circle",
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "key": {
+                      "description": "crv_<hex16>",
+                      "type": "string"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "type": "object"
+                },
+                "key": {
+                  "description": "edg_<hex16>",
+                  "type": "string"
+                },
+                "object_id": {
+                  "type": "string"
+                },
+                "sketch_id": {
+                  "type": "string"
+                },
+                "store": {
+                  "enum": [
+                    "topology",
+                    "owned",
+                    "free"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key",
+                "a",
+                "b",
+                "store"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "key": {
+            "description": "isl_<hex16>",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "units",
+    "regions"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
 
 ## hew.solid
 
@@ -5166,7 +6197,7 @@ Offset a region boundary within its sketch.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Delete an imprint (sub-face or chord), dissolving it back into its face.
+Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.
 
 **Params schema:**
 
@@ -5174,7 +6205,7 @@ Delete an imprint (sub-face or chord), dissolving it back into its face.
 {
   "properties": {
     "imprint": {
-      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point)",
       "type": "object"
     }
   },
@@ -5203,17 +6234,9 @@ Delete an imprint (sub-face or chord), dissolving it back into its face.
 
 **Refusals:**
 
-- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
-- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
-- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
-- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
-- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_in_plane` — A shape on a face can only move within the face's plane. Slide, turn, or scale it on the face, or delete it and draw it again where you want it.
 - `not_an_imprint`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
 - `locator_missed`
@@ -5238,7 +6261,12 @@ Extrude a region into a new Object, consuming the profile.
     "distance": {
       "type": "number"
     },
+    "plane": {
+      "description": "HEW_API.md §7 plane spec naming the drafting context a unit-key `region` belongs to. A region over no face extrudes as a new Object; a region that is a face of a solid push/pulls that face (result as hew.solid.push_pull); a region over a face that cannot hold it refuses region_not_pushable",
+      "type": "object"
+    },
     "region": {
+      "description": "a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units",
       "type": "string"
     }
   },
@@ -5254,15 +6282,19 @@ Extrude a region into a new Object, consuming the profile.
 
 ```json
 {
-  "description": "mints face tokens \"base\", \"top\", \"side.<n>\" (boundary-loop order) — HEW_API.md §5.4's normative example",
+  "description": "mints face tokens \"base\", \"top\", \"side.<n>\" (boundary-loop order) — HEW_API.md §5.4's normative example — when a new Object results",
   "properties": {
     "object_id": {
       "type": "string"
+    },
+    "object_ids": {
+      "description": "a through-cut's resulting pieces (unit-key form over a face, as hew.solid.push_pull)",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
-  "required": [
-    "object_id"
-  ],
   "type": "object"
 }
 ```
@@ -5273,6 +6305,8 @@ Extrude a region into a new Object, consuming the profile.
 - `degenerate_geometry` — This profile can't be extruded into a valid solid. Simplify the shape and try again.
 - `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_unit`
+- `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
 
 ### `hew.solid.follow_me`
 
@@ -5403,7 +6437,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - **Class:** read-only
 - **Served:** kernel
 
-List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
+Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per drawing plane; hew.sketch.units is the general form.
 
 **Params schema:**
 
@@ -5426,11 +6460,37 @@ List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
 ```json
 {
   "properties": {
+    "curve_units": {
+      "description": "drawn circles and arcs (whole or cut by other drawing into several runs) on the object's drawing planes: each {closed, curve: {center, radius}, runs: [{at, path}]}, a run that is a chord above carrying that chord's at locator — the whole drawn curve, a circle when closed, else an arc",
+      "items": {
+        "properties": {
+          "closed": {
+            "type": "boolean"
+          },
+          "curve": {
+            "type": "object"
+          },
+          "runs": {
+            "items": {
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "closed",
+          "curve",
+          "runs"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
     "imprints": {
       "items": {
         "properties": {
           "at": {
-            "description": "sub_face: an interior point clear of any nested imprint; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint",
+            "description": "sub_face: an interior point clear of any nested sub-face; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint",
             "items": {
               "type": "number"
             },
@@ -5443,6 +6503,13 @@ List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
           },
           "curves": {
             "description": "per edge of the loop (sub_face) or run (chord), in order: {center, radius} when that edge is a facet of a drawn circle or arc, else null — a pie, segment, or edge-to-edge arc reports its arc here",
+            "type": "array"
+          },
+          "holes": {
+            "description": "sub_face only: the hole loops' positions",
+            "items": {
+              "type": "array"
+            },
             "type": "array"
           },
           "kind": {
@@ -5460,8 +6527,15 @@ List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
             "type": "array"
           },
           "nested": {
-            "description": "sub_face only: count of directly nested imprints",
+            "description": "sub_face only: count of sub-faces lying inside this one",
             "type": "integer"
+          },
+          "normal": {
+            "description": "the drawing plane's normal",
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
           },
           "path": {
             "description": "chord only: the run's vertex positions, first to last",
@@ -5469,6 +6543,14 @@ List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
               "type": "array"
             },
             "type": "array"
+          },
+          "region": {
+            "description": "sub_face only: the region's unit key (rgn_…) on that plane, as hew.sketch.units reports it",
+            "type": "string"
+          },
+          "unit": {
+            "description": "the island's unit key (isl_…) on that plane, as hew.sketch.units reports it",
+            "type": "string"
           }
         },
         "required": [
@@ -5481,7 +6563,8 @@ List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
     }
   },
   "required": [
-    "imprints"
+    "imprints",
+    "curve_units"
   ],
   "type": "object"
 }
@@ -5558,7 +6641,7 @@ Boolean intersection of two solids.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Slide an imprint (sub-face or chord) on its face by a translation.
+Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.
 
 **Params schema:**
 
@@ -5566,7 +6649,7 @@ Slide an imprint (sub-face or chord) on its face by a translation.
 {
   "properties": {
     "imprint": {
-      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point)",
       "type": "object"
     },
     "offset": {
@@ -5604,17 +6687,9 @@ Slide an imprint (sub-face or chord) on its face by a translation.
 
 **Refusals:**
 
-- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
-- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
-- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
-- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
-- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_in_plane` — A shape on a face can only move within the face's plane. Slide, turn, or scale it on the face, or delete it and draw it again where you want it.
 - `not_an_imprint`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
 - `locator_missed`
@@ -5700,7 +6775,7 @@ Push/pull a face of a solid with the tool's full semantics.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Turn an imprint on its face about the face normal through a pivot point.
+Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.
 
 **Params schema:**
 
@@ -5728,7 +6803,7 @@ Turn an imprint on its face about the face normal through a pivot point.
       "type": "number"
     },
     "imprint": {
-      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point)",
       "type": "object"
     }
   },
@@ -5759,17 +6834,9 @@ Turn an imprint on its face about the face normal through a pivot point.
 
 **Refusals:**
 
-- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
-- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
-- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
-- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
-- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_in_plane` — A shape on a face can only move within the face's plane. Slide, turn, or scale it on the face, or delete it and draw it again where you want it.
 - `not_an_imprint`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
 - `locator_missed`
@@ -5785,7 +6852,7 @@ Turn an imprint on its face about the face normal through a pivot point.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Uniformly scale an imprint on its face about an anchor point.
+Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
 
 **Params schema:**
 
@@ -5814,7 +6881,7 @@ Uniformly scale an imprint on its face about an anchor point.
       "type": "number"
     },
     "imprint": {
-      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines",
+      "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point)",
       "type": "object"
     }
   },
@@ -5845,17 +6912,9 @@ Uniformly scale an imprint on its face about an anchor point.
 
 **Refusals:**
 
-- `not_in_plane` — A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face.
-- `nested_not_flat` — Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first.
-- `not_an_inner_face` — Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself.
-- `loop_self_intersects` — The shape's outline crosses itself. Draw a simple, non-crossing outline.
-- `loop_not_strictly_inside` — The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary.
-- `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
-- `not_a_chord` — That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way.
-- `endpoint_not_on_boundary` — A splitting line must start and end on the face's edges. Snap both ends to the face boundary.
-- `path_not_simple` — The line crosses itself or touches the face's edge partway along. Draw a simple path from edge to edge.
-- `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `not_in_plane` — A shape on a face can only move within the face's plane. Slide, turn, or scale it on the face, or delete it and draw it again where you want it.
 - `not_an_imprint`
+- `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
 - `locator_missed`

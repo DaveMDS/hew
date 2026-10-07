@@ -35,6 +35,8 @@ Circles and arcs get their own callouts, and which one you get depends on what y
 - **Click two points across the curve, through the centre** — a diameter, drawn rim to rim.
 - **Click two arbitrary points on the curve** — an ordinary linear dimension of that chord, because that's what you measured. It isn't a radius and won't claim to be one.
 
+Circles, arcs, and polygons drawn on a solid's face are measured and snapped the same way as those on the ground, including a polygon's centre snap.
+
 The drawn line always shows what's being measured: a radius runs from the centre mark to the rim, a diameter spans the full width through the centre.
 
 ## Leader text

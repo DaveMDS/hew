@@ -34,7 +34,78 @@ function makeRegionPick(sketch: bigint, region: bigint) {
   return { sketch: () => sketch, region: () => region, free: vi.fn() }
 }
 
+// A preselected path is a DRAFT ref (the drawing on a plane): the plane
+// listing says which edges of which FREE sketch it stands for, and the tool
+// recovers the sketch's edge handles by matching endpoints. Each sketch gets
+// its own plane (z = sketch id) so the ref's context identifies it.
+const ctxOfSketchId = (sketch: bigint): string => `{"plane":[0,0,${Number(sketch)},0,0,1]}`
+const hexKey = (n: bigint | number): string => BigInt(n).toString(16).padStart(16, '0')
+interface DrawnEdge { handle: bigint; a: readonly number[]; b: readonly number[]; curveKey?: string; runKey?: string }
+/** One unit-length segment per handle, side by side along x. */
+const segEdges = (handles: bigint[]): DrawnEdge[] =>
+  handles.map((h) => ({ handle: h, a: [Number(h), 0, 0], b: [Number(h) + 1, 0, 0] }))
+
+/** The plane-listing slice of a scene double for free sketches. */
+function drawing(sketches: { sketch: bigint; edges: DrawnEdge[] }[]) {
+  const byCtx = new Map(sketches.map((d) => [ctxOfSketchId(d.sketch), d]))
+  const endpoints = new Map<bigint, number[]>()
+  for (const d of sketches) for (const e of d.edges) endpoints.set(e.handle, [...e.a, ...e.b])
+  const stub = {
+    plane_units_json: (ctx: string) => {
+      const d = byCtx.get(ctx)
+      if (d === undefined) throw new Error('StalePlane')
+      return JSON.stringify({
+        units: [{
+          key: hexKey(1000n + d.sketch),
+          // A curve RUN per (curve key, run key); a facet with no explicit run
+          // is its circle's single run, keyed by the curve key.
+          curves: (() => {
+            const runs = new Map<string, { curve_key: string; edges: string[] }>()
+            for (const e of d.edges) {
+              if (e.curveKey === undefined) continue
+              const rk = e.runKey ?? e.curveKey
+              const r = runs.get(rk) ?? { curve_key: e.curveKey, edges: [] }
+              r.edges.push(hexKey(e.handle))
+              runs.set(rk, r)
+            }
+            return [...runs].map(([key, r]) => ({ key, curve_key: r.curve_key, kind: 'circle', center: [0, 0, 0], radius: 1, edges: r.edges }))
+          })(),
+          edges: d.edges.map((e) => ({
+            key: hexKey(e.handle),
+            a: e.a,
+            b: e.b,
+            store: { kind: 'free', sketch: Number(d.sketch) },
+            curve: e.curveKey !== undefined ? { center: [0, 0, 0], radius: 1 } : null,
+          })),
+        }],
+        regions: [],
+      })
+    },
+    pick_plane_unit: (ctx: string, ray: Float64Array) => {
+      const d = byCtx.get(ctx)
+      if (d === undefined) return 'null'
+      const e = d.edges.find(
+        (x) => Math.abs((x.a[0] + x.b[0]) / 2 - ray[0]) < 1e-9 && Math.abs((x.a[1] + x.b[1]) / 2 - ray[1]) < 1e-9,
+      )
+      return e === undefined
+        ? 'null'
+        : JSON.stringify({ edge: hexKey(e.handle), unit: hexKey(1000n + d.sketch), curve: e.curveKey ?? null, run: e.curveKey === undefined ? null : (e.runKey ?? e.curveKey) })
+    },
+    sketch_island_at_edge_positions: vi.fn(() => 5n),
+  }
+  return { stub, endpoints, handles: sketches.flatMap((d) => d.edges.map((e) => e.handle)) }
+}
+type Drawing = ReturnType<typeof drawing>
+const edgeRef = (sketch: bigint, handle: bigint): NodeRef => ({
+  kind: 'draft-edge', id: handle, ctx: ctxOfSketchId(sketch), key: hexKey(handle),
+})
+const curveRef = (sketch: bigint, key: bigint): NodeRef => ({
+  kind: 'draft-curve', id: key, ctx: ctxOfSketchId(sketch), key: hexKey(key),
+})
+
 function makeWasmScene(opts: {
+  /** The free-sketch drawing a preselected draft ref resolves through. */
+  drawing?: Drawing
   edgePick?: ReturnType<typeof makeEdgePick>
   facePick?: ReturnType<typeof makeFacePick>
   regionPick?: ReturnType<typeof makeRegionPick>
@@ -65,9 +136,12 @@ function makeWasmScene(opts: {
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     sketch_edge_island: vi.fn(() => 5n),
-    sketch_island_edges: vi.fn(() => new BigUint64Array(opts.islandEdges ?? [])),
+    sketch_island_edges: vi.fn(() => new BigUint64Array(opts.islandEdges ?? opts.drawing?.handles ?? [])),
     sketch_curve_edges: vi.fn(() => new BigUint64Array([])),
-    sketch_edge_endpoints: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0])),
+    sketch_edge_endpoints: vi.fn(
+      (_s: bigint, e: bigint) => new Float64Array(opts.drawing?.endpoints.get(e) ?? [0, 0, 0, 1, 0, 0]),
+    ),
+    ...(opts.drawing ? opts.drawing.stub : {}),
     face_boundary: vi.fn(() => new Float32Array([0, 0, 1, 1, 0, 1, 1, 1, 1])),
     instance_pose: vi.fn(
       () => new Float64Array(opts.instancePose ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
@@ -101,11 +175,8 @@ function makeTool(scene: WasmScene, selection: NodeRef[] = []) {
 describe('FollowMeTool — path from preselection', () => {
   it('starts at pick-profile when sketch edges are preselected, and commits on a region click', () => {
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ regionPick })
-    const selection: NodeRef[] = [
-      { kind: 'sketch-edge', id: 1n, sketch: 9n },
-      { kind: 'sketch-edge', id: 2n, sketch: 9n },
-    ]
+    const scene = makeWasmScene({ regionPick, drawing: drawing([{ sketch: 9n, edges: segEdges([1n, 2n]) }]) })
+    const selection: NodeRef[] = [edgeRef(9n, 1n), edgeRef(9n, 2n)]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
 
     expect(tool.statusHint()).toContain('profile')
@@ -124,11 +195,9 @@ describe('FollowMeTool — path from preselection', () => {
 
   it('expands a preselected curve to its facet edges', () => {
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ regionPick })
-    ;(scene.sketch_curve_edges as ReturnType<typeof vi.fn>).mockReturnValue(
-      new BigUint64Array([4n, 5n, 6n]),
-    )
-    const selection: NodeRef[] = [{ kind: 'sketch-curve', id: 3n, sketch: 9n }]
+    const facets = segEdges([4n, 5n, 6n]).map((e) => ({ ...e, curveKey: hexKey(3n) }))
+    const scene = makeWasmScene({ regionPick, drawing: drawing([{ sketch: 9n, edges: facets }]) })
+    const selection: NodeRef[] = [curveRef(9n, 3n)]
     const { tool } = makeTool(scene, selection)
 
     tool.onPointerDown(null, RAY)
@@ -138,12 +207,24 @@ describe('FollowMeTool — path from preselection', () => {
     expect(tool.statusHint()).toContain('path') // reset after commit
   })
 
+  it('a preselected RUN sweeps only its facets; the circle\'s curve key (a widened selection) sweeps every run', () => {
+    const mk = (selection: NodeRef[]) => {
+      const regionPick = makeRegionPick(20n, 21n)
+      const facets = segEdges([4n, 5n, 6n, 7n]).map((e, i) => ({ ...e, curveKey: hexKey(3n), runKey: hexKey(i < 2 ? 0xa1 : 0xa2) }))
+      const scene = makeWasmScene({ regionPick, drawing: drawing([{ sketch: 9n, edges: facets }]) })
+      makeTool(scene, selection).tool.onPointerDown(null, RAY)
+      return Array.from((scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0][3] as BigUint64Array)
+    }
+    expect(mk([curveRef(9n, 0xa2n)])).toEqual([6n, 7n])
+    expect(mk([curveRef(9n, 3n)])).toEqual([4n, 5n, 6n, 7n])
+  })
+
   it('sweeps a single preselected edge alone — the selection is the path, not its island', () => {
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n] })
+    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n], drawing: drawing([{ sketch: 9n, edges: segEdges([1n, 2n]) }]) })
     // A Select click on one line of an L yields exactly this selection; a
     // triple-click would have selected the island instead.
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool, onCommit } = makeTool(scene, selection)
 
     expect(tool.statusHint()).toContain('Click the profile')
@@ -159,11 +240,8 @@ describe('FollowMeTool — path from preselection', () => {
 
   it('honors an explicit multi-edge preselection as picked (deliberate partial path)', () => {
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n, 3n, 4n] })
-    const selection: NodeRef[] = [
-      { kind: 'sketch-edge', id: 1n, sketch: 9n },
-      { kind: 'sketch-edge', id: 2n, sketch: 9n },
-    ]
+    const scene = makeWasmScene({ regionPick, islandEdges: [1n, 2n, 3n, 4n], drawing: drawing([{ sketch: 9n, edges: segEdges([1n, 2n]) }]) })
+    const selection: NodeRef[] = [edgeRef(9n, 1n), edgeRef(9n, 2n)]
     const { tool } = makeTool(scene, selection)
 
     tool.onPointerDown(null, RAY)
@@ -174,13 +252,59 @@ describe('FollowMeTool — path from preselection', () => {
   })
 
   it('ignores a preselection spanning two sketches (starts at pick-path)', () => {
-    const scene = makeWasmScene()
-    const selection: NodeRef[] = [
-      { kind: 'sketch-edge', id: 1n, sketch: 9n },
-      { kind: 'sketch-edge', id: 2n, sketch: 10n },
-    ]
+    const scene = makeWasmScene({
+      drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }, { sketch: 10n, edges: segEdges([2n]) }]),
+    })
+    const selection: NodeRef[] = [edgeRef(9n, 1n), edgeRef(10n, 2n)]
     const { tool } = makeTool(scene, selection)
     expect(tool.statusHint()).toContain('path')
+  })
+})
+
+describe('FollowMeTool — path from a draft-ref preselection (free sketches only)', () => {
+  /** A drawing whose edge 2 lives on an object's face (topology) rather than
+   *  in a free sketch. */
+  function mixedDrawing() {
+    const d = drawing([{ sketch: 9n, edges: segEdges([1n, 2n]) }])
+    const orig = d.stub.plane_units_json
+    d.stub.plane_units_json = (ctx: string) => {
+      const l = JSON.parse(orig(ctx)) as { units: { edges: { key: string; store: object }[] }[] }
+      l.units[0].edges[1].store = { kind: 'topology', object: 4 }
+      return JSON.stringify(l)
+    }
+    return d
+  }
+
+  it('a whole free-sketch island preselects every edge of that sketch as the path', () => {
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ regionPick, drawing: drawing([{ sketch: 9n, edges: segEdges([1n, 2n, 3n]) }]) })
+    const island: NodeRef = { kind: 'draft-island', id: 1009n, ctx: ctxOfSketchId(9n), key: hexKey(1009n) }
+    const { tool } = makeTool(scene, [island])
+    expect(tool.statusHint()).toContain('Click the profile')
+    tool.onPointerDown(null, RAY)
+    const call = (scene.follow_me_along_edges as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[2]).toBe(9n)
+    expect(Array.from(call[3] as BigUint64Array).sort()).toEqual([1n, 2n, 3n])
+  })
+
+  it('a draft ref with any topology edge yields no preselected path (starts at pick-path)', () => {
+    const scene = makeWasmScene({ drawing: mixedDrawing() })
+    const island: NodeRef = { kind: 'draft-island', id: 1009n, ctx: ctxOfSketchId(9n), key: hexKey(1009n) }
+    const { tool } = makeTool(scene, [island])
+    expect(tool.statusHint()).toContain('path')
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('a draft edge on an object face is no path, while the same sketch\'s free edge still is', () => {
+    const scene = makeWasmScene({ drawing: mixedDrawing() })
+    expect(makeTool(scene, [edgeRef(9n, 2n)]).tool.capturingInput()).toBe(false)
+    expect(makeTool(scene, [edgeRef(9n, 1n)]).tool.capturingInput()).toBe(true)
+  })
+
+  it('a stale draft ref (plane or key gone) yields no preselection', () => {
+    const scene = makeWasmScene({ drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) })
+    expect(makeTool(scene, [edgeRef(9n, 77n)]).tool.capturingInput()).toBe(false)
+    expect(makeTool(scene, [edgeRef(12n, 1n)]).tool.capturingInput()).toBe(false)
   })
 })
 
@@ -412,9 +536,9 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
   it('the stale-preselection face recovery works for a member face too, once inside its own instance', () => {
     const facePick = makeFacePick(30n, 31n, 42n)
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ facePick, regionPick })
+    const scene = makeWasmScene({ facePick, regionPick, drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) })
     // A leftover single-edge preselection → the tool starts at pick-profile.
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
     tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
     tool.setFaceEligibility((_object, instance) => instance === 42n)
@@ -436,8 +560,8 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
   it('the stale-preselection face recovery still refuses a face OUTSIDE the entered instance', () => {
     const facePick = makeFacePick(30n, 31n, 99n) // a different instance
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ facePick, regionPick })
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const scene = makeWasmScene({ facePick, regionPick, drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) })
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
     tool.setEditContext({ kind: 'instance', id: 42n, component: 50n })
     tool.setFaceEligibility((_object, instance) => instance === 42n)
@@ -455,8 +579,8 @@ describe('FollowMeTool — face frame guard (only plain top-level faces sweep)',
     // PATH now (see `_faceFollowable`'s doc), so it can no longer stand in
     // for "ineligible" here; a grouped face still can.
     const facePick = makeFacePick(30n, 31n)
-    const scene = makeWasmScene({ facePick, faceParent: 88n }) // no regionPick → every region pick misses
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const scene = makeWasmScene({ facePick, faceParent: 88n, drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) }) // no regionPick → every region pick misses
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
 
     // Three clicks that each miss the region and land on the same ineligible
@@ -539,11 +663,11 @@ describe('FollowMeTool — face-path refusals get face-specific copy', () => {
   it('a solid-face click at the profile stage RE-PICKS the path (stale-preselection recovery)', () => {
     const facePick = makeFacePick(30n, 31n)
     const regionPick = makeRegionPick(20n, 21n)
-    const scene = makeWasmScene({ facePick, regionPick })
+    const scene = makeWasmScene({ facePick, regionPick, drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) })
     // The maintainer trap: an edge of the profile's own outline was left
     // selected from placing it, so the tool silently starts at
     // pick-profile with that edge as the path.
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool, onCommit, onToast } = makeTool(scene, selection)
     expect(tool.statusHint()).toContain('Click the profile')
 
@@ -615,8 +739,8 @@ describe('FollowMeTool — face-path refusals get face-specific copy', () => {
 
   it('a sketch-edge near-miss at the profile stage stays a no-op (an edge must not steal the path)', () => {
     const edgePick = makeEdgePick(9n, 1n)
-    const scene = makeWasmScene({ edgePick, islandEdges: [1n, 2n] })
-    const { tool, onCommit } = makeTool(scene, [{ kind: 'sketch-edge', id: 7n, sketch: 9n }])
+    const scene = makeWasmScene({ edgePick, islandEdges: [1n, 2n, 7n], drawing: drawing([{ sketch: 9n, edges: segEdges([7n]) }]) })
+    const { tool, onCommit } = makeTool(scene, [edgeRef(9n, 7n)])
     expect(tool.statusHint()).toContain('Click the profile')
 
     // Region miss, no face, but an edge within the pick cone (a near-miss
@@ -1246,6 +1370,11 @@ describe('FollowMeTool — start verdict, the other outcomes', () => {
         const b = CORNERS[(k + 1) % CORNERS.length]
         return new Float64Array([a[0], a[1], a[2], b[0], b[1], b[2]])
       }),
+      // The ground rectangle as a free-sketch drawing a draft ref resolves through.
+      ...drawing([{
+        sketch: 9n,
+        edges: RECT_EDGES.map((h, k) => ({ handle: h, a: CORNERS[k], b: CORNERS[(k + 1) % CORNERS.length] })),
+      }]).stub,
       sketch_edge_curve: vi.fn(() => undefined), // plain segments, no curve
       sketch_curve_geom: vi.fn(() => undefined),
       sketch_plane: vi.fn((s: bigint) =>
@@ -1358,7 +1487,7 @@ describe('FollowMeTool — start verdict, the other outcomes', () => {
     // constructor, was wiped before the tool ever went live.
     const scene = rectScene([0, 0, 0, 1, 0, 0])
     const preview = new THREE.Group()
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const tool = new FollowMeTool(scene, preview, vi.fn(), vi.fn(), vi.fn(), selection)
     expect(preview.children.length).toBeGreaterThan(0)
 
@@ -1880,11 +2009,11 @@ describe('FollowMeTool — K2 direction-aware drag (signed partial sweep)', () =
 
 describe('FollowMeTool — capturingInput (component-edit-parity.md phase A2)', () => {
   it('is false at the idle pick-path stage, true once a path is picked/preselected', () => {
-    const scene = makeWasmScene({})
+    const scene = makeWasmScene({ drawing: drawing([{ sketch: 9n, edges: segEdges([1n]) }]) })
     const { tool: idleTool } = makeTool(scene)
     expect(idleTool.capturingInput()).toBe(false)
 
-    const selection: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const selection: NodeRef[] = [edgeRef(9n, 1n)]
     const { tool: armedTool } = makeTool(scene, selection)
     expect(armedTool.capturingInput()).toBe(true) // preselection starts at pick-profile
   })

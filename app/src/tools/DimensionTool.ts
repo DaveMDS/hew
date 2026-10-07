@@ -56,7 +56,8 @@
  *      entirely — an explicit center/antipodal click always wins with its
  *      own definite kind).
  *   4. Second click decides, per the disambiguation table:
- *      off the curve (free space)  -> radial dimension, default kind Radius
+ *      off the curve (free space, or the bare interior of a face)
+ *                                  -> radial dimension, default kind Radius
  *        for an arc / Diameter for a full circle (SketchUp's rule),
  *        overridable by Tab.
  *      the curve's centre           -> Radius, anchored at the FIRST click's
@@ -106,6 +107,7 @@ import {
 } from '../viewport/annotationLayout'
 import { nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { worldFaceNormal } from './faceDraw'
+import { ctxGround, ctxOfFace, ctxOfSketch, planeOfCtx, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 import { projectPointOntoPlane } from './tapeOffset'
 import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
@@ -236,14 +238,131 @@ interface ResolvedCurve {
   planePoint: V3
   planeNormal: V3
   /** Owning sketch, so the disambiguation logic can query the curve's own
-   * chain (arc-vs-full-circle, `isFullCircle`). */
-  sketch: bigint
+   * chain (arc-vs-full-circle, `isFullCircle`). `null` for a circle read
+   * from a plane's listing (a drawing on a solid's face). */
+  sketch: bigint | null
   /** The curve chain's own handle (`sketch_curve_geom`'s `curve` id) — lets
    * `isFullCircle` ask the kernel for every one of the chain's edges
    * directly (`sketch_curve_edges`), regardless of which specific point the
    * resolving snap named (a quadrant, the centre, or a plain rim point all
-   * resolve the SAME curve handle). */
-  curveHandle: bigint
+   * resolve the SAME curve handle). `null` for a listing circle. */
+  curveHandle: bigint | null
+  /** The plane context the circle was listed under (a listing circle). */
+  ctx: string | null
+  /** Whether a listing circle is a whole circle rather than an arc or a run
+   *  of one. */
+  fullCircle: boolean
+}
+
+/** How near (m) a snap must lie to a listed circle's rim or center to name it. */
+const LISTED_CURVE_EPS = 1e-5
+
+/** Distance from `p` to the segment `a`-`b`. */
+function distToSegment(p: V3, a: V3, b: V3): number {
+  const ab = sub(b, a)
+  const l2 = dot(ab, ab)
+  const t = l2 > 0 ? Math.max(0, Math.min(1, dot(sub(p, a), ab) / l2)) : 0
+  return length(sub(p, add(a, scale(ab, t))))
+}
+
+/**
+ * Resolve `snap` to a circle in a plane's `plane_units_json` listing — the
+ * unified-drafting reading of a drawn curve on ANY plane (a face's drawing
+ * included, where no free sketch holds it). The planes tried: `ctxHint` alone
+ * when given (the first click's own plane), else the plane of the sketch the
+ * snap names, the face under `ray`, and the ground. The circle is the run
+ * whose rim or center the snap point lies on.
+ */
+function tryResolveListedCurve(
+  wasmScene: WasmScene,
+  snap: Snap,
+  ray: Ray | undefined,
+  ctxHint: string | null,
+): ResolvedCurve | null {
+  const ctxs: string[] = []
+  try {
+    if (ctxHint !== null) {
+      ctxs.push(ctxHint)
+    } else {
+      if (snap.sketch !== undefined) {
+        const c = ctxOfSketch(wasmScene, snap.sketch, null)
+        if (c !== null) ctxs.push(c)
+      }
+      if (ray !== undefined && typeof wasmScene.pick_face === 'function') {
+        const pick = wasmScene.pick_face(
+          ray.origin[0], ray.origin[1], ray.origin[2],
+          ray.direction[0], ray.direction[1], ray.direction[2],
+        )
+        if (pick !== undefined) {
+          try {
+            const c = pick.instance() === undefined ? ctxOfFace(wasmScene, pick.object(), pick.face(), null) : null
+            if (c !== null) ctxs.push(c)
+          } finally {
+            pick.free()
+          }
+        }
+      }
+      ctxs.push(ctxGround())
+    }
+  } catch {
+    return null
+  }
+  if (typeof wasmScene.plane_units_json !== 'function') return null
+  const P: V3 = [snap.x, snap.y, snap.z]
+  for (const ctx of ctxs) {
+    const pl = planeOfCtx(ctx)
+    const pu = readPlaneUnits(wasmScene as unknown as PlaneUnitsScene, ctx)
+    if (pl === null || pu === null) continue
+    if (Math.abs(dot(sub(P, pl.point), pl.normal)) > LISTED_CURVE_EPS) continue
+    let best: { err: number; unit: number; run: number } | null = null
+    // A snap ON a drawing edge (a rim click between facet vertices, a facet
+    // midpoint) lies on the CHORD, off the true circle by the sagitta: name
+    // the circle by the snapped edge's run, whatever the point's distance to
+    // the circle. Vertex/quadrant/center snaps keep the on-circle check.
+    if (snap.kind === 'on-edge' || snap.kind === 'midpoint') {
+      pu.units.forEach((u, ui) => {
+        u.curves.forEach((run, ri) => {
+          // A null radius is an ellipse (a circle in a stretched instance):
+          // nothing radial to measure.
+          if (run.kind !== 'circle' || run.radius === null) return
+          for (const k of run.edges) {
+            const e = pu.edgeByKey.get(k)?.edge
+            if (e === undefined) continue
+            const err = distToSegment(P, e.a, e.b)
+            if (err <= LISTED_CURVE_EPS && (best === null || err < best.err)) best = { err, unit: ui, run: ri }
+          }
+        })
+      })
+    }
+    if (best === null) {
+      pu.units.forEach((u, ui) => {
+        u.curves.forEach((run, ri) => {
+          if (run.kind !== 'circle' || run.radius === null) return
+          const d = length(sub(P, run.center))
+          const err = Math.min(d, Math.abs(d - run.radius))
+          if (err <= LISTED_CURVE_EPS && (best === null || err < best.err)) best = { err, unit: ui, run: ri }
+        })
+      })
+    }
+    if (best === null) continue
+    const { unit, run: ri } = best as { err: number; unit: number; run: number }
+    const run = pu.units[unit].curves[ri]
+    if (run.radius === null) continue
+    // Whole circle: the run's facets close on themselves.
+    const ends = run.edges.map((k) => pu.edgeByKey.get(k)?.edge)
+    const closed = ends.length > 0 && ends.every((e, i) => e !== undefined && ends.some((f, j) => j !== i && f !== undefined && length(sub(e.b, f.a)) < 1e-6))
+    return {
+      center: run.center,
+      radius: run.radius,
+      planePoint: pl.point,
+      planeNormal: pl.normal,
+      sketch: null,
+      curveHandle: null,
+      ctx,
+      fullCircle: closed,
+    }
+  }
+  return null
 }
 
 /**
@@ -251,7 +370,18 @@ interface ResolvedCurve {
  * curve (a plain line/vertex/face snap, or a polygon chain with no captured
  * analytic geometry — `sketch_curve_geom` is circles/arcs only).
  */
-function tryResolveCurve(wasmScene: WasmScene, snap: Snap): ResolvedCurve | null {
+function tryResolveCurve(
+  wasmScene: WasmScene,
+  snap: Snap,
+  ray?: Ray,
+  ctxHint: string | null = null,
+): ResolvedCurve | null {
+  return tryResolveSketchCurve(wasmScene, snap) ?? tryResolveListedCurve(wasmScene, snap, ray, ctxHint)
+}
+
+/** The free-sketch reading: the snap names a sketch curve by handle, whose
+ *  exact geometry the kernel answers. */
+function tryResolveSketchCurve(wasmScene: WasmScene, snap: Snap): ResolvedCurve | null {
   if (snap.sketch === undefined) return null
   let curveHandle: bigint | undefined
   if (snap.elementKind === 'sketch-curve' && snap.sketchCurve !== undefined) {
@@ -271,6 +401,8 @@ function tryResolveCurve(wasmScene: WasmScene, snap: Snap): ResolvedCurve | null
     planeNormal: [plane[3], plane[4], plane[5]],
     sketch: snap.sketch,
     curveHandle,
+    ctx: null,
+    fullCircle: false,
   }
 }
 
@@ -657,7 +789,7 @@ export class DimensionTool implements Tool {
     const point: V3 = [snap.x, snap.y, snap.z]
 
     if (this.stage.kind === 'idle') {
-      const curve = tryResolveCurve(this.wasmScene, snap)
+      const curve = tryResolveCurve(this.wasmScene, snap, ray)
       if (curve !== null) {
         const firstIsCenter = length(sub(point, curve.center)) < centerClickTolerance(curve.radius)
         const firstPoint = firstIsCenter ? curve.center : nearestRimPoint(curve, point)
@@ -1080,7 +1212,11 @@ export class DimensionTool implements Tool {
    * seed Tab's first press and to describe the current default in
    * `statusHint`. */
   private _defaultRadialKind(stage: Extract<LinearStage, { kind: 'have-curve' }>): 'radius' | 'diameter' {
-    return isFullCircle(this.wasmScene, stage.curve.sketch, stage.curve.curveHandle) ? 'diameter' : 'radius'
+    const { curve } = stage
+    const full = curve.sketch !== null && curve.curveHandle !== null
+      ? isFullCircle(this.wasmScene, curve.sketch, curve.curveHandle)
+      : curve.fullCircle
+    return full ? 'diameter' : 'radius'
   }
 
   /** Default leader direction for a radial dimension committed without an
@@ -1102,7 +1238,7 @@ export class DimensionTool implements Tool {
    */
   private _classify(stage: Extract<LinearStage, { kind: 'have-curve' }>, snap: Snap, point: V3): Classification {
     const { curve, firstPoint, firstIsCenter } = stage
-    const curve2 = tryResolveCurve(this.wasmScene, snap)
+    const curve2 = tryResolveCurve(this.wasmScene, snap, undefined, curve.ctx)
     const same = curve2 !== null && sameCurve(curve, curve2)
     if (same) {
       const isCenter2 = length(sub(point, curve.center)) < centerClickTolerance(curve.radius)
@@ -1127,7 +1263,18 @@ export class DimensionTool implements Tool {
       // reading of "centre, then some unrelated point" is a plain distance.
       return { kind: 'linear', aPoint: firstPoint, bPoint: point }
     }
-    const unidentified = snap.object === undefined && snap.instance === undefined && snap.sketch === undefined
+    // A click on the bare interior of the face the curve is drawn on names
+    // nothing to measure to either: drawn on a face, the curve is read exactly
+    // as on the ground. A face anywhere else (a side wall, another solid off
+    // the curve's plane) is a point to measure to.
+    const onCurvePlane =
+      Math.abs(dot(sub(point, curve.center), curve.planeNormal)) <= 1e-6 * Math.max(1, curve.radius)
+    const unidentified =
+      (snap.object === undefined && snap.instance === undefined && snap.sketch === undefined) ||
+      (snap.kind === 'on-face' &&
+        onCurvePlane &&
+        snap.elementKind !== 'sketch-curve' &&
+        snap.elementKind !== 'sketch-edge')
     if (unidentified) {
       // Off the curve, into free space — SketchUp's one-entity radial flow.
       const leaderDir = perpComponent(sub(point, firstPoint), curve.planeNormal)

@@ -28,8 +28,8 @@
  *
  *   1. First click: anchor corner
  *   2. Move: rubber-band rectangle preview on the plane
- *   3. Second click: commit — four `sketch_add_segment` calls forming the
- *      rectangle, via `runSketchGesture`
+ *   3. Second click: commit — four `draft_add_segment` calls forming the
+ *      rectangle, in one `runDraft`
  *   4. Esc between clicks: cancel stage 1
  *   Calls onCommit() after each successful commit so the viewport can
  *   refresh scene geometry and trigger re-render.
@@ -39,7 +39,7 @@
  * see `faceDraw.ts` for the shared plain-object eligibility policy):
  *   1. First click on an eligible face: anchor corner (on face plane)
  *   2. Move: rubber-band rectangle preview projected onto that face plane
- *   3. Second click: commit — split_face_inner() on that face
+ *   3. Second click: commit — one `runDraft` on that face
  *   4. Esc: cancel
  *   Calls onFaceImprint(objectId) after each successful imprint so the viewport
  *   can refresh the scene.
@@ -51,15 +51,17 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rectangleDimensionAxes, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rectangleDimensionAxes, defaultGrowthSigns, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
 import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
-import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import type { SketchTarget } from './sketchGesture'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { displayedLength, isFreePick } from './displayedValue'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { PlanePin } from './planePin'
 
@@ -67,6 +69,10 @@ import { PlanePin } from './planePin'
  *  degeneracy check in `onPointerDown` for why this is per-axis and why it
  *  sits deliberately above the kernel's `tol::POINT_MERGE`. */
 export const RECTANGLE_MIN_SIDE = 1e-8
+
+/** A cursor within this distance (meters) of the anchor along an axis has no
+ *  heading on it — sub-micron wobble from a snapped click must not pick a side. */
+const HEADING_EPSILON = 1e-6
 
 /** Signed extents of `cursor − anchor` along a plane's two dimension axes
  *  (`rectangleDimensionAxes`): W's axis first, D's second. */
@@ -185,11 +191,6 @@ export class RectangleTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached plane-mode sketch handles — the Viewport passes one cache
-   *  shared by every draw tool, so mixed-tool profiles land in a single
-   *  sketch per plane. */
-  private readonly sketchCache: SketchPlaneCache
-
   /** The current editing context (component-edit-parity.md phase A1) — see
    *  LineTool's identical fields for the full rationale. */
   private _editContext: EditContext = { kind: 'top' }
@@ -250,7 +251,6 @@ export class RectangleTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -258,7 +258,6 @@ export class RectangleTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
-    this.sketchCache = sketchCache
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -328,8 +327,8 @@ export class RectangleTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
   }
 
   /**
@@ -347,6 +346,8 @@ export class RectangleTool implements Tool {
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+      () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
+      snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
     )
   }
 
@@ -485,7 +486,7 @@ export class RectangleTool implements Tool {
         if (drawPlane !== null) return drawPlane
       }
     }
-    return this._resolveIdleTarget(ray).plane
+    return this._resolveIdleTarget(ray, snap).plane
   }
 
   /**
@@ -830,12 +831,9 @@ export class RectangleTool implements Tool {
   }
 
   /**
-   * A new/loaded document replaced the Scene, so every cached plane-mode
-   * sketch handle is now stale (reusing one throws UnknownSketch). Drop them
-   * all and reset. Called by the Viewport from `notifyLoaded`.
+   * A new/loaded document replaced the Scene: reset. Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchCache.clear()
     this.cancel()
   }
 
@@ -863,20 +861,45 @@ export class RectangleTool implements Tool {
   /**
    * The corners of a typed `w × d` on a non-ground plane: `w` along the
    * plane's first dimension axis and `d` along its second, each growing the
-   * way the cursor was heading from the anchor (default +,+ when it has not
-   * moved). Null only for a degenerate normal.
+   * way the cursor was heading from the anchor. An axis the cursor has not
+   * moved along (to within `HEADING_EPSILON`) takes the on-screen default of
+   * `defaultGrowthSigns` — right and up, +X then +Y on a horizontal plane.
+   * Null only for a degenerate normal.
    */
   private _typedCorners(anchor: V3, cursor: V3, normal: V3, w: number, d: number): [V3, V3, V3, V3] | null {
     const axes = rectangleDimensionAxes(normal)
     if (axes === null) return null
     const { first, second } = axes
     const [dw, dd] = projectOntoAxes(anchor, cursor, axes)
-    const sw = dw < 0 ? -1 : 1
-    const sd = dd < 0 ? -1 : 1
+    const [defW, defD] = defaultGrowthSigns(normal, axes)
+    const sw = Math.abs(dw) < HEADING_EPSILON ? defW : dw < 0 ? -1 : 1
+    const sd = Math.abs(dd) < HEADING_EPSILON ? defD : dd < 0 ? -1 : 1
     const b: V3 = [anchor[0] + first[0] * sw * w, anchor[1] + first[1] * sw * w, anchor[2] + first[2] * sw * w]
     const c: V3 = [b[0] + second[0] * sd * d, b[1] + second[1] * sd * d, b[2] + second[2] * sd * d]
     const dd3: V3 = [anchor[0] + second[0] * sd * d, anchor[1] + second[1] * sd * d, anchor[2] + second[2] * sd * d]
     return [anchor, b, c, dd3]
+  }
+
+  /**
+   * Second click on a FREE pick (see displayedValue.ts): commit the W × D
+   * the measurement box shows, through the typed path, so the rectangle is
+   * exactly what typing that text would make. `normal` null = the ground
+   * fast path (|dx|, |dy|). Returns false (caller commits the raw click)
+   * for a hard snap, a degenerate normal, or a displayed side of zero.
+   */
+  private _commitDisplayed(snap: Snap | null, anchor: V3, cursor: V3, normal: V3 | null): boolean {
+    if (!isFreePick(snap, anchor)) return false
+    let ext: [number, number] | null
+    if (normal === null) ext = [Math.abs(cursor[0] - anchor[0]), Math.abs(cursor[1] - anchor[1])]
+    else ext = this._planeExtents(anchor, cursor, normal)
+    if (ext === null) return false
+    const w = displayedLength(ext[0])
+    const d = displayedLength(ext[1])
+    if (!(w > 0) || !(d > 0)) return false
+    if (this.planeStage.kind === 'anchored') this._lastPlaneCursor = cursor
+    else this._lastFaceCursor = cursor
+    this._commitTyped(w, d)
+    return true
   }
 
   /** Report the live W × D measurement. */
@@ -1068,6 +1091,8 @@ export class RectangleTool implements Tool {
         ) {
           return
         }
+        // A free pick commits the DISPLAYED W × D, exactly as if typed.
+        if (this._commitDisplayed(snap, anchor, cursor, null)) return
         this.planeStage = { kind: 'idle' }
         this.typed = ''
         this._lastPlaneCursor = null
@@ -1080,6 +1105,7 @@ export class RectangleTool implements Tool {
       } else {
         const corners = faceRectangleCorners(anchor, cursor, plane.normal)
         if (corners === null) return // degenerate — ignore
+        if (this._commitDisplayed(snap, anchor, cursor, plane.normal)) return
         this.planeStage = { kind: 'idle' }
         this.typed = ''
         this._lastPlaneCursor = null
@@ -1092,51 +1118,40 @@ export class RectangleTool implements Tool {
     }
   }
 
-  /** Commit a rectangle loop (four `sketch_add_segment` calls) into
-   *  `target`'s sketch — used by both ground and non-ground plane/sketch
-   *  mode (real face mode instead imprints via `split_face_inner`, see
-   *  `_commitFaceCorners`). */
+  /** Commit a rectangle loop (four `draft_add_segment` calls) as ONE draft
+   *  on `target`'s plane — the plane is the drafting context, so the loop
+   *  lowers into whatever lies under it (face topology, an owned sketch, or
+   *  a free sketch). Used by ground, non-ground plane and sketch mode (the
+   *  face-mode click path commits through `_commitFaceCorners`). */
   private _commitPlaneRectangle(target: SketchTarget, corners: [V3, V3, V3, V3]): boolean {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
-        // Four edges: 0→1, 1→2, 2→3, 3→0
-        const edges = [
-          [corners[0], corners[1]],
-          [corners[1], corners[2]],
-          [corners[2], corners[3]],
-          [corners[3], corners[0]],
-        ] as const
-
-        let lastRegionsCreated: bigint[] = []
-        for (const [p0, q0] of edges) {
-          // `toLocal`: identity for a world target, pose⁻¹ for a definition-
-          // owned one (component-edit-parity.md phase A2) — see
-          // `runSketchGesture`'s doc.
-          const p = toLocal(p0)
-          const q = toLocal(q0)
-          const report = this.wasmScene.sketch_add_segment(
-            sketch,
-            p[0], p[1], p[2],
-            q[0], q[1], q[2],
-          )
-          try {
-            const rc = report.regions_created()
-            lastRegionsCreated = Array.from(rc)
-          } finally {
-            report.free()
-          }
-        }
-
-        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+      const { result: regionsCreated, report } = runDraft(
+        this.wasmScene,
+        draftTargetFromSketchTarget(target),
+        'Rectangle',
+        (d) => this._addLoop(d, corners),
+      )
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
       return true
     } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
+      this._toastError(err)
       return false
     }
+  }
+
+  /** The four edges 0→1, 1→2, 2→3, 3→0; returns the last segment's regions. */
+  private _addLoop(d: bigint, corners: readonly [V3, V3, V3, V3]): bigint[] {
+    return addDraftLoop(this.wasmScene, d, corners, null)
+  }
+
+  private _toastError(err: unknown): void {
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
+    this.onToast(message, code ?? undefined)
   }
 
   // ------------------------------------------------------------------ face mode
@@ -1170,6 +1185,7 @@ export class RectangleTool implements Tool {
 
       const corners = faceRectangleCorners(anchor, cursorOnPlane, normal)
       if (corners === null) return // degenerate — ignore
+      if (this._commitDisplayed(snap, anchor, cursorOnPlane, normal)) return
 
       this.faceStage = { kind: 'idle' }
       this.typed = ''
@@ -1206,35 +1222,24 @@ export class RectangleTool implements Tool {
     return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
   }
 
-  /** Split the given face with a rectangle loop defined by 4 explicit world-space
-   *  corners. True when the kernel accepted it (false = refused, toasted). */
+  /** Draw a rectangle loop of 4 explicit world-space corners on the given
+   *  face (one draft; the engine decides which edges become face topology).
+   *  True when the kernel accepted it (false = refused, toasted). */
   private _commitFaceCorners(object: bigint, face: bigint, corners: [V3, V3, V3, V3]): boolean {
-    // Flatten the 4 corners into a Float64Array of xyz triples
-    const loopPts = new Float64Array(4 * 3)
-    for (let i = 0; i < 4; i++) {
-      loopPts[i * 3 + 0] = corners[i][0]
-      loopPts[i * 3 + 1] = corners[i][1]
-      loopPts[i * 3 + 2] = corners[i][2]
-    }
-
     try {
-      // Inside a component instance's editing context (component-edit-
-      // parity.md phase A2), `object` is a definition member — the world
-      // `split_face_inner` refuses it (`is_world` guard);
-      // `split_face_inner_in_instance` maps the loop through the instance's
-      // pose⁻¹ and routes through `apply_def_op` instead.
-      if (this._activeInstance !== null) {
-        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
-      } else {
-        this.wasmScene.split_face_inner(object, face, loopPts)
-      }
-      this.onFaceImprint(object)
+      const { result: regionsCreated, report } = runDraft(
+        this.wasmScene,
+        { kind: 'face', object, face, instance: this._activeInstance },
+        'Rectangle',
+        (d) => this._addLoop(d, corners),
+      )
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
+      })
       return true
     } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
+      this._toastError(err)
       return false
     }
   }

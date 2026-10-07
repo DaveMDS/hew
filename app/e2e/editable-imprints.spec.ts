@@ -61,6 +61,21 @@ async function selection(page: Page) {
   return page.evaluate(() => window.__hew_test!.getSelection())
 }
 
+/** The drawing units listed on the top face's plane (z = 0.5): one set for
+ *  face topology, owned sketches, and free sketches alike. */
+async function topUnits(page: Page) {
+  return page.evaluate(() => {
+    const h = window.__hew_test!
+    return h.getPlaneUnits(h.ctxOfPlane([0, 0, 0.5], [0, 0, 1])!).units.map((u) => ({
+      key: u.key,
+      edges: u.edges.length,
+      topology: u.edges.filter((e) => e.store.kind === 'topology').length,
+      free: u.edges.filter((e) => e.store.kind === 'free').length,
+      objects: u.edges.flatMap((e) => (e.store.object === undefined ? [] : [String(e.store.object)])),
+    }))
+  })
+}
+
 function minX(loop: [number, number, number][]): number {
   return Math.min(...loop.map((p) => p[0]))
 }
@@ -77,9 +92,11 @@ test('a rectangle drawn inside a face is one imprint; clicking inside it selects
   await click(page, [0.75, 0.5, 0.5]) // inside the drawn shape
   let sel = await selection(page)
   expect(sel.length).toBe(1)
-  expect(sel[0].kind).toBe('imprint')
-  expect(sel[0].id).toBe(list[0].id)
-  expect(sel[0].object).toBe(object)
+  expect(sel[0].kind).toBe('draft-island')
+  const units = await topUnits(page)
+  expect(units.length).toBe(1)
+  expect(sel[0].key).toBe(units[0].key)
+  expect(new Set(units[0].objects)).toEqual(new Set([object])) // drawn on the box's own top
 
   await click(page, [1.6, 0.5, 0.5]) // the same face, outside the shape
   sel = await selection(page)
@@ -93,7 +110,7 @@ test('Delete dissolves a selected imprint back into its face, and undo brings it
   await drawRect(page, [0.5, 0.25, 0.5], [1, 0.75, 0.5])
   await page.keyboard.press('Space')
   await click(page, [0.75, 0.5, 0.5])
-  expect((await selection(page))[0].kind).toBe('imprint')
+  expect((await selection(page))[0].kind).toBe('draft-island')
   await page.keyboard.press('Delete')
   await page.waitForTimeout(200)
   expect((await imprints(page, object)).length).toBe(0)
@@ -105,7 +122,7 @@ test('Delete dissolves a selected imprint back into its face, and undo brings it
   expect((await imprints(page, object)).length).toBe(1)
 })
 
-test('Move slides a selected imprint across its face and keeps the selection; sliding it off the face is refused', async ({ page }) => {
+test('Move slides a selected imprint across its face and keeps the selection; sliding it past the edge keeps it, split into a face part and an overhang', async ({ page }) => {
   const object = await setup(page)
   await drawRect(page, [0.5, 0.25, 0.5], [1, 0.75, 0.5])
   await page.keyboard.press('Space')
@@ -119,23 +136,36 @@ test('Move slides a selected imprint across its face and keeps the selection; sl
   await page.waitForTimeout(200)
   const after = await imprints(page, object)
   expect(after.length).toBe(1)
-  expect(after[0].id).toBe(before.id) // handle-stable: the same shape
   expect(minX(after[0].loop)).toBeCloseTo(1.0, 6)
   expect(after[0].loop.every((p) => Math.abs(p[2] - 0.5) < 1e-9)).toBe(true) // still on the face
-  const sel = await selection(page)
-  expect(sel[0].kind).toBe('imprint')
-  expect(sel[0].id).toBe(before.id)
+  let units = await topUnits(page)
+  expect(units.length).toBe(1)
+  let sel = await selection(page)
+  expect(sel[0].kind).toBe('draft-island')
+  expect(sel[0].key).toBe(units[0].key) // the moved shape stays selected
 
-  // A drop past the east edge would leave the face: refused, nothing moves.
+  // A drop past the east edge no longer refuses: the shape is kept and
+  // splits at the edge — the part over the face stays an imprint, the
+  // overhang is free drawing — and it is still ONE selected shape.
   await page.keyboard.press('Escape')
   await page.keyboard.press('m')
   await click(page, [1.25, 0.5, 0.5])
   await click(page, [1.9, 0.5, 0.5])
   await page.waitForTimeout(200)
-  await expect(page.getByText(/fully inside the face/)).toBeVisible()
-  const still = await imprints(page, object)
-  expect(minX(still[0].loop)).toBeCloseTo(1.0, 6)
+  await expect(page.getByText(/would run off the face/)).toHaveCount(0)
+  units = await topUnits(page)
+  expect(units.length).toBe(1)
+  expect(units[0].topology).toBeGreaterThan(0)
+  expect(units[0].free).toBeGreaterThan(0)
+  sel = await selection(page)
+  expect(sel[0].kind).toBe('draft-island')
+  expect(sel[0].key).toBe(units[0].key)
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(150)
+  units = await topUnits(page)
+  expect(units.length).toBe(1)
+  expect(units[0].free).toBe(0)
 })
 
 test('a shape drawn up to a face edge selects by its line and deletes as a chord', async ({ page }) => {
@@ -152,8 +182,14 @@ test('a shape drawn up to a face edge selects by its line and deletes as a chord
   await click(page, [0.5, 0.75, 0.5]) // on the run's east side (x = 0.5)
   let sel = await selection(page)
   expect(sel.length).toBe(1)
-  expect(sel[0].kind).toBe('imprint-chord')
-  expect(sel[0].object).toBe(object)
+  expect(sel[0].kind).toBe('draft-edge') // one click selects the line it lands on
+  // Three quick clicks select the whole connected shape, the drawn run.
+  const at = await pagePoint(page, [0.5, 0.75, 0.5])
+  await page.mouse.click(at.x, at.y, { clickCount: 3, delay: 30 })
+  await page.waitForTimeout(300)
+  sel = await selection(page)
+  expect(sel.length).toBe(1)
+  expect(sel[0].kind).toBe('draft-island')
 
   await page.keyboard.press('Delete')
   await page.waitForTimeout(200)
@@ -197,17 +233,17 @@ test('a rectangle drawn all the way around a circle adopts it; deleting the rect
   const object = await setup(page)
   await drawCircle(page, [1, 0.5, 0.5], [1.15, 0.5, 0.5])
   await drawRect(page, [0.6, 0.2, 0.5], [1.4, 0.8, 0.5])
-  await expect(page.getByText(/fully inside the face/)).toHaveCount(0)
+  await expect(page.getByText(/would run off the face/)).toHaveCount(0)
   let list = await imprints(page, object)
   expect(list.map((f) => f.name).sort()).toEqual(['Circle', 'Rectangle'])
 
   await page.keyboard.press('Space')
   await click(page, [0.7, 0.3, 0.5]) // inside the rectangle, outside the circle
-  const rect = list.find((f) => f.name === 'Rectangle')!
   const sel = await selection(page)
   expect(sel.length).toBe(1)
-  expect(sel[0].kind).toBe('imprint')
-  expect(sel[0].id).toBe(rect.id)
+  expect(sel[0].kind).toBe('draft-island')
+  const rectUnit = (await topUnits(page)).find((u) => u.edges === 4)!
+  expect(sel[0].key).toBe(rectUnit.key)
 
   await page.keyboard.press('Delete')
   await page.waitForTimeout(200)
@@ -236,7 +272,7 @@ test('a circle whose center is clicked inside a small shape draws all the way ar
   await drawRect(page, [0.9, 0.4, 0.5], [1.1, 0.6, 0.5])
   // First click (the center) lands INSIDE the small rectangle.
   await drawCircle(page, [1, 0.5, 0.5], [1.3, 0.52, 0.5])
-  await expect(page.getByText(/fully inside the face/)).toHaveCount(0)
+  await expect(page.getByText(/would run off the face/)).toHaveCount(0)
   const list = await imprints(page, object)
   expect(list.map((f) => f.name).sort()).toEqual(['Circle', 'Rectangle'])
 })
@@ -274,7 +310,7 @@ test('a polygon whose center is clicked inside a small shape draws all the way a
   await click(page, [1, 0.5, 0.5])
   await click(page, [1.3, 0.52, 0.5])
   await page.waitForTimeout(150)
-  await expect(page.getByText(/fully inside the face/)).toHaveCount(0)
+  await expect(page.getByText(/would run off the face/)).toHaveCount(0)
   const list = await imprints(page, object)
   expect(list.length).toBe(2)
 })
@@ -284,7 +320,7 @@ test('an arc drawn on a face keeps its circle on the D-shaped cut, so the raised
   // A 2-point arc from the south edge back into the face: endpoints on the
   // south edge (y = 0), bulge north into the face — the face-mode counterpart
   // of the "circle pulled up" test above, proving the OPEN chord commit
-  // (`split_face_with_arc`) carries the drawn circle just like the closed
+  // (one face draft) carries the drawn circle just like the closed
   // sub-face path does.
   await page.getByRole('radio', { name: 'Arc' }).click()
   await click(page, [0.6, 0, 0.5]) // endpoint A, on the south edge

@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { CircleTool } from './CircleTool'
-import { makeSketchPlaneCache } from './sketchGesture'
-import { groundDrawPlane, planeKey } from './drawPlane'
+import { draftMock } from './draftMock'
 import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
+import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -40,62 +40,23 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
-  /** Handles whose sketch has gone stale/hidden — `sketch_plane` reads
-   *  `undefined` for them, so `runSketchGesture`'s pre-check retargets a
-   *  fresh sketch (as after undoing the sketch's creating gesture). */
-  staleSketchHandles?: bigint[]
 } = {}): WasmScene {
-  let sketchCounter = 41n
+  const fail = opts.addSegmentThrows
+    ? new Error('PathNotSimple: edges cross')
+    : opts.splitFaceThrows
+      ? new Error('LoopSelfIntersects: edges cross')
+      : null
   return {
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    // Every non-stale sketch lies on the ground plane (origin point, +Z).
-    sketch_plane: vi.fn((sketch: bigint) =>
-      (opts.staleSketchHandles ?? []).includes(sketch)
-        ? undefined
-        : new Float64Array([0, 0, 0, 0, 0, 1]),
-    ),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_begin_curve: vi.fn(() => 91n),
-    sketch_begin_curve_with: vi.fn(() => 91n),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn(() => {
-      if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
-      return {
-        new_edges: () => new BigUint64Array([]),
-        regions_created: () => new BigUint64Array([]),
-        regions_removed: () => new BigUint64Array([]),
-        free: vi.fn(),
-      }
-    }),
+    // Every sketch lies on the ground plane (origin point, +Z).
+    sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+    ...draftMock({ failSegmentAt: () => fail }).members,
     pick_face: vi.fn(() => opts.pick),
     pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
     // Every picked object is plain/ungrouped by default (top-level eligibility).
     node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 0, 0, 0, 1])),
-    split_face_inner: vi.fn(() => {
-      if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
-      return 99n
-    }),
-    split_face_inner_with_curve: vi.fn(() => {
-      if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
-      return 99n
-    }),
-    split_face_inner_in_instance: vi.fn(() => 99n),
-    split_face_inner_with_curve_in_instance: vi.fn(() => 99n),
-    begin_sketch_on_plane_in_instance: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   } as unknown as WasmScene
 }
@@ -118,17 +79,17 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim, radius 3
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
     // Adaptive facet count (true-curves §6): radius 3 caps at 96 per turn.
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(3))
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(3))
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: expect.any(BigInt), regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
-    // The whole N-segment commit is bracketed in exactly one gesture.
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
+    // The whole N-segment commit is bracketed in exactly one draft, with the
+    // analytic circle (world center + radius) wrapped around the facets.
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_curve_with).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end_curve).toHaveBeenCalledTimes(1)
   })
 
   it('the last segment closes back to the exact stored vertex 0 coordinates', () => {
@@ -138,7 +99,7 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0 }), RAY)
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     expect(calls).toHaveLength(segmentsPerTurn(5))
     // First call's "p" (args 1-3) is vertex 0; last call's "q" (args 4-6) must match exactly.
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
@@ -155,13 +116,13 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY) // same point — degenerate
 
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(scene.draft_add_segment).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
     // Still anchored (first click stands) — capturingInput stays true.
     expect(tool.capturingInput()).toBe(true)
   })
 
-  it('reuses the cached sketch handle across multiple circles', () => {
+  it('each circle is its own draft on the same ground plane (no shared sketch cache)', () => {
     const scene = makeWasmScene()
     const { tool } = makeTool(scene)
 
@@ -170,7 +131,10 @@ describe('CircleTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 12, y: 10, z: 0 }), RAY)
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    const begins = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls
+    expect(begins).toHaveLength(2)
+    for (const b of begins) expect(b.slice(0, 6)).toEqual([0, 0, 0, 0, 0, 1])
+    expect(scene.draft_end).toHaveBeenCalledTimes(2)
   })
 
   it('a refused commit (kernel throws) toasts and does not call onCommit', () => {
@@ -182,29 +146,24 @@ describe('CircleTool — ground mode', () => {
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onCommit).not.toHaveBeenCalled()
+    // The refused draft is cancelled, never ended.
+    expect(scene.draft_cancel).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).not.toHaveBeenCalled()
   })
 
-  it('a stale cached sketch handle (sketch_plane reads undefined) is retargeted onto a fresh sketch before the gesture opens', () => {
-    const scene = makeWasmScene({ staleSketchHandles: [7n] })
-    const preview = new THREE.Group()
+  it('there is no cached sketch handle to go stale: a commit opens one fresh plane draft on the ground', () => {
+    const scene = makeWasmScene()
     const onCommit = vi.fn()
     const onToast = vi.fn()
-    // Seed the shared cache with a handle whose creating gesture was undone.
-    const cache = makeSketchPlaneCache()
-    cache.set(planeKey(groundDrawPlane()), 7n)
-    const tool = new CircleTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
+    const tool = new CircleTool(scene, new THREE.Group(), onCommit, onToast, vi.fn(), vi.fn())
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim — commits
 
-    // The pre-check minted ONE fresh sketch up front; the stale handle never
-    // even opened a gesture (no failure-driven retry).
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: expect.any(BigInt), regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
   })
 })
@@ -222,10 +181,10 @@ describe('CircleTool — typed VCB radius entry', () => {
 
     tool.onKey(makeKeyEvent('Enter'))
 
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(5))
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(5))
     expect(onCommit).toHaveBeenCalledTimes(1)
     // Default direction (+X) since cursor hasn't moved: vertex 0 should be (5, 0, 0).
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     expect(firstP[0]).toBeCloseTo(5)
     expect(firstP[1]).toBeCloseTo(0)
@@ -241,7 +200,7 @@ describe('CircleTool — typed VCB radius entry', () => {
     tool.onKey(makeKeyEvent('2'))
     tool.onKey(makeKeyEvent('Enter'))
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     expect(firstP[0]).toBeCloseTo(0)
     expect(firstP[1]).toBeCloseTo(-2)
@@ -259,7 +218,7 @@ describe('CircleTool — typed VCB radius entry', () => {
 })
 
 describe('CircleTool — face mode', () => {
-  it('two clicks on an entered object face call split_face_inner_with_curve carrying the circle', () => {
+  it('two clicks on an entered object face open one face draft carrying the circle bracket', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -268,18 +227,17 @@ describe('CircleTool — face mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
 
-    // Plain imprint is NOT used — the identity-carrying variant is.
-    expect(scene.split_face_inner).not.toHaveBeenCalled()
-    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
-    const callArgs = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    const callArgs = (scene.draft_begin_face as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(callArgs[0]).toBe(7n)
     expect(callArgs[1]).toBe(3n)
-    const loopPts = callArgs[2] as Float64Array
-    expect(loopPts.length).toBe(segmentsPerTurn(3) * 3)
-    // center (0,0,0) and radius 3 travel with the imprint.
-    const centerArg = callArgs[3] as Float64Array
-    expect(Array.from(centerArg)).toEqual([0, 0, 0])
-    expect(callArgs[4]).toBeCloseTo(3)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(3))
+    // center (0,0,0) and radius 3 travel with the draft's curve bracket.
+    expect(scene.draft_begin_curve_with).toHaveBeenCalledTimes(1)
+    const curveArgs = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(curveArgs[1] as Float64Array)).toEqual([0, 0, 0])
+    expect(curveArgs[2]).toBeCloseTo(3)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onToast).not.toHaveBeenCalled()
   })
@@ -294,7 +252,7 @@ describe('CircleTool — face mode', () => {
     expect(tool.capturingInput()).toBe(false)
   })
 
-  it('a refused split_face_inner toasts the kernel error and does not call onFaceImprint', () => {
+  it('a refused face draft toasts the kernel error and does not call onFaceImprint', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, splitFaceThrows: true })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -351,7 +309,7 @@ describe('CircleTool — instance editing context (component-edit-parity.md phas
   const INSTANCE = 42n
   const COMPONENT = 5n
 
-  it('face mode routes to split_face_inner_with_curve_in_instance, never the world variant', () => {
+  it('face mode routes to draft_begin_face_in_instance, never the world variant', () => {
     const pick = makePick(7n, 3n, INSTANCE)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
@@ -361,16 +319,16 @@ describe('CircleTool — instance editing context (component-edit-parity.md phas
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
 
-    expect(scene.split_face_inner_with_curve_in_instance).toHaveBeenCalledTimes(1)
-    const callArgs = (scene.split_face_inner_with_curve_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face_in_instance).toHaveBeenCalledTimes(1)
+    const callArgs = (scene.draft_begin_face_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(callArgs[0]).toBe(INSTANCE)
     expect(callArgs[1]).toBe(7n)
     expect(callArgs[2]).toBe(3n)
-    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('plane mode on empty space mints a def-owned sketch, mapping the curve center into local space', () => {
+  it('plane mode on empty space opens a plane draft in the instance; the curve center stays in WORLD space', () => {
     const scene = makeWasmScene()
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
@@ -380,13 +338,15 @@ describe('CircleTool — instance editing context (component-edit-parity.md phas
     tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), { origin: [6, 1, 5], direction: [0, 0, -1] })
     tool.onPointerDown(makeSnap({ x: 9, y: 1, z: 0 }), { origin: [9, 1, 5], direction: [0, 0, -1] })
 
-    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
-    // The curve's analytic center travels mapped into LOCAL space: world
-    // (6,1,0) → local (1,1,0) under the pose⁻¹ of a +5-in-x translation.
-    expect(scene.sketch_begin_curve_with).toHaveBeenCalledWith(
-      expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6),
-    )
+    expect(scene.draft_begin_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect((scene.draft_begin_plane_in_instance as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(INSTANCE)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    // The curve's analytic center and radius are WORLD values — the engine
+    // maps them through the instance pose itself (no toLocal any more).
+    expect(scene.draft_begin_curve_with).toHaveBeenCalledTimes(1)
+    const curveArgs = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(curveArgs[1] as Float64Array)).toEqual([6, 1, 0])
+    expect(curveArgs[2]).toBeCloseTo(3, 6)
   })
 })
 
@@ -396,14 +356,12 @@ describe('CircleTool — retype the radius after the rim click', () => {
   function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
     const base = makeWasmScene(opts) as unknown as Record<string, unknown>
     let gen = 1n
-    let changed = 0
-    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const baseEnd = base.draft_end as (...args: unknown[]) => unknown
     const scene = {
       ...base,
       history_generation: vi.fn(() => gen),
-      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
-      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
-      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      // A draft that ends records one history step.
+      draft_end: vi.fn((...args: unknown[]) => { const r = baseEnd(...args); gen += 1n; return r }),
       scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
       scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
       __bump: () => { gen += 1n },
@@ -412,7 +370,7 @@ describe('CircleTool — retype the radius after the rim click', () => {
   }
   const key = (tool: CircleTool, k: string) => tool.onKey(makeKeyEvent(k))
   const typeLen = (tool: CircleTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
-  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  const addCalls = (scene: WasmScene) => (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
   /** Max distance of the segment endpoints committed since call index `from`
    *  to `center` — the radius actually drawn by that commit. */
   function drawnRadius(scene: WasmScene, from: number, center: [number, number]): number {
@@ -485,18 +443,18 @@ describe('CircleTool — retype the radius after the rim click', () => {
     expect(onToast).toHaveBeenCalledWith(expect.stringContaining('circle'))
   })
 
-  it('a face circle retypes through split_face_inner_with_curve with the new radius', () => {
+  it('a face circle retypes through a fresh face draft with the new radius', () => {
     const scene = makeRetypeScene({ pick: makePick(7n, 3n), faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
     tool.setEditContext({ kind: 'object', id: 7n })
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // centre
     tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), { origin: [1, 0, 5], direction: [0, 0, -1] }) // rim, radius 1
-    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
     typeLen(tool, '2.5')
     expect(scene.scene_undo).toHaveBeenCalledTimes(1)
-    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(2)
-    const call = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[1]
-    expect(call[4]).toBeCloseTo(2.5, 6) // radius argument
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(2)
+    const call = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[1]
+    expect(call[2]).toBeCloseTo(2.5, 6) // radius argument
     expect(onFaceImprint).toHaveBeenCalledTimes(2)
   })
 })
@@ -528,10 +486,9 @@ describe('CircleTool — boundary clicks (FacePickCache.faceThrough)', () => {
 
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim
 
-    // The commit went through the FACE split path, never a ground sketch.
-    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    // The commit went through a FACE draft, never a plane draft.
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onCommit).not.toHaveBeenCalled()
   })
@@ -557,14 +514,14 @@ describe('CircleTool — snapped face cursor (honours the chip, not ray∩plane)
       { origin: [3.005, 0, 5], direction: [0, 0, -1] },
     )
 
-    expect(scene.split_face_inner_with_curve).toHaveBeenCalledTimes(1)
-    const call = (scene.split_face_inner_with_curve as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    const call = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[0]
     // Radius argument: exactly 3 (the snap), not ~3.005 (the ray∩plane miss).
-    expect(call[4]).toBeCloseTo(3, 6)
-    const loopPts = call[2] as Float64Array
-    // vertex 0 of the loop is the rim point itself.
-    expect(loopPts[0]).toBeCloseTo(3, 6)
-    expect(loopPts[1]).toBeCloseTo(0, 6)
+    expect(call[2]).toBeCloseTo(3, 6)
+    const seg = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls[0]
+    // vertex 0 of the loop (first segment's start) is the rim point itself.
+    expect(seg[1]).toBeCloseTo(3, 6)
+    expect(seg[2]).toBeCloseTo(0, 6)
   })
 })
 
@@ -598,9 +555,12 @@ describe('CircleTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 1 }), emptyRay)
     tool.onPointerDown(makeSnap({ x: 13, y: 10, z: 1 }), { origin: [13, 10, 5], direction: [0, 0, -1] })
 
-    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // z=1 is not the ground plane
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
+    // One plane draft on the pinned z = 1 plane (not the ground).
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const begin = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(begin[2]).toBeCloseTo(1, 9)
+    expect(begin.slice(3, 6)).toEqual([0, 0, 1])
     expect(onCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -635,5 +595,48 @@ describe('CircleTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onKey(makeKeyEvent('Escape'))
     expect(tool.statusHint()).not.toContain('Pinned')
     expect(tool.hasArmedGesture()).toBe(false)
+  })
+})
+
+
+describe('CircleTool — a clicked radius is exactly the displayed radius', () => {
+  const prev = getLengthUnit()
+  const rim = 0.0123456 // shows "R 12.3 mm"
+  const run = (kind: string, typed: string | null) => {
+    const scene = makeWasmScene()
+    const t = makeTool(scene)
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    const s = makeSnap({ x: rim, y: 0, z: 0, kind })
+    t.tool.onPointerMove(s, RAY)
+    if (typed === null) t.tool.onPointerDown(s, RAY)
+    else {
+      for (const ch of typed) t.tool.onKey(makeKeyEvent(ch))
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+    return { calls: (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls, measure: t.onMeasurement }
+  }
+
+  it('a free click commits the same chain as typing the shown radius', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = run('ground', null)
+      const typed = run('ground', '12.3')
+      expect(clicked.measure).toHaveBeenCalledWith('R 12.3 mm')
+      expect(clicked.calls.length).toBeGreaterThan(0)
+      expect(clicked.calls).toEqual(typed.calls)
+      expect(clicked.calls[0][1]).toBe(12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a hard-snapped (endpoint) click keeps the snapped rim exactly', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = run('endpoint', null)
+      expect(clicked.calls[0][1]).toBe(rim)
+    } finally {
+      setLengthUnit(prev)
+    }
   })
 })

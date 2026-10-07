@@ -143,7 +143,7 @@ describe('worldBoundsForSelection', () => {
 
   it('returns null for a mesh-less selection (a sketch)', () => {
     const scene = makeScene({})
-    const selection: NodeRef[] = [{ kind: 'sketch-island', id: 1n }]
+    const selection: NodeRef[] = [{ kind: 'draft-island', id: 1n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000001' }]
     expect(worldBoundsForSelection(scene, selection)).toBeNull()
   })
 

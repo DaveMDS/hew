@@ -44,9 +44,11 @@ use crate::ops::{
     FaceSplitInnerReport, FaceSplitReport, PushPullError, PushPullReport, StickyError,
     TransformSubFaceReport,
 };
+use crate::retrace::{FaceRetraceReport, RetracePath};
 use crate::sketch::CurveGeom;
 use crate::tol;
 use crate::topo::FaceAttrs;
+use crate::topo::LoopKind;
 use crate::topo::Object;
 use crate::transform::Transform;
 
@@ -158,6 +160,24 @@ pub enum KernelOp {
         /// back. Empty for a user move.
         pinned: Vec<Vec<Point3>>,
     },
+    /// `Object::retrace_face(face, insert, remove)` — insert and/or remove
+    /// several paths in one face at once and re-trace its loops. Its own
+    /// inverse with the arguments swapped (the report's resolved inserted
+    /// paths removed, its removed chains inserted). With `restore`
+    /// non-empty this is an undo: each snapshot lands on the result face
+    /// holding its point. Also the undo of a `MergeFaces` that dissolved
+    /// several separate runs.
+    RetraceFace {
+        /// A face of the region (for a removal, any face beside a removed
+        /// edge, or one coplanar with them).
+        face: FaceId,
+        /// Paths to insert, boundary to boundary.
+        insert: Vec<RetracePath>,
+        /// Edge chains to remove, by vertex positions.
+        remove: Vec<Vec<Point3>>,
+        /// Attribute snapshots to restore onto the result faces (undo path).
+        restore: Vec<FaceAttrsAt>,
+    },
 }
 
 /// What an applied op reported; returned by apply/undo/redo so tools can
@@ -181,6 +201,8 @@ pub enum KernelOpReport {
     CollapseSubFace(CollapseSubFaceReport),
     /// Result of moving an imprint on its face.
     TransformSubFace(TransformSubFaceReport),
+    /// Result of re-tracing a face.
+    FaceRetrace(FaceRetraceReport),
 }
 
 /// An op that failed to apply. Wraps the op-specific error unchanged.
@@ -350,12 +372,11 @@ impl History {
     ) -> Result<KernelOpReport, KernelOpError> {
         // For MergeFaces, capture the cut-path geometry BEFORE the op runs,
         // because the edge chain's vertices may be healed away during the merge.
-        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
-            if let KernelOp::MergeFaces { edge } = &op {
-                Some(reconstruct_merge_path(object, *edge))
-            } else {
-                None
-            };
+        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &op {
+            Some(reconstruct_merge_runs(object, *edge))
+        } else {
+            None
+        };
 
         // Capture the rule-9 proof for the eventual undo: the state the
         // recorded inverse must restore is the one this op is about to leave.
@@ -398,12 +419,12 @@ impl History {
             .map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces in the inverse, capture path before dispatch.
-        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
-            if let KernelOp::MergeFaces { edge } = &inverse {
-                Some(reconstruct_merge_path(object, *edge))
-            } else {
-                None
-            };
+        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &inverse
+        {
+            Some(reconstruct_merge_runs(object, *edge))
+        } else {
+            None
+        };
 
         // Run the inverse on a clone, guard-exempt. A dispatch error is a
         // kernel bug surfaced as InverseFailed; a result that fails the
@@ -457,12 +478,12 @@ impl History {
             re_anchor(object, &rec.op, &rec.anchor).map_err(HistoryError::InverseFailed)?;
 
         // For MergeFaces, capture path before dispatch.
-        let pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)> =
-            if let KernelOp::MergeFaces { edge } = &redo_op {
-                Some(reconstruct_merge_path(object, *edge))
-            } else {
-                None
-            };
+        let pre_merge_path: Option<Vec<MergeRun>> = if let KernelOp::MergeFaces { edge } = &redo_op
+        {
+            Some(reconstruct_merge_runs(object, *edge))
+        } else {
+            None
+        };
 
         // Run the redo on a clone, guard-exempt, and hold it to the recorded
         // proof exactly as `undo` does; pop only after both succeed so a
@@ -542,6 +563,7 @@ struct EdgeClaimProof {
     b: Point3,
     curve: Option<CurveGeom>,
     soft: bool,
+    polygon: Option<CurveGeom>,
 }
 
 /// An undirected edge's exact endpoint bits, ordered — the lookup key the
@@ -555,7 +577,7 @@ fn edge_bits_key(a: Point3, b: Point3) -> [u64; 6] {
 }
 
 /// One face's fingerprint: outer ring and hole rings as position cycles,
-/// plus the face's stored plane and analytic surface.
+/// plus the face's stored plane, analytic surface, paint, and UV frame.
 ///
 /// `surface` is not part of the geometric MATCH (two faces of identical shape
 /// fingerprint alike regardless of their `SurfaceRef`), but it IS restored on
@@ -572,6 +594,12 @@ struct FaceProof {
     holes: Vec<Vec<Point3>>,
     plane: crate::math::Plane,
     surface: Option<crate::topo::SurfaceRef>,
+    /// Paint and UV frame, restored on alignment like `surface`: a replay
+    /// that rebuilds faces (a redone merge whose surviving face is decided
+    /// by which side of a re-minted edge is its primary) must come back
+    /// carrying exactly the paint the recorded state had.
+    material: crate::material::FaceMaterial,
+    uv_frame: Option<crate::material::UvFrame>,
 }
 
 /// The cyclic shift under which `a[i]` matches `b[(i + shift) % n]` within
@@ -603,6 +631,8 @@ impl StateProof {
                         .collect(),
                     plane: face.plane,
                     surface: face.surface,
+                    material: face.material,
+                    uv_frame: face.uv_frame,
                 })
                 .collect(),
             edges: object
@@ -610,7 +640,7 @@ impl StateProof {
                 .keys()
                 .filter_map(|e| {
                     let edge = &object.edges()[e];
-                    if edge.curve.is_none() && !edge.soft {
+                    if edge.curve.is_none() && !edge.soft && edge.polygon.is_none() {
                         return None;
                     }
                     let (a, b) = object.edge_endpoints(e)?;
@@ -619,6 +649,7 @@ impl StateProof {
                         b,
                         curve: edge.curve,
                         soft: edge.soft,
+                        polygon: edge.polygon,
                     })
                 })
                 .collect(),
@@ -716,11 +747,7 @@ impl StateProof {
             true
         };
         #[allow(clippy::type_complexity)]
-        let mut face_align: Vec<(
-            crate::ids::FaceId,
-            crate::math::Plane,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(live.len());
+        let mut face_align: Vec<(crate::ids::FaceId, &FaceProof)> = Vec::with_capacity(live.len());
         for lf in &live {
             let mut matched = false;
             for (k, rec) in self.faces.iter().enumerate() {
@@ -767,7 +794,7 @@ impl StateProof {
                         return false;
                     }
                 }
-                face_align.push((lf.id, rec.plane, rec.surface));
+                face_align.push((lf.id, rec));
                 taken[k] = true;
                 matched = true;
                 break;
@@ -781,11 +808,14 @@ impl StateProof {
         for (v, target) in &vertex_target {
             candidate.vertices[v].position = *target;
         }
-        for (f, plane, surface) in face_align {
-            candidate.faces[f].plane = plane;
+        for (f, rec) in face_align {
+            candidate.faces[f].plane = rec.plane;
             // Restore the routing-relevant analytic surface too (see FaceProof):
-            // the aligned face IS the recorded face, cylinder claim included.
-            candidate.faces[f].surface = surface;
+            // the aligned face IS the recorded face, cylinder claim included —
+            // and its paint and UV frame.
+            candidate.faces[f].surface = rec.surface;
+            candidate.faces[f].material = rec.material;
+            candidate.faces[f].uv_frame = rec.uv_frame;
         }
         // Fast path: neither the recorded state nor the candidate carries a
         // single claimed or soft edge (the common case for objects with no
@@ -793,37 +823,36 @@ impl StateProof {
         let candidate_has_claims = candidate
             .edges()
             .values()
-            .any(|e| e.curve.is_some() || e.soft);
+            .any(|e| e.curve.is_some() || e.soft || e.polygon.is_some());
         if !self.edges.is_empty() || candidate_has_claims {
             // Restore every edge's circle claim and soft flag to the recorded
             // state (see `StateProof::edges`): claimed edges get their claim back,
             // every other edge carries none. A recorded claim with no matching
             // edge means the replay did not reproduce the recorded edges — a kernel
             // bug by definition, refused rather than guessed.
-            let mut recorded: std::collections::BTreeMap<
-                [u64; 6],
-                (Option<CurveGeom>, bool, bool),
-            > = self
+            type Recorded = (Option<CurveGeom>, bool, Option<CurveGeom>, bool);
+            let mut recorded: std::collections::BTreeMap<[u64; 6], Recorded> = self
                 .edges
                 .iter()
-                .map(|e| (edge_bits_key(e.a, e.b), (e.curve, e.soft, false)))
+                .map(|e| (edge_bits_key(e.a, e.b), (e.curve, e.soft, e.polygon, false)))
                 .collect();
             let edge_ids: Vec<EdgeId> = candidate.edges().keys().collect();
             for e in edge_ids {
                 let Some((a, b)) = candidate.edge_endpoints(e) else {
                     continue;
                 };
-                let (curve, soft) = match recorded.get_mut(&edge_bits_key(a, b)) {
+                let (curve, soft, polygon) = match recorded.get_mut(&edge_bits_key(a, b)) {
                     Some(entry) => {
-                        entry.2 = true;
-                        (entry.0, entry.1)
+                        entry.3 = true;
+                        (entry.0, entry.1, entry.2)
                     }
-                    None => (None, false),
+                    None => (None, false, None),
                 };
                 candidate.edges[e].curve = curve;
                 candidate.edges[e].soft = soft;
+                candidate.edges[e].polygon = polygon;
             }
-            if recorded.values().any(|entry| !entry.2) {
+            if recorded.values().any(|entry| !entry.3) {
                 return false;
             }
         }
@@ -863,7 +892,8 @@ fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
         | KernelOp::MergeInnerFace { sub_face: face }
         | KernelOp::ExtrudeSubFace { sub_face: face, .. }
         | KernelOp::CollapseSubFace { sub_face: face }
-        | KernelOp::TransformSubFace { sub_face: face, .. } => {
+        | KernelOp::TransformSubFace { sub_face: face, .. }
+        | KernelOp::RetraceFace { face, .. } => {
             let f = &object.faces()[*face];
             Anchor::Face {
                 verts: object.loop_positions(f.outer_loop).collect(),
@@ -987,6 +1017,17 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             xf: *xf,
             pinned: pinned.clone(),
         }),
+        KernelOp::RetraceFace {
+            insert,
+            remove,
+            restore,
+            ..
+        } => Ok(KernelOp::RetraceFace {
+            face: face(unknown_face_sticky)?,
+            insert: insert.clone(),
+            remove: remove.clone(),
+            restore: restore.clone(),
+        }),
         KernelOp::MergeFaces { .. } => match anchor {
             Anchor::Edge { a, b } => resolve_edge(object, *a, *b)
                 .map(|edge| KernelOp::MergeFaces { edge })
@@ -1080,6 +1121,15 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
             .transform_sub_face_pinned(*sub_face, xf, pinned, true)
             .map(KernelOpReport::TransformSubFace)
             .map_err(KernelOpError::Sticky),
+        KernelOp::RetraceFace {
+            face,
+            insert,
+            remove,
+            restore,
+        } => object
+            .retrace_face_impl(*face, insert, remove, restore, None)
+            .map(KernelOpReport::FaceRetrace)
+            .map_err(KernelOpError::Sticky),
     }
 }
 
@@ -1090,7 +1140,7 @@ fn dispatch(object: &mut Object, op: &KernelOp) -> Result<KernelOpReport, Kernel
 fn derive_inverse(
     op: &KernelOp,
     report: &KernelOpReport,
-    pre_merge_path: Option<(Vec<Point3>, Vec<Option<CurveGeom>>)>,
+    pre_merge_path: Option<Vec<MergeRun>>,
 ) -> KernelOp {
     match (op, report) {
         (KernelOp::PushPull { distance, .. }, KernelOpReport::PushPull(r)) => {
@@ -1125,8 +1175,28 @@ fn derive_inverse(
             edge: r.new_edges[0],
         },
         (KernelOp::MergeFaces { .. }, KernelOpReport::FaceMerge(r)) => {
-            let (path, curves) = pre_merge_path
+            let mut runs = pre_merge_path
                 .expect("pre_merge_path must be provided for MergeFaces inverse derivation");
+            if runs.len() > 1 {
+                // Several separate runs dissolved together: the undo
+                // re-inserts them all at once (re-tracing restores the hole
+                // the merge closed, or the holes it joined), each side
+                // getting back exactly what it carried.
+                return KernelOp::RetraceFace {
+                    face: r.merged_face,
+                    insert: runs
+                        .into_iter()
+                        .map(|(path, curves)| RetracePath {
+                            path,
+                            curves,
+                            polygons: Vec::new(),
+                        })
+                        .collect(),
+                    remove: Vec::new(),
+                    restore: r.prior_attrs.iter().flatten().copied().collect(),
+                };
+            }
+            let (path, curves) = runs.pop().unwrap_or_default();
             KernelOp::SplitFace {
                 face: r.merged_face,
                 path,
@@ -1176,8 +1246,98 @@ fn derive_inverse(
                 pinned: r.adopted.clone(),
             }
         }
+        (KernelOp::RetraceFace { .. }, KernelOpReport::FaceRetrace(r)) => {
+            // Its own inverse with the arguments swapped; every region face
+            // gets back exactly what it carried.
+            KernelOp::RetraceFace {
+                face: r.faces[0],
+                insert: r.removed.clone(),
+                remove: r.inserted.iter().map(|p| p.path.clone()).collect(),
+                restore: r.prior_attrs.clone(),
+            }
+        }
         _ => panic!("derive_inverse: op and report type mismatch — kernel bug"),
     }
+}
+
+/// One dissolved run: its vertex positions and each edge's circle claim.
+type MergeRun = (Vec<Point3>, Vec<Option<CurveGeom>>);
+
+/// Every run of edges `merge_faces(edge)` will dissolve, each as
+/// [`reconstruct_merge_path`] reconstructs one: exactly that function's
+/// answer when the two faces share one run (so the undo stays the
+/// `SplitFace` it has always been), and every run — each canonically
+/// oriented, sorted by first point — when they share several (the undo is
+/// then one `RetraceFace` inserting them all). Empty for an edge the merge
+/// will refuse.
+fn reconstruct_merge_runs(object: &Object, edge: EdgeId) -> Vec<MergeRun> {
+    let (path, curves) = reconstruct_merge_path(object, edge);
+    if path.is_empty() {
+        return Vec::new();
+    }
+    let Some(edge_data) = object.edges().get(edge) else {
+        return Vec::new();
+    };
+    let Some(twin) = edge_data.twin_half_edge else {
+        return Vec::new();
+    };
+    let loop_a = object.half_edges()[edge_data.half_edge].loop_id;
+    let loop_b = object.half_edges()[twin].loop_id;
+    let walk = if object.loops()[loop_a].kind == LoopKind::Outer {
+        loop_a
+    } else {
+        loop_b
+    };
+    let other = if walk == loop_a { loop_b } else { loop_a };
+    let hes: Vec<HalfEdgeId> = object.loop_half_edges(walk).collect();
+    let shared = |h: HalfEdgeId| {
+        object.half_edges()[h]
+            .twin
+            .is_some_and(|t| object.half_edges()[t].loop_id == other)
+    };
+    let n = hes.len();
+    let starts: Vec<usize> = (0..n)
+        .filter(|&i| shared(hes[i]) && !shared(hes[(i + n - 1) % n]))
+        .collect();
+    if starts.len() <= 1 {
+        return vec![(path, curves)];
+    }
+    let mut runs: Vec<MergeRun> = starts
+        .into_iter()
+        .map(|i| {
+            let mut pts = Vec::new();
+            let mut cs = Vec::new();
+            let mut k = i;
+            while shared(hes[k % n]) {
+                let h = hes[k % n];
+                pts.push(object.vertices()[object.half_edges()[h].origin].position);
+                cs.push(object.edges()[object.half_edges()[h].edge].curve);
+                k += 1;
+            }
+            let last = hes[(k + n - 1) % n];
+            let dest = object.half_edges()[object.half_edges()[last].next].origin;
+            pts.push(object.vertices()[dest].position);
+            let key = |p: &Point3| (p.x, p.y, p.z);
+            let (f, l) = (key(&pts[0]), key(pts.last().expect("a run has points")));
+            if l.0
+                .total_cmp(&f.0)
+                .then(l.1.total_cmp(&f.1))
+                .then(l.2.total_cmp(&f.2))
+                == std::cmp::Ordering::Less
+            {
+                pts.reverse();
+                cs.reverse();
+            }
+            (pts, cs)
+        })
+        .collect();
+    runs.sort_by(|a, b| {
+        let (p, q) = (a.0[0], b.0[0]);
+        p.x.total_cmp(&q.x)
+            .then(p.y.total_cmp(&q.y))
+            .then(p.z.total_cmp(&q.z))
+    });
+    runs
 }
 
 /// Reconstruct the ordered sequence of vertex positions along the shared edge
@@ -1189,10 +1349,13 @@ fn derive_inverse(
 ///   become collinear (scar vertices), so we must capture them here.
 ///
 /// The returned path is as `split_face` expects it:
-/// `[chain_start_vertex, interior_vertices..., chain_end_vertex]`, ordered
-/// along the shared chain from face_a's perspective, paired with each chain
-/// edge's circle claim in the same order (so the undo re-cut restores an
-/// arc's identity, not just its facets).
+/// `[chain_start_vertex, interior_vertices..., chain_end_vertex]`, walked
+/// along whichever of the edge's two loops is an outer loop (both faces'
+/// outer loops for two faces side by side; the inner face's outer loop for
+/// a run along the hole of the face around it, whose undo then cuts that
+/// face from hole to hole), paired with each chain edge's circle claim in
+/// the same order (so the undo re-cut restores an arc's identity, not just
+/// its facets). The orientation is canonicalized below.
 ///
 /// If `edge` is not valid (stale or boundary), returns an empty vec; the
 /// subsequent `merge_faces` call will produce a `StickyError` and the empty
@@ -1221,13 +1384,19 @@ fn reconstruct_merge_path(object: &Object, edge: EdgeId) -> (Vec<Point3>, Vec<Op
         return (Vec::new(), Vec::new()); // SameFaceOnBothSides — merge will error
     }
 
-    // Collect all half-edges on outer_a.
-    let outer_a = object.faces()[face_a].outer_loop;
-    let outer_b = object.faces()[face_b].outer_loop;
+    // Walk the run on the OUTER loop of the two the edge separates: both
+    // faces' outer loops for two faces side by side, or the inner face's
+    // outer loop against the hole loop it sits in (a merge across a hole
+    // boundary — its undo re-cuts the hole owner from hole to hole).
+    let (walk_loop, other_loop) = if object.loops()[loop_a].kind == LoopKind::Outer {
+        (loop_a, loop_b)
+    } else {
+        (loop_b, loop_a)
+    };
 
-    let hes_a: Vec<HalfEdgeId> = object.loop_half_edges(outer_a).collect();
+    let hes_a: Vec<HalfEdgeId> = object.loop_half_edges(walk_loop).collect();
     let hes_b_set: std::collections::BTreeSet<HalfEdgeId> =
-        object.loop_half_edges(outer_b).collect();
+        object.loop_half_edges(other_loop).collect();
 
     // Find all half-edges on outer_a whose twin is on outer_b.
     let shared_set_a: std::collections::BTreeSet<HalfEdgeId> = hes_a

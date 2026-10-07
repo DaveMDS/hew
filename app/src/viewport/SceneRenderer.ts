@@ -33,7 +33,13 @@ import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
-import { findImprint, imprintSegments, readImprints } from '../tools/imprints'
+import {
+  ctxOfObjectPlane,
+  objectDrawingPlanes,
+  parsePlaneUnits,
+  ringAllDrawn,
+} from '../tools/planeUnits'
+import { invalidatePlaneUnits } from '../tools/planeUnits'
 import { DEPTH_BIAS } from './depthPolicy'
 import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
@@ -43,6 +49,20 @@ import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
 import { GUIDE_COLOR } from './guideColors'
+import { windowFor, guideReach, type GuideWindow } from './guideWindow'
+
+/** What `updateGuideExtents` needs to know about the live camera. */
+export interface GuideView {
+  /** The orbit target. */
+  focus: [number, number, number]
+  /** The camera position. */
+  eye: [number, number, number]
+  /** Unit view direction. */
+  dir: [number, number, number]
+  /** World length of the viewport's longer side at the focus. */
+  spanAtFocus: number
+  perspective: boolean
+}
 import { axisDashGapWorldFromWorldPerPixel } from './math'
 import { formatLength } from '../settings/units'
 import {
@@ -130,8 +150,20 @@ const CONTEXT_DIM_OPACITY: Record<'light' | 'dark', number> = {
   light: 0.65,
   dark: 0.55,
 }
-/** Half-length of a rendered line guide (meters) — long enough to read as "infinite" at person scale. */
-const GUIDE_LINE_HALF_LENGTH = 50
+/** Half-length (meters) a line guide is first built with, before the first
+ *  frame's `updateGuideExtents` sizes it to the view (see guideWindow.ts). */
+const GUIDE_INITIAL_HALF_LENGTH = 1
+/** How much of the view a drawn guide covers either side of the focus, in
+ *  multiples of the viewport's longer side at the focus's depth. */
+const GUIDE_VIEW_SPAN = 2
+/** Half-length of a guide line in a print overlay (meters): print pages
+ *  render from their own cameras, so a window sized to the live view would
+ *  crop them. */
+const GUIDE_PRINT_HALF_LENGTH = 50
+/** Half-length of the selected guide's highlight overlay (meters). It draws
+ *  with the depth test off, so unlike the guide itself its length cannot
+ *  disturb depth ordering and a long segment reads as infinite. */
+const GUIDE_HIGHLIGHT_HALF_LENGTH = 50
 /** Half-size of a point guide's cross marker (meters). */
 const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
 
@@ -541,6 +573,9 @@ export class SceneRenderer {
   private defSketchGroups: Map<bigint, DefSketchGroup> = new Map()
   /** Merged LineSegments for every dashed line guide. */
   private guideLines: THREE.LineSegments | null = null
+  /** Per line guide, in `guideLines` segment order: its origin, unit
+   *  direction, and the stretch of it currently drawn. */
+  private guideDefs: { o: [number, number, number]; d: [number, number, number]; win: GuideWindow | null }[] = []
   /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
@@ -578,12 +613,6 @@ export class SceneRenderer {
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
 
-  /** Individually selected sketch edges, highlighted alongside whole
-   *  sketches (kind 'sketch-edge' in the app selection). */
-  private selectedSketchEdges: { sketch: bigint; edge: bigint }[] = []
-
-  /** Selected islands — the connected-shape selection unit. */
-  private selectedSketchIslands: { sketch: bigint; island: bigint }[] = []
   /** Instance whose pose maps the selected definition-owned sketch geometry
    * into world space; null for ordinary world sketches. */
   private selectedSketchInstance: bigint | null = null
@@ -597,8 +626,9 @@ export class SceneRenderer {
    *.
    */
   private sketchHighlight: LineSegments2 | null = null
-  /** Selected imprints (imprints.ts refs) and their bright overlay. */
-  private selectedImprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[] = []
+  /** Selected drawn shapes (planeUnits.ts refs) as flat WORLD segment
+   *  endpoints, and their bright overlay. */
+  private selectedDraftSegments: Float32Array = new Float32Array(0)
   private imprintHighlight: LineSegments2 | null = null
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
@@ -1966,30 +1996,43 @@ export class SceneRenderer {
   }
 
   /**
-   * The imprint overlay for a world object (see `ObjectMeshGroup.imprints`):
-   * one translucent `SKETCH_REGION_COLOR` fill per drawn sub-face (every
-   * hole cut out, so a shape inside a shape reads as two fills, not a
-   * double one, and a boss it was drawn around is not tinted) and one fat `SKETCH_LINE_COLOR`
-   * line batch over every drawn loop and chord run. Both use the sketch
-   * depth biases so they sit in front of the coincident face and native
-   * edges without floating. Null when the object carries no imprint.
-   * Instanced (definition-member) geometry gets no fill overlay in this
-   * version — its selection highlight still poses correctly.
+   * The drawing overlay for a world object (see `ObjectMeshGroup.imprints`):
+   * one fat `SKETCH_LINE_COLOR` line batch over every Topology-store edge of
+   * the object on each of its drawing planes (owned sketch edges draw through
+   * the sketch overlay) and one translucent `SKETCH_REGION_COLOR` fill per
+   * region over a face whose outer ring is wholly drawing edges (every hole
+   * cut out, so a shape inside a shape reads as two fills, and a boss it was
+   * drawn around is not tinted). Both use the sketch depth biases so they sit
+   * in front of the coincident face and native edges without floating. Null
+   * when the object carries no such drawing. Instanced (definition-member)
+   * geometry gets no overlay in this version — its selection highlight still
+   * poses correctly.
    */
   private _buildImprintOverlay(objectId: bigint): THREE.Group | null {
-    const features = readImprints(this.wasmScene, objectId)
-    if (features.length === 0) return null
+    const planes = objectDrawingPlanes(this.wasmScene, objectId)
+    if (planes.length === 0) return null
     const group = new THREE.Group()
     group.name = `Imprints_${objectId}`
     const lines: number[] = []
-    for (const f of features) {
-      const segs = imprintSegments(f)
-      for (let i = 0; i < segs.length; i++) lines.push(segs[i])
-      if (f.kind !== 'sub_face') continue
-      // Every hole is cut out: a nested shape has its own fill, and a boss,
-      // recess, or hole the shape was drawn around is not part of it.
-      const mesh = this._buildPlanarFillMesh(f.loop, f.holes)
-      if (mesh !== null) group.add(mesh)
+    for (const plane of planes) {
+      const ctx = ctxOfObjectPlane(plane, objectId)
+      let pu
+      try {
+        pu = parsePlaneUnits(ctx, this.wasmScene.plane_units_json(ctx))
+      } catch {
+        continue
+      }
+      for (const u of pu.units) {
+        for (const e of u.edges) {
+          if (e.store.kind !== 'topology') continue
+          lines.push(e.a[0], e.a[1], e.a[2], e.b[0], e.b[1], e.b[2])
+        }
+      }
+      for (const r of pu.regions) {
+        if (r.over === null || r.extrude !== null || !ringAllDrawn(pu, r.outer)) continue
+        const mesh = this._buildPlanarFillMesh(r.outer, r.holes)
+        if (mesh !== null) group.add(mesh)
+      }
     }
     if (lines.length > 0) {
       group.add(
@@ -2072,14 +2115,12 @@ export class SceneRenderer {
     return new THREE.Mesh(geo, mat)
   }
 
-  /** Reflect the selected imprints (imprints.ts refs) into a bright overlay
-   *  over their line work — the imprint counterpart of
-   *  `setSelectedSketchIslands`. Posed through `setSelectedSketchInstance`'s
-   *  instance when the owning object is a definition member. */
-  setSelectedImprints(
-    imprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[],
-  ): void {
-    this.selectedImprints = [...imprints]
+  /** Reflect the selected drawn shapes (plane-unit refs — lines, curves,
+   *  shapes on a face or over the void) into a bright overlay over their line
+   *  work. `segments` are flat WORLD segment endpoints (`geometryOf`), so
+   *  instanced drawing needs no pose here. */
+  setSelectedDraft(segments: Float32Array): void {
+    this.selectedDraftSegments = segments
     this._rebuildImprintHighlight()
   }
 
@@ -2089,19 +2130,8 @@ export class SceneRenderer {
       this.sketchGroup.remove(this.imprintHighlight)
       this.imprintHighlight = null
     }
-    if (this.selectedImprints.length === 0) return
-    const pose = this.selectedSketchInstance !== null
-      ? this.wasmScene.instance_pose(this.selectedSketchInstance)
-      : undefined
-    const positions: number[] = []
-    for (const sel of this.selectedImprints) {
-      const feature = findImprint(this.wasmScene, { kind: sel.kind, id: sel.id, object: sel.object })
-      if (feature === null) continue // stale — contributes nothing
-      const segs = imprintSegments(feature, pose)
-      for (let i = 0; i < segs.length; i++) positions.push(segs[i])
-    }
-    if (positions.length === 0) return
-    this.imprintHighlight = makeFatSegments(new Float32Array(positions), {
+    if (this.selectedDraftSegments.length === 0) return
+    this.imprintHighlight = makeFatSegments(new Float32Array(this.selectedDraftSegments), {
       color: EDGE_COLOR_SELECTED,
       widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
       depthTest: false,
@@ -2119,6 +2149,9 @@ export class SceneRenderer {
    * a triangle-fan fill keyed by `${sketchHandle}:${regionHandle}`.
    */
   refreshAllSketches(): void {
+    // Every mutation (and every hide/unhide) lands here: what the plane-unit
+    // listings answer may have changed, so drop their cache.
+    invalidatePlaneUnits()
     this._clearSketchLines()
     this._clearSketchRegions()
 
@@ -2367,8 +2400,10 @@ export class SceneRenderer {
    * `refreshAllSketches`'s "clear and rebuild from scratch" approach since
    * guide counts are small and this is cheap.
    *
-   * Line guides render as a long dashed segment (±[GUIDE_LINE_HALF_LENGTH])
-   * through `origin` along `direction`; point guides render as a small
+   * Line guides render as a dashed segment through `origin` along
+   * `direction`, sized to the view each frame (`updateGuideExtents` — a
+   * fixed long segment breaks depth ordering on the face a guide lies on);
+   * point guides render as a small
    * dashed-free cross marker centered at `position`. Both use the muted
    * construction color GUIDE_COLOR, distinct from edges/axes/sketch lines.
    */
@@ -2376,6 +2411,7 @@ export class SceneRenderer {
     this._clearGuides()
 
     const linePositions: number[] = []
+    const lineDistances: number[] = []
     const markerPositions: number[] = []
 
     for (const guideId of this.wasmScene.guide_ids()) {
@@ -2388,18 +2424,23 @@ export class SceneRenderer {
         const [ox, oy, oz, dx, dy, dz] = geometry
         const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
         if (len < 1e-9) continue
-        const nx = (dx / len) * GUIDE_LINE_HALF_LENGTH
-        const ny = (dy / len) * GUIDE_LINE_HALF_LENGTH
-        const nz = (dz / len) * GUIDE_LINE_HALF_LENGTH
+        const ux = dx / len
+        const uy = dy / len
+        const uz = dz / len
 
         // One solid segment per guide; the dashed look comes from a
         // LineDashedMaterial whose dash/gap sizes are kept screen-constant
         // (updateGuideDashScale) so dashes don't balloon to metres when zoomed
-        // out. computeLineDistances() below makes the dashing work.
+        // out. The segment's endpoints and per-vertex `lineDistance` (the
+        // dash phase: the signed distance along the guide from its origin)
+        // are written by `_writeGuideWindow`.
+        const h = GUIDE_INITIAL_HALF_LENGTH
         linePositions.push(
-          ox - nx, oy - ny, oz - nz,
-          ox + nx, oy + ny, oz + nz,
+          ox - ux * h, oy - uy * h, oz - uz * h,
+          ox + ux * h, oy + uy * h, oz + uz * h,
         )
+        lineDistances.push(-h, h)
+        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], win: null })
       } else if (kind === 'point') {
         // [x, y, z] — a small 3-axis cross marker.
         const [x, y, z] = geometry
@@ -2418,8 +2459,11 @@ export class SceneRenderer {
       // dashSize/gapSize are placeholders — updateGuideDashScale() sets the
       // screen-constant values every frame from the camera distance.
       const mat = new THREE.LineDashedMaterial({ color: GUIDE_COLOR, dashSize: 0.05, gapSize: 0.05 })
+      geo.setAttribute('lineDistance', new THREE.BufferAttribute(new Float32Array(lineDistances), 1))
       this.guideLines = new THREE.LineSegments(geo, mat)
-      this.guideLines.computeLineDistances()
+      // The segment is rewritten as the view moves; its bounding sphere would
+      // go stale, and a guide is always at least partly in view when drawn.
+      this.guideLines.frustumCulled = false
       this.guidesGroup.add(this.guideLines)
     }
 
@@ -2444,6 +2488,7 @@ export class SceneRenderer {
       this.guidesGroup.remove(this.guideLines)
       this.guideLines = null
       this.lastGuideDashSize = -1
+      this.guideDefs = []
     }
     if (this.guideMarkers !== null) {
       this.guideMarkers.geometry.dispose()
@@ -2480,9 +2525,9 @@ export class SceneRenderer {
       const [ox, oy, oz, dx, dy, dz] = geometry
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
       if (len < 1e-9) return
-      const nx = (dx / len) * GUIDE_LINE_HALF_LENGTH
-      const ny = (dy / len) * GUIDE_LINE_HALF_LENGTH
-      const nz = (dz / len) * GUIDE_LINE_HALF_LENGTH
+      const nx = (dx / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
+      const ny = (dy / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
+      const nz = (dz / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
       pts.push(ox - nx, oy - ny, oz - nz, ox + nx, oy + ny, oz + nz)
     } else if (kind === 'point') {
       const [x, y, z] = geometry
@@ -3012,6 +3057,56 @@ export class SceneRenderer {
   }
 
   /**
+   * Size every line guide to the view: each is drawn as a stretch of its line
+   * centred on the point nearest `view.focus` (the orbit target) and reaching
+   * `GUIDE_VIEW_SPAN` viewport-lengths either side of it, so a guide spans
+   * the screen without the extreme endpoints that wreck depth ordering on the
+   * face it lies on (see guideWindow.ts). A guide running at a shallow angle
+   * to the view direction needs proportionally more line to cross the
+   * screen, and in perspective one deeper than the focus needs more again
+   * (the screen covers more world there), so each guide's reach is scaled by
+   * both. Call once per frame, next to `updateGuideDashScale`; rewrites
+   * buffers only when a window moves.
+   */
+  updateGuideExtents(view: GuideView): void {
+    if (this.guideLines === null) return
+    const base = view.spanAtFocus * GUIDE_VIEW_SPAN
+    const [fx, fy, fz] = view.focus
+    const focusDepth =
+      (fx - view.eye[0]) * view.dir[0] + (fy - view.eye[1]) * view.dir[1] + (fz - view.eye[2]) * view.dir[2]
+    const reachView = { eye: view.eye, dir: view.dir, focusDepth, perspective: view.perspective }
+    let changed = false
+    this.guideDefs.forEach((def, i) => {
+      const [ox, oy, oz] = def.o
+      const [dx, dy, dz] = def.d
+      const t = (fx - ox) * dx + (fy - oy) * dy + (fz - oz) * dz
+      const reach = guideReach(base, def.d, [ox + dx * t, oy + dy * t, oz + dz * t], reachView)
+      const win = windowFor(t, reach, def.win)
+      if (win === def.win) return
+      def.win = win
+      this._writeGuideWindow(i, win)
+      changed = true
+    })
+    if (!changed) return
+    const geo = this.guideLines.geometry
+    geo.getAttribute('position').needsUpdate = true
+    geo.getAttribute('lineDistance').needsUpdate = true
+  }
+
+  /** Write guide `i`'s drawn stretch into the position and dash-phase buffers. */
+  private _writeGuideWindow(i: number, win: GuideWindow): void {
+    const geo = this.guideLines!.geometry
+    const pos = geo.getAttribute('position').array as Float32Array
+    const dist = geo.getAttribute('lineDistance').array as Float32Array
+    const { o, d } = this.guideDefs[i]
+    const t0 = win.center - win.half
+    const t1 = win.center + win.half
+    pos.set([o[0] + d[0] * t0, o[1] + d[1] * t0, o[2] + d[2] * t0, o[0] + d[0] * t1, o[1] + d[1] * t1, o[2] + d[2] * t1], i * 6)
+    dist[i * 2] = t0
+    dist[i * 2 + 1] = t1
+  }
+
+  /**
    * Highlight exactly the given objects (orange edges, brighter faces) and
    * restore any others to normal colors. Ids that match no object group (e.g. a
    * selected sketch) are simply ignored. Pass `[]` to clear the highlight.
@@ -3074,25 +3169,10 @@ export class SceneRenderer {
     this._rebuildSketchHighlight()
   }
 
-  /** Reflect the individually selected sketch edges into the highlight
-   *  overlay (per-edge counterpart of `setSelectedSketches`). */
-  setSelectedSketchEdges(edges: { sketch: bigint; edge: bigint }[]): void {
-    this.selectedSketchEdges = [...edges]
-    this._rebuildSketchHighlight()
-  }
-
-  /** Reflect the selected islands (per-shape counterpart of
-   *  `setSelectedSketches`). */
-  setSelectedSketchIslands(islands: { sketch: bigint; island: bigint }[]): void {
-    this.selectedSketchIslands = [...islands]
-    this._rebuildSketchHighlight()
-  }
-
   setSelectedSketchInstance(instance: bigint | null): void {
     if (this.selectedSketchInstance === instance) return
     this.selectedSketchInstance = instance
     this._rebuildSketchHighlight()
-    this._rebuildImprintHighlight()
   }
 
   /** (Re)build the bright overlay for the selected sketches — solid lines in
@@ -3105,13 +3185,7 @@ export class SceneRenderer {
       this.sketchGroup.remove(this.sketchHighlight)
       this.sketchHighlight = null
     }
-    if (
-      this.selectedSketchIds.length === 0 &&
-      this.selectedSketchEdges.length === 0 &&
-      this.selectedSketchIslands.length === 0
-    ) {
-      return
-    }
+    if (this.selectedSketchIds.length === 0) return
 
     const positions: number[] = []
     const pose = this.selectedSketchInstance !== null
@@ -3139,31 +3213,6 @@ export class SceneRenderer {
         continue // stale/deleted handle — simply contributes nothing
       }
       pushLines(linePositions)
-    }
-    for (const { sketch, island } of this.selectedSketchIslands) {
-      if (this.selectedSketchIds.some((s) => s === sketch)) continue
-      let lines: Float32Array | number[]
-      try {
-        lines = this.wasmScene.sketch_island_lines(sketch, island)
-      } catch {
-        continue // stale handle — contributes nothing
-      }
-      pushLines(lines)
-    }
-    for (const { sketch, edge } of this.selectedSketchEdges) {
-      // The whole sketch already highlighted — skip its edge to avoid a
-      // doubled overdrawn segment.
-      if (this.selectedSketchIds.some((s) => s === sketch)) continue
-      // Stale/consumed edges return undefined and contribute nothing.
-      const seg = this.selectedSketchInstance !== null
-        ? this.wasmScene.sketch_edge_endpoints_in_instance(
-            this.selectedSketchInstance,
-            sketch,
-            edge,
-          )
-        : this.wasmScene.sketch_edge_endpoints(sketch, edge)
-      if (seg === undefined) continue
-      for (let i = 0; i < 6; i++) positions.push(seg[i])
     }
     if (positions.length === 0) return
 
@@ -3647,7 +3696,14 @@ export class SceneRenderer {
       }
       return out
     }
-    return { lines: grab(this.guideLines), markers: grab(this.guideMarkers) }
+    // Lines are rebuilt at a fixed long reach, not copied from the live
+    // window: a page is rendered from its own camera and zoom.
+    const lines = new Float32Array(this.guideDefs.length * 6)
+    this.guideDefs.forEach(({ o, d }, i) => {
+      const h = GUIDE_PRINT_HALF_LENGTH
+      lines.set([o[0] - d[0] * h, o[1] - d[1] * h, o[2] - d[2] * h, o[0] + d[0] * h, o[1] + d[1] * h, o[2] + d[2] * h], i * 6)
+    })
+    return { lines, markers: grab(this.guideMarkers) }
   }
 
   /**

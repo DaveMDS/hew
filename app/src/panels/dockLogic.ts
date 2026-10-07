@@ -19,7 +19,7 @@
  * No React import — pure data in, pure data out, unit-testable directly.
  */
 
-import type { NodeRef } from './treeModel'
+import { isSketchScopedKind, type NodeRef } from './treeModel'
 
 export type DockContext = 'empty' | 'object' | 'group' | 'instance' | 'multi' | 'sketch'
 
@@ -40,20 +40,11 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
   if (selectedIds.length === 0) return 'empty'
   if (selectedIds.length > 1) return 'multi'
   const kind = selectedIds[0].kind
-  // Sketch-scoped selections (a whole island, a drawn curve, or a single
-  // line) all get the sketch verb set — same context, finer selection.
-  if (
-    kind === 'sketch' ||
-    kind === 'sketch-island' ||
-    kind === 'sketch-curve' ||
-    kind === 'sketch-edge' ||
-    kind === 'imprint' ||
-    kind === 'imprint-chord'
-  ) {
-    // An imprint (a drawn shape on a solid's face) gets the sketch verb
-    // set too: same drawing-scoped actions (erase, move), finer target.
-    return 'sketch'
-  }
+  // Sketch-scoped selections (a whole sketch, or any drawn shape, curve,
+  // line, or region on a plane) all get the sketch verb set — same context,
+  // finer selection. A drawing on a solid's face gets it too: same
+  // drawing-scoped actions (erase, move), finer target.
+  if (isSketchScopedKind(kind)) return 'sketch'
   return kind
 }
 

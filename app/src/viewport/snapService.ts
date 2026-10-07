@@ -22,7 +22,17 @@ import {
 import { rayPlaneIntersect } from './geoHelpers'
 import { isCoarsePointer } from '../platform'
 
-/** Pixel radius to *acquire* a snap candidate. */
+/**
+ * Pixel radius to *acquire* a snap candidate. This is the radius for lines
+ * (edges, guides, the drawing axes); the inference crate admits named points
+ * (endpoints, midpoints, centers, quadrants) out to `POINT_SNAP_REACH` (1.75)
+ * times it, about 14 px, so a corner on an edge or axis captures before the
+ * line can hold the cursor off it (and releases a held point at about 18 px,
+ * `POINT_RELEASE_MARGIN`). The anchor-relative soft axis is further
+ * capped on screen at `SOFT_AXIS_SCREEN_REACH` (1.0) times it, so it captures
+ * and lets go like an edge.
+ * A selection pick (`resolve`'s `pick`) gives points no wider reach.
+ */
 export const SNAP_RADIUS_PX = 8
 
 /**
@@ -197,6 +207,7 @@ export class SnapService {
     constraintPlaneArr: Float64Array | null,
     offPlanePoints: boolean,
     softAxisApertureScale?: number,
+    pick?: boolean,
   ): Snap | null {
     try {
       const [ox, oy, oz] = ray.origin
@@ -214,6 +225,7 @@ export class SnapService {
         cylinder,
         softAxisApertureScale ?? null,
         offPlanePoints,
+        pick ?? false,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -283,6 +295,15 @@ export class SnapService {
      * of this flag supplies alongside it.
      */
     facesOnly?: boolean,
+    /**
+     * A selection pick, not an inference: named points (endpoints,
+     * midpoints, centers, quadrants) are admitted at `SNAP_RADIUS_PX` like
+     * lines, without the kernel's wider `POINT_SNAP_REACH` that drawing tools
+     * get. The Select tool's hover and click pass it, so a click in the
+     * middle of a small face selects the face rather than the edge whose
+     * midpoint is 10 px away.
+     */
+    pick?: boolean,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -300,7 +321,7 @@ export class SnapService {
     //    the hysteresis step below.
     let acquired = this.query(
       ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
-      offPlanePoints ?? false,
+      offPlanePoints ?? false, undefined, pick,
     )
     if (facesOnly && acquired !== null && acquired.kind !== 'on-face') {
       acquired = null
@@ -325,6 +346,7 @@ export class SnapService {
         ray, SNAP_BREAK_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
         offPlanePoints ?? false,
         SOFT_AXIS_BREAK_APERTURE_SCALE,
+        pick,
       )
       if (held !== null && sameTarget(held, this.lastSnap)) {
         this.lastSnap = held

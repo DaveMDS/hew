@@ -899,6 +899,20 @@ describe('TapeMeasureTool — typed offset commits along the resolved offset dir
     expect(wasm.add_guide_line).not.toHaveBeenCalled() // no arbitrary-side commit
   })
 
+  it('a typed offset with no side yet says to move the cursor first instead of silently doing nothing', () => {
+    for (const lockFirst of [false, true]) {
+      const { scene } = makeWasmScene()
+      const { tool, onToast } = makeTool(scene)
+      tool.onPointerDown(
+        makeSnap({ x: 0, y: 0, z: 0, kind: 'on-edge', elementKind: 'edge', object: 7n, element: 3n }),
+        RAY,
+      )
+      if (lockFirst) tool.onKey(makeKeyEvent('ArrowLeft')) // resolved offset plane, zero offset
+      typeAndEnter(tool, '5')
+      expect(onToast).toHaveBeenCalledWith(expect.stringContaining('Move the cursor to the side'))
+    }
+  })
+
   it('regression: the pre-existing free-offset degenerate guard (no resolved plane) still no-ops unchanged', () => {
     const { scene } = makeWasmScene()
     const { tool } = makeTool(scene)

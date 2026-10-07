@@ -54,6 +54,10 @@ Draw directly on a solid's face to split it into regions (see [Drawing](/learn/d
 - **Push past a neighboring face** → a notch. On an L- or P-shaped solid, pushing one face inward past the plane of a face that points the same way (the wider part's end past the narrower part's end) carves the material behind it, the same way a through-cut does, instead of stopping at the plane.
 - **Pull past a neighboring face** → the reverse. Pulling the narrower part's end outward past the wider part's end grows it straight through, and pulling a notched face back out to where it started restores the original shape. Pull exactly flush with the neighboring face and the two merge into one. The same goes for a face pulled across a gap into the face looking back at it, such as one arm of a U pulled into the other: the gap closes and the two become one. A face whose corner sits on a lower step (the exposed end of a thick part where a thinner part joins it) grows or recedes the same way, whatever the distance.
 
+A shape drawn half over a face and half past its edge splits at the edge, and each part pushes on its own terms. Push/Pull the part over the face and the solid grows (or is cut, if you push in); Push/Pull the part past the edge and you get a new, separate object. Do them in either order: the second part is still there, waiting, after the first.
+
+A shape the face can't hold — one that touches an edge or another shape at only a single point, or leaves a sliver too thin to keep — is still drawn, but can't be pushed. Push/Pull says so and says why, instead of doing nothing. Move the shape clear of the problem and try again.
+
 ![A box with a circular hole punched clean through it, the opening visible at the back face](/docs/pushpull-throughcut.webp)
 
 You can type the depth instead of dragging to choose the direction: a plain number grows the boss outward, and a leading minus (`-6mm`) cuts the recess inward.

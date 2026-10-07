@@ -21,9 +21,12 @@ import { projectRayOntoAxis, applyAffine3x4, transformNormalThroughPose } from '
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
+import { displayedLength } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
-import { defaultFaceEligible, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
+import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
+import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
+import { regionUnderRay } from './regionPick'
 
 /** Snap kinds whose point is a deliberate depth reference for push/pull — the
  * cursor was parked on a real feature. `on-face` is excluded on purpose: it
@@ -90,11 +93,20 @@ type RegionPick = { sketch: bigint; region: bigint; depth: number }
  * extruding on the rest). No face on the ray at all also counts as "in
  * front"; no region never does.
  */
-function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null): boolean {
+function regionInFrontOfFace(region: RegionPick | null, face: RawFacePick | null, faceEligible = true): boolean {
   if (region === null) return false
   if (face === null) return true
+  // Free drawing lying ON a face that cannot be pushed from here (a group's
+  // or component's face, drawn on from outside) is what the cursor is on:
+  // a tie goes to the drawing, which pulls into a new object of its own.
+  if (!faceEligible) return region.depth <= face.depth + REGION_COPLANAR_EPS_M
   return region.depth < face.depth - REGION_IN_FRONT_EPS_M
 }
+
+/** How far behind a non-pushable face a region may lie and still count as
+ *  lying on it (metres along the ray): the two are the same plane, picked
+ *  through two code paths. */
+const REGION_COPLANAR_EPS_M = 1e-7
 
 export type PushPullTarget =
   | {
@@ -350,7 +362,7 @@ export class PushPullTool implements Tool {
     // never inside an OBJECT editing context.
     const activeInstance = this._activeInstance
     const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-    if (!regionInFrontOfFace(region, raw)) {
+    if (!regionInFrontOfFace(region, raw, eligible !== null)) {
       if (eligible !== null) {
         const a = this.wasmScene.face_plane(eligible.object, eligible.face)
         return {
@@ -385,6 +397,37 @@ export class PushPullTool implements Tool {
       normal = mappedNormal
     }
     return { constraintPlane: { point, normal }, facesOnly: true }
+  }
+
+  /**
+   * The face to push/pull for a ray that struck `face` of `object`, resolved
+   * through the plane's listing (unified drafting §4.6): the region under the
+   * cursor names the face it lies over (`over.face`), so a region drawn on
+   * the face pushes as its own sub-face whichever face the ray struck. A
+   * region over the object with NO face (`over.face` null: a pinch or
+   * sliver the solid cannot hold) answers `{ refuse: <code> }`: RegionPinched,
+   * RegionSliver, or RegionNotPushable by the listing's `over.why`. Free regions never
+   * reach here — they resolve through Path B (`extrude_region`). Anything
+   * the listing cannot say (no listing, no region under the ray, a stale
+   * handle) leaves the struck face as it was.
+   */
+  private _routeThroughListing(
+    object: bigint,
+    face: bigint,
+    instance: bigint | undefined,
+    ray: Ray,
+  ): bigint | { refuse: 'RegionPinched' | 'RegionSliver' | 'RegionNotPushable' } {
+    let hit: ReturnType<typeof regionUnderRay> = null
+    try {
+      const ctx = ctxOfFace(this.wasmScene, object, face, instance ?? null)
+      if (ctx !== null) hit = regionUnderRay(this.wasmScene as unknown as PlaneUnitsScene, ctx, ray, 0)
+    } catch {
+      return face
+    }
+    const over = hit?.region.over ?? null
+    if (over === null || over.object !== object) return face
+    if (over.face !== null) return over.face
+    return { refuse: over.why === 'pinch' ? 'RegionPinched' : over.why === 'sliver' ? 'RegionSliver' : 'RegionNotPushable' }
   }
 
   /**
@@ -484,7 +527,7 @@ export class PushPullTool implements Tool {
       // as `snapConstraint` skips it at hover time. The two must agree.
       const activeInstance = this._activeInstance
       const region = this._activeContext === null ? this._pickRegionFor(ray, activeInstance) : null
-      const regionWins = regionInFrontOfFace(region, raw)
+      const regionWins = regionInFrontOfFace(region, raw, eligible !== null)
       if (raw !== null && !regionWins) {
         // Same face-eligibility policy as the draw tools (faceDraw.ts): at
         // the top level only PLAIN objects are directly push/pullable —
@@ -493,8 +536,16 @@ export class PushPullTool implements Tool {
         // scope is editable, so isolated editing can't disturb neighbors.
         if (eligible !== null) {
           const objectHandle = eligible.object
-          const faceHandle = eligible.face
           const instanceHandle = raw.instance
+          // The face's plane lists what is drawn on it; the region under the
+          // cursor says which face to push — or that the solid cannot hold
+          // it (a pinch or sliver of an owned sketch).
+          const routed = this._routeThroughListing(objectHandle, eligible.face, instanceHandle, ray)
+          if (typeof routed === 'object') {
+            this.onToast(kernelErrorMessage(routed.refuse, ''), routed.refuse)
+            return
+          }
+          const faceHandle = routed
           // `face_normal` answers in `objectHandle`'s own LOCAL frame — the
           // instance the face was actually picked THROUGH (`instanceHandle`,
           // not necessarily `this._activeInstance`: an injected eligibility
@@ -607,7 +658,16 @@ export class PushPullTool implements Tool {
       // _axisDistance) so e.g. clicking an edge midpoint cuts to exactly that
       // depth rather than the cursor ray's diagonal closest-approach.
       const finalDistance = this._axisDistance(snap, ray, anchor, target.normal)
-      this._commitAndArm(target, finalDistance === 0 ? distance : finalDistance, anchor)
+      const raw = finalDistance === 0 ? distance : finalDistance
+      // A depth that follows the cursor (not borrowed from a hard snap)
+      // commits the DISPLAYED distance through the typed path — sign rules
+      // included — exactly as if typed. A hard-snap depth stays exact.
+      const shown = displayedLength(Math.abs(raw))
+      if (!this._depthFromHardSnap(snap, anchor, target.normal) && shown > 0) {
+        this._commitFromTypedClick(target, raw, shown, anchor)
+        return
+      }
+      this._commitAndArm(target, raw, anchor)
     }
   }
 
@@ -806,13 +866,11 @@ export class PushPullTool implements Tool {
    *  (where plain objects always pass) an instanced pick belongs to a
    *  component and anything else was a grouped face. */
   private _ineligibleFaceHint(instance: bigint | undefined): string {
-    if (this._contextScoped || this._activeContext !== null || this._activeComponent !== null) {
-      return 'Push/pull is scoped to what you are editing — press Esc to step out first'
-    }
-    if (instance !== undefined) {
-      return 'That face is part of a component — double-click it to edit the component'
-    }
-    return 'That face is inside a group — double-click to enter the group and edit it'
+    return ineligibleFaceHint(
+      'Push/pull',
+      this._contextScoped || this._activeContext !== null || this._activeComponent !== null,
+      instance,
+    )
   }
 
   /**
@@ -848,6 +906,33 @@ export class PushPullTool implements Tool {
       if (Math.abs(depth) > COPLANAR_SNAP_EPS_M) return depth
     }
     return projectRayOntoAxis(ray.origin, ray.direction, anchor, normal)
+  }
+
+  /** True when `_axisDistance` took its depth from a hard snap (so the
+   *  depth is a deliberate reference, not a free cursor position). */
+  private _depthFromHardSnap(
+    snap: Snap | null,
+    anchor: [number, number, number],
+    normal: [number, number, number],
+  ): boolean {
+    if (snap === null || !HARD_SNAP_KINDS.has(snap.kind)) return false
+    const depth =
+      (snap.x - anchor[0]) * normal[0] +
+      (snap.y - anchor[1]) * normal[1] +
+      (snap.z - anchor[2]) * normal[2]
+    return Math.abs(depth) > COPLANAR_SNAP_EPS_M
+  }
+
+  /** The click commit of a free depth: `_commitFromTyped` with the shown
+   *  magnitude, the live drag distance standing in for the stage's. */
+  private _commitFromTypedClick(
+    target: PushPullTarget,
+    rawDistance: number,
+    shown: number,
+    anchor: [number, number, number],
+  ): void {
+    this.stage = { kind: 'dragging', target, anchor, distance: rawDistance }
+    this._commitFromTyped(shown)
   }
 
   /** Commit through `_commit`, then open the retype window on the result

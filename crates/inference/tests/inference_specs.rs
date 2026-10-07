@@ -7,8 +7,8 @@
 //! treats ids as opaque labels.
 
 use inference::{
-    ApertureMode, ElementRef, InferenceScene, PickRay, Snap, SnapKind, SnapLock, SnapQuery,
-    SnapWeights,
+    ApertureMode, ElementRef, InferenceScene, POINT_SNAP_REACH, PickRay, SOFT_AXIS_SCREEN_REACH,
+    Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use kernel::{
     AxesFrame, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId,
@@ -323,12 +323,14 @@ fn cylinder_query(radius: f64) -> SnapQuery {
 /// At the query's own reference depth, `radius = depth * tan(aperture)`
 /// makes the cylinder and the cone agree exactly (design camera.md §1): a
 /// candidate just inside one tolerance is just inside the other, and a
-/// candidate just outside one is just outside the other.
+/// candidate just outside one is just outside the other. The candidate is a
+/// point, so both tolerances reach `POINT_SNAP_REACH` times as far.
 #[test]
 fn cylinder_cone_equivalence_at_target_distance() {
     let radius = CYL_REF_DEPTH * CYL_APERTURE_RAD.tan();
+    let reach = radius * POINT_SNAP_REACH;
 
-    let inside = single_point_scene(0.9 * radius, CYL_REF_DEPTH);
+    let inside = single_point_scene(0.9 * reach, CYL_REF_DEPTH);
     assert!(
         inside.resolve(&cone_query(CYL_APERTURE_RAD)).is_some(),
         "cone admits a point safely inside its aperture at the reference depth"
@@ -338,7 +340,7 @@ fn cylinder_cone_equivalence_at_target_distance() {
         "cylinder admits the same point at the equivalent radius"
     );
 
-    let outside = single_point_scene(1.1 * radius, CYL_REF_DEPTH);
+    let outside = single_point_scene(1.1 * reach, CYL_REF_DEPTH);
     assert!(
         outside.resolve(&cone_query(CYL_APERTURE_RAD)).is_none(),
         "cone rejects a point safely outside its aperture at the reference depth"
@@ -2552,16 +2554,17 @@ fn aiming_squarely_at_a_facet_endpoint_still_gets_the_endpoint() {
     assert!(snap.position.approx_eq(vertex, tol::POINT_MERGE));
 }
 
-/// A weighted kind reaches BEYOND the plain pick cone: the quadrant snaps
-/// from 1.25 apertures away (inside its 2.5x reach) where the unweighted
-/// query has nothing at all to offer.
+/// A weighted kind reaches BEYOND its base reach: the quadrant snaps from
+/// 2.0 apertures away (past the 1.75x `POINT_SNAP_REACH`, inside its 2.5x
+/// gravity) where the unweighted query has nothing at all to offer.
 #[test]
 fn gravity_reaches_past_the_plain_aperture() {
     let (scene, quadrant, _vertex) = circle_gravity_fixture();
-    // Radially outward from the circle, away from every facet: at 0.075 m the
-    // aim is 0.025 rad off-axis — past the 0.02 aperture, inside 2.5 x 0.02.
+    // Radially outward from the circle, away from every facet: at 0.12 m the
+    // aim is 0.04 rad off-axis — past the 1.75 x 0.02 point reach, inside
+    // 2.5 x 0.02.
     let outward = (quadrant - GRAVITY_CIRCLE_CENTER).normalized().unwrap();
-    let aim = quadrant + outward * 0.075;
+    let aim = quadrant + outward * 0.12;
 
     let q = query(overhead(aim), 0.02);
     let snap = scene
@@ -2594,9 +2597,9 @@ fn a_polygon_center_reaches_past_the_plain_aperture() {
         &[(kernel::SketchCurveId::default(), center)],
     );
 
-    // 0.075 m off at 3 m overhead is 0.025 rad — past the 0.02 aperture,
-    // inside the 2.5x analytic-point reach.
-    let aim = center + Vec3::new(0.075, 0.0, 0.0);
+    // 0.12 m off at 3 m overhead is 0.04 rad — past the 1.75 x 0.02 point
+    // reach, inside the 2.5x analytic-point gravity.
+    let aim = center + Vec3::new(0.12, 0.0, 0.0);
     let q = query(overhead(aim), 0.02);
     let snap = scene.resolve(&q).expect("the center is within its gravity");
     assert_eq!(snap.kind, SnapKind::Center);
@@ -2612,8 +2615,8 @@ fn a_polygon_center_reaches_past_the_plain_aperture() {
     );
 }
 
-/// Reach never steals. A quadrant admitted ONLY by its gravity — past the
-/// query's own aperture — must lose to anything inside the plain aperture,
+/// Reach never steals. A quadrant admitted ONLY by its gravity — past its
+/// base `POINT_SNAP_REACH` — must lose to anything inside the plain aperture,
 /// however weak its kind: otherwise hovering a face near a circle would yank
 /// the cursor a couple of apertures away onto the rim, which is exactly the
 /// regression `standing_sketch_region_is_a_hoverable_face` (wasm-api, over
@@ -2624,11 +2627,12 @@ fn gravity_reach_never_steals_from_a_candidate_inside_the_aperture() {
     // A transient segment straight through the aim point gives an `OnEdge` —
     // the weakest positional kind that can sit right under the cursor.
     let outward = (quadrant - GRAVITY_CIRCLE_CENTER).normalized().unwrap();
-    let aim = quadrant + outward * 0.075; // 0.025 rad: past 0.02, inside 2.5x
+    let aim = quadrant + outward * 0.12; // 0.04 rad: past 1.75x 0.02, inside 2.5x
     // Deliberately lopsided: a symmetric segment would put its Midpoint — a
-    // stronger kind — exactly under the cursor and prove less.
+    // stronger kind — exactly under the cursor and prove less. Both ends and
+    // the midpoint sit past `POINT_SNAP_REACH` of the aim.
     scene.add_transient_segment(
-        aim + Vec3::new(0.0, -0.1, 0.0),
+        aim + Vec3::new(0.0, -0.2, 0.0),
         aim + Vec3::new(0.0, 0.5, 0.0),
     );
 
@@ -2919,9 +2923,10 @@ fn boosting_an_indexed_kind_still_matches_the_linear_reference() {
 fn soft_axis_snaps_through_the_anchor_within_tolerance() {
     let scene = InferenceScene::new();
     let anchor = Point3::new(2.0, 3.0, 0.0);
-    // 5 units along +X from the anchor, drifted 0.3 in Y: atan(0.3/5) ≈
-    // 3.43°, inside the ~5° soft-axis tolerance.
-    let target = Point3::new(7.0, 3.3, 0.0);
+    // 5 units along +X from the anchor, drifted 0.04 in Y: atan(0.04/5) ≈
+    // 0.46°, inside the ~5° soft-axis tolerance, and 0.008 rad on screen
+    // from 5 m up, inside the on-screen cap (SOFT_AXIS_SCREEN_REACH x NARROW).
+    let target = Point3::new(7.0, 3.04, 0.0);
     let ray = ray_at(Point3::new(target.x, target.y, 5.0), target);
     let q = SnapQuery {
         aperture_mode: ApertureMode::Cone,
@@ -2942,6 +2947,39 @@ fn soft_axis_snaps_through_the_anchor_within_tolerance() {
     // On the line y=3, z=0 through the anchor.
     assert!((snap.position.y - anchor.y).abs() <= tol::POINT_MERGE);
     assert!((snap.position.z - anchor.z).abs() <= tol::POINT_MERGE);
+}
+
+/// The drag-direction angle alone does not capture: 0.3 off the axis at
+/// the end of a 5-unit drag is inside the ~5° tolerance (≈ 3.43°) but six
+/// pick radii away on screen, past `SOFT_AXIS_SCREEN_REACH`. Without the
+/// on-screen cap the axis pulled the cursor in from across the screen on
+/// every long drag and held it off any point near the axis's far end.
+#[test]
+fn soft_axis_does_not_capture_from_across_the_screen() {
+    let scene = InferenceScene::new();
+    let anchor = Point3::new(2.0, 3.0, 0.0);
+    let target = Point3::new(7.0, 3.3, 0.0);
+    let ray = ray_at(Point3::new(target.x, target.y, 5.0), target);
+    let q = SnapQuery {
+        aperture_mode: ApertureMode::Cone,
+        weights: SnapWeights::default(),
+        ray,
+        anchor: Some(anchor),
+        lock: None,
+        aperture: NARROW,
+        constraint_plane: None,
+        soft_axis_aperture_scale: None,
+        off_plane_points: false,
+    };
+    assert_eq!(scene.resolve(&q), None);
+
+    // Widening the query to put the axis inside the cap brings it back:
+    // the cap, not the angle, is what refused it.
+    let wide = SnapQuery {
+        aperture: 0.06 / SOFT_AXIS_SCREEN_REACH * 1.05,
+        ..q
+    };
+    assert_eq!(scene.resolve(&wide).map(|s| s.kind), Some(SnapKind::OnAxis));
 }
 
 /// Axis × edge crossings: dragging along a soft axis from an anchor on one
@@ -3205,9 +3243,9 @@ fn moved_axes_frame_reorients_soft_axis_candidates() {
 
     let anchor = Point3::new(2.0, 3.0, 0.0);
     // 5 units along the frame's red axis (world +Y) from the anchor,
-    // drifted 0.3 along world -X (the frame's green axis): same ~3.43°
-    // geometry as the world-identity fixture, just reoriented.
-    let target = anchor + frame.x * 5.0 + frame.y * 0.3;
+    // drifted 0.04 along world -X (the frame's green axis): same geometry
+    // as the world-identity fixture, just reoriented.
+    let target = anchor + frame.x * 5.0 + frame.y * 0.04;
     let ray = ray_at(Point3::new(target.x, target.y, 5.0), target);
     let q = SnapQuery {
         aperture_mode: ApertureMode::Cone,
@@ -4379,7 +4417,9 @@ fn item7_query(target: Point3) -> SnapQuery {
 #[test]
 fn item7_locked_line_hovering_the_south_edge_projects_each_edge_point_onto_the_lock() {
     let scene = cube_scene();
-    for i in 1..10 {
+    // 0.1 and 0.9 sit within `POINT_SNAP_REACH` of the edge's corners in
+    // this view; the corner case is pinned below.
+    for i in 2..9 {
         let x = i as f64 / 10.0;
         let snap = scene
             .resolve(&item7_query(Point3::new(x, 0.0, 1.0)))
@@ -4395,6 +4435,19 @@ fn item7_locked_line_hovering_the_south_edge_projects_each_edge_point_onto_the_l
             snap.position
         );
     }
+}
+
+/// Hovering the south edge 0.1 short of its far corner — about 1.5 pick
+/// radii away on screen, past the plain aperture but within
+/// `POINT_SNAP_REACH` — captures the corner, projected onto the lock.
+#[test]
+fn item7_locked_line_near_the_south_corner_captures_the_corner() {
+    let scene = cube_scene();
+    let snap = scene
+        .resolve(&item7_query(Point3::new(0.9, 0.0, 1.0)))
+        .expect("locked resolve always answers");
+    assert_eq!(snap.kind, SnapKind::Endpoint, "got {snap:?}");
+    assert!((snap.position.x - 1.0).abs() < 1e-9 && (snap.position.y - 0.5).abs() < 1e-9);
 }
 
 #[test]

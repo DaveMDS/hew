@@ -701,8 +701,8 @@ for, not shipped.
 | `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty; in the desktop app also front, attached, label — §4.2) | Required |
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
-| `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` | Required |
-| `hew.solid` | `extrude` (region → new Object), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn-but-not-yet-pushed shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one before it is ever pushed/pulled) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
+| `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
@@ -723,25 +723,92 @@ Semantics notes, normative:
 
 - Drawing commands take a **plane spec**: `{"ground": true}`, an explicit
   `{origin, normal[, x_axis]}` frame, `{"face": <locator>}` (draw on a
-  solid's face — the face-imprint path), or `{"sketch": id}` (extend an
-  existing sketch). Points are 3D world coordinates and must lie on the
-  plane within kernel tolerance; off-plane input is refused typed, never
-  projected silently. In face mode a closed profile clear of the face
-  boundary imprints as a sub-face; one whose sides run along part of the
-  boundary imprints as one or more boundary-to-boundary chord splits (one
-  undo entry), and the result's `face` token names the face that carries
-  the drawn region either way. Only a profile that merely touches the
-  boundary at a point is refused `loop_not_strictly_inside` — except
-  `draw_arc`'s `"pie"`/`"segment"` closes, which keep the stricter
-  every-vertex-inside check described under `hew.sketch.draw_arc` below
-  and refuse any boundary contact. Any point parameter accepts a derived-point locator
-  (§5.3) in place of coordinates.
+  solid's face), or `{"sketch": id}` (extend an existing sketch). Points
+  are 3D world coordinates and must lie on the plane within kernel
+  tolerance; off-plane input is refused typed, never projected silently
+  (on a face: `point_not_on_face`). Any point parameter accepts a
+  derived-point locator (§5.3) in place of coordinates.
+- **The plane is the drafting context.** With a `{"face": ...}` plane
+  spec the draw goes through the drafting engine: everything drawn on the
+  face's plane — the face edges of every solid with a face on it, the
+  drawing kept on those faces, and the free drawing over the void — is one
+  arrangement, and the new geometry is added to it as one undo step, then
+  each edge is stored where it can be: an edge that closes a region over a
+  face becomes that solid's face structure (`"topology"`, an imprint); a
+  loose edge over a face (a free end, a line touching no other edge) is
+  kept in a sketch owned by that solid and rides with its faces
+  (`"owned"`); an edge over no face is free drawing (`"free"`, in a free
+  sketch on that plane). A solid's own edges are fixed: drawing splits
+  them where lines meet them but never moves them. Consequences: a loose
+  line on a face, an open path that touches no edge, and a shape
+  overhanging the face's edge are all accepted — an overhanging shape
+  splits at the face's edge into a face on the solid and a region over the
+  void, and the void region extrudes as a new Object
+  (`hew.solid.extrude` with `plane`, below) while the face part
+  push/pulls, in either order. Drawing on the ground or into a sketch
+  (`{"ground"}`, `{origin,normal}`, `{"sketch"}`) keeps its sketch-mode
+  behavior and result.
+- A face-target draw's result is `{object_id, units}`: `object_id` the
+  solid the face belongs to, and `units` the **plane units** the draw
+  touched — every drawing edge lying along what was drawn, then every
+  region whose boundary carries it — each `{kind: "edge"|"region", key:
+  "edg_<hex16>"|"rgn_<hex16>", store: "topology"|"owned"|"free",
+  object_id?, sketch_id?}`. Keys are geometry-derived (a 64-bit hash of
+  the geometry, in the plane's own coordinates), stable until the
+  geometry they name changes (not the per-sketch compound ids of §5.2: a
+  unit key is a prefix and exactly 16 hex digits), and are the way to address a unit in
+  `hew.sketch.units`/`move`/`rotate`/`scale`/`copy`/`delete`/`offset` and
+  `hew.solid.extrude`. Face tokens are minted from the faces the draw
+  produced, when it produced any: for a closed shape `"face"` (the face
+  carrying the drawn region — the new sub-face, or the part of the shape
+  that lies on the solid) and `"parent"` (a face the shape borders: the
+  reshaped parent, now carrying the shape as a hole, or the face across a
+  cut); for an open path `"a"` and `"b"` (the faces it borders). A draw
+  that produced no face (a loose line, a shape wholly over the void) mints
+  no token, and a later `{"$face": ...}` reference to one refuses
+  `face_token_unknown`.
+- **Unit verbs.** `hew.sketch.units {plane}` (read-only) lists a plane's
+  drawing: `units` — islands `{key: "isl_<hex16>", edges: [{key, a, b,
+  store, object_id?, sketch_id?, curve?}]}` (`curve` is `{key:
+  "crv_<hex16>", center, radius}` for a facet of an analytic circle) — and
+  `regions` — `{key: "rgn_<hex16>", outer, holes, object_id?, face?,
+  extrudable}` (`face` is a face locator `{object, at}` for a region that
+  IS a face of a solid, ready for `hew.solid.push_pull`; `extrudable` is
+  true for a region over no face). A solid's own edges appear in no
+  island: they bound regions but belong to no unit. The edit verbs each
+  take a required `plane` (any plane spec above, or a bare sketch id) and
+  `units`, a non-empty list of keys: `isl_` an island (every drawing edge
+  in it), `edg_` one edge, `crv_` every facet of the circle with that key,
+  `rgn_` the region's ring edges that are drawing edges. `hew.sketch.move
+  {plane, units, offset}` and `copy {plane, units, offset}` translate (or
+  copy) by a vector; `rotate {plane, units, axis_point, angle}` turns about
+  the plane's normal through `axis_point` (radians, counter-clockwise seen
+  from the normal side); `scale {plane, units, center, factor | factors}`
+  scales uniformly or per world axis (a scale that leaves the plane
+  refuses `point_off_plane`); `delete {plane, units}` erases. Each is one
+  undo step, edits the arrangement exactly as drawing there would — moving
+  a shape onto another shape arranges it, on the ground too — and answers
+  `{units}`, the plane units the edit made (new keys after the edit; empty
+  for `delete`). `hew.sketch.offset` additionally accepts `{plane, region:
+  "rgn_<hex16>", distance}` for a face or plane region (answering
+  `{units}`); its original `{region: <sketch region id>, distance}` form is
+  unchanged. A key that names no unit on that plane (or is malformed)
+  refuses `unknown_unit`. A solid's own edges cannot be moved or deleted:
+  an `edg_` key naming one, or an `rgn_` key whose ring is all solid
+  edges, refuses `draft_boundary_edge_touched` and changes nothing.
+- `hew.solid.extrude` also accepts `{plane, region: "rgn_<hex16>",
+  distance}`, a plane region by unit key: a region over no face extrudes as
+  a new Object (result `{object_id}`, face tokens per §5.4); a region that
+  is a face of a solid push/pulls that face exactly as `hew.solid.push_pull`
+  does (result `{object_id}` or, for a through-cut, `{object_ids}`); a
+  region over a face that cannot hold it (a pinch or sliver kept as
+  drawing) refuses `region_not_pushable`.
 - `hew.sketch.draw_arc` takes a `close`: `"open"` (default, a bare arc),
   `"pie"` (closed wedge — two radii to the center), or `"segment"`
   (closed circular segment — the chord) — the API counterpart of the UI
   Arc tool's Alt-cycled completion modes. `"pie"`/`"segment"` commit a
   closed profile exactly like `draw_rect`/`draw_circle`: a region in
-  plane/sketch mode, a `SplitFaceInner` loop imprint in face mode.
+  plane/sketch mode, a region arranged on the face in face mode.
   Refused typed when combined with a full-turn sweep, which is already a
   closed loop (the circle special case).
   `"pie"`/`"segment"` additionally need at least 2 chords: a single chord
@@ -751,11 +818,9 @@ Semantics notes, normative:
   sharpest at a half turn). `segments` below that floor is refused
   static (`-32602`); the proportional default is floored at 2 as well,
   so a small sweep never silently falls into the same degenerate case.
-  Face mode additionally validates every loop vertex — including
-  `"pie"`'s caller-supplied center — strictly inside the target face
-  before cutting, refused `loop_not_strictly_inside` otherwise; this is
-  stricter than the bare containment test alone, which is not reliable
-  for a point sitting exactly on the face's own boundary.
+  In face mode the arc's own facets keep their circle and the closing
+  radii or chord are plain lines; a pie whose center lies on or beyond the
+  face's edge is kept (it splits like any overhanging shape).
 - In headless hosts `hew.doc.new`/`open` establish the working document.
   A live host at 1.0 keeps document lifecycle user-driven — the user
   creates or opens documents and clients `attach`; whether a live host
@@ -781,45 +846,57 @@ Semantics notes, normative:
   or a sketch curve id — validated for connectivity and refused typed
   where the tool itself refuses (branching selections, bends tighter
   than the profile). Exact schema in the registry.
-- **Editable imprints**: a drawn-but-not-yet-pushed shape (an *imprint* —
-  a coplanar sub-face clear of its parent face's boundary, or a *chord*,
-  one or more boundary-to-boundary splits, per the face-mode bullet
-  above) is recovered structurally from a solid's topology rather than
-  stored, and can be listed, moved, turned, scaled, or deleted before it
-  is ever pushed/pulled. `hew.solid.imprints {object}` lists every one on
-  an object — `{kind: "sub_face", at, loop, curve, curves, nested}` or
-  `{kind: "chord", at, path, curves}` — where `curves` is the per-edge
-  circle each loop or run edge is a facet of (`{center, radius}` or
-  `null`; an arc drawn on a face keeps its circle, so a pie, segment, or
-  edge-to-edge arc reports it here while `curve` names only a whole drawn
-  circle), and `at` is the **locator** to pass back to the
-  four commands below: for a sub-face, a point strictly inside its loop
-  (clear of any nested imprint); for a chord, the midpoint of its run's
-  first segment. `hew.solid.move_imprint`/`rotate_imprint`/
-  `scale_imprint`/`delete_imprint` all take `{imprint: <locator>, …}`,
-  where the locator is a face locator (§5.2) for a sub-face — resolved
-  the same way a click on the shape would be — or, for a chord (which has
-  no face of its own), the same locator shape read instead as a point on
-  one of its lines: a chord's shared edge sits exactly on the boundary
-  between its two coplanar faces, so the face reading is tried first and
-  a miss or a non-imprint hit falls back to an edge reading; a locator
-  that names neither refuses `not_an_imprint`. `move_imprint` takes an
+- **Editable imprints** (kept for compatibility; implemented over the
+  drafting engine's plane units — `hew.sketch.units`, `move`, `rotate`,
+  `scale`, `delete` are the general form and take plane and unit keys):
+  an *imprint* is a drawn unit on one of an object's drawing planes
+  (`Document::object_drawing_planes`: planes where drawing splits a face,
+  plus planes of the object's owned sketches). A *sub-face* is a region
+  over the object whose outer ring is wholly drawing edges and is a
+  closed loop nothing else meets (no other line joins it, it does not
+  touch the solid's boundary); a shape that other drawing cuts is listed
+  as its chords instead. A *chord* is
+  a connected run of drawing edges, anchored at both ends on the solid's
+  boundary or on other drawing (a run with a free end is neither). Moving
+  or deleting an imprint acts on its whole island of drawing edges.
+  `hew.solid.imprints {object}` lists, per drawing plane, every
+  sub-face — `{kind: "sub_face", at, loop, holes, curve, curves, nested,
+  normal, region, unit}` — and every chord — `{kind: "chord", at, path,
+  curves, normal, unit}`. `curves` is the per-edge circle each loop or run
+  edge is a facet of (`{center, radius}` or `null`; `curve` names only a
+  whole drawn circle), `normal` is the plane's normal, and `region` /
+  `unit` are the `rgn_…` / `isl_…` keys `hew.sketch.units` reports for
+  that plane. `at` is the **locator** to pass back to the four commands
+  below: a point strictly inside a sub-face (clear of its holes), or the
+  midpoint of a chord's first segment. `hew.solid.move_imprint`/
+  `rotate_imprint`/`scale_imprint`/`delete_imprint` take `{imprint:
+  <locator>, …}`: `{object, at}` picks, on each of the object's drawing
+  planes the point lies on, the chord whose line the point touches, else
+  the sub-face containing it; `{object, ray}` and `{"$face": …}` name a
+  face and pick the sub-face over it. A locator that finds no drawing (a
+  point on a plain face) refuses `not_an_imprint`. `move_imprint` takes an
   `offset` translation; `rotate_imprint` an `angle` (radians) about the
-  imprint's own face normal through a pivot point; `scale_imprint` a
-  uniform `factor` about an anchor point — every point parameter
-  accepting a derived-point locator (§5.3). Moving or scaling a sub-face
-  off its plane (or mirroring or stretching it) refuses `not_in_plane`,
-  and a move that would carry it past the face's edge, across or inside
-  another imprint refuses `loop_not_strictly_inside`. A sub-face drawn or
-  moved all the way AROUND other imprints, bosses, recesses, or holes
-  adopts them as its own holes (they move with it from then on); a chord has no plane gate of
-  its own — its run is re-cut through the face's own gates, so a move
-  whose endpoints leave the boundary refuses `endpoint_not_on_boundary`
-  and one that crosses it `path_not_simple`. A hole of a sub-face holding
-  a raised boss or recess (not a further flat imprint) refuses
-  `nested_not_flat` before anything moves. `delete_imprint` dissolves a
-  sub-face back into its parent — anything it held stays on the face — or
-  merges a chord's two faces back into one; either way, one undo entry.
+  plane's normal through a pivot point; `scale_imprint` a uniform `factor`
+  about an anchor point — every point parameter accepting a derived-point
+  locator (§5.3). Each of the four is one drafting gesture on the unit's
+  whole island (one undo entry), so a move landing on other drawing or
+  past the face's edge is accepted and lands as the same shape drawn
+  there would. A landing off the plane (a move with a normal component,
+  or a scale about a point off the plane) refuses `not_in_plane`; a
+  solid's own edges never move (`draft_boundary_edge_touched`). A change
+  that leaves the geometry identical (turning a square a quarter turn
+  about its center) makes no undo entry. `delete_imprint` removes the
+  island's drawing edges: a sub-face dissolves into its parent face and a
+  chord's faces merge back. Result `{object_id}` for all four. The old
+  face-topology refusals (`loop_not_strictly_inside`, `nested_not_flat`,
+  `not_a_chord`, `endpoint_not_on_boundary`, `path_not_simple`,
+  `would_corrupt`, `not_an_inner_face`, `loop_self_intersects`,
+  `point_not_on_face`) no longer arise here. A circle or arc, whole or
+  cut apart by other drawing, is also listed in `curve_units` beside
+  `imprints` (always present, empty when there are none): `{closed,
+  curve: {center, radius}, runs: [{at, path}]}`, one entry per curve with
+  one run per cut piece; a run that is a listed chord carries that chord's
+  `at`, `closed` for a whole circle, else an arc.
 - The transform commands are contract-shaped as: `move` takes a
   translation vector or a from→to point pair; `rotate` takes a pivot
   point, an axis direction, and an angle; `scale` takes an anchor point

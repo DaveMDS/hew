@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { PolygonTool, DEFAULT_POLYGON_SIDES, MIN_POLYGON_SIDES, MAX_POLYGON_SIDES } from './PolygonTool'
-import { makeSketchPlaneCache } from './sketchGesture'
-import { groundDrawPlane, planeKey } from './drawPlane'
+import { draftMock } from './draftMock'
 import { toolHasArmedGesture, type Snap, type Tool } from './types'
+import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 
@@ -37,60 +37,26 @@ function makeWasmScene(opts: {
   faceNormal?: [number, number, number]
   addSegmentThrows?: boolean
   splitFaceThrows?: boolean
-  /** Handles whose sketch has gone stale/hidden — `sketch_plane` reads
-   *  `undefined` for them, so `runSketchGesture`'s pre-check retargets a
-   *  fresh sketch (as after undoing the sketch's creating gesture). */
-  staleSketchHandles?: bigint[]
 } = {}): WasmScene {
-  let sketchCounter = 41n
+  const fail = opts.addSegmentThrows
+    ? new Error('PathNotSimple: edges cross')
+    : opts.splitFaceThrows
+      ? new Error('LoopSelfIntersects: edges cross')
+      : null
   return {
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
-    // Every non-stale sketch lies on the ground plane (origin point, +Z).
-    sketch_plane: vi.fn((sketch: bigint) =>
-      (opts.staleSketchHandles ?? []).includes(sketch)
-        ? undefined
-        : new Float64Array([0, 0, 0, 0, 0, 1]),
-    ),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    // A polygon's plane-mode commit is bracketed as ONE polygon chain,
-    // carrying the drawn centre and circumradius — that is what makes its
-    // centre selectable and inferable.
-    sketch_begin_polygon_with: vi.fn(() => 7n),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn(() => {
-      if (opts.addSegmentThrows) throw new Error('PathNotSimple: edges cross')
-      return {
-        new_edges: () => new BigUint64Array([]),
-        regions_created: () => new BigUint64Array([]),
-        regions_removed: () => new BigUint64Array([]),
-        free: vi.fn(),
-      }
-    }),
+    // Every sketch lies on the ground plane (origin point, +Z).
+    sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+    // A polygon's commit is bracketed as ONE polygon chain
+    // (draft_begin_polygon_with ... draft_end_curve), carrying the drawn
+    // centre and circumradius, in plane AND face mode.
+    ...draftMock({ failSegmentAt: () => fail }).members,
     pick_face: vi.fn(() => opts.pick),
     pick_sketch: vi.fn(() => undefined), // no committed sketches in these fixtures
     // Every picked object is plain/ungrouped by default (top-level eligibility).
     node_parent: vi.fn(() => undefined),
     face_normal: vi.fn(() => new Float64Array(opts.faceNormal ?? [0, 0, 1])),
     face_plane: vi.fn(() => new Float64Array(opts.facePlane ?? [0, 0, 0, 0, 0, 1])),
-    split_face_inner: vi.fn(() => {
-      if (opts.splitFaceThrows) throw new Error('LoopSelfIntersects: edges cross')
-      return 99n
-    }),
-    split_face_inner_with_curve: vi.fn(() => 99n),
-    split_face_inner_in_instance: vi.fn(() => 99n),
-    begin_sketch_on_plane_in_instance: vi.fn(() => {
-      sketchCounter += 1n
-      return sketchCounter
-    }),
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0])), // translated +5 in x
   } as unknown as WasmScene
 }
@@ -102,7 +68,7 @@ function makeTool(scene: WasmScene) {
   const onFaceImprint = vi.fn()
   const onMeasurement = vi.fn()
   const onSideCountChange = vi.fn()
-  const tool = new PolygonTool(scene, preview, onCommit, onToast, onFaceImprint, onMeasurement, makeSketchPlaneCache(), onSideCountChange)
+  const tool = new PolygonTool(scene, preview, onCommit, onToast, onFaceImprint, onMeasurement, onSideCountChange)
   return { tool, preview, onCommit, onToast, onFaceImprint, onMeasurement, onSideCountChange }
 }
 
@@ -120,25 +86,23 @@ describe('PolygonTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim, radius 3
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(6)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(6)
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: 42n, regionsCreated: [] })
+    expect(onCommit).toHaveBeenCalledWith({ sketchHandle: expect.any(BigInt), regionsCreated: [] })
     expect(onToast).not.toHaveBeenCalled()
-    // Face mode's curve-carrying imprint is a CircleTool thing; a polygon
-    // never claims an analytic circle on a solid (design §4/§8).
-    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
-    // In plane mode the polygon IS one chain, opened as a POLYGON (not a
-    // circle) with the drawn centre (0,0,0) and circumradius 3 — the record
-    // that makes its centre snappable. Bracket closed exactly once.
-    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledWith(42n, 0, 0, 0, 3)
-    expect(scene.sketch_end_curve).toHaveBeenCalledTimes(1)
-    // The whole N-segment commit is bracketed in exactly one gesture.
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
+    // A polygon never claims an analytic circle (design §4/§8).
+    expect(scene.draft_begin_curve_with).not.toHaveBeenCalled()
+    // The polygon IS one chain, opened as a POLYGON (not a circle) with the
+    // drawn centre (0,0,0) and circumradius 3 — the record that makes its
+    // centre snappable. Bracket closed exactly once.
+    expect(scene.draft_begin_polygon_with).toHaveBeenCalledTimes(1)
+    const pw = (scene.draft_begin_polygon_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(pw[1] as Float64Array)).toEqual([0, 0, 0])
+    expect(pw[2]).toBe(3)
+    expect(scene.draft_end_curve).toHaveBeenCalledTimes(1)
+    // The whole N-segment commit is exactly one draft.
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
   })
 
   it('the last segment closes back to the exact stored vertex 0 coordinates', () => {
@@ -148,7 +112,7 @@ describe('PolygonTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0 }), RAY)
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     expect(calls).toHaveLength(6)
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     const lastQ = [calls[calls.length - 1][4], calls[calls.length - 1][5], calls[calls.length - 1][6]]
@@ -164,7 +128,7 @@ describe('PolygonTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY) // center (1,1)
     tool.onPointerDown(makeSnap({ x: 5, y: 1, z: 0 }), RAY) // rim — radius 4
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     for (const call of calls) {
       const p: [number, number, number] = [call[1], call[2], call[3]]
       const r = Math.hypot(p[0] - 1, p[1] - 1)
@@ -179,12 +143,12 @@ describe('PolygonTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), RAY) // same point — degenerate
 
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(scene.draft_add_segment).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(true)
   })
 
-  it('reuses the cached sketch handle across multiple polygons', () => {
+  it('each polygon is its own draft on the same ground plane (no shared sketch cache)', () => {
     const scene = makeWasmScene()
     const { tool } = makeTool(scene)
 
@@ -193,7 +157,10 @@ describe('PolygonTool — ground mode', () => {
     tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 12, y: 10, z: 0 }), RAY)
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    const begins = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls
+    expect(begins).toHaveLength(2)
+    for (const b of begins) expect(b.slice(0, 6)).toEqual([0, 0, 0, 0, 0, 1])
+    expect(scene.draft_end).toHaveBeenCalledTimes(2)
   })
 
   it('a refused commit (kernel throws) toasts and does not call onCommit', () => {
@@ -205,25 +172,23 @@ describe('PolygonTool — ground mode', () => {
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onCommit).not.toHaveBeenCalled()
+    // The refused draft is cancelled, never ended.
+    expect(scene.draft_cancel).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).not.toHaveBeenCalled()
   })
 
-  it('a stale cached sketch handle (sketch_plane reads undefined) is retargeted onto a fresh sketch before the gesture opens', () => {
-    const scene = makeWasmScene({ staleSketchHandles: [7n] })
-    const preview = new THREE.Group()
+  it('there is no cached sketch handle to go stale: a commit opens one fresh plane draft on the ground', () => {
+    const scene = makeWasmScene()
     const onCommit = vi.fn()
     const onToast = vi.fn()
-    const cache = makeSketchPlaneCache()
-    cache.set(planeKey(groundDrawPlane()), 7n)
-    const tool = new PolygonTool(scene, preview, onCommit, onToast, vi.fn(), vi.fn(), cache)
+    const tool = new PolygonTool(scene, new THREE.Group(), onCommit, onToast, vi.fn(), vi.fn())
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim — commits
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(42n)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(42n)
     expect(onToast).not.toHaveBeenCalled()
   })
 })
@@ -254,7 +219,7 @@ describe('PolygonTool — typed VCB: side count (Ns)', () => {
     tool.onKey(makeKeyEvent('Enter'))
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // rim — commits
 
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(8)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(8)
   })
 
   it('2s is clamped to the minimum side count (3)', () => {
@@ -303,12 +268,12 @@ describe('PolygonTool — typed VCB: side count (Ns)', () => {
     tool.onKey(makeKeyEvent('Enter'))
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY) // commits first polygon
 
-    ;(scene.sketch_add_segment as ReturnType<typeof vi.fn>).mockClear()
+    ;(scene.draft_add_segment as ReturnType<typeof vi.fn>).mockClear()
 
     tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 12, y: 10, z: 0 }), RAY) // second polygon, no re-typing
 
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(8)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(8)
   })
 })
 
@@ -325,10 +290,10 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
 
     tool.onKey(makeKeyEvent('Enter'))
 
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(6)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(6)
     expect(onCommit).toHaveBeenCalledTimes(1)
     // Default direction (+X) since cursor hasn't moved: vertex 0 should be (5, 0, 0).
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     expect(firstP[0]).toBeCloseTo(5)
     expect(firstP[1]).toBeCloseTo(0)
@@ -342,7 +307,7 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
     for (const ch of '10mm') tool.onKey(makeKeyEvent(ch))
     tool.onKey(makeKeyEvent('Enter'))
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     const r = Math.hypot(firstP[0], firstP[1])
     expect(r).toBeCloseTo(0.01)
@@ -358,7 +323,7 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
     tool.onKey(makeKeyEvent('2'))
     tool.onKey(makeKeyEvent('Enter'))
 
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     expect(firstP[0]).toBeCloseTo(0)
     expect(firstP[1]).toBeCloseTo(-2)
@@ -384,12 +349,12 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
 
     // Degenerate: no teardown, no commit.
     expect(onCommit).not.toHaveBeenCalled()
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(scene.draft_add_segment).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(true)
 
     // The placed center survived — a real second click still commits from it.
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), RAY)
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(6)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(6)
     expect(onCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -403,7 +368,7 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(onCommit).toHaveBeenCalledTimes(1)
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     // Radius 5 in the +X default direction — NOT flipped to (-5, 0, 0).
     expect(firstP[0]).toBeCloseTo(5)
@@ -422,15 +387,15 @@ describe('PolygonTool — typed VCB: circumradius entry', () => {
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(onCommit).toHaveBeenCalledTimes(1)
-    expect(scene.sketch_add_segment).toHaveBeenCalledTimes(8)
-    const calls = (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(8)
+    const calls = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
     const firstP = [calls[0][1], calls[0][2], calls[0][3]]
     expect(Math.hypot(firstP[0], firstP[1])).toBeCloseTo(0.01)
   })
 })
 
 describe('PolygonTool — face mode', () => {
-  it('two clicks on an entered object face call split_face_inner (no curve identity)', () => {
+  it('two clicks on an entered object face open one face draft carrying the polygon bracket', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -439,13 +404,16 @@ describe('PolygonTool — face mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // center on face
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim click
 
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
-    expect(scene.split_face_inner_with_curve).not.toHaveBeenCalled()
-    const callArgs = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    const callArgs = (scene.draft_begin_face as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(callArgs[0]).toBe(7n)
     expect(callArgs[1]).toBe(3n)
-    const loopPts = callArgs[2] as Float64Array
-    expect(loopPts.length).toBe(6 * 3) // default 6 sides
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(6) // default 6 sides
+    // Unified drafting: a face polygon now carries the polygon bracket too
+    // (it used to be a plain imprint with no chain identity) — never a circle.
+    expect(scene.draft_begin_polygon_with).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_curve_with).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onToast).not.toHaveBeenCalled()
   })
@@ -462,13 +430,13 @@ describe('PolygonTool — face mode', () => {
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
 
     // No imprint, and — crucially — the center is not silently dropped.
-    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
     expect(onFaceImprint).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(true)
 
     // A real second click from the preserved center still imprints.
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
@@ -482,7 +450,7 @@ describe('PolygonTool — face mode', () => {
     expect(tool.capturingInput()).toBe(false)
   })
 
-  it('a refused split_face_inner toasts the kernel error and does not call onFaceImprint', () => {
+  it('a refused face draft toasts the kernel error and does not call onFaceImprint', () => {
     const pick = makePick(7n, 3n)
     const scene = makeWasmScene({ pick, splitFaceThrows: true })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -583,7 +551,7 @@ describe('PolygonTool — instance editing context (component-edit-parity.md pha
   const INSTANCE = 42n
   const COMPONENT = 5n
 
-  it('face mode routes to split_face_inner_in_instance, never the world variant', () => {
+  it('face mode routes to draft_begin_face_in_instance, never the world variant', () => {
     const pick = makePick(7n, 3n, INSTANCE)
     const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
     const { tool, onFaceImprint } = makeTool(scene)
@@ -593,16 +561,16 @@ describe('PolygonTool — instance editing context (component-edit-parity.md pha
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] })
 
-    expect(scene.split_face_inner_in_instance).toHaveBeenCalledTimes(1)
-    const [instance, object, face] = (scene.split_face_inner_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(scene.draft_begin_face_in_instance).toHaveBeenCalledTimes(1)
+    const [instance, object, face] = (scene.draft_begin_face_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(instance).toBe(INSTANCE)
     expect(object).toBe(7n)
     expect(face).toBe(3n)
-    expect(scene.split_face_inner).not.toHaveBeenCalled()
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
   })
 
-  it('plane mode on empty space mints a def-owned sketch via begin_sketch_on_plane_in_instance', () => {
+  it('plane mode on empty space opens a plane draft in the instance; the polygon center stays in WORLD space', () => {
     const scene = makeWasmScene()
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
@@ -610,9 +578,13 @@ describe('PolygonTool — instance editing context (component-edit-parity.md pha
     tool.onPointerDown(makeSnap({ x: 6, y: 1, z: 0 }), { origin: [6, 1, 5], direction: [0, 0, -1] })
     tool.onPointerDown(makeSnap({ x: 9, y: 1, z: 0 }), { origin: [9, 1, 5], direction: [0, 0, -1] })
 
-    expect(scene.begin_sketch_on_plane_in_instance).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
-    expect(scene.sketch_begin_polygon_with).toHaveBeenCalledWith(expect.any(BigInt), 1, 1, 0, expect.closeTo(3, 6))
+    expect(scene.draft_begin_plane_in_instance).toHaveBeenCalledTimes(1)
+    expect((scene.draft_begin_plane_in_instance as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(INSTANCE)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    // World-space center and radius (the engine maps through the pose).
+    const pw = (scene.draft_begin_polygon_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(pw[1] as Float64Array)).toEqual([6, 1, 0])
+    expect(pw[2]).toBeCloseTo(3, 6)
   })
 })
 
@@ -622,14 +594,12 @@ describe('PolygonTool — retype radius / side count after the rim click', () =>
   function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
     const base = makeWasmScene(opts) as unknown as Record<string, unknown>
     let gen = 1n
-    let changed = 0
-    const baseAdd = base.sketch_add_segment as (...args: unknown[]) => unknown
+    const baseEnd = base.draft_end as (...args: unknown[]) => unknown
     const scene = {
       ...base,
       history_generation: vi.fn(() => gen),
-      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
-      sketch_add_segment: vi.fn((...args: unknown[]) => { const r = baseAdd(...args); changed += 1; return r }),
-      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
+      // A draft that ends records one history step.
+      draft_end: vi.fn((...args: unknown[]) => { const r = baseEnd(...args); gen += 1n; return r }),
       scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
       scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
     }
@@ -637,7 +607,7 @@ describe('PolygonTool — retype radius / side count after the rim click', () =>
   }
   const key = (tool: PolygonTool, k: string) => tool.onKey(makeKeyEvent(k))
   const typeIn = (tool: PolygonTool, text: string) => { for (const ch of text) key(tool, ch); key(tool, 'Enter') }
-  const addCalls = (scene: WasmScene) => (scene.sketch_add_segment as ReturnType<typeof vi.fn>).mock.calls
+  const addCalls = (scene: WasmScene) => (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
   const radiusSince = (scene: WasmScene, from: number, c: [number, number]) =>
     Math.max(...addCalls(scene).slice(from).map((k) => Math.hypot((k[1] as number) - c[0], (k[2] as number) - c[1])))
 
@@ -717,9 +687,8 @@ describe('PolygonTool — boundary clicks (FacePickCache.faceThrough)', () => {
 
     tool.onPointerDown(makeSnap({ x: 3, y: 0, z: 0 }), { origin: [3, 0, 5], direction: [0, 0, -1] }) // rim
 
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
-    expect(scene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
     expect(onFaceImprint).toHaveBeenCalledWith(7n)
     expect(onCommit).not.toHaveBeenCalled()
   })
@@ -742,9 +711,11 @@ describe('PolygonTool — snapped face cursor (honours the chip, not ray∩plane
       { origin: [3.005, 0, 5], direction: [0, 0, -1] },
     )
 
-    expect(scene.split_face_inner).toHaveBeenCalledTimes(1)
-    const call = (scene.split_face_inner as ReturnType<typeof vi.fn>).mock.calls[0]
-    const loopPts = call[2] as Float64Array
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    // The loop's corners are the six segments' start points.
+    const segs = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
+    expect(segs).toHaveLength(6)
+    const loopPts = new Float64Array(segs.flatMap((c) => [c[1] as number, c[2] as number, c[3] as number]))
     // vertex 0 of the loop sits exactly at radius 3 from centre (0,0,1) —
     // the snap — not ~3.005 (the ray∩plane miss).
     const dist = Math.hypot(loopPts[0] - 0, loopPts[1] - 0, loopPts[2] - 1)
@@ -780,9 +751,12 @@ describe('PolygonTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onPointerDown(makeSnap({ x: 10, y: 10, z: 1 }), emptyRay)
     tool.onPointerDown(makeSnap({ x: 13, y: 10, z: 1 }), { origin: [13, 10, 5], direction: [0, 0, -1] })
 
-    expect(scene.split_face_inner).not.toHaveBeenCalled()
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled() // z=1 is not the ground plane
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_face).not.toHaveBeenCalled()
+    // One plane draft on the pinned z = 1 plane (not the ground).
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const begin = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(begin[2]).toBeCloseTo(1, 9)
+    expect(begin.slice(3, 6)).toEqual([0, 0, 1])
     expect(onCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -816,5 +790,48 @@ describe('PolygonTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
     tool.onKey(makeKeyEvent('Escape'))
     expect(tool.statusHint()).not.toContain('Pinned')
     expect(tool.hasArmedGesture()).toBe(false)
+  })
+})
+
+
+describe('PolygonTool — a clicked radius is exactly the displayed radius', () => {
+  const prev = getLengthUnit()
+  const rim = 0.0123456 // shows "R 12.3 mm"
+  const run = (kind: string, typed: string | null) => {
+    const scene = makeWasmScene()
+    const t = makeTool(scene)
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+    const s = makeSnap({ x: rim, y: 0, z: 0, kind })
+    t.tool.onPointerMove(s, RAY)
+    if (typed === null) t.tool.onPointerDown(s, RAY)
+    else {
+      for (const ch of typed) t.tool.onKey(makeKeyEvent(ch))
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+    return { calls: (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls, measure: t.onMeasurement }
+  }
+
+  it('a free click commits the same chain as typing the shown radius', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = run('ground', null)
+      const typed = run('ground', '12.3')
+      expect(clicked.measure).toHaveBeenCalledWith('R 12.3 mm')
+      expect(clicked.calls.length).toBeGreaterThan(0)
+      expect(clicked.calls).toEqual(typed.calls)
+      expect(clicked.calls[0][1]).toBe(12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a hard-snapped (endpoint) click keeps the snapped rim exactly', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = run('endpoint', null)
+      expect(clicked.calls[0][1]).toBe(rim)
+    } finally {
+      setLengthUnit(prev)
+    }
   })
 })

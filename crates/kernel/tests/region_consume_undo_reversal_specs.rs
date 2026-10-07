@@ -387,30 +387,27 @@ fn undo_is_byte_identical_after_an_eraser_deletion_reused_a_slot() {
     );
 }
 
-/// A doomed vertex sitting in the sub-tolerance NEAR-ENDPOINT BAND of a
-/// long surviving edge (metrically within POINT_MERGE of the segment,
-/// parametrically inside the no-split band, farther than POINT_MERGE
-/// from either endpoint — only reachable on edges longer than a meter)
-/// defeats restore's pre-creation guard, so a faithful, slot-exact
-/// restore is impossible. The restore must REFUSE typed
-/// (`RestoreConflicts`, document untouched) rather than silently commit
-/// a slot-permuted sketch — found by adversarial review of the
-/// recorded-vertex-order fix.
+/// A vertex drawn metrically within POINT_MERGE of a long edge's interior,
+/// but farther than POINT_MERGE from either of its endpoints, SPLITS that
+/// edge at draw time. Contact is classified in metres, not as a fraction of
+/// the edge's length (unified-drafting D10), so the "near-endpoint band" a
+/// parametric tolerance left on edges longer than a meter (no weld, no split,
+/// yet within tolerance of the segment — a vertex restore could not place
+/// slot-exactly) no longer exists. Consuming the triangle and undoing is
+/// therefore an ordinary, byte-exact restore.
 #[test]
-fn undo_refuses_typed_when_a_doomed_vertex_hides_in_a_survivors_endpoint_band() {
+fn a_vertex_within_tolerance_of_a_long_edges_interior_splits_it_and_undo_is_exact() {
     let ground = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
         .expect("ground plane is well-defined");
     let mut doc = Document::new();
     let s = doc.add_sketch(ground);
 
-    // A long bare survivor edge E, then a triangle whose first vertex p
-    // sits 5e-9 m along E's line, 1e-10 m off it: no weld (distance to
-    // E's endpoint is 5e-9 > POINT_MERGE), no split (param 5e-10 of a
-    // 10 m edge is 5e-11 <= POINT_MERGE as a parameter), but metrically
-    // within POINT_MERGE of the closed segment — the guard's blind spot.
+    // A long bare edge E, then a triangle whose first vertex p sits 5e-9 m
+    // along E's line and 1e-10 m off it: within POINT_MERGE of E's interior,
+    // farther than POINT_MERGE from E's endpoint.
     let sk = doc.sketch_mut(s).expect("sketch is live");
     sk.add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(10.0, 0.0, 0.0))
-        .expect("survivor edge");
+        .expect("long edge");
     let p = Point3::new(5e-9, 1e-10, 0.0);
     let q = Point3::new(2.0, 1.0, 0.0);
     let r = Point3::new(1.0, 2.0, 0.0);
@@ -418,29 +415,15 @@ fn undo_refuses_typed_when_a_doomed_vertex_hides_in_a_survivors_endpoint_band() 
         sk.add_segment(a, b).expect("triangle segment");
     }
 
+    // E was split at p: two pieces of E plus the triangle's three edges.
+    let sk = doc.sketch(s).expect("sketch is live");
+    assert_eq!(sk.edges().len(), 5, "E must split at the touching vertex");
+    assert_eq!(sk.islands().len(), 1, "the triangle touches E: one island");
+
+    let before = doc.save();
     let region = only_region(&doc, s);
     doc.extrude_region(s, region, 0.5)
         .expect("extrude triangle");
-    let extruded = doc.save();
-
-    match doc.undo() {
-        Err(_) => {}
-        Ok(_) => {
-            // If the kernel someday welds or splits this band at draw
-            // time, the configuration stops existing and this pin should
-            // be revisited — but a SILENT byte-different restore is the
-            // one outcome that must never happen.
-            assert_eq!(
-                doc.save(),
-                extruded,
-                "an undo that succeeded here must have been faithful — it was not"
-            );
-            panic!("expected RestoreConflicts for the endpoint-band configuration");
-        }
-    }
-    assert_eq!(
-        doc.save(),
-        extruded,
-        "a refused undo must leave the document untouched (strong guarantee)"
-    );
+    doc.undo().expect("undo extrude");
+    assert_eq!(doc.save(), before, "undo must restore byte-identically");
 }

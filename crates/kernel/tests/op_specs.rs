@@ -15,8 +15,7 @@
 
 use kernel::{
     BooleanError, BooleanOp, FaceId, History, HistoryError, KernelOp, KernelOpReport, Object,
-    Plane, Point3, Profile, PushPullError, StickyError, Transform, TransformError, Vec3,
-    WatertightState, tol,
+    Plane, Point3, Profile, PushPullError, Transform, TransformError, Vec3, WatertightState, tol,
 };
 use proptest::prelude::*;
 
@@ -3537,11 +3536,12 @@ fn preserve_shields_an_imprint_that_joins_a_seam_chain() {
 }
 
 /// Faces meeting along two DISCONNECTED edge chains (a bridge/dogbone
-/// adjacency) refuse to merge with a typed error, leaving the object
-/// untouched — dissolving everything shared would need the merged boundary
-/// rebuilt as outer + hole loops, which merge_faces does not do.
+/// adjacency) merge across both: the merged boundary is re-traced as an
+/// outer loop plus a hole around the face they enclosed (refused
+/// `SharedChainDisconnected` until the re-trace existed). The boolean seam
+/// cleanup still skips such a pair.
 #[test]
-fn merge_faces_refuses_faces_sharing_two_disconnected_chains() {
+fn merge_faces_across_two_disconnected_chains_leaves_a_hole() {
     // A flat sheet in the z=0 plane, partitioned into a U-shaped face A, the
     // notch filler M, and a right-hand bar B that touches A along TWO
     // disjoint runs of x=2 (separated by M's own edge). Open (not
@@ -3563,7 +3563,7 @@ fn merge_faces_refuses_faces_sharing_two_disconnected_chains() {
         vec![3, 2, 5, 4],             // M: the notch filler
         vec![1, 8, 9, 6, 5, 2],       // B: the bar (touches A twice)
     ];
-    let mut sheet = Object::from_polygons(&positions, &faces).unwrap();
+    let sheet = Object::from_polygons(&positions, &faces).unwrap();
     sheet.validate().unwrap();
     let face_count = sheet.faces().len();
 
@@ -3583,13 +3583,17 @@ fn merge_faces_refuses_faces_sharing_two_disconnected_chains() {
         .map(|(id, _)| id)
         .expect("the (2,0)-(2,1) edge exists");
 
+    let mut merged = sheet.clone();
+    let r = merged
+        .merge_faces(ab_edge)
+        .expect("the two faces merge across both chains");
+    merged.validate().unwrap();
+    assert_eq!(merged.faces().len(), face_count - 1);
     assert_eq!(
-        sheet.merge_faces(ab_edge).unwrap_err(),
-        StickyError::SharedChainDisconnected,
+        merged.faces()[r.merged_face].inner_loops.len(),
+        1,
+        "the notch filler is now a hole of the merged face"
     );
-    // Strong guarantee: refused means untouched.
-    sheet.validate().unwrap();
-    assert_eq!(sheet.faces().len(), face_count);
 
     // And the automated pass skips the pair rather than corrupting: it only
     // merges what merge_faces accepts (A–M and M–B are single chains, so

@@ -5,6 +5,8 @@ import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
+import { ctxGround, draftRef } from './planeUnits'
+import { applyAffineToPoint } from './transformMath'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
@@ -20,6 +22,16 @@ vi.mock('../platform', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../platform')>()
   return { ...actual, isMac: true, COPY_MODIFIER_KEY: 'Alt', COPY_MODIFIER_LABEL: 'Option' }
 })
+
+const CTX = ctxGround()
+/** Kernel keys are 16-hex strings. */
+const hex = (n: bigint): string => n.toString(16).padStart(16, '0')
+/** A `draft-island` ref of the ground plane's drawing. */
+const di = (key: bigint): NodeRef => draftRef('draft-island', CTX, hex(key))
+
+type V3 = [number, number, number]
+interface DSeg { key: bigint; a: V3; b: V3 }
+interface DUnit { key: bigint; sketch: number; edges: DSeg[]; curve?: { center: V3; radius: number } }
 
 /** ~2° axis tolerance, matching RotateTool's own AXIS_SNAP_TOL_DOT. */
 const TOL = Math.cos((2 * Math.PI) / 180)
@@ -72,8 +84,118 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
   let nextSketchId = 900n
   let nextEdge = 500n
   let gen = 1n
-  return {
+  // --- drawing surface (drafting engine): the ground plane's listing. Units
+  // 40 (edge 10), 41 (edge 20) in sketch 3 and 45 (edge 30, a facet of the
+  // drawn circle center (2,0,0) r 1) in sketch 6 — the same shapes as the
+  // sketch fixture below. `draft_transform_edges` moves the listed edges;
+  // copies land in unit 78 (draft copies and sketch replays alike) and
+  // out-of-plane detach copies in unit 77. Mutate `drawing.units` (with a
+  // generation bump) to simulate an arranging landing.
+  const drawing: { units: DUnit[] } = {
+    units: [
+      { key: 40n, sketch: 3, edges: [{ key: 10n, a: [0, 0, 0], b: [1, 0, 0] }] },
+      { key: 41n, sketch: 3, edges: [{ key: 20n, a: [5, 5, 0], b: [6, 5, 0] }] },
+      {
+        key: 45n, sketch: 6, edges: [{ key: 30n, a: [3, 0, 0], b: [2, 1, 0] }],
+        curve: { center: [2, 0, 0], radius: 1 },
+      },
+    ],
+  }
+  const origSegs = (): Map<bigint, DSeg> =>
+    new Map(drawing.units.flatMap((u) => u.edges).map((e) => [e.key, e]))
+  const added = new Map<bigint, number[]>() // island 78
+  const copied = new Map<bigint, number[]>() // island 77
+  const jsonUnit = (key: bigint, sketch: number, edges: { key: bigint; a: number[]; b: number[] }[], curve?: object) => ({
+    key: hex(key),
+    edges: edges.map((e) => ({
+      key: hex(e.key), a: e.a, b: e.b, store: { kind: 'free', sketch }, curve: curve ?? null,
+    })),
+  })
+  const segs = (m: Map<bigint, number[]>) =>
+    [...m].map(([key, v]) => ({ key, a: v.slice(0, 3), b: v.slice(3, 6) }))
+  const undoCalls = (): number => scene.scene_undo.mock.calls.length
+  // History bracket: open snapshots the generation and every drawing store;
+  // abort restores them exactly; commit folds everything recorded since open
+  // into ONE entry (the generation moves by one).
+  const brackets = {
+    open: null as null | { gen: bigint; units: DUnit[]; added: Map<bigint, number[]>; copied: Map<bigint, number[]> },
+    labels: [] as string[],
+    aborted: 0,
+  }
+  const scene = {
+    brackets,
+    history_bracket_open: vi.fn(() => {
+      if (brackets.open !== null) throw new Error('StaleReference: a history bracket is already open')
+      brackets.open = { gen, units: structuredClone(drawing.units), added: new Map(added), copied: new Map(copied) }
+    }),
+    history_bracket_commit: vi.fn((label: string) => {
+      const b = brackets.open
+      brackets.open = null
+      if (b === null) throw new Error('StaleReference: no history bracket')
+      if (gen === b.gen) return false
+      gen = b.gen + 1n
+      brackets.labels.push(label)
+      return true
+    }),
+    history_bracket_abort: vi.fn(() => {
+      const b = brackets.open
+      brackets.open = null
+      if (b === null) return
+      brackets.aborted += 1
+      gen = b.gen
+      drawing.units = b.units
+      added.clear()
+      for (const [k, v] of b.added) added.set(k, v)
+      copied.clear()
+      for (const [k, v] of b.copied) copied.set(k, v)
+    }),
     axes: vi.fn(() => new Float64Array(frame)),
+    plane_units_json: vi.fn((_ctx: string) =>
+      JSON.stringify({
+        units: [
+          ...drawing.units.map((u) => jsonUnit(u.key, u.sketch, u.edges, u.curve)),
+          ...(added.size > 0 ? [jsonUnit(78n, 3, segs(added))] : []),
+          ...(copied.size > 0 ? [jsonUnit(77n, 900, segs(copied))] : []),
+        ],
+        regions: [],
+      }),
+    ),
+    sketch_island_at_edge_positions: vi.fn((s: bigint, a: Float64Array, b: Float64Array) => {
+      const near = (p: number[], q: ArrayLike<number>) => p.every((v, i) => Math.abs(v - q[i]) < 1e-9)
+      for (const u of drawing.units) {
+        if (BigInt(u.sketch) !== s) continue
+        for (const e of u.edges) {
+          if ((near(e.a, a) && near(e.b, b)) || (near(e.a, b) && near(e.b, a))) return u.key
+        }
+      }
+      return undefined
+    }),
+    draft_begin_ctx: vi.fn((_ctx: string, _label: string) => 1n),
+    draft_transform_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
+      const set = new Set([...keys])
+      for (const u of drawing.units) {
+        for (const e of u.edges) {
+          if (!set.has(e.key)) continue
+          e.a = applyAffineToPoint(affine, e.a)
+          e.b = applyAffineToPoint(affine, e.b)
+        }
+      }
+    }),
+    draft_copy_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
+      const all = origSegs()
+      for (const k of keys) {
+        const e = all.get(k)
+        if (e === undefined) continue
+        added.set(nextEdge++, [...applyAffineToPoint(affine, e.a), ...applyAffineToPoint(affine, e.b)])
+      }
+    }),
+    // Ending a draft is a commit: the history generation moves by one.
+    draft_end: vi.fn((_d: bigint) => {
+      gen++
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[]}'
+    }),
+    draft_cancel: vi.fn(),
+    drawing,
     face_normal: vi.fn((..._args: unknown[]) => {
       if (faceNormal === undefined) throw new Error('not a live world-object face')
       return new Float64Array(faceNormal)
@@ -97,6 +219,8 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     scene_undo: vi.fn(() => { gen++; return { free: () => { /* no-op */ } } }),
     scene_redo: vi.fn(() => { gen++; return { free: () => { /* no-op */ } } }),
     history_generation: vi.fn(() => gen),
+    // The undo stack's size: records minus undos plus redos = gen - 2 * undos.
+    undo_depth: vi.fn(() => Number(gen) - 1 - 2 * undoCalls()),
     // --- sketch copy surface (Rotate+Alt sketch copies). Two sketches, both
     // on the ground plane (point origin, normal +Z):
     //   - sketch 3: two single-edge islands, 40 (edge 10, endpoints
@@ -109,13 +233,14 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     // (island 78); an OUT-OF-PLANE (or flipping) copy lands a new sketch id
     // whose sole island is 77.
     sketch_plane: vi.fn((sketch: bigint) =>
-      sketch === 3n || sketch === 6n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
+      sketch === 3n || sketch === 6n || sketch >= 900n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
     ),
     sketch_island_ids: vi.fn((sketch: bigint) =>
       sketch === 3n ? [40n, 41n] : sketch === 6n ? [45n] : sketch >= 900n ? [77n] : [],
     ),
     sketch_island_edges: vi.fn((_sketch: bigint, island: bigint) =>
-      island === 40n ? [10n] : island === 41n ? [20n] : island === 45n ? [30n] : [],
+      island === 40n ? [10n] : island === 41n ? [20n] : island === 45n ? [30n]
+      : island === 78n ? [...added.keys()] : island === 77n ? [...copied.keys()] : [],
     ),
     sketch_edge_island: vi.fn((_sketch: bigint, edge: bigint) =>
       edge >= 500n ? 78n : edge === 10n ? 40n : edge === 20n ? 41n : edge === 30n ? 45n : undefined,
@@ -124,7 +249,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
       edge === 10n ? [0, 0, 0, 1, 0, 0]
       : edge === 20n ? [5, 5, 0, 6, 5, 0]
       : edge === 30n ? [3, 0, 0, 2, 1, 0]
-      : undefined,
+      : added.get(edge) ?? copied.get(edge),
     ),
     sketch_edge_curve: vi.fn((_sketch: bigint, edge: bigint) => (edge === 30n ? 99n : undefined)),
     sketch_curve_geom: vi.fn((_sketch: bigint, curve: bigint) => (curve === 99n ? [2, 0, 0, 1] : undefined)),
@@ -138,21 +263,32 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     sketch_add_segment: vi.fn(
       (_sketch: bigint, _ax: number, _ay: number, _az: number, _bx: number, _by: number, _bz: number) => {
         const id = nextEdge++
+        added.set(id, [_ax, _ay, _az, _bx, _by, _bz])
         return { new_edges: () => [id], free: () => { /* no-op */ } }
       },
     ),
-    // The ghost preview builds a sketch-island NodeRef's lines regardless of
+    // The ghost preview of a whole sketch builds its lines regardless of
     // objectsGroup (null in these logic tests) — no geometry needed to
     // exercise the copy/array logic itself.
+    sketch_lines: vi.fn(() => new Float32Array(0)),
     sketch_island_lines: vi.fn(() => new Float32Array(0)),
     copy_sketch_islands: vi.fn(
-      (_sketch: bigint, _islands: BigUint64Array, _affine: Float64Array) => {
+      (sketch: bigint, islands: BigUint64Array, affine: Float64Array) => {
         const id = nextSketchId++
+        const all = origSegs()
+        for (const u of drawing.units) {
+          if (BigInt(u.sketch) !== sketch || !islands.includes(u.key)) continue
+          for (const e of u.edges) {
+            const o = all.get(e.key)!
+            copied.set(nextEdge++, [...applyAffineToPoint(affine, o.a), ...applyAffineToPoint(affine, o.b)])
+          }
+        }
         gen++
         return id
       },
     ),
   }
+  return scene
 }
 
 function makeTool(opts: {
@@ -775,14 +911,40 @@ describe('RotateTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is
   })
 })
 
-describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelope)', () => {
+describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" envelope)', () => {
   // `runNinetyDegreeGesture` rotates 90° about the origin on the inferred
-  // (default) axis, world +Z — exactly normal to sketch 3's ground plane,
-  // with the pivot ON that plane. That is the in-plane case (spokes/petals/
-  // bolt-ring): the copy must REPLAY into the SAME sketch, not detach onto a
-  // new one.
-  it('an in-plane copy REPLAYS into the SAME sketch id, with the geometry already rotated', () => {
-    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+  // (default) axis, world +Z — exactly normal to the ground plane the shapes
+  // are drawn on, with the pivot ON that plane. That is the in-plane case
+  // (spokes/petals/bolt-ring): the copy is ONE draft over the shape's edge
+  // keys, never a detach onto a new sketch.
+  it('an in-plane copy of a drawn unit goes through ONE draft (draft_copy_edges) with the 90° rotation affine', () => {
+    const t = makeTool({ selection: [di(40n)] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    expect(t.wasmScene.draft_begin_ctx).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.draft_begin_ctx).toHaveBeenCalledWith(CTX, 'Copy')
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1)
+    const [, keys, affine] = t.wasmScene.draft_copy_edges.mock.calls[0]
+    expect([...(keys as BigUint64Array)]).toEqual([10n])
+    expect(thetaOfZAffine(affine as Float64Array)).toBeCloseTo(Math.PI / 2, 9)
+    expect(t.wasmScene.draft_end).toHaveBeenCalledTimes(1)
+    // Never the sketch machinery.
+    expect(t.wasmScene.sketch_begin_gesture).not.toHaveBeenCalled()
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    // A COPY, not a rotate — and no object-duplicate call for a pure drawing
+    // selection.
+    expect(t.wasmScene.draft_transform_edges).not.toHaveBeenCalled()
+    expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+    // The copy (found by geometry) becomes the committed selection.
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('an in-plane copy of a WHOLE sketch REPLAYS into the SAME sketch id, with the geometry already rotated', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch', id: 3n }] })
     t.tool.onKey(makeKeyEvent('Alt'))
     runNinetyDegreeGesture(t.tool)
 
@@ -790,11 +952,12 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     expect(t.wasmScene.sketch_begin_gesture).toHaveBeenCalledWith(3n)
     expect(t.wasmScene.sketch_end_gesture).toHaveBeenCalledWith(3n)
     expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.draft_begin_ctx).not.toHaveBeenCalled()
 
     // The edge (0,0,0)-(1,0,0) rotated 90° about Z through the origin lands
     // at (0,0,0)-(0,1,0) — the geometry itself arrives already rotated, not
-    // merely offset.
-    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1)
+    // merely offset. (Sketch 3's other island replays after it.)
+    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(2)
     const [sketch, ax, ay, az, bx, by, bz] = t.wasmScene.sketch_add_segment.mock.calls[0]
     expect(sketch).toBe(3n)
     expect(ax).toBeCloseTo(0, 9)
@@ -804,17 +967,33 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     expect(by).toBeCloseTo(1, 9)
     expect(bz).toBeCloseTo(0, 9)
 
-    // A COPY, not a rotate — and no object-duplicate call for a pure sketch
-    // selection.
     expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
     expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
-    // The new island becomes the committed selection, on the SOURCE sketch.
-    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 78n, sketch: 3n }])
+    // The replayed unit becomes the committed selection.
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
-  it('an in-plane copy of a drawn-circle island keeps curve identity: rotated center, same radius', () => {
-    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 45n, sketch: 6n }] })
+  it('an in-plane copy of a drawn-circle unit hands the kernel the circle\'s edge keys and the rigid rotation (curve identity is the draft\'s job)', () => {
+    const t = makeTool({ selection: [di(45n)] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1)
+    const [, keys, affine] = t.wasmScene.draft_copy_edges.mock.calls[0]
+    expect([...(keys as BigUint64Array)]).toEqual([30n])
+    // A pure rotation: Curve 99's center (2,0,0) goes to (0,2,0) under it and
+    // the radius is untouched — the draft carries the analytic circle.
+    const c = applyAffineToPoint(affine as Float64Array, [2, 0, 0])
+    expect(c[0]).toBeCloseTo(0, 9)
+    expect(c[1]).toBeCloseTo(2, 9)
+    expect(t.wasmScene.sketch_begin_curve_with).not.toHaveBeenCalled()
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+  })
+
+  it('an in-plane copy of a WHOLE drawn-circle sketch keeps curve identity: rotated center, same radius', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch', id: 6n }] })
     t.tool.onKey(makeKeyEvent('Alt'))
     runNinetyDegreeGesture(t.tool)
 
@@ -830,11 +1009,11 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     expect(cz).toBeCloseTo(0, 9)
     expect(radius).toBe(1) // untouched — not recomputed, just carried through
     expect(t.wasmScene.sketch_begin_curve).not.toHaveBeenCalled() // it has geom — not an identity-only chain
-    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 78n, sketch: 6n }])
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
   })
 
-  it('an out-of-plane rotation (axis not normal to the sketch) still lands a new sketch', () => {
-    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+  /** Pivot at the origin, lock Y (an in-plane axis), sweep toward +Z. */
+  function sweepAboutY(t: ReturnType<typeof makeTool>): void {
     t.tool.onKey(makeKeyEvent('Alt'))
     t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
@@ -842,17 +1021,35 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     t.tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference (+X, on the Y-locked plane)
     t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0)) // sweep toward +Z (~90° about Y)
     t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1 }), rayThrough(0, 0)) // commit
+  }
 
+  it('an out-of-plane rotation (axis not normal to the plane) of a drawn unit still lands a new sketch (detach copy)', () => {
+    const t = makeTool({ selection: [di(40n)] })
+    sweepAboutY(t)
+
+    expect(t.wasmScene.draft_begin_ctx).not.toHaveBeenCalled()
     expect(t.wasmScene.copy_sketch_islands).toHaveBeenCalledTimes(1)
     const [sketch, islands] = t.wasmScene.copy_sketch_islands.mock.calls[0]
     expect(sketch).toBe(3n)
     expect(Array.from(islands as BigUint64Array)).toEqual([40n])
     expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled() // never a same-sketch replay
-    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 900n }])
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
   })
 
-  it('an orientation-flipping rotation (180° about an in-plane axis) routes to the new-sketch arm, never a reflective in-plane replay', () => {
-    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+  it('an out-of-plane rotation of a WHOLE sketch still lands a new sketch', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch', id: 3n }] })
+    sweepAboutY(t)
+
+    expect(t.wasmScene.copy_sketch_islands).toHaveBeenCalledTimes(1)
+    const [sketch, islands] = t.wasmScene.copy_sketch_islands.mock.calls[0]
+    expect(sketch).toBe(3n)
+    expect(Array.from(islands as BigUint64Array)).toEqual([40n, 41n])
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
+  })
+
+  /** Pivot at the origin, lock X (in-plane), sweep +Y to −Y: 180°. */
+  function flipAboutX(t: ReturnType<typeof makeTool>): void {
     t.tool.onKey(makeKeyEvent('Alt'))
     t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
@@ -860,16 +1057,41 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     t.tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(1, 0)) // reference (+Y, on the X-locked plane)
     t.tool.onPointerMove(makeSnap({ x: 0, y: -1, z: 0 }), rayThrough(0, -1)) // sweep to −Y: 180°
     t.tool.onPointerDown(makeSnap({ x: 0, y: -1, z: 0 }), rayThrough(0, -1)) // commit
+  }
+
+  it('an orientation-flipping rotation (180° about an in-plane axis) of a WHOLE sketch routes to the new-sketch arm, never a reflective in-plane replay', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch', id: 3n }] })
+    flipAboutX(t)
 
     expect(t.wasmScene.copy_sketch_islands).toHaveBeenCalledTimes(1)
     const [sketch] = t.wasmScene.copy_sketch_islands.mock.calls[0]
     expect(sketch).toBe(3n)
     expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled() // never a reflective in-plane replay
-    expect(t.onCommit).toHaveBeenCalledWith([{ kind: 'sketch-island', id: 77n, sketch: 900n }])
+    // The flipped copy of edge 10 lands exactly back on the original (the
+    // axis runs along it), so the fixture's by-geometry lookup may name
+    // either listed unit: just one drawn-unit ref comes back.
+    const [committed] = t.onCommit.mock.calls[0] as [NodeRef[]]
+    expect(committed).toHaveLength(1)
+    expect(committed[0].kind).toBe('draft-island')
   })
 
-  it('a sketch copy ARMS the ×N array window: typing 5x retracts the single-copy commit with ONE scene undo, then replays 5 cumulative copies into the SAME sketch inside a SECOND (still singular) gesture bracket', () => {
-    const t = makeTool({ selection: [{ kind: 'sketch-island', id: 40n, sketch: 3n }] })
+  it('a 180° flip about an in-plane axis of a DRAWN unit stays in the plane: ONE draft copy (the draft re-derives regions from edges), no detach', () => {
+    // FLIPPED from the sketch-era expectation (new-sketch arm): a drawn unit
+    // lands every endpoint back on its plane under this affine, and the
+    // draft re-derives its regions from the copied edges, so the reflective
+    // winding problem of the sketch replay does not exist for it.
+    const t = makeTool({ selection: [di(40n)] })
+    flipAboutX(t)
+
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1)
+    expect([...(t.wasmScene.draft_copy_edges.mock.calls[0][1] as BigUint64Array)]).toEqual([10n])
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(t.onToast).not.toHaveBeenCalled()
+  })
+
+  it('a WHOLE-sketch copy ARMS the ×N array window: typing 5x retracts the single-copy commit with ONE scene undo, then replays 5 cumulative copies into the SAME sketch inside a SECOND (still singular) gesture bracket', () => {
+    const t = makeTool({ selection: [{ kind: 'sketch', id: 6n }] })
     t.tool.onKey(makeKeyEvent('Alt'))
     runNinetyDegreeGesture(t.tool)
 
@@ -894,41 +1116,70 @@ describe('RotateTool — sketch copy (Move\'s "you can\'t Copy a Sketch" envelop
     expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
     expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
     for (const call of t.wasmScene.sketch_add_segment.mock.calls) {
-      expect(call[0]).toBe(3n) // every rep lands on the SOURCE sketch
+      expect(call[0]).toBe(6n) // every rep lands on the SOURCE sketch
     }
     expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
   })
 
-  it('a mixed selection duplicates objects AND copies sketches, and BOTH array together when ×N is typed (retracting BOTH prior entries)', () => {
+  it('a drawn-unit copy ARMS the ×N array window: typing 5x retracts the single-copy draft with ONE scene undo, then lands 5 cumulative copies inside ONE draft (one undo step for the whole array)', () => {
+    const t = makeTool({ selection: [di(40n)] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+
+    expect(t.wasmScene.draft_begin_ctx).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.draft_end).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, 'x5')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1) // the one single-copy draft
+    expect(t.wasmScene.draft_begin_ctx).toHaveBeenCalledTimes(1 + 1) // the single copy + ONE array draft
+    expect(t.wasmScene.draft_end).toHaveBeenCalledTimes(1 + 1)
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1 + 5) // one copy per rep inside it
+    expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
+    expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled()
+    expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+    // Each rep carries its OWN cumulative angle: 90°, 180°, 270°, 360°, 450°.
+    const angles = t.wasmScene.draft_copy_edges.mock.calls
+      .slice(1)
+      .map((c) => thetaOfZAffine(c[2] as Float64Array))
+    expect(angles[0]).toBeCloseTo(Math.PI / 2, 6)
+    expect(angles[1]).toBeCloseTo(Math.PI, 6)
+    expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a mixed selection duplicates objects AND copies drawn shapes, and BOTH array together when ×N is typed (ONE step each time)', () => {
     const t = makeTool({
       selection: [
         { kind: 'object', id: 1n },
-        { kind: 'sketch-island', id: 40n, sketch: 3n },
+        di(40n),
       ],
     })
     t.tool.onKey(makeKeyEvent('Alt'))
     runNinetyDegreeGesture(t.tool)
 
     expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
-    // The default gesture (Z axis, pivot at the origin) is in-plane for
-    // sketch 3 — the sketch half replays into the source sketch, it does
-    // not detach onto a new one.
+    // The default gesture (Z axis, pivot at the origin) is in-plane for the
+    // ground drawing — the drawn half copies through one draft, it does not
+    // detach onto a new sketch.
     expect(t.wasmScene.copy_sketch_islands).not.toHaveBeenCalled()
-    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1)
     expect(t.onCommit).toHaveBeenCalledWith([
-      { kind: 'sketch-island', id: 78n, sketch: 3n },
+      di(78n),
       { kind: 'object', id: 100n },
     ])
 
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
 
-    // The initial commit recorded TWO history entries (one sketch replay,
-    // one object array) — both get retracted before the array reissues at
-    // count 3.
-    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
+    // The initial commit is ONE history entry (draft copy + object array in a
+    // bracket; was two) — one undo retracts it before the array reissues at
+    // count 3, again as one entry.
+    expect(t.wasmScene.brackets.labels).toEqual(['Copy', 'Copy'])
+    expect(t.wasmScene.undo_depth()).toBe(1)
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
     expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(2)
-    expect(t.wasmScene.sketch_add_segment).toHaveBeenCalledTimes(1 + 3)
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1 + 3)
     expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
   })
 })
@@ -1254,6 +1505,48 @@ describe('RotateTool — retype the angle after the commit', () => {
   })
 })
 
+describe('RotateTool — retype after an arranging drawn-shape rotation', () => {
+  it('re-commits with the PRE-commit shape refs (the undo restores the original keys), while the visible selection is the re-resolved unit', () => {
+    const t = makeTool({ selection: [di(40n)] })
+    const scene = t.wasmScene as unknown as Record<string, ReturnType<typeof vi.fn>> & {
+      drawing: { units: DUnit[] }
+    }
+    const baseUndo = scene.scene_undo.getMockImplementation() as () => unknown
+    const original = scene.drawing.units.map((u) => ({
+      ...u,
+      edges: u.edges.map((e) => ({ ...e, a: [...e.a] as V3, b: [...e.b] as V3 })),
+    }))
+    // EVERY landing arranges: the rotated edge re-keys into fresh unit 99.
+    const applyImpl = scene.draft_transform_edges.getMockImplementation() as (...a: unknown[]) => void
+    scene.draft_transform_edges.mockImplementation((...args: unknown[]) => {
+      applyImpl(...args)
+      const moved = scene.drawing.units[0].edges[0]
+      scene.drawing.units = [{ key: 99n, sketch: 3, edges: [{ key: 60n, a: moved.a, b: moved.b }] }, scene.drawing.units[1], scene.drawing.units[2]]
+    })
+    scene.scene_undo.mockImplementation(() => {
+      scene.drawing.units = original.map((u) => ({
+        ...u,
+        edges: u.edges.map((e) => ({ ...e, a: [...e.a] as V3, b: [...e.b] as V3 })),
+      }))
+      return baseUndo()
+    })
+
+    runNinetyDegreeGesture(t.tool)
+    expect(scene.draft_transform_edges).toHaveBeenCalledTimes(1)
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+
+    typeKeys(t.tool, '45')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(scene.draft_transform_edges).toHaveBeenCalledTimes(2)
+    // Both commits name the ORIGINAL unit's edge, never the dead merged key 60.
+    expect([...(scene.draft_transform_edges.mock.calls[0][1] as BigUint64Array)]).toEqual([10n])
+    expect([...(scene.draft_transform_edges.mock.calls[1][1] as BigUint64Array)]).toEqual([10n])
+    expect(thetaOfZAffine(scene.draft_transform_edges.mock.calls[1][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+  })
+})
+
 describe('RotateTool — a typed angle after an array re-fans the array', () => {
   it('copy 90°, then 3x, then 45 → three copies fanned by 45°', () => {
     const t = makeTool()
@@ -1274,5 +1567,83 @@ describe('RotateTool — a typed angle after an array re-fans the array', () => 
     typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup.mock.calls[3][3]).toBe(2)
     expect(thetaOfZAffine(dup.mock.calls[3][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+  })
+})
+
+describe('RotateTool — a refused mixed array resolve is atomic', () => {
+  it('aborts the attempt (drawn half included) and redoes the previous copy', () => {
+    const t = makeTool({ selection: [{ kind: 'object', id: 1n }, di(40n)] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+
+    t.wasmScene.duplicate_selection_array.mockImplementationOnce(() => {
+      throw new Error('Transform: refused')
+    })
+    typeKeys(t.tool, 'x3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+
+    // One undo retracted the previous commit; the refused attempt's bracket
+    // aborted (restoring document and redo stack exactly), so ONE redo
+    // brings the previous copy back — nothing is re-laid by hand.
+    expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.scene_redo).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.brackets.aborted).toBe(1)
+    expect(t.wasmScene.draft_copy_edges).toHaveBeenCalledTimes(1 + 3) // first copy + the aborted attempt's 3 reps
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(t.wasmScene.undo_depth()).toBe(1)
+    expect(t.onToast).toHaveBeenCalled()
+  })
+})
+
+describe('RotateTool — array history edge cases', () => {
+  it('a refused xN that recorded nothing keeps the typed-angle window armed', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    t.wasmScene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+    typeKeys(t.tool, 'x3'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.scene_redo).toHaveBeenCalledTimes(1)
+    t.onToast.mockClear()
+    typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).not.toHaveBeenCalled()
+    const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+  })
+
+  it('a refused relay that recorded nothing re-stamps the array window so the next xN is accepted', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
+    t.wasmScene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+    typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter')) // relay refused
+    t.onToast.mockClear()
+    typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).not.toHaveBeenCalledWith(expect.stringContaining('Array entry ended'), undefined)
+    expect(t.wasmScene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(5)
+  })
+
+  it('the drawn half succeeding and the object half refusing during a relay nets out', () => {
+    const t = makeTool({ selection: [{ kind: 'object', id: 1n }, di(40n)] })
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
+    const depth = t.wasmScene.undo_depth()
+    t.wasmScene.duplicate_selection_array.mockImplementationOnce(() => { throw new Error('Transform: refused') })
+    typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.undo_depth()).toBe(depth)
+  })
+})
+
+describe('RotateTool — one gesture, one undo step (history bracket)', () => {
+  it('rotating an object together with drawing records ONE undo step labeled Rotate', () => {
+    const t = makeTool({ selection: [{ kind: 'object', id: 1n }, di(40n), di(41n)] })
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.draft_end).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.wasmScene.undo_depth()).toBe(1)
+    expect(t.wasmScene.brackets.labels).toEqual(['Rotate'])
   })
 })

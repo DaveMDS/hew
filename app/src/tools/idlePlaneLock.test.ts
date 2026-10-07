@@ -5,10 +5,9 @@
  * NORMAL to a world axis (Right=0/red X, Left=1/green Y, Up=2/blue Z); the
  * same arrow again, or ArrowDown, clears it. An active lock beats face pick
  * and sketch-hover adoption on the next click; the plane passes through
- * that click's snapped point and is minted (or reused) via the Phase 2
- * plane-mode cache — `begin_sketch_on_plane` off the ground plane,
- * `begin_ground_sketch` when the lock resolves to it exactly (blue through
- * z=0).
+ * that click's snapped point and each commit is one `draft_begin_plane` on
+ * it (no per-plane sketch cache any more) — on the ground plane itself when
+ * the lock resolves to it exactly (blue through z=0).
  *
  * One shared parameterized suite drives all four tools through a common
  * `DrawToolUnderTest` surface (every tool exposes the same method shapes —
@@ -20,7 +19,7 @@ import { LineTool } from './LineTool'
 import { RectangleTool } from './RectangleTool'
 import { CircleTool } from './CircleTool'
 import { ArcTool } from './ArcTool'
-import { makeSketchPlaneCache, type SketchPlaneCache } from './sketchGesture'
+import { draftMock } from './draftMock'
 import { toolHasArmedGesture, type EditContext, type Snap, type Tool } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
@@ -40,15 +39,11 @@ function makeKeyEvent(key: string): KeyboardEvent {
 const TILTED_SKETCH = 55n
 const TILTED_PLANE = new Float64Array([0, 0, 0, 0, -1, 0])
 
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
-type PlaneCall = [number, number, number, number, number, number]
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
 
 function makeWasmScene(opts: { sketchPick?: bigint } = {}) {
   const planes = new Map<bigint, Float64Array>([[TILTED_SKETCH, TILTED_PLANE]])
-  const segmentCalls: SegmentCall[] = []
-  const planeCalls: PlaneCall[] = []
-  let sketchCounter = 90n
-  let nextRegionsCreated: bigint[] = []
+  const dm = draftMock()
 
   const scene = {
     // World-identity drawing axes (tool-parity §4) — no test in this suite
@@ -56,51 +51,26 @@ function makeWasmScene(opts: { sketchPick?: bigint } = {}) {
     // the movable-frame coverage.
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, new Float64Array([0, 0, 0, 0, 0, 1]))
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planeCalls.push([px, py, pz, nx, ny, nz])
-        planes.set(sketchCounter, new Float64Array([px, py, pz, nx, ny, nz]))
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined), // never an eligible face in these fixtures
     pick_sketch: vi.fn(() => opts.sketchPick),
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_begin_curve: vi.fn(),
-    sketch_begin_curve_with: vi.fn(),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        const rc = nextRegionsCreated
-        nextRegionsCreated = []
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array(rc),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return {
-    scene: scene as unknown as WasmScene,
-    segmentCalls,
-    planeCalls,
-    setNextRegionsCreated: (rc: bigint[]) => { nextRegionsCreated = rc },
-  }
+  // A live array view of the draft log's segments as {a, b} pairs.
+  const segmentCalls = new Proxy([] as SegmentCall[], {
+    get(_t, k) {
+      const live: SegmentCall[] = dm.log.segments.map((sg) => ({
+        a: sg.slice(0, 3) as SegmentCall['a'],
+        b: sg.slice(3, 6) as SegmentCall['b'],
+      }))
+      return Reflect.get(live, k)
+    },
+  })
+  return { scene: scene as unknown as WasmScene & typeof scene, segmentCalls, log: dm.log }
 }
 
 /** The subset of each draw tool's public surface these tests drive — every
@@ -118,7 +88,7 @@ interface DrawToolUnderTest {
 
 interface Driver {
   name: string
-  make(scene: WasmScene, cache?: SketchPlaneCache): DrawToolUnderTest
+  make(scene: WasmScene): DrawToolUnderTest
   /** Drive ONE complete plane-mode gesture from first-click point `a`
    *  through `bulge` (a second/third point off any degenerate line with
    *  `a`), leaving the tool idle again so a following gesture can be driven
@@ -129,8 +99,8 @@ interface Driver {
 const DRIVERS: Driver[] = [
   {
     name: 'Line',
-    make: (scene, cache) =>
-      new LineTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new LineTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     commit: (tool, a, bulge) => {
       tool.onPointerDown(makeSnap(a), RAY)
       tool.onPointerDown(makeSnap(bulge), RAY)
@@ -141,8 +111,8 @@ const DRIVERS: Driver[] = [
   },
   {
     name: 'Rectangle',
-    make: (scene, cache) =>
-      new RectangleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new RectangleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     commit: (tool, a, bulge) => {
       tool.onPointerDown(makeSnap(a), RAY)
       tool.onPointerDown(makeSnap(bulge), RAY) // opposite corner — auto-returns to idle
@@ -150,8 +120,8 @@ const DRIVERS: Driver[] = [
   },
   {
     name: 'Circle',
-    make: (scene, cache) =>
-      new CircleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new CircleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     commit: (tool, a, bulge) => {
       tool.onPointerDown(makeSnap(a), RAY)
       tool.onPointerDown(makeSnap(bulge), RAY) // rim point — auto-returns to idle
@@ -159,8 +129,8 @@ const DRIVERS: Driver[] = [
   },
   {
     name: 'Arc',
-    make: (scene, cache) =>
-      new ArcTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new ArcTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     commit: (tool, a, bulge) => {
       // Every call site holds ONE coordinate fixed between `a` and `bulge`
       // (the locked axis — both points lie in the same locked plane) and
@@ -310,20 +280,20 @@ describe.each(DRIVERS)('$name — idle plane lock', ({ make, commit }) => {
     commit(tool, planePoint(0, 2, 1, 3), planePoint(0, 2, 4, 3.5))
 
     expect(scene.pick_sketch).not.toHaveBeenCalled()
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledWith(2, 1, 3, 1, 0, 0)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).toHaveBeenCalledWith(2, 1, 3, 1, 0, 0, expect.any(String))
   })
 
   // -------------------------------------------------------------- first click resolves the plane
 
-  it('first click through a snapped point mints the plane through THAT point', () => {
+  it('first click through a snapped point begins the draft plane through THAT point', () => {
     const { scene, segmentCalls } = makeWasmScene()
     const tool = make(scene)
 
     tool.onKey(makeKeyEvent('ArrowRight')) // red/X
     commit(tool, planePoint(0, 2, 1, 3), planePoint(0, 2, 4, 3.5))
 
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledWith(2, 1, 3, 1, 0, 0)
+    expect(scene.draft_begin_plane).toHaveBeenCalledWith(2, 1, 3, 1, 0, 0, expect.any(String))
     expect(segmentCalls.length).toBeGreaterThan(0)
     for (const call of segmentCalls) {
       expect(call.a[0]).toBeCloseTo(2)
@@ -334,56 +304,67 @@ describe.each(DRIVERS)('$name — idle plane lock', ({ make, commit }) => {
   it.each([
     [0, 'red'] as const,
     [1, 'green'] as const,
-  ])('lock axis %i (%s) through a nonzero offset mints via begin_sketch_on_plane', (axis, _color) => {
+  ])('lock axis %i (%s) through a nonzero offset begins a draft on that plane (draft_begin_plane)', (axis, _color) => {
     const { scene } = makeWasmScene()
     const tool = make(scene)
 
     tool.onKey(makeKeyEvent(ARROW_FOR_AXIS[axis]))
     commit(tool, planePoint(axis, 5, 1, 1), planePoint(axis, 5, 4, 1.5))
 
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const c = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(c[axis + 3]).toBe(1) // the lock axis is the plane normal
+    expect(c[axis]).toBe(5) // through the nonzero offset
   })
 
-  // -------------------------------------------------------------- plane-mode cache
+  // -------------------------------------------------------------- one draft per commit
 
-  it('two gestures through the SAME locked plane share one minted sketch', () => {
+  it('two gestures through the SAME locked plane are two drafts on that one plane', () => {
     const { scene } = makeWasmScene()
-    const cache = makeSketchPlaneCache()
-    const tool = make(scene, cache)
+    const tool = make(scene)
 
     tool.onKey(makeKeyEvent('ArrowRight'))
     commit(tool, planePoint(0, 2, 1, 3), planePoint(0, 2, 4, 3.5))
     // Lock survives — draw a second shape through a DIFFERENT point on the
-    // SAME plane (x = 2).
+    // SAME plane (x = 2). There is no per-plane sketch cache any more (the
+    // old "share one minted sketch" assertion): each commit is its own draft,
+    // so the same plane is simply begun twice.
     commit(tool, planePoint(0, 2, 10, 10), planePoint(0, 2, 13, 10.5))
 
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(2)
+    for (const c of (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls) {
+      expect(c[0]).toBe(2) // x = 2 plane
+      expect(c.slice(3, 6)).toEqual([1, 0, 0])
+    }
   })
 
-  it('a second gesture on the SAME axis through a DIFFERENT offset mints a second sketch', () => {
+  it('a second gesture on the SAME axis through a DIFFERENT offset begins a draft on a different plane', () => {
     const { scene } = makeWasmScene()
-    const cache = makeSketchPlaneCache()
-    const tool = make(scene, cache)
+    const tool = make(scene)
 
     tool.onKey(makeKeyEvent('ArrowRight'))
     commit(tool, planePoint(0, 2, 1, 3), planePoint(0, 2, 4, 3.5))
     commit(tool, planePoint(0, 5, 1, 3), planePoint(0, 5, 4, 3.5)) // x = 5, not 2
 
-    expect(scene.begin_sketch_on_plane).toHaveBeenCalledTimes(2)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(2)
+    const calls = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls
+    expect(calls[0][0]).toBe(2)
+    expect(calls[1][0]).toBe(5)
   })
 
   // -------------------------------------------------------------- ground-plane special case
 
-  it('blue lock through z=0 reuses the ground path (begin_ground_sketch), not begin_sketch_on_plane', () => {
+  it('blue lock through z=0 begins its draft on the ground plane (normal +Z, z = 0)', () => {
     const { scene } = makeWasmScene()
     const tool = make(scene)
 
     tool.onKey(makeKeyEvent('ArrowUp')) // blue/Z
     commit(tool, planePoint(2, 0, 1, 2), planePoint(2, 0, 4, 2.5))
 
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
-    expect(scene.begin_sketch_on_plane).not.toHaveBeenCalled()
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const c = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(c[2]).toBe(0)
+    expect(c.slice(3, 6)).toEqual([0, 0, 1])
   })
 
   // -------------------------------------------------------------- hasArmedGesture (Escape routing)

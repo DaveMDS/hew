@@ -60,7 +60,7 @@ describe('isWholePartKind', () => {
     expect(isWholePartKind('group')).toBe(true)
     expect(isWholePartKind('instance')).toBe(true)
     expect(isWholePartKind('sketch')).toBe(false)
-    expect(isWholePartKind('sketch-edge')).toBe(false)
+    expect(isWholePartKind('draft-edge')).toBe(false)
   })
 })
 
@@ -168,5 +168,8 @@ describe('resolveInspect — node', () => {
   it('never builds a node card for a sketch-scoped kind', () => {
     const scene = makeScene()
     expect(resolveInspect(scene, { kind: 'sketch', id: 1n }, null)).toBeNull()
+    for (const kind of ['draft-island', 'draft-curve', 'draft-edge', 'draft-region'] as const) {
+      expect(resolveInspect(scene, { kind, id: 1n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000001' }, null)).toBeNull()
+    }
   })
 })

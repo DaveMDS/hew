@@ -1,10 +1,10 @@
 ---
 title: "Drawing"
-description: "The five profile tools, offsetting a boundary, what changes when you draw on a face instead of the ground, and every way to type an exact dimension."
+description: "The five profile tools, drawing on a face exactly as on the ground, offsetting a boundary, editing what you drew, and every way to type an exact dimension."
 order: 5
 ---
 
-Hew's five drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools **split the face**, carving regions you can push in or pull out. The tool decides which mode to use from what's under your cursor; there is no explicit switch.
+Hew's five drawing tools create 2D profiles. On the empty ground plane, a closed profile becomes a **sketch region** ready to extrude. Drawn directly on a solid's face, the same tools work the same way: the face is a drawing plane just like the ground, and a closed profile on it becomes a region you can push in or pull out. The tool decides which plane you are on from what's under your cursor; there is no explicit switch.
 
 <docs-video theme="dark" slug="drawing" label="drawing demonstration"></docs-video>
 
@@ -47,7 +47,9 @@ One consequence worth knowing: an outline that ends up spread across two planes 
 1. Click to set the first corner.
 2. Click again to set the opposite corner.
 
-**Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The first number is the width across the surface you're drawing on and the second is the height up it; on the ground and other flat surfaces that means along the red axis, then the green. The Measurements box shows the pair in the same order while you drag. The rectangle grows in the direction your cursor was heading.
+**Exact dimensions:** after the first click, type both dimensions separated by a comma or an `x` (`2m,1m`, `50 x 30`, `3',18"`) and press `Enter`. A single value makes a square. The first number is the width across the surface you're drawing on and the second is the height up it; on the ground and other flat surfaces that means along the red axis, then the green. The Measurements box shows the pair in the same order while you drag. The rectangle grows in the direction your cursor was heading; if the cursor hasn't moved since the click (a click on a snapped guide intersection, say), it grows right and up as you see the face from outside — toward +X and +Y on a horizontal one.
+
+A click works the same way: what the Measurements box shows when you click the second corner is exactly what you get, as if you had typed it, unless the click snapped onto existing geometry, which keeps its exact point.
 
 You can also type dimensions *after* the second click. The rectangle you just drew resizes in place, keeping the same first corner and growth direction — retype and press `Enter` again as many times as you like, until you click, press `Esc`, switch tools, or make any other change to the model. Every drawing tool works this way; see "Typing exact values" below.
 
@@ -93,9 +95,18 @@ A typed length after the third click works too: the arc you just drew redraws wi
 
 ## Drawing on a face
 
-Point any drawing tool at a solid's face and it works there instead of on the ground: edges cut the face, and closed shapes (a rectangle, circle, polygon, or closed line/arc loop) split it into regions. The new regions are immediately push/pullable — recesses, through-holes, and raised bosses all start this way. A shape can run right along the face's own edges: a rectangle from one edge's midpoint to another's, or flush against an edge, cuts the face along its inner sides, and the piece it encloses is a face you can push or pull like any other. At the top level, any plain object's face is drawable directly — objects are immediately editable, just as they are with Push/Pull. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered. Starting a line on an edge or corner two faces share is fine — the face the line runs across is settled by where you put its second point (or by an arrow-key lock), so a line from the midpoint of a box's top edge to the midpoint of the opposite one cuts the top, not the side.
+Point any drawing tool at a solid's face and draw. A face is a drawing plane exactly like the ground, so every gesture in this chapter does the same thing on a face that it does on the ground: the same shapes, the same snapping, the same selecting, moving, and deleting. What changes is only where the result lives.
 
-A line chain on a face cuts the face wherever it runs from one edge to another, and it may keep going: touch the far edge and continue to a third point on the bottom edge, or draw from a corner up to the midpoint of the top edge and back down to the other corner, and each edge-to-edge stretch becomes its own cut — the second of those leaves a triangle you can push straight through. A chain that never touches an edge can still make a face: click point to point inside the face and finish by clicking your start point, and the loop becomes a region of its own, exactly as a rectangle or circle drawn there would. What a face cannot hold is a loose line — one that starts or ends inside the face without closing back on itself or reaching an edge. A solid's face has no place for an edge that divides nothing, so Hew says so instead of leaving a stray line behind; close the loop, or run it out to an edge.
+- **A closed shape over the face** becomes part of the solid's face, cutting it into regions. Push or pull a region and you get a recess, a through-hole, or a raised boss. Shapes can touch the face's own edges, run flush against them, cross each other, or sit inside each other; the face splits into the same pieces the ground would.
+- **A loose line stays.** A line that starts or ends inside the face, without closing a loop or reaching an edge, is kept as it is, like a construction line on the ground. It belongs to the solid: move the face by push/pull and the line goes with it, and deleting the solid deletes it.
+- **A shape that hangs over the edge is split in two.** Draw a rectangle half on a box's top and half past its edge. The part over the face is a face region (push or pull it and the box grows or is cut), and the part past the edge is a region of the ground-side drawing (push or pull it and you get a new, separate object). The two parts stay one shape for selecting and moving, and you can push the pieces in either order.
+- **A shape the face can't hold** — one that touches an edge or another shape at only a single point, or leaves a sliver too thin to keep — is still drawn and kept. It just can't be pushed: when you try, Push/Pull tells you which part is the problem so you can move it clear.
+
+A solid's own edges are not part of the drawing. You can snap to them and draw up to them, but drawing never moves or erases them, and the Select, Move, and Delete tools treat the solid's corners and edges as the solid's.
+
+At the top level, any plain object's face is drawable directly. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered. Starting a line on an edge or corner two faces share is fine; the face the line runs across is settled by where you put its second point (or by an arrow-key lock), so a line from the midpoint of a box's top edge to the midpoint of the opposite one cuts the top, not the side.
+
+A line chain on a face may run from edge to edge, cross shapes you've drawn there, or wander across the middle; an arc arched over a rectangle splits it. The whole chain is one step, so one `Ctrl+Z` takes it all back. A circle or arc you drew stays one **Circle** or **Arc** when other shapes cut it apart, so you can select it whole and delete it in one step.
 
 ![A box with a circular boss pulled out and a circular recess pushed in, both drawn directly on its front face](/docs/drawing-on-face.webp)
 
@@ -119,13 +130,13 @@ Getting Started walks through all of this on a real part — [drawing a cutter o
 
 Offset copies an existing boundary a set distance inward or outward — the quickest way to draw a border, a rim, or a wall of even thickness without measuring anything.
 
-1. Click a filled sketch region — its interior or right on its boundary edge, both work — or a solid's face.
+1. Click a filled region — its interior or right on its boundary edge, both work — on the ground, on a solid's face, or on a shape drawn there.
 2. Move the cursor inward or outward — a preview of the offset outline follows at the distance shown in the readout.
 3. Click to commit, or type an exact distance and press `Enter`.
 
 Every edge of the boundary moves by the same distance: straight edges stay parallel, and a drawn circle or arc offsets to a true concentric curve — same center, radius changed by exactly the offset — so the result snaps, displays, and exports like any freshly drawn curve. A region with a hole offsets both boundaries at once, keeping the band between them even.
 
-On a sketch region, the offset outline joins the same sketch, so both the original and the new region are ready to extrude — offset a circle outward and you have a ring to pull into a pipe wall. On a solid's face, offsetting inward carves the face the way drawing on it does, leaving an inset region to push or pull; only inward offsets fit on a face. An arc in the face's outline offsets as a concentric arc and keeps its curve, so pushing the inset down hollows the shape with an inner curve as smooth as the outer one.
+Offset works the same on the ground and on a face. On the ground, the offset outline joins the same drawing, so both the original and the new region are ready to extrude — offset a circle outward and you have a ring to pull into a pipe wall. On a solid's face, offsetting inward leaves an inset region to push or pull. Offsetting outward is fine too, even past the face's edge: the loop splits where it crosses the edge, with the part over the face ready to push or pull the solid and the part beyond ready to extrude into a new object. An arc in the outline offsets as a concentric arc and keeps its curve, so pushing the inset down hollows the shape with an inner curve as smooth as the outer one.
 
 If the distance is more than the shape can absorb — an inward offset past the middle, or an arc squeezed to nothing — the preview disappears and committing is refused with a message; nothing is committed halfway.
 
@@ -133,18 +144,29 @@ Type a distance right after the click commits too: the offset you just made redo
 
 ## Editing a sketch
 
-**Deleting a line or curve.** With the Select tool, click any sketch line to select it — a facet of a drawn arc or circle selects the whole curve — and press `Delete`. If the line separated two regions, they merge; if it closed a region, the region opens back up. Deleting a shape's last line removes it entirely. Every line you can see is an ordinary line: pulling a region into a solid removes its outline from the sketch (the outline became the solid's base), so nothing invisible lingers behind to complicate later edits. What survives an extrusion — a wall shared with a neighboring shape, a stray construction line — deletes like anything else.
+Everything you draw is made of four kinds of unit, and the Select tool picks the one you click:
 
-**Deleting or moving a whole shape.** Click inside a shape's filled region (or its row in the outliner) to select the connected shape, then `Delete` removes it or Move slides it — without disturbing anything else you've drawn. Selecting a single line or drawn curve and transforming it moves its whole connected shape the same way. A move that would land one shape on top of another is refused rather than welded, and rotating a shape out of the ground plane — standing a profile upright — splits it into its own sketch so the rest of the drawing stays put.
+- A **line** (a single straight stretch), picked by clicking it.
+- A **curve run**: a drawn circle, arc, or polygon, or the piece of one between the places other geometry cuts it. An untouched circle is one run; a circle crossed by a line is two, and clicking one selects just that run.
+- A **shape**: everything connected, which you get by clicking inside a filled region, or by triple-clicking (or double-clicking) any line or curve of it.
+- A **region**: the filled area itself, which is what Push/Pull and Offset pick.
 
-**Shapes drawn on a face.** A shape drawn on a solid's face and not yet pushed or pulled edits the same way. It fills blue like a ground sketch, and clicking inside it selects the shape rather than the solid — click anywhere else on the solid, or its row in the outliner, to select the solid itself. `Delete` dissolves the shape back into the face; anything drawn inside it stays. Move slides it across the face: the drop stays on the face's plane, so a corner snapped on some other face never carries the shape off its own. Rotate turns it about the face; Scale resizes it in place — always uniformly, since a stretched circle would no longer be a circle. A shape can go all the way around other shapes — draw, offset, move, or scale it around them — and whatever it encloses, even a boss or a hole, becomes part of it and moves with it. An edit that would push the shape past the face's edge, across another shape, or inside one is refused with a message and nothing changes. A shape holding a boss or recess stays put until that is undone. A shape drawn up to an edge — a rectangle from an edge's midpoint — selects by clicking its line, slides along that edge, and deletes the same way; sliding it off the edge is refused. Each shape also appears in the outliner under its solid, named for what it is (Circle, Rectangle, Shape, or Arc shape for a pie or segment; a shape drawn up to an edge is a Line, an Arc, or an Edge shape). Once you push or pull a shape it is solid geometry — a boss or a recess — and stops being a shape you can move; undo the push to get the shape back. Copying a shape on a face isn't supported yet: draw the copy instead.
+A rubber-band drag selects the shapes it encloses (or touches, dragging right to left), on the ground or on a face. Start the drag off a solid; pressing on a solid and dragging moves it. Shapes drawn apart from each other are independent: selecting, deleting, or moving one never touches the other.
 
-**Moving a point.** For a free-standing sketch that hasn't been extruded yet, the **Edit Vertex** tool (Tools ▸ Edit Vertex, or find it in the palette) adjusts a single point:
+**Deleting a line or curve.** With the Select tool, click a line or curve run and press `Delete`. If it separated two regions, they merge; if it closed a region, the region opens back up. Deleting a shape's last line removes it entirely. Every line you can see is an ordinary line: pulling a region into a solid removes its outline from the drawing (the outline became the solid's base), so nothing invisible lingers behind to complicate later edits. A solid's own edges are the exception in the other direction: you can't select them as drawing, so `Delete` can't erase one.
 
-1. Click a sketch vertex to grab it.
+**Deleting or moving a whole shape.** Click inside a shape's filled region (or its row in the outliner) to select the shape, then `Delete` removes it or Move slides it, without disturbing anything else you've drawn. On a face it works the same way: a shape drawn there selects when you click inside it, and clicking anywhere else on the solid selects the solid.
+
+**Moving, copying, and transforming.** Move, Rotate, and Scale work on a shape on a face exactly as on the ground, and a copy-move makes a copy there too. Move a shape onto other shapes and it joins them exactly as if you had drawn it there: lines split where they cross, overlapping lines merge, and the regions re-form, all as one step that a single `Ctrl+Z` takes back. This is true on the ground and on a face alike; nothing is refused for crossing another shape. A shape can slide right off a face's edge: it splits into a part on the face and a part beyond, and slides back together if you bring it back. Rotating a shape out of its plane, standing a profile upright, splits it into a sketch of its own so the rest of the drawing stays put. Once you push or pull a region, it is solid geometry and no longer a shape you can move; undo the push to get the shape back.
+
+**Moving a point.** The **Edit Vertex** tool (Tools ▸ Edit Vertex, or find it in the palette) adjusts a single point of a drawing, on the ground or on a face:
+
+1. Click a vertex to grab it.
 2. Click its new position — the connected edges stretch to follow.
 
-If a move would break the sketch's topology (collapse a segment, fold a region), Hew refuses with a message and leaves the vertex where it was.
+Drag a vertex across or onto other lines and the drawing arranges itself the way a drawn line would: lines split where they cross and the regions re-form, as one undoable step. If a move would collapse a segment to nothing, Hew refuses with a message and leaves the vertex where it was. A solid's own corner isn't a drawing vertex, so it can't be grabbed this way.
+
+**Circle segments.** Select a drawn circle and change **Segments** in Object Info to refacet it. This works on a face as it does on the ground.
 
 ## Inference while drawing
 

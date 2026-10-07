@@ -32,8 +32,8 @@ import {
   type NodeRef,
   type NodeKind,
 } from './treeModel'
-import { readImprints, imprintRef, imprintName, type ImprintFeature } from '../tools/imprints'
-import { isImprintKind } from './treeModel'
+import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '../tools/planeUnits'
+import { isSketchScopedKind } from './treeModel'
 
 interface Props {
   scene: WasmScene
@@ -181,28 +181,6 @@ function isHiddenByAncestor(node: NodeRef, scene: WasmScene, hiddenKeys: Set<str
   return false
 }
 
-/** Outliner labels for one object's imprint child rows: `imprintName(feature)`
- *  as-is, except when more than one imprint on the SAME object shares a name
- *  ("Circle" + "Circle") — then every one of that group is numbered 1-based
- *  ("Circle 1", "Circle 2", …), the same 1-based scheme `entityLabel` uses
- *  for an unnamed node's positional fallback, so a face carrying two circles
- *  reads unambiguously instead of two identical rows. */
-function numberedImprintLabels(features: readonly ImprintFeature[]): string[] {
-  const counts = new Map<string, number>()
-  for (const f of features) {
-    const name = imprintName(f)
-    counts.set(name, (counts.get(name) ?? 0) + 1)
-  }
-  const seen = new Map<string, number>()
-  return features.map((f) => {
-    const name = imprintName(f)
-    if ((counts.get(name) ?? 0) <= 1) return name
-    const n = (seen.get(name) ?? 0) + 1
-    seen.set(name, n)
-    return `${name} ${n}`
-  })
-}
-
 export function DocumentTree({
   scene,
   docRev,
@@ -244,32 +222,26 @@ export function DocumentTree({
     return m
   }, [topNodes])
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  // One outliner row per ISLAND (connected shape), numbered across all
-  // sketches — the user-facing unit; two shapes drawn apart get two rows.
-  const sketches = useMemo(
-    () =>
-      Array.from(scene.sketch_ids()).flatMap((sid) =>
-        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sketch: sid, island })),
-      ),
+  // Where every drawn shape lists: under its object when any of its edges is
+  // face topology or an object-owned sketch, else (entirely over the void)
+  // as a top-level sketch row, numbered across all sketches — the user-facing
+  // unit; two shapes drawn apart get two rows. One kernel read per document
+  // revision, shared by every row.
+  const drawing = useMemo(
+    () => outlinerDrawing(scene as unknown as Parameters<typeof outlinerDrawing>[0], Array.from(scene.object_ids())),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [scene, docRev],
   )
+  const sketches = drawing.free
 
   const selected = new Set(selectedIds.map((n) => nodeKey(n)))
-  // A selected line/curve/island has no dedicated row beyond the island's —
-  // light up the owning ISLAND's row so the outliner reflects the selection.
+  // A selected line/curve has no dedicated row beyond its shape's — light up
+  // the owning SHAPE's row so the outliner reflects the selection.
   for (const n of selectedIds) {
-    if (n.sketch === undefined) continue
-    if (n.kind === 'sketch-island') continue // has its own row key already
-    let island: bigint | undefined
-    if (n.kind === 'sketch-edge') {
-      island = scene.sketch_edge_island(n.sketch, n.id)
-    } else if (n.kind === 'sketch-curve') {
-      // The ref's id is the chain's representative edge.
-      island = scene.sketch_edge_island(n.sketch, n.id)
-    }
-    if (island !== undefined) {
-      selected.add(nodeKey({ kind: 'sketch-island', id: island, sketch: n.sketch }))
+    if (n.kind !== 'draft-edge' && n.kind !== 'draft-curve') continue
+    const unit = resolveDraft(scene as unknown as Parameters<typeof resolveDraft>[0], n)?.unit
+    if (unit !== undefined && unit !== null && n.ctx !== undefined) {
+      selected.add(nodeKey(draftRef('draft-island', n.ctx, unit.key)))
     }
   }
   const isSelected = (n: NodeRef) => selected.has(nodeKey(n))
@@ -378,17 +350,8 @@ export function DocumentTree({
   const ancestorGroupKeys = useMemo(() => {
     const keys = new Set<string>()
     for (const node of selectedIds) {
-      // Sketch-scoped selections are always top-level with no kernel NodeId —
-      // no ancestors.
-      if (
-        node.kind === 'sketch' ||
-        node.kind === 'sketch-island' ||
-        node.kind === 'sketch-curve' ||
-        node.kind === 'sketch-edge' ||
-        isImprintKind(node.kind)
-      ) {
-        continue
-      }
+      // Sketch-scoped selections have no kernel NodeId — no ancestors.
+      if (isSketchScopedKind(node.kind)) continue
       // Walk up the parent chain from this node.
       const kindNum = node.kind === 'object' ? 0 : node.kind === 'group' ? 1 : 2
       let parentId = scene.node_parent(kindNum, node.id)
@@ -463,26 +426,21 @@ export function DocumentTree({
   const [filter, setFilter] = useState('')
   const filterInputRef = useRef<HTMLInputElement>(null)
   const filterResult = useMemo(() => {
-    // Imprint rows filter by the same text they render (an object's
+    // Drawn-shape rows filter by the same text they render (an object's
     // shapes are its children for this walk).
     const getChildren = (node: NodeRef): NodeRef[] =>
       node.kind === 'group'
         ? getGroupMembers(node.id)
         : node.kind === 'object'
-          ? readImprints(scene, node.id).map((f) => imprintRef(node.id, f))
+          ? (drawing.byObject.get(node.id.toString()) ?? []).map((u) => u.ref)
           : []
     const labelForFiltered = (node: NodeRef): string => {
-      if (isImprintKind(node.kind) && node.object !== undefined) {
-        const features = readImprints(scene, node.object)
-        const labels = numberedImprintLabels(features)
-        const at = features.findIndex((f) => nodeKey(imprintRef(node.object!, f)) === nodeKey(node))
-        return at >= 0 ? labels[at] : ''
-      }
+      if (isSketchScopedKind(node.kind)) return drawing.labels.get(nodeKey(node)) ?? ''
       return labelFor(node)
     }
     return filterTreeKeys(topNodes, getChildren, labelForFiltered, filter)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [topNodes, filter, scene, docRev])
+  }, [topNodes, filter, scene, docRev, drawing])
   const filterActive = filterResult !== null
   const filterQuery = filter.trim().toLowerCase()
   // Sketches aren't part of the group-nested tree `filterTreeKeys` walks
@@ -848,6 +806,7 @@ export function DocumentTree({
         ))}
         {sessionStack.length > 0 && (sessionMembers ?? []).map((node, sessionIndex) => (
           <NodeRow
+              drawing={drawing}
             key={`session-member:${nodeKey(node)}`}
             node={node}
             // Positional-label index: an unnamed member's fallback label
@@ -902,6 +861,7 @@ export function DocumentTree({
           }
           return (
             <NodeRow
+              drawing={drawing}
               key={`${node.kind}:${node.id}`}
               node={node}
               index={index}
@@ -930,12 +890,11 @@ export function DocumentTree({
             />
           )
         })}
-        {visibleSketches.map(({ sketch, island }) => {
-          const node: NodeRef = { kind: 'sketch-island', id: island, sketch }
-          const index = sketches.findIndex((s) => s.sketch === sketch && s.island === island)
+        {visibleSketches.map(({ ref: node }) => {
+          const index = sketches.findIndex((s) => nodeKey(s.ref) === nodeKey(node))
           return (
             <Row
-              key={`${sketch}:${island}`}
+              key={nodeKey(node)}
               label={entityLabel('sketch', index)}
               icon={<NodeIcon kind="sketch" />}
               selected={isSelected(node)}
@@ -1074,12 +1033,15 @@ const NodeRow = memo(function NodeRowInner({
   dropHighlightKey,
   dragSourceKeys,
   onStartDrag,
+  drawing,
 }: {
   node: NodeRef
   index: number
   depth: number
   scene: WasmScene
   docRev: number
+  /** Where every drawn shape lists (planeUnits.ts `outlinerDrawing`). */
+  drawing: OutlinerDrawing
   watertightMap: Map<bigint, boolean>
   /** The combined session-stack + object-context path (see the parent
    *  component's `fullPath`) — every entry on it gets the "editing"
@@ -1163,15 +1125,12 @@ const NodeRow = memo(function NodeRowInner({
   )
   const hidden = ownHidden || hiddenByParent
   // Imprints (drawn-but-not-yet-pushed shapes on this object's faces —
-  // imprints.ts) render below as indented, always-visible child rows.
+  // imprints.ts) render below as indented, always-visible child rows; a
+  // circle or arc other shapes cut into runs is one row, the curve drawn.
   // Memoized on the document revision: the read is a kernel topology walk
   // plus a JSON round-trip, and this row re-renders on every hover state
   // change — unconditional so the hook order never varies with `kind`.
-  const imprints = useMemo(
-    () => (node.kind === 'object' ? readImprints(scene, node.id) : []),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [node.kind, node.id, scene, docRev],
-  )
+  const imprints = node.kind === 'object' ? (drawing.byObject.get(node.id.toString()) ?? []) : []
   // Whether THIS row is the node a just-closed session frame returned to
   // (see the parent component's `sessionRevealKey` comment) — mutually
   // exclusive with `isPrimary` in practice (a session boundary always clears
@@ -1186,7 +1145,6 @@ const NodeRow = memo(function NodeRowInner({
     // An object usually carries 0-2 imprints, and objects have no expand
     // chevron of their own, so there is no collapsed state to hide the
     // rows behind.
-    const imprintLabels = numberedImprintLabels(imprints)
     return (
       <>
         <Row
@@ -1208,14 +1166,14 @@ const NodeRow = memo(function NodeRowInner({
           isDropTarget={dropHighlightKey === key}
           onRowPointerDown={(e) => onStartDrag(node, e)}
         />
-        {imprints.map((feature, i) => {
-          const ref = imprintRef(node.id, feature)
+        {imprints.map((unit) => {
+          const ref = unit.ref
           const refKey = nodeKey(ref)
           return (
             <Row
               key={refKey}
-              label={imprintLabels[i]}
-              icon={<NodeIcon kind="imprint" />}
+              label={drawing.labels.get(refKey) ?? 'Shape'}
+              icon={<NodeIcon kind="draft-island" />}
               selected={isSelected(ref)}
               isPrimary={primaryKey === refKey}
               active={false}
@@ -1320,6 +1278,7 @@ const NodeRow = memo(function NodeRowInner({
       />
       {expanded && visibleMembers.map((child, childIdx) => (
         <NodeRow
+              drawing={drawing}
           key={`${child.kind}:${child.id}`}
           node={child}
           index={childIdx}

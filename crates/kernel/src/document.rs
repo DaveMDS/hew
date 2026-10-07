@@ -33,6 +33,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
+mod draft;
+pub use draft::{
+    DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit,
+    PlaneUnits,
+};
+
 use slotmap::SlotMap;
 use tracing::info;
 
@@ -49,8 +55,7 @@ use crate::import::{ImportReport, ImportScene, SkippedMesh};
 use crate::material::{FaceMaterial, Material, UvFrame};
 use crate::math::{MathError, Plane, Point3, Vec3};
 use crate::ops::{
-    BooleanError, BooleanOp, ExtrudeError, FaceFeature, FaceSplitReport, FollowMeError,
-    LoopImprintPlan, Operand, SliceError, StickyError, TransformSubFaceReport,
+    BooleanError, BooleanOp, ExtrudeError, FollowMeError, Operand, SliceError, StickyError,
 };
 use crate::serialize::{
     DocSaveData, LoadError, NodeRefDto, RawAnchor, RawAnnotation, decode_document_raw,
@@ -146,6 +151,70 @@ struct ObjectRecord {
     /// Per-node tag paths (root-first segment lists, e.g. `["Structure","Roof"]`).
     /// Empty by default; set by import decode or user ops. No global tag registry.
     tags: Vec<Vec<String>>,
+}
+
+/// The owned-sketch drawing that rides with a pushed face
+/// ([`Document::plan_face_ride`]).
+struct FaceRide {
+    /// The face's sweep: a translation along its pre-op normal.
+    forward: Transform,
+    sketches: Vec<(SketchId, RidePart)>,
+}
+
+/// How much of one owned sketch rides with a pushed face.
+enum RidePart {
+    /// Every edge: the sketch moves whole.
+    Whole,
+    /// Some edges: they move into a new sketch on the face's new plane; the
+    /// rest stay.
+    Split {
+        moved: Box<Sketch>,
+        rest: Box<Sketch>,
+    },
+}
+
+/// Whether a face of `obj` coplanar and same-facing with `plane` holds `p`
+/// strictly inside its region (inside the outer loop, outside every hole).
+fn face_under(obj: &Object, plane: &crate::math::Plane, p: Point3) -> bool {
+    obj.faces().values().any(|f| {
+        let n = f.plane.normal();
+        if n.dot(plane.normal()) <= 0.0 {
+            return false;
+        }
+        let outer: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+        if outer
+            .iter()
+            .any(|&q| plane.signed_distance(q).abs() > crate::tol::PLANE_DIST)
+        {
+            return false;
+        }
+        crate::geom2d::point_inside_polygon(p, &outer, n)
+            && !f.inner_loops.iter().any(|&l| {
+                let h: Vec<Point3> = obj.loop_positions(l).collect();
+                crate::geom2d::point_inside_polygon(p, &h, n)
+            })
+    })
+}
+
+/// Whether `obj` has an edge from `a` to `b` (either direction, within
+/// [`crate::tol::POINT_MERGE`]).
+fn object_has_edge(obj: &Object, a: Point3, b: Point3) -> bool {
+    let near = |x: Point3, y: Point3| x.approx_eq(y, crate::tol::POINT_MERGE);
+    obj.edges().keys().any(|e| {
+        obj.edge_endpoints(e)
+            .is_some_and(|(p, q)| (near(p, a) && near(q, b)) || (near(p, b) && near(q, a)))
+    })
+}
+
+/// Whether some face of `obj` is coplanar (within [`crate::tol::PLANE_DIST`])
+/// and same-facing with `plane`.
+fn object_has_face_on_plane(obj: &Object, plane: &crate::math::Plane) -> bool {
+    obj.faces().values().any(|f| {
+        f.plane.normal().dot(plane.normal()) > 0.0
+            && obj
+                .loop_positions(f.outer_loop)
+                .all(|p| plane.signed_distance(p).abs() <= crate::tol::PLANE_DIST)
+    })
 }
 
 impl ComponentDef {
@@ -750,6 +819,9 @@ enum DocAction {
         /// Every baked target's id paired with its exact pre-transform
         /// snapshot.
         objects: Vec<(ObjectId, Object)>,
+        /// The baked targets' object-owned sketches (they ride with their
+        /// owner), each with its exact pre-transform snapshot.
+        sketches: Vec<(SketchId, Sketch)>,
         forward: Transform,
         reanchored: Vec<AnnotationReanchor>,
     },
@@ -765,11 +837,13 @@ enum DocAction {
         prior: Sketch,
         forward: Transform,
     },
-    /// A move/rotate baked into ONE island of a sketch (per-island Move).
+    /// A move/rotate baked into a SET of islands of one sketch (per-shape
+    /// Move), moved together. A landing that touches other geometry
+    /// arranges with it as a draw would ([`Sketch::apply_transform_islands`]).
     /// Undo restores the RECORDED pre-transform `prior` snapshot of the
     /// WHOLE sketch verbatim — never a recomputed inverse, the same rule-9
     /// posture as [`DocAction::TransformSketch`]/[`DocAction::Rescale`].
-    /// Redo re-applies `forward` to `island` inside a fresh clone of that
+    /// Redo re-applies `forward` to `islands` inside a fresh clone of that
     /// same `prior`, reproducing the original commit bit-for-bit.
     ///
     /// A whole-sketch clone (rather than an island-scoped partial snapshot)
@@ -794,7 +868,7 @@ enum DocAction {
     /// later churn to the live document.
     TransformSketchIsland {
         sketch: SketchId,
-        island: SketchIslandId,
+        islands: Vec<SketchIslandId>,
         /// The WHOLE sketch's exact pre-transform snapshot (see above for
         /// why whole-sketch, not island-scoped).
         prior: Sketch,
@@ -826,6 +900,14 @@ enum DocAction {
     /// [`DocAction::DetachedSketchIsland`] there is no source outline to
     /// restore: undo is a pure visibility flip that can never fail.
     CopiedSketchIslands { copy: SketchId },
+    /// A sketch's object owner changed ([`Document::set_sketch_object_owner`]):
+    /// `prev` → `next`, either side `None` for "not object-owned". Undo sets
+    /// `prev` back, redo `next`; the sketch's geometry never changes.
+    SketchOwnerChanged {
+        sketch: SketchId,
+        prev: Option<ObjectId>,
+        next: Option<ObjectId>,
+    },
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
     /// leaf object and listed sketch; composed into every leaf instance's
@@ -912,6 +994,16 @@ enum DocAction {
         vertex: SketchVertexId,
         old_pos: Point3,
         new_pos: Point3,
+    },
+    /// A sketch vertex drag that touched other geometry and re-arranged
+    /// ([`Sketch::move_vertex_arranging`]): its incident edges were replayed
+    /// through the sticky rules, so position-based undo cannot describe it.
+    /// Snapshot-based like [`DocAction::SketchGesture`]: undo restores
+    /// `before`, redo restores `after`, both verbatim.
+    RearrangedSketchVertex {
+        sketch: SketchId,
+        before: Box<Sketch>,
+        after: Box<Sketch>,
     },
     /// One sketch-drawing gesture (`begin_sketch_gesture` … `end_sketch_gesture`):
     /// a whole rectangle/circle/arc — or one committed Line segment — as a
@@ -1746,12 +1838,15 @@ impl DocAction {
             DocAction::TransformSketch { .. }
             | DocAction::TransformSketchIsland { .. }
             | DocAction::DetachedSketchIsland { .. }
-            | DocAction::CopiedSketchIslands { .. } => Vec::new(),
+            | DocAction::CopiedSketchIslands { .. }
+            | DocAction::SketchOwnerChanged { .. } => Vec::new(),
             DocAction::TransformSelection { objects, .. } => {
                 objects.iter().map(|&(id, _)| id).collect()
             }
             DocAction::Rescale { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
-            DocAction::SetAxes { .. } | DocAction::MovedSketchVertex { .. } => Vec::new(),
+            DocAction::SetAxes { .. }
+            | DocAction::MovedSketchVertex { .. }
+            | DocAction::RearrangedSketchVertex { .. } => Vec::new(),
             DocAction::SketchGesture { .. } => Vec::new(),
             DocAction::Grouped { .. }
             | DocAction::Ungrouped { .. }
@@ -1861,8 +1956,9 @@ impl DocAction {
             DocAction::Boolean { .. }
             | DocAction::BooleanNodes { .. }
             | DocAction::Sliced { .. }
-            | DocAction::PushThrough { .. }
-            | DocAction::Transform { .. } => Vec::new(),
+            | DocAction::PushThrough { .. } => Vec::new(),
+            // A transformed object's owned sketches ride with it.
+            DocAction::Transform { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
             DocAction::TransformSketch { sketch, .. } => vec![*sketch],
             DocAction::TransformSketchIsland { sketch, .. } => vec![*sketch],
             DocAction::DetachedSketchIsland {
@@ -1871,12 +1967,14 @@ impl DocAction {
                 vec![*source, *detached]
             }
             DocAction::CopiedSketchIslands { copy } => vec![*copy],
+            DocAction::SketchOwnerChanged { sketch, .. } => vec![*sketch],
             DocAction::TransformSelection { sketches, .. } => {
                 sketches.iter().map(|&(id, _)| id).collect()
             }
             DocAction::Rescale { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
             DocAction::SetAxes { .. } => Vec::new(),
-            DocAction::MovedSketchVertex { sketch, .. } => vec![*sketch],
+            DocAction::MovedSketchVertex { sketch, .. }
+            | DocAction::RearrangedSketchVertex { sketch, .. } => vec![*sketch],
             DocAction::SketchGesture { sketch, .. } => vec![*sketch],
             DocAction::Grouped { .. }
             | DocAction::Ungrouped { .. }
@@ -2280,6 +2378,18 @@ pub enum DocumentError {
     /// `end_sketch_gesture` with no gesture open, or for a different sketch
     /// than the open one.
     SketchGestureNotOpen,
+    /// [`Document::set_sketch_object_owner`]: the sketch cannot ride with
+    /// that object — its definition ownership differs from the object's, or
+    /// no face of the object lies on the sketch's plane.
+    SketchOwnerMismatch,
+    /// [`Document::begin_draft`] while another draft is open.
+    DraftAlreadyOpen,
+    /// [`Document::end_draft`] with no draft open.
+    DraftNotOpen,
+    /// A draft moved or removed one of a solid's own edges (where its face
+    /// meets a non-coplanar one): that is topology editing, which drafting
+    /// never does.
+    DraftBoundaryEdgeTouched,
     /// Guide geometry is degenerate: a zero-length/non-finite direction, or a
     /// non-finite coordinate. Nothing is silently repaired or guessed.
     DegenerateGuide,
@@ -2551,6 +2661,16 @@ impl std::fmt::Display for DocumentError {
             DocumentError::SketchGestureNotOpen => {
                 write!(f, "no open sketch gesture for this sketch")
             }
+            DocumentError::DraftAlreadyOpen => write!(f, "a drafting gesture is already open"),
+            DocumentError::DraftNotOpen => write!(f, "no drafting gesture is open"),
+            DocumentError::DraftBoundaryEdgeTouched => write!(
+                f,
+                "a solid's own edge cannot be moved or removed by drawing"
+            ),
+            DocumentError::SketchOwnerMismatch => write!(
+                f,
+                "the sketch cannot belong to that object: it lies on none of its faces, or in another component"
+            ),
             DocumentError::DegenerateGuide => write!(
                 f,
                 "guide geometry is degenerate (zero-length direction or non-finite coordinate)"
@@ -2794,39 +2914,6 @@ pub struct InsertOptions {
     pub provenance: Option<LibraryProvenance>,
 }
 
-/// What [`Document::insert_document`] did — the caller's selection set plus
-/// the user-facing accounting ("4 solids · 2 materials · 1 definition
-/// reused").
-/// Which way [`Document::imprint_loop_on_face`] realized a drawn loop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoopImprintRoute {
-    /// A sub-face inside a new hole.
-    Inner,
-    /// This many boundary-to-boundary chords.
-    Chords(usize),
-}
-
-/// What [`Document::imprint_loop_on_face`] produced: the face carrying the
-/// drawn region (what a push/pull or paint acts on next) and the face on
-/// the other side of the cut (the parent for a sub-face; the other half
-/// for a chord).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LoopImprintReport {
-    pub region: FaceId,
-    pub other: FaceId,
-    pub route: LoopImprintRoute,
-}
-
-/// What [`Document::transform_chord`] produced: the moved run, re-keyed the
-/// way [`FaceFeature::Chord`] reports it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TransformChordReport {
-    /// The re-cut run's first edge (in `faces[0]`'s outer-loop order).
-    pub edge: EdgeId,
-    /// The two faces the run now separates, lower key first.
-    pub faces: [FaceId; 2],
-}
-
 /// What [`Document::purge_unused`] removed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PurgeReport {
@@ -2918,6 +3005,20 @@ pub struct Document {
     /// husk) on the ORIGINAL definition only: nothing in a copy or an
     /// exploded instance can ever reference it.
     def_sketches: BTreeMap<SketchId, ComponentId>,
+    /// The OBJECT owner of every object-owned sketch (unified-drafting §3):
+    /// sketch id → the Object whose faces the sketch's edges lie over. An
+    /// owned sketch holds exactly the drawing over the owner's faces that
+    /// cannot be face topology (loose chains, pinched or sliver regions) and
+    /// rides with the owner: it moves with it, and it is LIVE exactly while
+    /// the owner is — derived, never tracked ([`Document::sketch_tombstoned`]),
+    /// so every path that hides or restores an object (delete, boolean,
+    /// slice, push-through, undo of a creation) carries its sketches with no
+    /// code of its own. Expressed in the owner's frame: a world object's
+    /// sketch is a world sketch; a definition member's is ALSO in
+    /// `def_sketches` under the member's definition, so it renders, bakes
+    /// into sessions, and folds back exactly like any definition sketch.
+    /// Persisted as the sketch record's `owner_object` (manifest v17+).
+    object_sketches: BTreeMap<SketchId, ObjectId>,
     /// Sketches added by [`Document::add_sketch`] that no gesture has recorded
     /// into yet: the first gesture on one of these folds the sketch's creation
     /// into its undo step ([`DocAction::SketchGesture::created`]). Session-only
@@ -2926,6 +3027,15 @@ pub struct Document {
     /// The open sketch gesture, if any ([`Document::begin_sketch_gesture`] …
     /// [`Document::end_sketch_gesture`]). Session-only, never serialized.
     pending_sketch_gesture: Option<PendingSketchGesture>,
+    /// The open drafting gesture ([`Document::begin_draft`]), if any.
+    /// Session-only, like `pending_sketch_gesture`; never serialized.
+    pending_draft: Option<Box<draft::PendingDraft>>,
+    /// Non-zero while a [`DocAction::Compound`]'s children are being undone
+    /// or redone one by one: a compound is atomic, so the document-level
+    /// invariants are checked once, after its last child — an intermediate
+    /// state (a line already in a face but not yet out of its sketch) is
+    /// not a state the document is ever left in. Session-only.
+    validation_hold: u32,
     /// Tag metadata: every KNOWN tag path → hidden-by-default flag. Tags
     /// still exist implicitly by appearing on a node; this registry adds
     /// (a) tags with no content yet (an imported `.skp` layer list survives
@@ -3148,9 +3258,7 @@ impl Document {
         };
         let live = match entity {
             EntityRef::Object(id) => self.objects.get(*id).is_some_and(|r| !r.hidden),
-            EntityRef::Sketch(id) => {
-                self.sketches.contains_key(*id) && !self.hidden_sketches.contains(id)
-            }
+            EntityRef::Sketch(id) => self.sketches.contains_key(*id) && !self.sketch_tombstoned(id),
             EntityRef::Group(id) => self.groups.get(*id).is_some_and(|r| !r.hidden),
             EntityRef::Component(id) => self.components.get(*id).is_some_and(|r| !r.hidden),
             EntityRef::Instance(id) => self.instances.get(*id).is_some_and(|r| !r.hidden),
@@ -3514,7 +3622,7 @@ impl Document {
         let sketches: Vec<(SketchId, Sketch)> = self
             .sketches
             .iter()
-            .filter(|(id, _)| !self.hidden_sketches.contains(id))
+            .filter(|(id, _)| !self.sketch_tombstoned(id))
             .map(|(id, sk)| (id, sk.clone()))
             .collect();
 
@@ -3522,8 +3630,17 @@ impl Document {
         let sketch_owner: BTreeMap<SketchId, ComponentId> = self
             .def_sketches
             .iter()
-            .filter(|(id, _)| !self.hidden_sketches.contains(id))
+            .filter(|(id, _)| !self.sketch_tombstoned(id))
             .map(|(&id, &cid)| (id, cid))
+            .collect();
+
+        // ── Per-sketch OBJECT owner (manifest v17+), live sketches only ───
+        // (a live owned sketch has a live owner by definition).
+        let sketch_owner_object: BTreeMap<SketchId, ObjectId> = self
+            .object_sketches
+            .iter()
+            .filter(|(id, _)| !self.sketch_tombstoned(id))
+            .map(|(&id, &oid)| (id, oid))
             .collect();
 
         // ── Collect live guides (in slotmap key order) ─────────────────
@@ -3561,6 +3678,7 @@ impl Document {
             instances,
             sketches,
             sketch_owner,
+            sketch_owner_object,
             guides,
             annotations,
             roots,
@@ -4008,6 +4126,30 @@ impl Document {
                         "the document expands beyond {MAX_EXPANDED_PLACEMENTS} placements"
                     ),
                 });
+            }
+        }
+
+        // ── Object-owned sketches (manifest v17+): every node kind and its
+        // definition membership is resolved now. The owner object's
+        // definition must be exactly the sketch's own `owner` (the sketch
+        // lives in its owner's frame): a world object's sketch is a world
+        // sketch, a member of C's sketch is C's.
+        for (i, owner_dense) in raw.sketch_owner_object.iter().enumerate() {
+            if let Some(od) = owner_dense {
+                let oid = *dense_obj_ids.get(*od as usize).ok_or_else(|| {
+                    LoadError::DanglingReference {
+                        what: format!("sketch {i} owner object dense id {od} out of range"),
+                    }
+                })?;
+                let sid = sketch_ids[i];
+                if doc.object_owner_component(oid) != doc.sketch_owner_component(sid) {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "sketch {i} is owned by object {od} but lies in a different component"
+                        ),
+                    });
+                }
+                doc.object_sketches.insert(sid, oid);
             }
         }
 
@@ -5102,6 +5244,17 @@ impl Document {
         if options.pose.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
+        // Every world solid of the item bakes the pose: one that would
+        // leave a face too small to reopen refuses the insert, typed,
+        // before anything is copied.
+        for root in item.top_level_nodes() {
+            for oid in item.leaf_objects_under(root) {
+                item.objects[oid]
+                    .object
+                    .check_transform(&options.pose)
+                    .map_err(DocumentError::Transform)?;
+            }
+        }
         // The width bound, before anything mutates: the graft adds the
         // item's whole expansion to this document's.
         if self.expanded_total().saturating_add(item.expanded_total()) > MAX_EXPANDED_PLACEMENTS {
@@ -5186,7 +5339,12 @@ impl Document {
         }
 
         // ── 5. v1-scope skips, counted honestly ───────────────────────────
-        ctx.report.world_sketches_skipped = item.sketch_ids().len();
+        // Object-owned sketches travelled with their objects.
+        ctx.report.world_sketches_skipped = item
+            .sketch_ids()
+            .into_iter()
+            .filter(|s| !item.object_sketches.contains_key(s))
+            .count();
         ctx.report.annotations_skipped = item.annotations.iter().filter(|(_, r)| !r.hidden).count();
 
         // ── 6. One undo step ──────────────────────────────────────────────
@@ -5344,11 +5502,26 @@ impl Document {
                 .filter(|(_, r)| !r.hidden && matches!(r.owner, ObjectOwner::World { .. }))
                 .map(|(id, _)| id)
                 .collect();
+            // A translation preserves every area up to rounding; a face at
+            // the reopen limit far from the origin can still round under it,
+            // so the refusal stays typed (`item` is a scratch copy).
+            // Sketches owned by those objects ride with them.
+            let owned_sketches: Vec<SketchId> = item
+                .object_sketches
+                .iter()
+                .filter(|&(_, o)| world_objects.contains(o))
+                .map(|(&s, _)| s)
+                .collect();
             for oid in world_objects {
                 item.objects[oid]
                     .object
                     .apply_transform(&shift)
-                    .expect("a pure translation cannot be refused");
+                    .map_err(DocumentError::Transform)?;
+            }
+            for sid in owned_sketches {
+                item.sketches[sid]
+                    .apply_transform(&shift)
+                    .map_err(DocumentError::Transform)?;
             }
             // Same "what the user SEES" exclusion `visible_world_bottom_center`
             // applied to the anchor itself — a visibly-hidden instance's pose
@@ -5531,6 +5704,18 @@ impl Document {
             z.z,
             -(z.x * o.x + z.y * o.y + z.z * o.z),
         ]);
+        // Every copied world solid bakes `frame`: check them all before
+        // copying anything, so a refusal is typed rather than a panic in
+        // the copy below. (A rigid frame preserves areas, but not to the
+        // last rounding at the reopen limit.)
+        for &root in roots {
+            for oid in self.leaf_objects_under(root) {
+                self.objects[oid]
+                    .object
+                    .check_transform(&frame)
+                    .map_err(DocumentError::Transform)?;
+            }
+        }
 
         let mut item = Document::new();
         let mut ctx = LibraryCopy::new(None);
@@ -5834,7 +6019,7 @@ impl Document {
         if self.pending_sketch_gesture.is_some() {
             return Err(DocumentError::SketchGestureAlreadyOpen);
         }
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         let s = self
@@ -5876,7 +6061,7 @@ impl Document {
             .pending_sketch_gesture
             .take()
             .expect("matched Some above");
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         let Some(s) = self.sketches.get(sketch) else {
@@ -5922,7 +6107,7 @@ impl Document {
 
     /// A sketch by handle, or `None` if stale or hidden (deleted).
     pub fn sketch(&self, id: SketchId) -> Option<&Sketch> {
-        if self.hidden_sketches.contains(&id) {
+        if self.sketch_tombstoned(&id) {
             return None;
         }
         self.sketches.get(id)
@@ -5934,7 +6119,7 @@ impl Document {
     /// is a later milestone); they are surfaced to the caller via the returned
     /// handle and reconciled through [`Document::sketch`] reads.
     pub fn sketch_mut(&mut self, id: SketchId) -> Option<&mut Sketch> {
-        if self.hidden_sketches.contains(&id) {
+        if self.sketch_tombstoned(&id) {
             return None;
         }
         self.sketches.get_mut(id)
@@ -5952,7 +6137,7 @@ impl Document {
     pub fn sketch_ids(&self) -> Vec<SketchId> {
         self.sketches
             .keys()
-            .filter(|s| !self.hidden_sketches.contains(s) && !self.def_sketches.contains_key(s))
+            .filter(|s| !self.sketch_tombstoned(s) && !self.def_sketches.contains_key(s))
             .collect()
     }
 
@@ -5962,6 +6147,133 @@ impl Document {
     /// [`Document::is_world_object`] for objects.
     pub fn sketch_owner_component(&self, id: SketchId) -> Option<ComponentId> {
         self.def_sketches.get(&id).copied()
+    }
+
+    /// Whether sketch `id` is dead: tombstoned by [`Document::delete_sketch`]
+    /// (or any hide path), or owned by an object that is itself hidden
+    /// (deleted, consumed by a boolean/slice/push-through, or an undone
+    /// creation). The single liveness test for sketches; object-owned
+    /// sketches live and die with their owner, so no hide path tracks them.
+    pub(crate) fn sketch_tombstoned(&self, id: &SketchId) -> bool {
+        self.hidden_sketches.contains(id)
+            || self
+                .object_sketches
+                .get(id)
+                .is_some_and(|&o| self.objects.get(o).is_none_or(|r| r.hidden))
+            || self
+                .def_sketches
+                .get(id)
+                .is_some_and(|&c| self.components.get(c).is_none_or(|r| r.hidden))
+    }
+
+    /// Re-derives each object-owned sketch's definition membership from its
+    /// owner's (an owned sketch lives in its owner's frame): a world owner's
+    /// sketch is a world sketch, a member of `C`'s is `C`'s. For changes of
+    /// membership that keep the frame (Make Component folds with an
+    /// identity pose); a change that moves the frame bakes the sketch itself.
+    fn resync_owned_frames(&mut self) {
+        let pairs: Vec<(SketchId, ObjectId)> =
+            self.object_sketches.iter().map(|(&s, &o)| (s, o)).collect();
+        for (s, o) in pairs {
+            if self.objects.get(o).is_none() {
+                continue;
+            }
+            match self.object_owner_component(o) {
+                Some(c) => {
+                    self.def_sketches.insert(s, c);
+                }
+                None => {
+                    self.def_sketches.remove(&s);
+                }
+            }
+        }
+    }
+
+    /// The Object that owns sketch `id` (an object-owned sketch, which rides
+    /// with its owner), or `None` for a world or definition sketch, or a
+    /// stale id.
+    pub fn sketch_owner_object(&self, id: SketchId) -> Option<ObjectId> {
+        self.object_sketches.get(&id).copied()
+    }
+
+    /// The live sketches `object` owns, in sketch-key order (empty for a
+    /// stale or hidden object).
+    pub fn object_owned_sketches(&self, object: ObjectId) -> Vec<SketchId> {
+        if self.objects.get(object).is_none_or(|r| r.hidden) {
+            return Vec::new();
+        }
+        self.object_sketches
+            .iter()
+            .filter(|&(s, &o)| o == object && !self.hidden_sketches.contains(s))
+            .map(|(&s, _)| s)
+            .collect()
+    }
+
+    /// Makes `sketch` owned by `object`, or (with `None`) no longer
+    /// object-owned. Undoable ([`DocAction::SketchOwnerChanged`]). An owned
+    /// sketch rides with its owner (moves with it, lives and dies with it);
+    /// its frame is the owner's, so the sketch's definition ownership must
+    /// match the object's: a world sketch for a world object, a sketch of
+    /// definition `C` for a member of `C`. The sketch's plane must be
+    /// coplanar and same-facing with at least one face of the owner.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or dead sketch.
+    /// - [`DocumentError::UnknownObject`] — stale or hidden object.
+    /// - [`DocumentError::SketchOwnerMismatch`] — the sketch's definition
+    ///   ownership differs from the object's, or no face of the object lies
+    ///   on the sketch's plane.
+    pub fn set_sketch_object_owner(
+        &mut self,
+        sketch: SketchId,
+        object: Option<ObjectId>,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        if let Some(o) = object {
+            let rec = self
+                .objects
+                .get(o)
+                .filter(|r| !r.hidden)
+                .ok_or(DocumentError::UnknownObject)?;
+            if self.object_owner_component(o) != self.sketch_owner_component(sketch)
+                || !object_has_face_on_plane(&rec.object, &self.sketches[sketch].plane())
+            {
+                return Err(DocumentError::SketchOwnerMismatch);
+            }
+        }
+        let prev = self.object_sketches.get(&sketch).copied();
+        if prev == object {
+            return Ok(DocChange::default());
+        }
+        self.apply_sketch_owner(sketch, object);
+        self.undo.push(DocAction::SketchOwnerChanged {
+            sketch,
+            prev,
+            next: object,
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
+        Ok(DocChange {
+            sketches_touched: vec![sketch],
+            components_touched,
+            instances_touched,
+            ..Default::default()
+        })
+    }
+
+    /// Sets or clears `sketch`'s object owner in the side table.
+    fn apply_sketch_owner(&mut self, sketch: SketchId, object: Option<ObjectId>) {
+        match object {
+            Some(o) => {
+                self.object_sketches.insert(sketch, o);
+            }
+            None => {
+                self.object_sketches.remove(&sketch);
+            }
+        }
     }
 
     /// The [`ComponentId`] that owns object `id`'s definition-local geometry,
@@ -6005,7 +6317,7 @@ impl Document {
     ///
     /// On `Err` the document is untouched.
     pub fn delete_sketch(&mut self, sketch: SketchId) -> Result<DocChange, DocumentError> {
-        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         self.hidden_sketches.insert(sketch);
@@ -8229,7 +8541,7 @@ impl Document {
         let hidden_sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
-            .filter(|(sid, c)| **c == component && !self.hidden_sketches.contains(sid))
+            .filter(|(sid, c)| **c == component && !self.sketch_tombstoned(sid))
             .map(|(sid, _)| *sid)
             .collect();
         self.set_definition_hidden(component, &hidden_nodes, &hidden_sketches, true);
@@ -8732,7 +9044,7 @@ impl Document {
     ) -> Result<(ObjectId, DocChange), DocumentError> {
         info!(target: "kernel::op", op = "extrude_region", distance);
         self.explode_scope_sketch(sketch)?;
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         // World-op guard (component-edit-parity.md phase K1): a def-owned
@@ -8815,7 +9127,7 @@ impl Document {
             .ok_or(DocumentError::AmbiguousInstanceScale)?;
         let local_distance = distance / scale;
 
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         let s = self
@@ -8905,7 +9217,7 @@ impl Document {
         info!(target: "kernel::op", op = "follow_me");
         self.explode_scope_sketch(sketch)?;
         self.explode_scope_follow_path(path)?;
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         // World-op guard (component-edit-parity.md phase K1): see
@@ -8959,7 +9271,7 @@ impl Document {
         else {
             return Err(DocumentError::UnknownObject);
         };
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         // World-op guard (component-edit-parity.md phase K1): see
@@ -9102,14 +9414,22 @@ impl Document {
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::FollowMeFace {
-            result: id,
-            merged_base: Some(object),
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &[id]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::FollowMeFace {
+                result: id,
+                merged_base: Some(object),
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![object, id],
             sketches_touched: Vec::new(),
             groups_touched: Vec::new(),
@@ -9117,6 +9437,7 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((id, change))
     }
 
@@ -9165,7 +9486,7 @@ impl Document {
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
             .transpose()?;
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         if self.sketch_owner_component(sketch) != Some(component) {
@@ -9218,7 +9539,7 @@ impl Document {
         let local_stop = stop_len
             .map(|stop| self.map_world_distance_through_pose(pose, stop))
             .transpose()?;
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         if self.sketch_owner_component(sketch) != Some(component) {
@@ -9373,20 +9694,29 @@ impl Document {
         self.objects[object].hidden = true;
         self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::FollowMeFace {
-            result: id,
-            merged_base: Some(object),
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &[id]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::FollowMeFace {
+                result: id,
+                merged_base: Some(object),
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
         let instances_touched = self.placing_instances(component);
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![object, id],
             components_touched: vec![component],
             instances_touched,
             ..Default::default()
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((id, change))
     }
 
@@ -9473,7 +9803,7 @@ impl Document {
     ) -> Result<ResolvedFollowMePath, DocumentError> {
         match path {
             FollowMePath::SketchEdges { sketch, edges } => {
-                if self.hidden_sketches.contains(sketch) {
+                if self.sketch_tombstoned(sketch) {
                     return Err(DocumentError::UnknownSketch);
                 }
                 // World-op guard (component-edit-parity.md phase K1): the
@@ -9571,7 +9901,7 @@ impl Document {
     ) -> Result<ResolvedFollowMePath, DocumentError> {
         match path {
             FollowMePath::SketchEdges { sketch, edges } => {
-                if self.hidden_sketches.contains(sketch) {
+                if self.sketch_tombstoned(sketch) {
                     return Err(DocumentError::UnknownSketch);
                 }
                 if self.sketch_owner_component(*sketch) != Some(component) {
@@ -9721,18 +10051,29 @@ impl Document {
             reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(base)]);
         }
 
-        self.undo.push(DocAction::CreatedObject {
-            id,
-            sketch,
-            removed,
-            emptied,
-            merged_base,
-            reanchored,
-        });
+        let carried = match merged_base {
+            Some(base) => self.carry_owned_sketches(&[base], &[id]),
+            None => Vec::new(),
+        };
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::CreatedObject {
+                id,
+                sketch,
+                removed,
+                emptied,
+                merged_base,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched,
             sketches_touched: vec![sketch],
             groups_touched,
@@ -9740,6 +10081,7 @@ impl Document {
             components_touched,
             guides_touched: Vec::new(),
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         (id, change)
     }
 
@@ -9748,447 +10090,271 @@ impl Document {
     ///
     /// On `Err` the Object is untouched (the op's strong guarantee) and nothing
     /// is recorded.
-    /// Imprints a closed loop drawn on `face` of `object` — the one entry
-    /// point every face-mode draw (rectangle, circle, polygon, arc, offset,
-    /// and the API's face-plane drawing) goes through. The loop is
-    /// classified by [`Object::plan_loop_imprint`]: clear of the boundary it
-    /// becomes a sub-face ([`KernelOp::SplitFaceInner`]); running along part
-    /// of the boundary it becomes one or more boundary-to-boundary chords
-    /// ([`KernelOp::SplitFace`]), applied in order and bundled as ONE undo
-    /// entry when there are several. Either way the caller gets back the
-    /// face that now carries the drawn region — the one a push/pull or a
-    /// paint acts on — plus the face on the other side of the cut.
-    ///
-    /// `scope`: `None` for a world object, `Some(component)` for a
-    /// definition member (the def-scoped [`Document::apply_def_op`] path,
-    /// so every instance sees the edit).
-    ///
-    /// # Errors
-    /// Everything the underlying ops refuse, typed and with the object
-    /// untouched: a loop that only touches the boundary at a corner is
-    /// still `LoopNotStrictlyInside`; a chord whose interior corner leaves
-    /// the face is `PointNotOnFace`; a loop that IS the boundary has nothing
-    /// to cut and is refused `LoopNotStrictlyInside` as well.
-    pub fn imprint_loop_on_face(
-        &mut self,
-        scope: Option<ComponentId>,
-        object: ObjectId,
-        face: FaceId,
-        loop_path: Vec<Point3>,
-        curve: Option<crate::sketch::CurveGeom>,
-    ) -> Result<(LoopImprintReport, DocChange), DocumentError> {
-        let curves = curve
-            .map(|g| vec![Some(g); loop_path.len()])
-            .unwrap_or_default();
-        self.imprint_loop_on_face_with_curves(scope, object, face, loop_path, curves)
-    }
-
-    /// [`Document::imprint_loop_on_face`] with a per-edge analytic claim:
-    /// `curves[k]` is the circle loop edge `k` (`loop_path[k]` →
-    /// `loop_path[k+1]`, the last closing the loop) is a chord facet of, or
-    /// `None` for a plain edge — how a pie or segment (an arc closed by
-    /// lines) keeps its arc, whether it lands as a sub-face or, drawn up to
-    /// the boundary, as chords (each chord takes the claims of the loop
-    /// edges it is made of). Empty `curves` claims nothing.
-    pub fn imprint_loop_on_face_with_curves(
-        &mut self,
-        scope: Option<ComponentId>,
-        object: ObjectId,
-        face: FaceId,
-        loop_path: Vec<Point3>,
-        curves: Vec<Option<crate::sketch::CurveGeom>>,
-    ) -> Result<(LoopImprintReport, DocChange), DocumentError> {
-        if !curves.is_empty() && curves.len() != loop_path.len() {
-            return Err(DocumentError::Op(KernelOpError::Sticky(
-                StickyError::CurveClaimOffLoop,
-            )));
-        }
-        let obj = &self
-            .objects
-            .get(object)
-            .filter(|r| !r.hidden)
-            .ok_or(DocumentError::UnknownObject)?
-            .object;
-        // A loop drawn AROUND the shape under its first click — a circle or
-        // polygon whose center lands inside an existing shape, a rectangle
-        // started inside one — does not fit that shape's face but does fit a
-        // coplanar face the shape sits on. Walk up the imprint parents to the
-        // first face that holds the loop, so enclosing works whichever click
-        // started the shape. A loop the clicked face holds, or one running
-        // along its boundary, keeps the clicked face (nesting still works),
-        // and a loop no ancestor holds reports the clicked face's own refusal.
-        let fits = |f: FaceId| -> Option<LoopImprintPlan> {
-            match obj.plan_loop_imprint(f, &loop_path) {
-                Ok(LoopImprintPlan::Inner(p))
-                    if obj.check_loop_strictly_inside(f, &p, None).is_ok() =>
-                {
-                    Some(LoopImprintPlan::Inner(p))
-                }
-                Ok(plan @ LoopImprintPlan::Chords(_)) => Some(plan),
-                _ => None,
-            }
-        };
-        let (face, plan) = match fits(face) {
-            Some(plan) => (face, plan),
-            None => {
-                let mut found = None;
-                let mut f = face;
-                while let Some((parent, _)) = obj.imprint_parent(f) {
-                    if let Some(plan) = fits(parent) {
-                        found = Some((parent, plan));
-                        break;
-                    }
-                    f = parent;
-                }
-                match found {
-                    Some(hit) => hit,
-                    None => (
-                        face,
-                        obj.plan_loop_imprint(face, &loop_path)
-                            .map_err(|e| DocumentError::Op(KernelOpError::Sticky(e)))?,
-                    ),
-                }
-            }
-        };
-        let apply = |doc: &mut Document, op: KernelOp| match scope {
-            Some(component) => doc.apply_def_op(component, object, op),
-            None => doc.apply_object_op(object, op),
-        };
-        match plan {
-            LoopImprintPlan::Nothing => Err(DocumentError::Op(KernelOpError::Sticky(
-                StickyError::LoopNotStrictlyInside { index: 0 },
-            ))),
-            LoopImprintPlan::Inner(loop_path) => {
-                let (report, change) = apply(
-                    self,
-                    KernelOp::SplitFaceInner {
-                        face,
-                        loop_path,
-                        restore: None,
-                        curves,
-                    },
-                )?;
-                let KernelOpReport::FaceSplitInner(r) = report else {
-                    unreachable!("SplitFaceInner reports FaceSplitInner");
-                };
-                Ok((
-                    LoopImprintReport {
-                        region: r.sub_face,
-                        other: r.parent,
-                        route: LoopImprintRoute::Inner,
-                    },
-                    change,
-                ))
-            }
-            LoopImprintPlan::Chords(chords) => {
-                // A point strictly inside the drawn loop — an ear centroid,
-                // not a vertex average, so a concave loop (a C hugging one
-                // edge, whose vertex average sits in its own notch) still
-                // names its region. Every chord bounds that region, so the
-                // half holding this point is the half the next chord cuts
-                // and, after the last chord, the region itself. A loop with
-                // no interior is not a simple loop.
-                let centroid = self.objects[object]
-                    .object
-                    .loop_interior_point_on_face(face, &loop_path)
-                    .ok_or(DocumentError::Op(KernelOpError::Sticky(
-                        StickyError::LoopSelfIntersects,
-                    )))?;
-                let bundle = chords.len() > 1;
-                let txn = bundle.then(|| self.begin_transaction());
-                let mut merged = DocChange::default();
-                let mut current_face = face;
-                let mut region = face;
-                let mut other = face;
-                for chord in &chords {
-                    // A chord is a run of consecutive loop edges (the planner
-                    // copies the loop's points exactly): its claims are the
-                    // loop's, starting at the edge whose ends the chord's
-                    // first two points are. A chord that cannot be placed on
-                    // the loop claims nothing (drop, never misattribute).
-                    let n = loop_path.len();
-                    let chord_curves: Vec<Option<crate::sketch::CurveGeom>> = (0..n)
-                        .find(|&i| loop_path[i] == chord[0] && loop_path[(i + 1) % n] == chord[1])
-                        .filter(|_| !curves.is_empty())
-                        .map(|start| {
-                            (0..chord.len() - 1)
-                                .map(|j| curves[(start + j) % n])
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    let (report, change) = match apply(
-                        self,
-                        KernelOp::SplitFace {
-                            face: current_face,
-                            path: chord.clone(),
-                            restore: None,
-                            curves: chord_curves,
-                        },
-                    ) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            if let Some(txn) = txn {
-                                self.abort_transaction(txn);
-                            }
-                            return Err(e);
-                        }
-                    };
-                    merge_doc_change(&mut merged, change);
-                    let KernelOpReport::FaceSplit(r) = report else {
-                        unreachable!("SplitFace reports FaceSplit");
-                    };
-                    let obj = &self.objects[object].object;
-                    let [a, b] = r.new_faces;
-                    let (inside, outside) = if obj.face_contains_point(a, centroid) {
-                        (a, b)
-                    } else {
-                        (b, a)
-                    };
-                    region = inside;
-                    other = outside;
-                    // The next chord cuts whichever half still holds it.
-                    current_face = inside;
-                }
-                if let Some(txn) = txn {
-                    self.commit_transaction(
-                        txn,
-                        CompoundMeta {
-                            label: "Draw on face".to_string(),
-                            origin: HistoryOrigin::User,
-                        },
-                    )?;
-                }
-                Ok((
-                    LoopImprintReport {
-                        region,
-                        other,
-                        route: LoopImprintRoute::Chords(chords.len()),
-                    },
-                    merged,
-                ))
-            }
-        }
-    }
-
-    /// The drawn-but-unpushed shapes `object` carries
-    /// ([`Object::face_features`]), or `None` for an unknown/hidden object.
-    /// Pure. A definition member answers in definition-local space.
-    pub fn face_features(&self, object: ObjectId) -> Option<Vec<FaceFeature>> {
-        self.objects
-            .get(object)
-            .filter(|r| !r.hidden)
-            .map(|r| r.object.face_features())
-    }
-
-    /// Dissolves the imprint `face` of `object` back into its parent — the
-    /// user's Delete on a selected imprint — as one undo entry labeled
-    /// "Delete imprint". Anything the shape encloses (shapes drawn inside it,
-    /// or a boss, recess, or hole it was drawn around) is handed back to the
-    /// parent face: deleting a shape never deletes what is inside it.
-    ///
-    /// `scope`: `None` for a world object, `Some(component)` for a
-    /// definition member (the def-scoped [`Document::apply_def_op`] path).
-    ///
-    /// # Errors
-    /// [`StickyError::NotAnInnerFace`] when `face` is not an imprint, with the
-    /// object untouched.
-    pub fn dissolve_imprint(
-        &mut self,
-        scope: Option<ComponentId>,
-        object: ObjectId,
-        face: FaceId,
-    ) -> Result<DocChange, DocumentError> {
-        let obj = &self
-            .objects
-            .get(object)
-            .filter(|r| !r.hidden)
-            .ok_or(DocumentError::UnknownObject)?
-            .object;
-        if obj.imprint_parent(face).is_none() {
-            return Err(DocumentError::Op(KernelOpError::Sticky(
-                StickyError::NotAnInnerFace,
-            )));
-        }
-        let op = KernelOp::MergeInnerFace { sub_face: face };
-        let (_, change) = match scope {
-            Some(component) => self.apply_def_op(component, object, op)?,
-            None => self.apply_object_op(object, op)?,
-        };
-        Ok(change)
-    }
-
-    /// Slides, turns, or scales an imprint sub-face on its face
-    /// ([`Object::transform_sub_face`]) as one recorded, undoable step.
-    /// `scope` as for [`Document::dissolve_imprint`]; for a definition
-    /// member `xf` is definition-local.
-    pub fn transform_imprint(
-        &mut self,
-        scope: Option<ComponentId>,
-        object: ObjectId,
-        face: FaceId,
-        xf: Transform,
-    ) -> Result<(TransformSubFaceReport, DocChange), DocumentError> {
-        let op = KernelOp::TransformSubFace {
-            sub_face: face,
-            xf,
-            pinned: Vec::new(),
-        };
-        let (report, change) = match scope {
-            Some(component) => self.apply_def_op(component, object, op)?,
-            None => self.apply_object_op(object, op)?,
-        };
-        let KernelOpReport::TransformSubFace(r) = report else {
-            unreachable!("TransformSubFace reports TransformSubFace");
-        };
-        Ok((r, change))
-    }
-
-    /// Moves a chord feature ([`FaceFeature::Chord`], a shape drawn up to a
-    /// face's edge) by `xf`: the run is dissolved (`MergeFaces`) and the
-    /// merged face re-cut along the transformed path (`SplitFace`), as ONE
-    /// undo entry labeled "Move imprint". Both endpoints of the moved path
-    /// must still lie on the merged face's boundary — sliding a rectangle
-    /// along the edge it was drawn from works; anything that would leave
-    /// the boundary refuses typed through `split_face`'s own gates
-    /// (`EndpointNotOnBoundary`, `PathNotSimple`) and the document is
-    /// restored exactly. Returns the re-cut run's first edge (handles are
-    /// re-minted by the split) and the two faces it now separates.
-    ///
-    /// # Errors
-    /// [`StickyError::NotAChord`] when `edge` is not a chord feature, plus
-    /// everything the two ops refuse.
-    pub fn transform_chord(
-        &mut self,
-        scope: Option<ComponentId>,
-        object: ObjectId,
-        edge: EdgeId,
-        xf: Transform,
-    ) -> Result<(TransformChordReport, DocChange), DocumentError> {
-        let features = self
-            .face_features(object)
-            .ok_or(DocumentError::UnknownObject)?;
-        let (path, curves) = features
-            .into_iter()
-            .find_map(|f| match f {
-                FaceFeature::Chord {
-                    edge: e,
-                    path,
-                    curves,
-                    ..
-                } if e == edge => Some((path, curves)),
-                _ => None,
-            })
-            .ok_or(DocumentError::Op(KernelOpError::Sticky(
-                StickyError::NotAChord,
-            )))?;
-        let moved: Vec<Point3> = path.iter().map(|&p| xf.apply_point(p)).collect();
-        // An arc's circle rides the similarity with its facets (center
-        // mapped, radius scaled); a run with no claims carries none.
-        let moved_curves: Vec<Option<crate::sketch::CurveGeom>> =
-            if curves.iter().all(Option::is_none) {
-                Vec::new()
-            } else {
-                let scale =
-                    xf.similarity_scale()
-                        .ok_or(DocumentError::Op(KernelOpError::Sticky(
-                            StickyError::NotInPlane,
-                        )))?;
-                curves
-                    .iter()
-                    .map(|c| {
-                        c.map(|g| crate::sketch::CurveGeom {
-                            center: xf.apply_point(g.center),
-                            radius: g.radius * scale,
-                        })
-                    })
-                    .collect()
-            };
-        let apply = |doc: &mut Document, op: KernelOp| match scope {
-            Some(component) => doc.apply_def_op(component, object, op),
-            None => doc.apply_object_op(object, op),
-        };
-        let txn = self.begin_transaction();
-        let run = |doc: &mut Document| -> Result<(FaceSplitReport, DocChange), DocumentError> {
-            let (report, c1) = apply(doc, KernelOp::MergeFaces { edge })?;
-            let KernelOpReport::FaceMerge(m) = report else {
-                unreachable!("MergeFaces reports FaceMerge");
-            };
-            let (report, c2) = apply(
-                doc,
-                KernelOp::SplitFace {
-                    face: m.merged_face,
-                    path: moved.clone(),
-                    restore: None,
-                    curves: moved_curves.clone(),
-                },
-            )?;
-            let KernelOpReport::FaceSplit(s) = report else {
-                unreachable!("SplitFace reports FaceSplit");
-            };
-            let mut change = c1;
-            merge_doc_change(&mut change, c2);
-            Ok((s, change))
-        };
-        let (split, change) = match run(self) {
-            Ok(v) => v,
-            Err(e) => {
-                self.abort_transaction(txn);
-                return Err(e);
-            }
-        };
-        self.commit_transaction(
-            txn,
-            CompoundMeta {
-                label: "Move imprint".to_string(),
-                origin: HistoryOrigin::User,
-            },
-        )?;
-        // Report the run as `face_features` will key it: first edge in the
-        // lower-keyed face's outer-loop order.
-        let obj = &self.objects[object].object;
-        let mut faces = split.new_faces;
-        if faces[1] < faces[0] {
-            faces.swap(0, 1);
-        }
-        let edge = obj
-            .face_features()
-            .into_iter()
-            .find_map(|f| match f {
-                FaceFeature::Chord {
-                    edge, faces: fs, ..
-                } if fs == faces => Some(edge),
-                _ => None,
-            })
-            .unwrap_or(split.new_edges[0]);
-        Ok((TransformChordReport { edge, faces }, change))
-    }
-
     pub fn apply_object_op(
         &mut self,
         object: ObjectId,
         op: KernelOp,
     ) -> Result<(KernelOpReport, DocChange), DocumentError> {
-        let rec = match self.objects.get_mut(object) {
-            Some(rec) if !rec.hidden && rec.is_world() => rec,
-            _ => return Err(DocumentError::UnknownObject),
-        };
+        if !self
+            .objects
+            .get(object)
+            .is_some_and(|rec| !rec.hidden && rec.is_world())
+        {
+            return Err(DocumentError::UnknownObject);
+        }
+        // Plan (and pre-build) the owned-sketch drawing that rides with a
+        // pushed face BEFORE the op, so a refusal anywhere leaves everything
+        // as it was.
+        let ride = self.plan_face_ride(object, &op)?;
+        let rec = &mut self.objects[object];
         let report = rec
             .history
             .apply(&mut rec.object, op)
             .map_err(DocumentError::Op)?;
-        self.undo.push(DocAction::ObjectOp { object });
+        let (followups, ridden) = self.install_face_ride(object, ride);
+        self.push_with_followups(DocAction::ObjectOp { object }, followups);
         self.commit_new_action();
         self.debug_validate();
 
         let change = DocChange {
             objects_touched: vec![object],
-            sketches_touched: Vec::new(),
+            sketches_touched: ridden,
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
         Ok((report, change))
+    }
+
+    /// Pushes `action`, or — when `followups` is non-empty — one
+    /// [`DocAction::Compound`] of `action` then `followups`, so they undo and
+    /// redo as one step (the followups undo first). The caller commits.
+    fn push_with_followups(&mut self, action: DocAction, followups: Vec<DocAction>) {
+        if followups.is_empty() {
+            self.undo.push(action);
+        } else {
+            let mut actions = Vec::with_capacity(followups.len() + 1);
+            actions.push(action);
+            actions.extend(followups);
+            self.undo.push(DocAction::Compound {
+                actions,
+                meta: None,
+            });
+        }
+    }
+
+    /// The object-owned drawing that rides with the face `op` moves: for a
+    /// push/pull ([`KernelOp::PushPull`]) or a boss/recess
+    /// ([`KernelOp::ExtrudeSubFace`]), every owned-sketch edge of `object`
+    /// lying over that face (coplanar, midpoint strictly inside it) moves
+    /// with it by the sweep. A sketch whose every edge rides moves whole;
+    /// otherwise its riding edges are pre-built here as a new sketch on the
+    /// face's new plane. Pure: nothing changes until
+    /// [`Document::install_face_ride`]. `None` when nothing rides.
+    ///
+    /// # Errors
+    /// [`DocumentError::Sketch`] when a riding part cannot be rebuilt (a
+    /// typed replay refusal) — the op is then refused untouched.
+    fn plan_face_ride(
+        &self,
+        object: ObjectId,
+        op: &KernelOp,
+    ) -> Result<Option<FaceRide>, DocumentError> {
+        let (face, distance) = match op {
+            KernelOp::PushPull { face, distance } => (*face, *distance),
+            KernelOp::ExtrudeSubFace { sub_face, distance } => (*sub_face, *distance),
+            _ => return Ok(None),
+        };
+        let owned = self.object_owned_sketches(object);
+        if owned.is_empty() {
+            return Ok(None);
+        }
+        let obj = &self.objects[object].object;
+        let Some(f) = obj.faces().get(face) else {
+            return Ok(None); // the op itself will refuse the stale face
+        };
+        let normal = f.plane.normal();
+        let outer: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+        let holes: Vec<Vec<Point3>> = f
+            .inner_loops
+            .iter()
+            .map(|&l| obj.loop_positions(l).collect())
+            .collect();
+        let inside = |p: Point3| {
+            crate::geom2d::point_inside_polygon(p, &outer, normal)
+                && !holes
+                    .iter()
+                    .any(|h| crate::geom2d::point_inside_polygon(p, h, normal))
+        };
+        let forward = Transform::translation(normal * distance);
+        let mut sketches = Vec::new();
+        for sid in owned {
+            let sk = &self.sketches[sid];
+            let plane = sk.plane();
+            if plane.normal().dot(normal) <= 0.0
+                || outer
+                    .iter()
+                    .any(|&p| plane.signed_distance(p).abs() > crate::tol::PLANE_DIST)
+            {
+                continue; // not on this face's plane
+            }
+            let riding: Vec<SketchEdgeId> = sk
+                .edges()
+                .iter()
+                .filter(|(_, e)| {
+                    let (a, b) = (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+                    inside(Point3::ORIGIN + (a.to_vec() + b.to_vec()) * 0.5)
+                })
+                .map(|(id, _)| id)
+                .collect();
+            if riding.is_empty() {
+                continue;
+            }
+            let part = if riding.len() == sk.edges().len() {
+                RidePart::Whole
+            } else {
+                let moved_plane = forward
+                    .apply_plane(&plane)
+                    .map_err(DocumentError::Transform)?;
+                let fresh = sk
+                    .rebuild_edges_transformed(&riding, &forward, moved_plane)
+                    .map_err(DocumentError::Sketch)?;
+                let set: BTreeSet<SketchEdgeId> = riding.iter().copied().collect();
+                let mut rest = sk.clone();
+                rest.remove_edges(&set);
+                RidePart::Split {
+                    moved: Box::new(fresh),
+                    rest: Box::new(rest),
+                }
+            };
+            sketches.push((sid, part));
+        }
+        if sketches.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(FaceRide { forward, sketches }))
+    }
+
+    /// Installs a planned [`FaceRide`] after its op succeeded, returning the
+    /// undo actions that record it and every sketch it touched. A whole
+    /// sketch is transformed in place ([`DocAction::TransformSketch`]); a
+    /// split one keeps its staying edges ([`DocAction::SketchGesture`]) and
+    /// gains a new owned sketch for the riding ones
+    /// ([`DocAction::CopiedSketchIslands`]: undo hides it, redo shows it),
+    /// owned by the same object in the same frame.
+    fn install_face_ride(
+        &mut self,
+        object: ObjectId,
+        ride: Option<FaceRide>,
+    ) -> (Vec<DocAction>, Vec<SketchId>) {
+        let mut actions = Vec::new();
+        let mut touched = Vec::new();
+        let Some(FaceRide { forward, sketches }) = ride else {
+            return (actions, touched);
+        };
+        for (sid, part) in sketches {
+            match part {
+                RidePart::Whole => {
+                    let prior = self.sketches[sid].clone();
+                    self.sketches[sid]
+                        .apply_transform(&forward)
+                        .expect("a translation of a live sketch cannot be refused");
+                    actions.push(DocAction::TransformSketch {
+                        sketch: sid,
+                        prior,
+                        forward,
+                    });
+                    touched.push(sid);
+                }
+                RidePart::Split { moved, rest } => {
+                    let before = self.sketches[sid].clone();
+                    self.sketches[sid] = *rest;
+                    actions.push(DocAction::SketchGesture {
+                        sketch: sid,
+                        before: Box::new(before),
+                        after: Box::new(self.sketches[sid].clone()),
+                        created: false,
+                    });
+                    let copy = self.insert_sketch_record(*moved);
+                    if let Some(c) = self.def_sketches.get(&sid).copied() {
+                        self.def_sketches.insert(copy, c);
+                    }
+                    self.object_sketches.insert(copy, object);
+                    actions.push(DocAction::CopiedSketchIslands { copy });
+                    touched.push(sid);
+                    touched.push(copy);
+                }
+            }
+        }
+        (actions, touched)
+    }
+
+    /// Carries the drawing owned by `sources` (objects a boolean, slice,
+    /// push-through, or merging sweep just consumed) onto `results`, edge by
+    /// edge: each owned-sketch edge goes to the result with a coplanar,
+    /// same-facing face under its midpoint, as a new sketch owned by that
+    /// result in the same frame; an edge some result now holds as topology
+    /// is dropped (it is drawn there already); an edge over no result face
+    /// is over the void and goes to a new free sketch. The sources' own
+    /// sketches stay with them (hidden with them; an undo restores both).
+    /// Copies owned by a result live and die with it, so they need no undo
+    /// record; each free copy is returned as a
+    /// [`DocAction::CopiedSketchIslands`] for the caller to bundle with its
+    /// own action ([`Document::push_with_followups`]). Infallible: every
+    /// copy is a clone with edges removed.
+    fn carry_owned_sketches(
+        &mut self,
+        sources: &[ObjectId],
+        results: &[ObjectId],
+    ) -> Vec<DocAction> {
+        let mut actions = Vec::new();
+        for &src in sources {
+            let owned: Vec<SketchId> = self
+                .object_sketches
+                .iter()
+                .filter(|&(s, &o)| o == src && !self.hidden_sketches.contains(s))
+                .map(|(&s, _)| s)
+                .collect();
+            for sid in owned {
+                let sk = self.sketches[sid].clone();
+                let plane = sk.plane();
+                let mut groups: BTreeMap<Option<ObjectId>, BTreeSet<SketchEdgeId>> =
+                    BTreeMap::new();
+                for (eid, e) in sk.edges().iter() {
+                    let (a, b) = (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+                    let mid = Point3::ORIGIN + (a.to_vec() + b.to_vec()) * 0.5;
+                    let holder = results.iter().copied().find(|&r| {
+                        self.objects
+                            .get(r)
+                            .is_some_and(|rec| !rec.hidden && face_under(&rec.object, &plane, mid))
+                    });
+                    if let Some(r) = holder
+                        && object_has_edge(&self.objects[r].object, a, b)
+                    {
+                        continue; // the result holds this line as topology
+                    }
+                    groups.entry(holder).or_default().insert(eid);
+                }
+                let all: BTreeSet<SketchEdgeId> = sk.edges().keys().collect();
+                for (holder, keep) in groups {
+                    let mut part = sk.clone();
+                    let drop: BTreeSet<SketchEdgeId> = all.difference(&keep).copied().collect();
+                    part.remove_edges(&drop);
+                    let copy = self.insert_sketch_record(part);
+                    if let Some(c) = self.def_sketches.get(&sid).copied() {
+                        self.def_sketches.insert(copy, c);
+                    }
+                    match holder {
+                        Some(r) => {
+                            self.object_sketches.insert(copy, r);
+                        }
+                        None => actions.push(DocAction::CopiedSketchIslands { copy }),
+                    }
+                }
+            }
+        }
+        actions
     }
 
     /// Explicitly combines two visible objects (union / subtract / intersect)
@@ -10255,17 +10421,25 @@ impl Document {
         self.objects[a].hidden = true;
         self.objects[b].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
-        self.undo.push(DocAction::Boolean {
-            op,
-            result: id,
-            a,
-            b,
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[a, b], &[id]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::Boolean {
+                op,
+                result: id,
+                a,
+                b,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![a, b, id],
             sketches_touched: Vec::new(),
             groups_touched: Vec::new(),
@@ -10273,6 +10447,7 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((id, change))
     }
 
@@ -10366,23 +10541,32 @@ impl Document {
         // like `delete_def_member`'s tombstone (see `DocAction::DeletedDefMember`).
         self.components[component].members.push(NodeId::Object(id));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(a), NodeId::Object(b)]);
-        self.undo.push(DocAction::Boolean {
-            op,
-            result: id,
-            a,
-            b,
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[a, b], &[id]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::Boolean {
+                op,
+                result: id,
+                a,
+                b,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
         let instances_touched = self.placing_instances(component);
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![a, b, id],
             components_touched: vec![component],
             instances_touched,
             ..Default::default()
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((id, change))
     }
 
@@ -10547,19 +10731,35 @@ impl Document {
             Some(g) => NodeId::Group(g),
             None => NodeId::Object(result_objects[0]),
         };
-        let change = boolean_nodes_change(&hidden_operands, &result_objects, result_group);
-        self.undo.push(DocAction::BooleanNodes {
-            op,
-            a,
-            b,
-            hidden_operands,
-            result_objects,
-            result_group,
-            reanchored,
-        });
+        let mut change = boolean_nodes_change(&hidden_operands, &result_objects, result_group);
+        let consumed: Vec<ObjectId> = hidden_operands
+            .iter()
+            .filter_map(|n| match n {
+                NodeId::Object(o) => Some(*o),
+                _ => None,
+            })
+            .collect();
+        let carried = self.carry_owned_sketches(&consumed, &result_objects);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::BooleanNodes {
+                op,
+                a,
+                b,
+                hidden_operands,
+                result_objects,
+                result_group,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((root, change))
     }
 
@@ -10680,16 +10880,24 @@ impl Document {
         });
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::Sliced {
-            source: object,
-            a,
-            b,
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &[a, b]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::Sliced {
+                source: object,
+                a,
+                b,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![object, a, b],
             sketches_touched: Vec::new(),
             groups_touched: Vec::new(),
@@ -10697,6 +10905,7 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok(((a, b), change))
     }
 
@@ -10779,22 +10988,31 @@ impl Document {
         self.components[component].members.push(NodeId::Object(a));
         self.components[component].members.push(NodeId::Object(b));
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::Sliced {
-            source: object,
-            a,
-            b,
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &[a, b]);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::Sliced {
+                source: object,
+                a,
+                b,
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
         let instances_touched = self.placing_instances(component);
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched: vec![object, a, b],
             components_touched: vec![component],
             instances_touched,
             ..Default::default()
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok(((a, b), change))
     }
 
@@ -10849,17 +11067,25 @@ impl Document {
         }
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::PushThrough {
-            source: object,
-            results: results.clone(),
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &results);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::PushThrough {
+                source: object,
+                results: results.clone(),
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
         let mut objects_touched = results.clone();
         objects_touched.push(object);
-        let change = DocChange {
+        let mut change = DocChange {
             objects_touched,
             sketches_touched: Vec::new(),
             groups_touched: Vec::new(),
@@ -10867,6 +11093,7 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: Vec::new(),
         };
+        merge_unique(&mut change.sketches_touched, carried_sketches);
         Ok((results, change))
     }
 
@@ -10932,11 +11159,19 @@ impl Document {
         }
         self.objects[object].hidden = true;
         let reanchored = self.reevaluate_liveness_recorded(&[NodeId::Object(object)]);
-        self.undo.push(DocAction::PushThrough {
-            source: object,
-            results: results.clone(),
-            reanchored,
-        });
+        let carried = self.carry_owned_sketches(&[object], &results);
+        let carried_sketches: Vec<SketchId> = carried
+            .iter()
+            .flat_map(DocAction::touched_sketches)
+            .collect();
+        self.push_with_followups(
+            DocAction::PushThrough {
+                source: object,
+                results: results.clone(),
+                reanchored,
+            },
+            carried,
+        );
         self.commit_new_action();
         self.debug_validate();
 
@@ -10946,6 +11181,7 @@ impl Document {
             results,
             DocChange {
                 objects_touched,
+                sketches_touched: carried_sketches,
                 components_touched: vec![component],
                 instances_touched: self.placing_instances(component),
                 ..Default::default()
@@ -10969,18 +11205,33 @@ impl Document {
         // re-checks and also rejects det<0); the exact inverse itself is not
         // stored — undo restores the snapshot below verbatim instead.
         t.inverse().map_err(DocumentError::Transform)?;
-        let rec = match self.objects.get_mut(object) {
-            Some(rec) if !rec.hidden && rec.is_world() => rec,
-            _ => return Err(DocumentError::UnknownObject),
-        };
-        // Snapshot the PRE-transform state before mutating anything.
-        let prior = rec.object.clone();
-        rec.object
-            .apply_transform(t)
-            .map_err(DocumentError::Transform)?;
+        if !self
+            .objects
+            .get(object)
+            .is_some_and(|rec| !rec.hidden && rec.is_world())
+        {
+            return Err(DocumentError::UnknownObject);
+        }
+        // Snapshot the PRE-transform state, and bake into copies of the
+        // object and its owned sketches (which ride along) before mutating
+        // anything: a refusal leaves everything as it was.
+        let prior = self.objects[object].object.clone();
+        let owned = self.owned_sketches_of(&[object]);
+        let pre_sketches: Vec<(SketchId, Sketch)> = owned
+            .iter()
+            .map(|&s| (s, self.sketches[s].clone()))
+            .collect();
+        let (baked_objects, baked_sketches) = self.scaled_copies(&[object], &owned, t)?;
+        for (id, o) in baked_objects {
+            self.objects[id].object = o;
+        }
+        for (id, sk) in baked_sketches {
+            self.sketches[id] = sk;
+        }
         let reanchored = self.reanchor_touched(&[NodeId::Object(object)], t);
         self.undo.push(DocAction::Transform {
             objects: vec![(object, prior)],
+            sketches: pre_sketches,
             forward: *t,
             reanchored,
         });
@@ -10989,7 +11240,7 @@ impl Document {
 
         Ok(DocChange {
             objects_touched: vec![object],
-            sketches_touched: Vec::new(),
+            sketches_touched: owned,
             groups_touched: Vec::new(),
             instances_touched: Vec::new(),
             components_touched: Vec::new(),
@@ -11049,23 +11300,31 @@ impl Document {
         // `transform_object`); undo restores the snapshot below verbatim, so
         // the inverse itself is not stored.
         local_t.inverse().map_err(DocumentError::Transform)?;
-        let rec = match self.objects.get_mut(object) {
-            Some(rec)
-                if !rec.hidden
-                    && matches!(rec.owner, ObjectOwner::Definition { def, .. } if def == component) =>
-            {
-                rec
-            }
-            _ => return Err(DocumentError::UnknownObject),
-        };
-        // Snapshot the PRE-transform state before mutating anything.
-        let prior = rec.object.clone();
-        rec.object
-            .apply_transform(&local_t)
-            .map_err(DocumentError::Transform)?;
+        if !self.objects.get(object).is_some_and(|rec| {
+            !rec.hidden
+                && matches!(rec.owner, ObjectOwner::Definition { def, .. } if def == component)
+        }) {
+            return Err(DocumentError::UnknownObject);
+        }
+        // Snapshot the PRE-transform state and bake copies (the member and
+        // its owned sketches, in definition-local space) before mutating.
+        let prior = self.objects[object].object.clone();
+        let owned = self.owned_sketches_of(&[object]);
+        let pre_sketches: Vec<(SketchId, Sketch)> = owned
+            .iter()
+            .map(|&s| (s, self.sketches[s].clone()))
+            .collect();
+        let (baked_objects, baked_sketches) = self.scaled_copies(&[object], &owned, &local_t)?;
+        for (id, o) in baked_objects {
+            self.objects[id].object = o;
+        }
+        for (id, sk) in baked_sketches {
+            self.sketches[id] = sk;
+        }
         let reanchored = self.reanchor_touched(&[NodeId::Object(object)], &local_t);
         self.undo.push(DocAction::Transform {
             objects: vec![(object, prior)],
+            sketches: pre_sketches,
             forward: local_t,
             reanchored,
         });
@@ -11074,6 +11333,7 @@ impl Document {
 
         let instances_touched = self.placing_instances(component);
         Ok(DocChange {
+            sketches_touched: owned,
             objects_touched: vec![object],
             components_touched: vec![component],
             instances_touched,
@@ -11110,13 +11370,27 @@ impl Document {
         island: SketchIslandId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
+        self.transform_def_sketch_islands(instance, sketch, &[island], t)
+    }
+
+    /// Transform a set of islands of one definition-owned sketch together
+    /// through `instance` ([`Document::transform_sketch_islands`] in the
+    /// definition's frame). Out-of-plane detaches remain owned by the same
+    /// definition.
+    pub fn transform_def_sketch_islands(
+        &mut self,
+        instance: InstanceId,
+        sketch: SketchId,
+        islands: &[SketchIslandId],
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
         let (component, pose) = self.instance_component(instance)?;
         if self.sketch_owner_component(sketch) != Some(component) {
             return Err(DocumentError::UnknownSketch);
         }
         let pose_inv = pose.inverse().map_err(DocumentError::Transform)?;
         let local_t = pose.then(t).then(&pose_inv);
-        let mut change = self.transform_sketch_island(sketch, island, &local_t)?;
+        let mut change = self.transform_sketch_islands(sketch, islands, &local_t)?;
         change.components_touched = vec![component];
         change.instances_touched = self.placing_instances(component);
         Ok(change)
@@ -11143,11 +11417,18 @@ impl Document {
         let checkpoint = self.clone();
         let undo_start = self.undo.actions.len();
         let mut change = DocChange::default();
+        // Islands of one sketch move together, so one moved island never
+        // arranges against another's old position.
+        let mut by_sketch: std::collections::BTreeMap<SketchId, Vec<SketchIslandId>> =
+            std::collections::BTreeMap::new();
+        for &(sketch, island) in islands {
+            by_sketch.entry(sketch).or_default().push(island);
+        }
         let result = (|| {
-            for &(sketch, island) in islands {
+            for (&sketch, group) in &by_sketch {
                 merge_doc_change(
                     &mut change,
-                    self.transform_def_sketch_island(instance, sketch, island, t)?,
+                    self.transform_def_sketch_islands(instance, sketch, group, t)?,
                 );
             }
             for &sketch in sketches {
@@ -11207,7 +11488,7 @@ impl Document {
         // re-checks and also rejects det<0); undo restores the snapshot
         // below verbatim, so the inverse itself is not stored.
         t.inverse().map_err(DocumentError::Transform)?;
-        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         // Snapshot the PRE-transform state before mutating anything.
@@ -11215,6 +11496,9 @@ impl Document {
         self.sketches[sketch]
             .apply_transform(t)
             .map_err(DocumentError::Transform)?;
+        // An owned sketch moved off every face of its owner becomes free
+        // drawing, and an edge moved onto an owner edge is dropped, in the
+        // same undo step (`reconcile_owned_drawing`, run by the commit).
         self.undo.push(DocAction::TransformSketch {
             sketch,
             prior,
@@ -11233,43 +11517,55 @@ impl Document {
         })
     }
 
-    /// Rigidly move ONE island of a free-standing sketch (the per-shape
-    /// Move / Rotate / Scale). Three arms, chosen by where `t` lands the
-    /// island:
+    /// Move ONE island of a free-standing sketch (the per-shape Move /
+    /// Rotate / Scale). The single-island case of
+    /// [`Document::transform_sketch_islands`].
+    pub fn transform_sketch_island(
+        &mut self,
+        sketch: SketchId,
+        island: SketchIslandId,
+        t: &Transform,
+    ) -> Result<DocChange, DocumentError> {
+        self.transform_sketch_islands(sketch, &[island], t)
+    }
+
+    /// Move a SET of islands of one free-standing sketch together (the
+    /// per-shape Move / Rotate / Scale of a multi-shape selection). Three
+    /// arms, chosen by where `t` lands the islands:
     ///
-    /// - **In-plane** (every vertex stays on the sketch plane): baked in
-    ///   place ([`Sketch::apply_transform_island`]). Landings that would
-    ///   cross or merge with other islands' geometry are refused with a
-    ///   typed error, never welded. Undoable via
-    ///   [`DocAction::TransformSketchIsland`]; every handle is stable.
-    /// - **Out-of-plane, sole island**: the island IS the sketch, so this
-    ///   is a whole-sketch bake — delegates to
-    ///   [`Document::transform_sketch`] (plane remaps, `SketchId` and all
-    ///   sketch-element handles stay stable).
-    /// - **Out-of-plane, shared sketch**: a sketch is planar, so the island
-    ///   cannot stay; it DETACHES into a new sketch on the transformed
-    ///   plane. The remaining islands are untouched; curve chains keep
-    ///   their identity and their analytic [`CurveGeom`] maps under the
-    ///   usual map-or-drop contract ([`Sketch::rebuild_island_transformed`]).
-    ///   The new sketch's element handles are fresh (a slotmap cannot mint
-    ///   keys into another sketch); callers re-query, as after any
-    ///   reshaping mutation. Undoable via
+    /// - **In-plane** (every vertex stays on the sketch plane): baked into
+    ///   the sketch ([`Sketch::apply_transform_islands`]). A landing clear of
+    ///   other geometry moves in place with every handle stable; a landing
+    ///   that touches, crosses, or overlaps other geometry ARRANGES with it,
+    ///   exactly as the same shapes drawn there would (unified-drafting
+    ///   decision 4), and the moved geometry's handles are fresh. Undoable
+    ///   via [`DocAction::TransformSketchIsland`].
+    /// - **Out-of-plane, the islands are the whole sketch**: a whole-sketch
+    ///   bake — delegates to [`Document::transform_sketch`] (plane remaps,
+    ///   `SketchId` and all sketch-element handles stay stable).
+    /// - **Out-of-plane, shared sketch**: a sketch is planar, so the islands
+    ///   cannot stay; they DETACH together into one new sketch on the
+    ///   transformed plane (together, so a donut's hole stays its hole). The
+    ///   remaining islands are untouched; curve chains keep their identity
+    ///   and their analytic [`CurveGeom`] maps under the usual map-or-drop
+    ///   contract ([`Sketch::rebuild_islands_transformed`]). The new sketch's
+    ///   element handles are fresh. Undoable via
     ///   [`DocAction::DetachedSketchIsland`]. The returned
     ///   [`DocChange::sketches_touched`] lists `[source, detached]`.
     ///
     /// # Errors
     /// - [`DocumentError::UnknownSketch`] — stale or hidden sketch.
-    /// - [`DocumentError::Sketch`] — stale island
-    ///   ([`SketchError::UnknownIsland`]), or an in-plane landing that would
-    ///   cross or merge other geometry ([`SketchError::WouldRetopologize`]).
+    /// - [`DocumentError::Sketch`] — a stale island
+    ///   ([`SketchError::UnknownIsland`]), or a replay the sticky machinery
+    ///   refuses (a tolerance-collapsing transform).
     /// - [`DocumentError::Transform`] — singular or orientation-flipping
     ///   map.
     ///
     /// Every error leaves the document untouched (strong guarantee).
-    pub fn transform_sketch_island(
+    pub fn transform_sketch_islands(
         &mut self,
         sketch: SketchId,
-        island: SketchIslandId,
+        islands: &[SketchIslandId],
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
         // Validate invertibility before mutating anything (mirrors
@@ -11279,92 +11575,98 @@ impl Document {
         if t.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
-        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         // Snapshot the WHOLE sketch's PRE-transform state before mutating
         // anything (rule 9 posture — see the `DocAction::TransformSketchIsland`
         // doc comment for why whole-sketch, not island-scoped).
         let prior = self.sketches[sketch].clone();
-        match self.sketches[sketch].apply_transform_island(island, t) {
+        match self.sketches[sketch].apply_transform_islands(islands, t) {
             Ok(()) => {
                 self.undo.push(DocAction::TransformSketchIsland {
                     sketch,
-                    island,
+                    islands: islands.to_vec(),
                     prior,
                     forward: *t,
                 });
                 self.commit_new_action();
                 self.debug_validate();
 
+                let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
                 Ok(DocChange {
                     objects_touched: Vec::new(),
                     sketches_touched: vec![sketch],
                     groups_touched: Vec::new(),
-                    instances_touched: Vec::new(),
-                    components_touched: Vec::new(),
+                    instances_touched,
+                    components_touched,
                     guides_touched: Vec::new(),
                 })
             }
             Err(SketchError::PointOffPlane { .. }) => {
                 // The transform leaves the sketch plane. (apply_transform_
-                // island's strong guarantee: nothing has changed yet.)
-                if self.sketches[sketch].islands().len() == 1 {
-                    // The island IS the sketch: whole-sketch bake.
+                // islands' strong guarantee: nothing has changed yet.)
+                if self.islands_cover_sketch(sketch, islands) {
+                    // The islands ARE the sketch: whole-sketch bake.
                     return self.transform_sketch(sketch, t);
                 }
-                self.detach_transformed_island(sketch, island, t)
+                self.detach_transformed_islands(sketch, islands, t)
             }
             Err(e) => Err(DocumentError::Sketch(e)),
         }
     }
 
+    /// Whether `islands` name every island `sketch` has (duplicates allowed).
+    fn islands_cover_sketch(&self, sketch: SketchId, islands: &[SketchIslandId]) -> bool {
+        let all = self.sketches[sketch].islands();
+        let named: std::collections::BTreeSet<SketchIslandId> = islands.iter().copied().collect();
+        all.keys().all(|k| named.contains(&k))
+    }
+
     /// [`Document::transform_sketch_island`]'s acceptance, without the
-    /// commit: `Ok(())` iff the same call would succeed AGAINST THE CURRENT
-    /// STATE. Batch movers (the app's multi-island Move) validate EVERY
-    /// island first so one refusal aborts the whole gesture before anything
-    /// commits.
-    ///
-    /// The contract is SUCCESS-equivalence, not MECHANISM-equivalence: the
-    /// commit's routing between its three arms (in-plane bake / sole-island
-    /// whole-sketch bake / detach) is decided against COMMIT-TIME state, so
-    /// a validate-all-then-commit-sequentially batch over ALL islands of one
-    /// sketch can see a later commit take a different arm than validation
-    /// observed — an earlier island's detach can leave a later island the
-    /// sketch's sole one, rerouting its out-of-plane commit from "detach"
-    /// to a whole-sketch bake. The commit still succeeds, the document
-    /// stays sound, and undo restores exactly (pinned by
-    /// `batch_commit_over_all_islands_may_reroute_after_earlier_detach` in
-    /// `document_specs.rs`). Every real app caller folds full island
-    /// coverage into one whole-sketch transform first, so a surviving
-    /// sibling island always keeps the observed mechanism in practice.
+    /// commit; the single-island case of
+    /// [`Document::validate_transform_sketch_islands`].
     pub fn validate_transform_sketch_island(
         &self,
         sketch: SketchId,
         island: SketchIslandId,
         t: &Transform,
     ) -> Result<(), DocumentError> {
+        self.validate_transform_sketch_islands(sketch, &[island], t)
+    }
+
+    /// [`Document::transform_sketch_islands`]'s acceptance, without the
+    /// commit: `Ok(())` iff the same call would succeed AGAINST THE CURRENT
+    /// STATE. Batch movers validate before committing so one refusal aborts
+    /// the whole gesture before anything commits.
+    pub fn validate_transform_sketch_islands(
+        &self,
+        sketch: SketchId,
+        islands: &[SketchIslandId],
+        t: &Transform,
+    ) -> Result<(), DocumentError> {
         t.inverse().map_err(DocumentError::Transform)?;
         if t.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
-        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         let s = &self.sketches[sketch];
-        match s.validate_transform_island(island, t) {
+        let mut probe = s.clone();
+        match probe.apply_transform_islands(islands, t) {
             Ok(()) => Ok(()),
             Err(SketchError::PointOffPlane { .. }) => {
                 // Out-of-plane arms: whole-sketch bake needs only the
                 // already-validated transform; detach additionally needs the
-                // island to replay onto the mapped plane.
+                // islands to replay onto the mapped plane.
                 let plane = t
                     .apply_plane(&s.plane())
                     .map_err(DocumentError::Transform)?;
-                if s.islands().len() == 1 {
+                if self.islands_cover_sketch(sketch, islands) {
                     return Ok(());
                 }
-                s.rebuild_island_transformed(island, t, plane)
+                s.rebuild_islands_transformed(islands, t, plane)
                     .map(|_| ())
                     .map_err(DocumentError::Sketch)
             }
@@ -11372,17 +11674,17 @@ impl Document {
         }
     }
 
-    /// The out-of-plane detach arm of [`Document::transform_sketch_island`]:
-    /// rebuilds the island with `t` baked in as a NEW sketch on the mapped
-    /// plane, removes the island's edges from `source`, and records
+    /// The out-of-plane detach arm of [`Document::transform_sketch_islands`]:
+    /// rebuilds the islands with `t` baked in as ONE new sketch on the mapped
+    /// plane, removes their edges from `source`, and records
     /// [`DocAction::DetachedSketchIsland`]. The caller has already vetted
     /// `t` (invertible, det > 0) and that `source` is live. The detached
     /// sketch is built COMPLETELY before anything mutates, so every typed
     /// failure leaves the document untouched.
-    fn detach_transformed_island(
+    fn detach_transformed_islands(
         &mut self,
         source: SketchId,
-        island: SketchIslandId,
+        islands: &[SketchIslandId],
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
         let src = &self.sketches[source];
@@ -11390,15 +11692,21 @@ impl Document {
             .apply_plane(&src.plane())
             .map_err(DocumentError::Transform)?;
         let fresh = src
-            .rebuild_island_transformed(island, t, plane)
+            .rebuild_islands_transformed(islands, t, plane)
             .map_err(DocumentError::Sketch)?;
-        // Undo rows: the island's edges at their PRE-transform positions
+        // Undo rows: the islands' edges at their PRE-transform positions
         // with their source curve ids (curve slots outlive their edges, so
         // a later undo re-links surviving analytic identity) — the
         // extrusion-consumption shape, restored the same way.
-        let isl = &src.islands()[island];
-        let scaffolding: std::collections::BTreeSet<SketchEdgeId> =
-            isl.edges.iter().copied().collect();
+        let mut scaffolding: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        for &island in islands {
+            let isl = src
+                .islands()
+                .get(island)
+                .ok_or(DocumentError::Sketch(SketchError::UnknownIsland))?;
+            scaffolding.extend(isl.edges.iter().copied());
+        }
         let removed = src.scaffolding_removal(&scaffolding);
 
         // Nothing left can fail; commit.
@@ -11431,7 +11739,7 @@ impl Document {
     /// out-of-plane arm of Move+Alt's sketch copy: an in-plane copy replays
     /// into the source sketch (the UI's gesture-replay path), but a sketch is
     /// planar, so islands copied off its plane land on a sketch of their own —
-    /// on the transformed plane. It is [`Document::detach_transformed_island`]
+    /// on the transformed plane. It is [`Document::detach_transformed_islands`]
     /// WITHOUT the source removal, generalized to many islands: the same
     /// [`Sketch::rebuild_islands_transformed`] replay, so regions re-derive as
     /// for freshly drawn geometry and curve chains keep their identity and
@@ -11471,7 +11779,7 @@ impl Document {
         if t.determinant() < 0.0 {
             return Err(DocumentError::Transform(TransformError::Reflection));
         }
-        if !self.sketches.contains_key(source) || self.hidden_sketches.contains(&source) {
+        if !self.sketches.contains_key(source) || self.sketch_tombstoned(&source) {
             return Err(DocumentError::UnknownSketch);
         }
         let src = &self.sketches[source];
@@ -11502,42 +11810,58 @@ impl Document {
     }
 
     /// Drags one vertex of a free-standing sketch to `new_pos` (Phase D
-    /// per-vertex edit). Topology-preserving — see [`Sketch::move_vertex`]:
-    /// the vertex moves and its incident edges stretch, but nothing splits,
-    /// merges, or re-forms. Undoable via [`DocAction::MovedSketchVertex`].
+    /// per-vertex edit), landing the way the same lines drawn there would
+    /// ([`Sketch::move_vertex_arranging`]): a drag clear of other geometry
+    /// moves the vertex in place (undoable via
+    /// [`DocAction::MovedSketchVertex`], every handle stable); a drag that
+    /// lands on a vertex, or makes an incident edge touch, cross, or run
+    /// along another, re-arranges the incident edges through the sticky
+    /// rules (undoable via [`DocAction::RearrangedSketchVertex`]; the
+    /// replayed geometry's handles are fresh).
     ///
     /// # Errors
     /// - [`DocumentError::UnknownSketch`] — stale or hidden (deleted) sketch.
-    /// - [`DocumentError::Sketch`] — the move was refused (off-plane, would
-    ///   collapse an incident edge, or would cross/merge geometry); the sketch
-    ///   is left untouched (the [`Sketch::move_vertex`] strong guarantee).
+    /// - [`DocumentError::Sketch`] — the drag was refused (stale vertex,
+    ///   off-plane, or an incident edge collapsing onto its other end); the
+    ///   sketch is left untouched (strong guarantee).
     pub fn move_sketch_vertex(
         &mut self,
         sketch: SketchId,
         vertex: SketchVertexId,
         new_pos: Point3,
     ) -> Result<DocChange, DocumentError> {
-        if !self.sketches.contains_key(sketch) || self.hidden_sketches.contains(&sketch) {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
-        let old_pos = self.sketches[sketch]
-            .move_vertex(vertex, new_pos)
+        let before = self.sketches[sketch].clone();
+        let moved = self.sketches[sketch]
+            .move_vertex_arranging(vertex, new_pos)
             .map_err(DocumentError::Sketch)?;
-        self.undo.push(DocAction::MovedSketchVertex {
-            sketch,
-            vertex,
-            old_pos,
-            new_pos,
-        });
+        if moved.rearranged {
+            let after = self.sketches[sketch].clone();
+            self.undo.push(DocAction::RearrangedSketchVertex {
+                sketch,
+                before: Box::new(before),
+                after: Box::new(after),
+            });
+        } else {
+            self.undo.push(DocAction::MovedSketchVertex {
+                sketch,
+                vertex,
+                old_pos: moved.old_pos,
+                new_pos,
+            });
+        }
         self.commit_new_action();
         self.debug_validate();
 
+        let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
         Ok(DocChange {
             objects_touched: Vec::new(),
             sketches_touched: vec![sketch],
             groups_touched: Vec::new(),
-            instances_touched: Vec::new(),
-            components_touched: Vec::new(),
+            instances_touched,
+            components_touched,
             guides_touched: Vec::new(),
         })
     }
@@ -11562,7 +11886,7 @@ impl Document {
         vertex: SketchVertexId,
         at: Point3,
     ) -> Option<SketchVertexId> {
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return None;
         }
         let vertices = self.sketches.get(sketch)?.vertices();
@@ -11961,10 +12285,9 @@ impl Document {
         group: GroupId,
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
-        // Pre-validate invertibility before mutating; also this call's own
-        // strong-guarantee rollback below (never stored — undo restores the
-        // snapshot verbatim instead).
-        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        // Pre-validate invertibility before mutating (the exact inverse is
+        // never stored — undo restores the snapshot verbatim instead).
+        t.inverse().map_err(DocumentError::Transform)?;
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
         }
@@ -11986,23 +12309,21 @@ impl Document {
             .map(|&id| (id, self.objects[id].object.clone()))
             .collect();
 
-        // `t` is invertible and non-reflecting, so per-leaf apply cannot fail
-        // for geometric reasons. Should one somehow err, roll back the leaves
-        // already baked to preserve the strong guarantee.
-        let mut done: Vec<ObjectId> = Vec::new();
-        for &obj in &leaves {
-            match self.objects[obj].object.apply_transform(t) {
-                Ok(()) => done.push(obj),
-                Err(e) => {
-                    for &d in &done {
-                        self.objects[d]
-                            .object
-                            .apply_transform(&inverse)
-                            .expect("inverse of a validated transform must re-apply");
-                    }
-                    return Err(DocumentError::Transform(e));
-                }
-            }
+        // Bake into copies, then commit: a leaf refusing (a shrink that would
+        // leave one of its faces too small to reopen) leaves every leaf as
+        // it was.
+        // The leaves' object-owned sketches ride along.
+        let owned = self.owned_sketches_of(&leaves);
+        let pre_sketches: Vec<(SketchId, Sketch)> = owned
+            .iter()
+            .map(|&s| (s, self.sketches[s].clone()))
+            .collect();
+        let (baked, baked_sketches) = self.scaled_copies(&leaves, &owned, t)?;
+        for (id, object) in baked {
+            self.objects[id].object = object;
+        }
+        for (id, sk) in baked_sketches {
+            self.sketches[id] = sk;
         }
 
         // A group holds no vertex geometry of its own, but the bake above
@@ -12030,7 +12351,7 @@ impl Document {
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
             objects: pre_objects,
-            sketches: Vec::new(),
+            sketches: pre_sketches,
             instances: instance_prevs,
             forward: *t,
             reanchored,
@@ -12040,7 +12361,7 @@ impl Document {
 
         Ok(DocChange {
             objects_touched: leaves,
-            sketches_touched: Vec::new(),
+            sketches_touched: owned,
             groups_touched: vec![group],
             instances_touched: instances,
             components_touched: Vec::new(),
@@ -12079,8 +12400,8 @@ impl Document {
         t: &Transform,
     ) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "transform_selection");
-        // Pre-validate invertibility before mutating; this is also undo's bake.
-        let inverse = t.inverse().map_err(DocumentError::Transform)?;
+        // Pre-validate invertibility before mutating.
+        t.inverse().map_err(DocumentError::Transform)?;
 
         // Validate every listed handle up front — nothing mutates until the
         // whole selection is known live.
@@ -12112,7 +12433,7 @@ impl Document {
             }
         }
         for &s in sketches {
-            if !self.sketches.contains_key(s) || self.hidden_sketches.contains(&s) {
+            if !self.sketches.contains_key(s) || self.sketch_tombstoned(&s) {
                 return Err(DocumentError::UnknownSketch);
             }
         }
@@ -12144,6 +12465,12 @@ impl Document {
                 sketch_targets.push(s);
             }
         }
+        // The leaf objects' owned sketches ride along with them.
+        for s in self.owned_sketches_of(&objects) {
+            if sketch_set.insert(s) {
+                sketch_targets.push(s);
+            }
+        }
 
         if objects.is_empty() && instances.is_empty() && sketch_targets.is_empty() {
             return Err(DocumentError::EmptySelection);
@@ -12162,25 +12489,16 @@ impl Document {
             .map(|&id| (id, self.sketches[id].clone()))
             .collect();
 
-        // Bake into objects, then sketches. `t` is invertible, so a per-target
-        // failure (a reflecting `t` hitting a baked target) can only happen on
-        // the first bake — but roll back whatever was already baked either
-        // way, to preserve the strong guarantee.
-        let mut baked_objects: Vec<ObjectId> = Vec::new();
-        let mut baked_sketches: Vec<SketchId> = Vec::new();
-        for &obj in &objects {
-            if let Err(e) = self.objects[obj].object.apply_transform(t) {
-                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
-                return Err(DocumentError::Transform(e));
-            }
-            baked_objects.push(obj);
+        // Bake into copies of the objects and sketches, then commit them all:
+        // any target refusing (a reflecting `t`, or a shrink that would leave
+        // a face too small to reopen) leaves every target as it was — the
+        // strong guarantee without a computed-inverse rollback.
+        let (baked_objects, baked_sketches) = self.scaled_copies(&objects, &sketch_targets, t)?;
+        for (id, object) in baked_objects {
+            self.objects[id].object = object;
         }
-        for &s in &sketch_targets {
-            if let Err(e) = self.sketches[s].apply_transform(t) {
-                self.rollback_selection_bakes(&baked_objects, &baked_sketches, &inverse);
-                return Err(DocumentError::Transform(e));
-            }
-            baked_sketches.push(s);
+        for (id, sketch) in baked_sketches {
+            self.sketches[id] = sketch;
         }
 
         // Compose into instance poses last — cannot fail once `t` is known
@@ -12239,28 +12557,6 @@ impl Document {
         })
     }
 
-    /// Bake `inverse` back into targets a failed `transform_selection` had
-    /// already transformed — the strong-guarantee rollback shared by its bake
-    /// arms. The inverse of a validated transform cannot fail to re-apply.
-    fn rollback_selection_bakes(
-        &mut self,
-        baked_objects: &[ObjectId],
-        baked_sketches: &[SketchId],
-        inverse: &Transform,
-    ) {
-        for &s in baked_sketches {
-            self.sketches[s]
-                .apply_transform(inverse)
-                .expect("inverse of a validated transform must re-apply");
-        }
-        for &d in baked_objects {
-            self.objects[d]
-                .object
-                .apply_transform(inverse)
-                .expect("inverse of a validated transform must re-apply");
-        }
-    }
-
     /// Uniformly scales the WHOLE document about the world origin (design
     /// tool-parity §3 — the Tape Measure "resize the model" flow): every
     /// world Object's geometry, every Sketch's geometry, every construction
@@ -12297,7 +12593,11 @@ impl Document {
     /// # Errors
     /// [`DocumentError::InvalidRescaleFactor`] for a non-finite, zero, or
     /// negative factor — nothing is silently clamped or repaired
-    /// (DEVELOPMENT.md rule 4). The document is untouched on error.
+    /// (DEVELOPMENT.md rule 4); [`DocumentError::Transform`]
+    /// (`TransformError::Singular`) for a shrink that would leave some
+    /// object's face too small for a saved file to reopen. Every object and
+    /// sketch is scaled on a copy first, so the document is untouched on
+    /// error.
     pub fn rescale_document(&mut self, factor: f64) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "rescale_document", factor);
         // A rescale mutates INSTANCE POSES ("definitions stay at their
@@ -12323,10 +12623,15 @@ impl Document {
             .iter()
             .map(|&id| (id, self.objects[id].object.clone()))
             .collect();
+        // World sketches only: a definition's sketches stay at the
+        // definition's authored size exactly like its member objects (every
+        // instance's pose absorbs the scale), so scaling them too would
+        // double-scale them relative to their members. Object-owned world
+        // sketches ride with their (world) owner here.
         let sketch_ids: Vec<SketchId> = self
             .sketches
             .keys()
-            .filter(|id| !self.hidden_sketches.contains(id))
+            .filter(|id| !self.sketch_tombstoned(id) && !self.def_sketches.contains_key(id))
             .collect();
         let pre_sketches: Vec<(SketchId, Sketch)> = sketch_ids
             .iter()
@@ -12354,19 +12659,16 @@ impl Document {
             .collect();
         let pre_axes_origin = self.axes.origin;
 
-        // A positive finite factor's uniform-scale transform is never
-        // singular nor orientation-flipping, so `apply_transform` cannot
-        // refuse — the guard above is the only fallible step, already past.
-        for &id in &object_ids {
-            self.objects[id]
-                .object
-                .apply_transform(&scale)
-                .expect("a positive finite uniform scale is never singular or reflecting");
+        // Scale every object and sketch on a copy first: a shrink that
+        // would leave some face too small for a saved file to reopen
+        // refuses (`TransformError::Singular`) before anything changes.
+        let (scaled_objects, scaled_sketches) =
+            self.scaled_copies(&object_ids, &sketch_ids, &scale)?;
+        for (id, object) in scaled_objects {
+            self.objects[id].object = object;
         }
-        for &id in &sketch_ids {
-            self.sketches[id]
-                .apply_transform(&scale)
-                .expect("a positive finite uniform scale is never singular or reflecting");
+        for (id, sketch) in scaled_sketches {
+            self.sketches[id] = sketch;
         }
         for &id in &guide_ids {
             let rec = &mut self.guides[id];
@@ -12424,6 +12726,8 @@ impl Document {
     ///   open (the whole-document path is [`Document::rescale_document`]).
     /// - [`DocumentError::InvalidRescaleFactor`] — non-finite or
     ///   non-positive `factor`, or a non-finite `anchor` component.
+    /// - [`DocumentError::Transform`] — a shrink that would leave some
+    ///   object's face too small for a saved file to reopen.
     ///
     /// On `Err` the document is untouched.
     pub fn rescale_session(
@@ -12487,9 +12791,13 @@ impl Document {
                         sketch_ids.push(s);
                     }
                 }
-                sketch_ids.retain(|s| {
-                    self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s)
-                });
+                // The scoped objects' own sketches ride with them.
+                for s in self.owned_sketches_of(&object_ids) {
+                    if !sketch_ids.contains(&s) {
+                        sketch_ids.push(s);
+                    }
+                }
+                sketch_ids.retain(|s| self.sketches.contains_key(*s) && !self.sketch_tombstoned(s));
                 (object_ids, sketch_ids, instance_ids, group_ids)
             } else {
                 let (objs, sks) = self
@@ -12499,10 +12807,16 @@ impl Document {
                     .into_iter()
                     .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
                     .collect();
-                let sketch_ids: Vec<SketchId> = sks
+                let mut sketch_ids: Vec<SketchId> = sks
                     .into_iter()
-                    .filter(|s| self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s))
+                    .filter(|s| self.sketches.contains_key(*s) && !self.sketch_tombstoned(s))
                     .collect();
+                // The scoped objects' own sketches ride with them.
+                for s in self.owned_sketches_of(&object_ids) {
+                    if !sketch_ids.contains(&s) {
+                        sketch_ids.push(s);
+                    }
+                }
                 (object_ids, sketch_ids, Vec::new(), Vec::new())
             };
 
@@ -12539,16 +12853,15 @@ impl Document {
             .map(|&id| (id, self.instances[id].pose))
             .collect();
 
-        for &id in &object_ids {
-            self.objects[id]
-                .object
-                .apply_transform(&scale)
-                .expect("an anchored positive uniform scale is never singular or reflecting");
+        // On copies first, exactly as `rescale_document` does: a refusal
+        // leaves the document untouched.
+        let (scaled_objects, scaled_sketches) =
+            self.scaled_copies(&object_ids, &sketch_ids, &scale)?;
+        for (id, object) in scaled_objects {
+            self.objects[id].object = object;
         }
-        for &id in &sketch_ids {
-            self.sketches[id]
-                .apply_transform(&scale)
-                .expect("an anchored positive uniform scale is never singular or reflecting");
+        for (id, sketch) in scaled_sketches {
+            self.sketches[id] = sketch;
         }
         for &id in &guide_ids {
             let rec = &mut self.guides[id];
@@ -12579,6 +12892,50 @@ impl Document {
             components_touched: Vec::new(),
             guides_touched: guide_ids,
         })
+    }
+
+    /// The live object-owned sketches of `objects`, in first-listing order,
+    /// without duplicates — the sketches that ride along when those objects
+    /// are transformed.
+    fn owned_sketches_of(&self, objects: &[ObjectId]) -> Vec<SketchId> {
+        let mut out = Vec::new();
+        for &o in objects {
+            for s in self.object_owned_sketches(o) {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// `xf` applied to copies of the listed objects and sketches, or the
+    /// first refusal — the all-or-nothing half of a multi-target transform
+    /// (a later target refusing must not leave earlier ones transformed).
+    #[allow(clippy::type_complexity)]
+    fn scaled_copies(
+        &self,
+        objects: &[ObjectId],
+        sketches: &[SketchId],
+        xf: &Transform,
+    ) -> Result<(Vec<(ObjectId, Object)>, Vec<(SketchId, Sketch)>), DocumentError> {
+        let objects = objects
+            .iter()
+            .map(|&id| {
+                let mut o = self.objects[id].object.clone();
+                o.apply_transform(xf).map(|()| (id, o))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DocumentError::Transform)?;
+        let sketches = sketches
+            .iter()
+            .map(|&id| {
+                let mut sk = self.sketches[id].clone();
+                sk.apply_transform(xf).map(|()| (id, sk))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(DocumentError::Transform)?;
+        Ok((objects, sketches))
     }
 
     // ------------------------------------------------- component mutations
@@ -12804,6 +13161,9 @@ impl Document {
             self.splice_in_parent(pg, members, NodeId::Instance(instance));
         }
 
+        // The folded objects' own sketches fold with them (identity pose:
+        // definition-local = world at this moment).
+        self.resync_owned_frames();
         self.undo.push(DocAction::MadeComponent {
             component,
             instance,
@@ -12988,7 +13348,7 @@ impl Document {
         {
             return Err(DocumentError::UnknownGroup);
         }
-        if self.hidden_sketches.contains(&sketch) {
+        if self.sketch_tombstoned(&sketch) {
             return Err(DocumentError::UnknownSketch);
         }
         if regions.is_empty() {
@@ -13048,7 +13408,7 @@ impl Document {
         // entity (Finding 2). A glyph run with no counters already emptied
         // (and hid) the sketch via the last region's own extrusion above,
         // so this is a no-op then — no action is recorded.
-        if !self.hidden_sketches.contains(&sketch) {
+        if !self.sketch_tombstoned(&sketch) {
             let sk = self
                 .sketches
                 .get(sketch)
@@ -13175,16 +13535,17 @@ impl Document {
         // live operand — mutating it would record an undo entry for an
         // invisible edit and clear the redo stack that could revive it.
         // Same refusal the world path (`apply_object_op`) gives the state.
-        let rec = self
-            .objects
-            .get_mut(object)
-            .filter(|r| !r.hidden)
-            .ok_or(DocumentError::UnknownObject)?;
+        if self.objects.get(object).is_none_or(|r| r.hidden) {
+            return Err(DocumentError::UnknownObject);
+        }
+        let ride = self.plan_face_ride(object, &op)?;
+        let rec = &mut self.objects[object];
         let report = rec
             .history
             .apply(&mut rec.object, op)
             .map_err(DocumentError::Op)?;
-        self.undo.push(DocAction::DefObjectOp { component, object });
+        let (followups, ridden) = self.install_face_ride(object, ride);
+        self.push_with_followups(DocAction::DefObjectOp { component, object }, followups);
         self.commit_new_action();
         self.debug_validate();
 
@@ -13193,6 +13554,7 @@ impl Document {
         Ok((
             report,
             DocChange {
+                sketches_touched: ridden,
                 objects_touched: vec![object],
                 components_touched: vec![component],
                 instances_touched,
@@ -13358,7 +13720,7 @@ impl Document {
         let def_owned_sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
-            .filter(|&(sid, &c)| c == def && !self.hidden_sketches.contains(sid))
+            .filter(|&(sid, &c)| c == def && !self.sketch_tombstoned(sid))
             .map(|(&sid, _)| sid)
             .collect();
         // A non-similarity pose cannot carry a sketch's curve identity
@@ -13385,6 +13747,9 @@ impl Document {
         let mut created_groups: Vec<GroupId> = Vec::new();
         let mut created_instances: Vec<InstanceId> = Vec::new();
         let mut created_roots: Vec<NodeId> = Vec::with_capacity(member_nodes.len());
+        // Old member -> its baked world copy, so a copied object-owned
+        // sketch stays owned by the copy of its owner.
+        let mut member_copies: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
         for m in member_nodes {
             match m {
                 NodeId::Object(o) => {
@@ -13409,6 +13774,7 @@ impl Document {
                         tags: self.objects[o].tags.clone(),
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    member_copies.insert(o, id);
                     created.push(id);
                     created_roots.push(NodeId::Object(id));
                 }
@@ -13424,6 +13790,7 @@ impl Document {
                         &mut created,
                         &mut created_groups,
                         &mut created_instances,
+                        &mut member_copies,
                     )?;
                     created_roots.push(NodeId::Group(gid));
                 }
@@ -13450,6 +13817,16 @@ impl Document {
                 .map_err(DocumentError::Transform)?;
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
+            // An object-owned def sketch rides with the baked copy of its
+            // owner (derived liveness hides it with that copy on undo); one
+            // whose owner was not baked stays a plain world sketch.
+            if let Some(&copy) = self
+                .object_sketches
+                .get(&sid)
+                .and_then(|owner| member_copies.get(owner))
+            {
+                self.object_sketches.insert(new_sid, copy);
+            }
             created_sketches.push(new_sid);
         }
 
@@ -13521,6 +13898,7 @@ impl Document {
         src: GroupId,
         new_def: ComponentId,
         parent: Option<GroupId>,
+        member_copies: &mut BTreeMap<ObjectId, ObjectId>,
     ) -> GroupId {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -13559,13 +13937,14 @@ impl Document {
                         tags,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    member_copies.insert(o, id);
                     members.push(NodeId::Object(id));
                 }
                 NodeId::Group(g) => {
                     if self.groups.get(g).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child = self.unique_copy_group(g, new_def, Some(gid));
+                    let child = self.unique_copy_group(g, new_def, Some(gid), member_copies);
                     members.push(NodeId::Group(child));
                 }
                 NodeId::Instance(i) => {
@@ -13655,7 +14034,9 @@ impl Document {
     /// Deep-copy one def-owned member group's subtree out to the world side
     /// for [`Document::explode_instance`]: objects bake `outer` into fresh
     /// world copies, nested groups recurse, nested instances copy via
-    /// [`Document::explode_copy_instance`]. Returns the copied group.
+    /// [`Document::explode_copy_instance`]. Returns the copied group;
+    /// `member_copies` collects each baked object's source -> copy pair.
+    #[allow(clippy::too_many_arguments)]
     fn explode_copy_group(
         &mut self,
         src: GroupId,
@@ -13664,6 +14045,7 @@ impl Document {
         created: &mut Vec<ObjectId>,
         created_groups: &mut Vec<GroupId>,
         created_instances: &mut Vec<InstanceId>,
+        member_copies: &mut BTreeMap<ObjectId, ObjectId>,
     ) -> Result<GroupId, DocumentError> {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -13703,6 +14085,7 @@ impl Document {
                         tags,
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    member_copies.insert(o, id);
                     created.push(id);
                     members.push(NodeId::Object(id));
                 }
@@ -13717,6 +14100,7 @@ impl Document {
                         created,
                         created_groups,
                         created_instances,
+                        member_copies,
                     )?;
                     members.push(NodeId::Group(child));
                 }
@@ -13823,6 +14207,9 @@ impl Document {
         // subtrees copy, but a member instance's copy still SHARES its own
         // inner definition — making the outer unique never forks the inner.
         let mut new_members: Vec<NodeId> = Vec::with_capacity(members.len());
+        // Old member -> its private copy, so a copied object-owned sketch
+        // stays owned by the copy of its owner.
+        let mut member_copies: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
         for m in members {
             match m {
                 NodeId::Object(o) => {
@@ -13839,10 +14226,11 @@ impl Document {
                         tags: Vec::new(),
                     });
                     self.copy_attrs(&EntityRef::Object(o), EntityRef::Object(id));
+                    member_copies.insert(o, id);
                     new_members.push(NodeId::Object(id));
                 }
                 NodeId::Group(g) => {
-                    let gid = self.unique_copy_group(g, new_def, None);
+                    let gid = self.unique_copy_group(g, new_def, None, &mut member_copies);
                     new_members.push(NodeId::Group(gid));
                 }
                 NodeId::Instance(i) => {
@@ -13871,7 +14259,7 @@ impl Document {
         let source_sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
-            .filter(|&(sid, &c)| c == prev_def && !self.hidden_sketches.contains(sid))
+            .filter(|&(sid, &c)| c == prev_def && !self.sketch_tombstoned(sid))
             .map(|(&sid, _)| sid)
             .collect();
         let mut cloned_sketches: Vec<SketchId> = Vec::with_capacity(source_sketches.len());
@@ -13880,6 +14268,13 @@ impl Document {
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.def_sketches.insert(new_sid, new_def);
+            if let Some(&copy) = self
+                .object_sketches
+                .get(&sid)
+                .and_then(|owner| member_copies.get(owner))
+            {
+                self.object_sketches.insert(new_sid, copy);
+            }
             cloned_sketches.push(new_sid);
         }
 
@@ -14010,10 +14405,9 @@ impl Document {
                 continue;
             }
             pristine_objects.insert(m, self.objects[m].object.clone());
-            self.objects[m]
-                .object
-                .apply_transform(&pose)
-                .expect("explode session pose validated a similarity at open");
+            // Checked by `open_explode_session` before anything moved; a
+            // replay re-enters a state accepted once (see the doc comment).
+            self.objects[m].object.apply_session_pose(&pose);
             // A group-nested member keeps its parent link across the flip —
             // the surfaced group is a world group for the session's
             // duration, and this object stays inside it.
@@ -14021,13 +14415,13 @@ impl Document {
             self.objects[m].owner = ObjectOwner::World { parent };
         }
         for &s in &sketches {
-            if self.hidden_sketches.contains(&s) {
+            if self.sketch_tombstoned(&s) {
                 continue;
             }
             pristine_sketches.insert(s, self.sketches[s].clone());
-            self.sketches[s]
-                .apply_transform(&pose)
-                .expect("explode session pose validated a similarity at open");
+            self.sketches[s].apply_transform(&pose).expect(
+                "a similarity maps a sketch plane: the session pose was validated one at open",
+            );
             self.def_sketches.remove(&s);
         }
         // Surfaced member groups become ordinary world groups (parents
@@ -14171,7 +14565,7 @@ impl Document {
         let sketches: Vec<SketchId> = self
             .def_sketches
             .iter()
-            .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
+            .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
             .map(|(&sid, _)| sid)
             .collect();
         // Only WORLD placements hide: a def-owned placement of this
@@ -14186,6 +14580,17 @@ impl Document {
         // Outer placements that render this definition's content THROUGH
         // other definitions need refreshing at both open and close.
         let outer_placements = self.placing_instances(component);
+        // Every live member bakes the pose: one that would leave a face too
+        // small for a saved file to reopen (a shrunk placement of a small
+        // part) refuses the open, typed, before anything moves.
+        for &m in &members {
+            if !self.objects[m].hidden {
+                self.objects[m]
+                    .object
+                    .check_transform(&pose)
+                    .map_err(DocumentError::Transform)?;
+            }
+        }
 
         let mut session = self.bake_explode_session(
             instance,
@@ -14256,6 +14661,38 @@ impl Document {
     /// core pushed internally, a redo of a close double-pushed — one fresh,
     /// one original — leaving a phantom stack entry that corrupted the next
     /// undos); `save_for_persistence`'s clone discards everything.
+    /// The full transform check for every object [`Document::exit_explode_session`]
+    /// would unbake through the innermost component session's inverse
+    /// pose — touched or snapshot-less members and live world creations,
+    /// the same selection the exit makes. Pure.
+    fn check_explode_close_unbake(&self) -> Result<(), DocumentError> {
+        let Some(SessionFrame::Component(session)) = self.sessions.last() else {
+            return Ok(());
+        };
+        let mut dirty: BTreeSet<ObjectId> = BTreeSet::new();
+        let mut created: Vec<ObjectId> = Vec::new();
+        for action in &self.undo.actions[session.undo_len_at_open..] {
+            dirty.extend(action.touched_objects());
+            created.extend(action.created_objects_and_sketches().0);
+        }
+        let members = session.members.iter().copied().filter(|&m| {
+            !self.objects[m].hidden
+                && (dirty.contains(&m) || !session.pristine_objects.contains_key(&m))
+        });
+        let creations = created.into_iter().filter(|&o| {
+            self.objects
+                .get(o)
+                .is_some_and(|r| !r.hidden && r.is_world())
+        });
+        for o in members.chain(creations) {
+            self.objects[o]
+                .object
+                .check_transform(&session.pose_inv)
+                .map_err(DocumentError::Transform)?;
+        }
+        Ok(())
+    }
+
     fn exit_explode_session(&mut self) -> (DocChange, DocAction) {
         let Some(SessionFrame::Component(session)) = self.sessions.pop() else {
             panic!("exit_explode_session called with no component session innermost — caller bug");
@@ -14306,10 +14743,8 @@ impl Document {
             // dirty marker with it. Snapshot-or-dirty therefore under-counts
             // exactly this case; the no-snapshot rule closes it: unbake.
             if dirty_objects.contains(&m) || !session.pristine_objects.contains_key(&m) {
-                self.objects[m]
-                    .object
-                    .apply_transform(&session.pose_inv)
-                    .expect("session pose is invertible by construction");
+                // Checked by `close_explode_session` before anything moved.
+                self.objects[m].object.apply_session_pose(&session.pose_inv);
             } else {
                 self.objects[m].object = session.pristine_objects[&m].clone();
             }
@@ -14386,14 +14821,14 @@ impl Document {
         // `def_sketches`), so a deleted one simply stays out of
         // `def_sketches` — nothing further to remove.
         for &s in &session.sketches {
-            if self.hidden_sketches.contains(&s) {
+            if self.sketch_tombstoned(&s) {
                 continue;
             }
             // Same no-snapshot rule as the member loop above.
             if dirty_sketches.contains(&s) || !session.pristine_sketches.contains_key(&s) {
-                self.sketches[s]
-                    .apply_transform(&session.pose_inv)
-                    .expect("session pose is invertible by construction");
+                self.sketches[s].apply_transform(&session.pose_inv).expect(
+                    "a similarity maps a sketch plane: the session pose was validated one at open",
+                );
             } else {
                 self.sketches[s] = session.pristine_sketches[&s].clone();
             }
@@ -14412,10 +14847,7 @@ impl Document {
             if !is_new_world_member {
                 continue;
             }
-            self.objects[o]
-                .object
-                .apply_transform(&session.pose_inv)
-                .expect("session pose is invertible by construction");
+            self.objects[o].object.apply_session_pose(&session.pose_inv);
             let parent = self.objects[o].group_parent();
             self.objects[o].owner = ObjectOwner::Definition {
                 def: session.component,
@@ -14430,15 +14862,34 @@ impl Document {
             }
             folded_objects.push(o);
         }
+        // Every live sketch owned by an object now in the definition folds
+        // in with its owner, whichever action made it (a duplicate's copies,
+        // a boolean result's carried drawing, a pushed face's ridden part):
+        // an object-owned sketch lives in its owner's frame.
+        let owned_by_members: Vec<SketchId> = self
+            .object_sketches
+            .iter()
+            .filter(|&(s, &o)| {
+                !self.sketch_tombstoned(s)
+                    && self.object_owner_component(o) == Some(session.component)
+                    && !self.def_sketches.contains_key(s)
+            })
+            .map(|(&s, _)| s)
+            .collect();
+        for s in owned_by_members {
+            if !created_sketches.contains(&s) {
+                created_sketches.push(s);
+            }
+        }
         for s in created_sketches {
             let is_new_world_sketch =
-                !self.hidden_sketches.contains(&s) && !self.def_sketches.contains_key(&s);
+                !self.sketch_tombstoned(&s) && !self.def_sketches.contains_key(&s);
             if !is_new_world_sketch {
                 continue;
             }
-            self.sketches[s]
-                .apply_transform(&session.pose_inv)
-                .expect("session pose is invertible by construction");
+            self.sketches[s].apply_transform(&session.pose_inv).expect(
+                "a similarity maps a sketch plane: the session pose was validated one at open",
+            );
             self.def_sketches.insert(s, session.component);
             folded_sketches.push(s);
         }
@@ -14603,7 +15054,7 @@ impl Document {
         Some(
             sketches
                 .into_iter()
-                .filter(|s| self.sketches.contains_key(*s) && !self.hidden_sketches.contains(s))
+                .filter(|s| self.sketches.contains_key(*s) && !self.sketch_tombstoned(s))
                 .collect(),
         )
     }
@@ -14657,6 +15108,11 @@ impl Document {
                 return Err(DocumentError::ComponentExpansionExceeded);
             }
         }
+        // Every object the close unbakes into the definition must still be
+        // one a saved file can reopen at definition scale (a part drawn a
+        // micron wide inside a thousandfold placement would be a nanometre):
+        // refused typed, session left open, before anything moves.
+        self.check_explode_close_unbake()?;
         let (change, action) = self.exit_explode_session();
         self.undo.push(action);
         self.commit_new_action();
@@ -15481,6 +15937,18 @@ impl Document {
                 object
                     .apply_transform(placement)
                     .map_err(DocumentError::Transform)?;
+                // The object's own sketches are copied with it (placed the
+                // same way) before anything is inserted, so a refusal leaves
+                // nothing behind.
+                let owned: Vec<Sketch> = self
+                    .object_owned_sketches(id)
+                    .into_iter()
+                    .map(|s| {
+                        let mut sk = self.sketches[s].clone();
+                        sk.apply_transform(placement).map(|()| sk)
+                    })
+                    .collect::<Result<_, _>>()
+                    .map_err(DocumentError::Transform)?;
                 let new_id = self.insert_object_record(ObjectRecord {
                     object,
                     history: History::new(),
@@ -15491,6 +15959,12 @@ impl Document {
                 });
                 created.objects.push(new_id);
                 self.copy_attrs(&EntityRef::Object(id), EntityRef::Object(new_id));
+                // The copies live and die with the new object (hidden with
+                // it on undo), so they need no undo record of their own.
+                for sk in owned {
+                    let copy = self.insert_sketch_record(sk);
+                    self.object_sketches.insert(copy, new_id);
+                }
                 Ok(NodeId::Object(new_id))
             }
             NodeId::Instance(id) => {
@@ -15683,6 +16157,7 @@ impl Document {
     /// call this: they move between states that all keep their depth
     /// identity, so the mark stays valid across them.
     fn commit_new_action(&mut self) {
+        self.reconcile_owned_drawing();
         // The mark is a CONTENT depth (bookkeeping entries — session
         // open/close — do not count, see `DocAction::is_bookkeeping`), so
         // compare against the content depth as it was before this push.
@@ -15695,6 +16170,131 @@ impl Document {
             self.saved = SavedMark(None);
         }
         self.redo.clear();
+    }
+
+    /// Keeps object-owned drawing true to its owner after the action just
+    /// pushed (invariants I7 and I8), in the same undo step. Every owned
+    /// sketch of an object the action touched, or that the action touched
+    /// itself, is checked: an edge its owner now holds as topology is
+    /// dropped (an imprint, or a push/pull that brought a face edge onto
+    /// it, draws that line already; a sketch left empty is deleted), and a
+    /// sketch whose plane no longer has a coplanar, same-facing face of its
+    /// owner (it was moved off, or the face moved away) stops being owned
+    /// and becomes free drawing. The
+    /// repairs are appended to the action, wrapping it in a
+    /// [`DocAction::Compound`] when it is not one, so undo reverses both.
+    /// The stack's push count is unchanged: this is still one recorded step.
+    fn reconcile_owned_drawing(&mut self) {
+        let Some(top) = self.undo.last() else {
+            return;
+        };
+        if top.is_bookkeeping() || self.object_sketches.is_empty() {
+            return;
+        }
+        let mut owners: BTreeSet<ObjectId> = top.touched_objects().into_iter().collect();
+        for s in top.touched_sketches() {
+            if let Some(&o) = self.object_sketches.get(&s) {
+                owners.insert(o);
+            }
+        }
+        if owners.is_empty() {
+            return;
+        }
+        let candidates: Vec<(SketchId, ObjectId)> = self
+            .object_sketches
+            .iter()
+            .filter(|&(s, o)| owners.contains(o) && !self.sketch_tombstoned(s))
+            .map(|(&s, &o)| (s, o))
+            .collect();
+        let mut followups = Vec::new();
+        for (sid, o) in candidates {
+            let Some(sk) = self.sketches.get(sid) else {
+                continue;
+            };
+            let obj = &self.objects[o].object;
+            if !object_has_face_on_plane(obj, &sk.plane()) {
+                self.apply_sketch_owner(sid, None);
+                followups.push(DocAction::SketchOwnerChanged {
+                    sketch: sid,
+                    prev: Some(o),
+                    next: None,
+                });
+                continue;
+            }
+            let dup: BTreeSet<SketchEdgeId> = sk
+                .edges()
+                .iter()
+                .filter(|(_, e)| {
+                    object_has_edge(
+                        obj,
+                        sk.vertices()[e.from].position,
+                        sk.vertices()[e.to].position,
+                    )
+                })
+                .map(|(id, _)| id)
+                .collect();
+            if dup.is_empty() {
+                continue;
+            }
+            let before = sk.clone();
+            self.sketches[sid].remove_edges(&dup);
+            followups.push(DocAction::SketchGesture {
+                sketch: sid,
+                before: Box::new(before),
+                after: Box::new(self.sketches[sid].clone()),
+                created: false,
+            });
+            // Emptied, it is gone, as a draft leaves an emptied store.
+            if self.sketches[sid].edges().is_empty() {
+                self.hidden_sketches.insert(sid);
+                followups.push(DocAction::DeletedSketch { sketch: sid });
+            }
+        }
+        if followups.is_empty() {
+            return;
+        }
+        let top = self
+            .undo
+            .actions
+            .pop()
+            .expect("the top action was read above");
+        let wrapped = match top {
+            DocAction::Compound { mut actions, meta } => {
+                actions.extend(followups);
+                DocAction::Compound { actions, meta }
+            }
+            other => {
+                let mut actions = Vec::with_capacity(followups.len() + 1);
+                actions.push(other);
+                actions.extend(followups);
+                DocAction::Compound {
+                    actions,
+                    meta: None,
+                }
+            }
+        };
+        // Straight onto the vector: the step was already counted.
+        self.undo.actions.push(wrapped);
+    }
+
+    /// Completes `change` with the drawing its objects own. An owned
+    /// sketch's liveness and placement derive from its owner, so whatever
+    /// touched the owner (a delete, a boolean, a slice, a transform, or the
+    /// undo or redo of one) touched its sketches too, live or dead. Hosts
+    /// that keep per-sketch caches (inference, rendering) call this on every
+    /// change they reconcile; [`Document::undo`] and [`Document::redo`]
+    /// return completed changes already.
+    pub fn complete_change(&self, change: &mut DocChange) {
+        if self.object_sketches.is_empty() || change.objects_touched.is_empty() {
+            return;
+        }
+        let owned: Vec<SketchId> = self
+            .object_sketches
+            .iter()
+            .filter(|(_, o)| change.objects_touched.contains(o))
+            .map(|(&s, _)| s)
+            .collect();
+        merge_unique(&mut change.sketches_touched, owned);
     }
 
     /// How many entries on the undo stack are real changes to the
@@ -15829,6 +16429,7 @@ impl Document {
             }
             DocAction::DetachedSketchIsland { .. } => "Move sketch off its plane".to_string(),
             DocAction::CopiedSketchIslands { .. } => "Copy sketch".to_string(),
+            DocAction::SketchOwnerChanged { .. } => "Attach sketch".to_string(),
             DocAction::TransformSelection {
                 objects,
                 sketches,
@@ -15854,7 +16455,9 @@ impl Document {
                 .trim_end_matches('.')
                 .to_string(),
             DocAction::SetAxes { .. } => "Move drawing axes".to_string(),
-            DocAction::MovedSketchVertex { .. } => "Move sketch point".to_string(),
+            DocAction::MovedSketchVertex { .. } | DocAction::RearrangedSketchVertex { .. } => {
+                "Move sketch point".to_string()
+            }
             DocAction::SketchGesture { .. } => "Draw".to_string(),
             DocAction::Grouped { .. } => "Group".to_string(),
             DocAction::Ungrouped { .. } => "Ungroup".to_string(),
@@ -16030,6 +16633,13 @@ impl Document {
                 "Delete imprint".to_string()
             }
             Some(KernelOp::TransformSubFace { .. }) => "Move imprint".to_string(),
+            // A re-trace that inserts is a draw (a shape bridging separate
+            // outlines); one that only removes is a delete along several
+            // runs.
+            Some(KernelOp::RetraceFace { insert, .. }) if !insert.is_empty() => {
+                "Draw on face".to_string()
+            }
+            Some(KernelOp::RetraceFace { .. }) => "Delete imprint".to_string(),
             None => "Edit face".to_string(),
         }
     }
@@ -16656,7 +17266,7 @@ impl Document {
                     let orphaned: Vec<SketchId> = self
                         .def_sketches
                         .iter()
-                        .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
+                        .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
                         .map(|(&sid, _)| sid)
                         .collect();
                     for &sid in &orphaned {
@@ -16807,7 +17417,7 @@ impl Document {
                     let restored: Vec<SketchId> = self
                         .def_sketches
                         .iter()
-                        .filter(|&(sid, &c)| c == component && self.hidden_sketches.contains(sid))
+                        .filter(|&(sid, &c)| c == component && self.sketch_tombstoned(sid))
                         .map(|(&sid, _)| sid)
                         .collect();
                     for &sid in &restored {
@@ -16876,6 +17486,13 @@ impl Document {
     /// Reverses the most recent document action (LIFO across creations and
     /// per-Object ops alike) and returns what it touched.
     pub fn undo(&mut self) -> Result<DocChange, DocumentError> {
+        let mut change = self.undo_step()?;
+        self.complete_change(&mut change);
+        Ok(change)
+    }
+
+    /// One [`Document::undo`] step, before [`Document::complete_change`].
+    fn undo_step(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.undo.pop().ok_or(DocumentError::NothingToUndo)?;
         if let DocAction::Compound { actions, .. } = &action {
             let checkpoint = self.clone();
@@ -16884,8 +17501,13 @@ impl Document {
                 self.undo.push(child.clone());
             }
             let mut change = DocChange::default();
+            self.validation_hold += 1;
             for _ in 0..actions.len() {
-                match self.undo() {
+                let child = self.undo_step();
+                if child.is_err() {
+                    self.validation_hold -= 1;
+                }
+                match child {
                     Ok(child_change) => merge_doc_change(&mut change, child_change),
                     Err(error) => {
                         // Roll back the children undone so far and keep the
@@ -16898,6 +17520,7 @@ impl Document {
                     }
                 }
             }
+            self.validation_hold -= 1;
             self.redo.actions.truncate(redo_start);
             self.redo.push(action);
             self.debug_validate();
@@ -16967,6 +17590,16 @@ impl Document {
             DocAction::ConsumedScaffolding { .. } => unreachable!(
                 "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
             ),
+            &DocAction::SketchOwnerChanged { sketch, prev, .. } => {
+                self.apply_sketch_owner(sketch, prev);
+                let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    components_touched,
+                    instances_touched,
+                    ..Default::default()
+                }
+            }
             &DocAction::CopiedSketchIslands { copy } => {
                 // Undo a copy: hide the new sketch (its contents survive
                 // hiding bit-exactly). The source was never touched.
@@ -17220,6 +17853,7 @@ impl Document {
             }
             DocAction::Transform {
                 objects,
+                sketches,
                 reanchored,
                 ..
             } => {
@@ -17229,6 +17863,10 @@ impl Document {
                 for (id, obj) in objects {
                     self.objects[*id].object = obj.clone();
                 }
+                for (id, sk) in sketches {
+                    self.sketches[*id] = sk.clone();
+                }
+                let sketches_touched: Vec<SketchId> = sketches.iter().map(|&(id, _)| id).collect();
                 let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
                 // A definition-owned target (component-edit-parity.md phase
                 // K2: `transform_def_member`) needs every instance of its
@@ -17258,7 +17896,7 @@ impl Document {
                 }
                 DocChange {
                     objects_touched,
-                    sketches_touched: Vec::new(),
+                    sketches_touched,
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
@@ -17331,6 +17969,21 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: instances.iter().map(|&(i, _)| i).collect(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::RearrangedSketchVertex { sketch, before, .. } => {
+                // Undo a re-arranging vertex drag by restoring the recorded
+                // pre-drag snapshot verbatim.
+                let sketch = *sketch;
+                self.sketches[sketch] = (**before).clone();
+                let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched,
                     guides_touched: Vec::new(),
                 }
             }
@@ -17518,11 +18171,13 @@ impl Document {
                 // never touches. Recomputed by ownership rather than stored,
                 // since nothing else can retarget `def_sketches` for a
                 // now-about-to-be-hidden component between this undo and its
-                // matching redo (LIFO replay).
+                // matching redo (LIFO replay). Sketches owned by the
+                // returning objects go back to the world with them first.
+                self.resync_owned_frames();
                 let sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
-                    .filter(|&(sid, &c)| c == component && !self.hidden_sketches.contains(sid))
+                    .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
                     .map(|(&sid, _)| sid)
                     .collect();
                 for &sid in &sketches_touched {
@@ -17793,7 +18448,7 @@ impl Document {
                 let sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
-                    .filter(|&(sid, &c)| c == new_def && !self.hidden_sketches.contains(sid))
+                    .filter(|&(sid, &c)| c == new_def && !self.sketch_tombstoned(sid))
                     .map(|(&sid, _)| sid)
                     .collect();
                 for &sid in &sketches_touched {
@@ -17898,17 +18553,14 @@ impl Document {
                     self.components[component].hidden = false;
                 }
                 for &o in folded_objects {
-                    self.objects[o]
-                        .object
-                        .apply_transform(&pose)
-                        .expect("session pose is invertible by construction");
+                    self.objects[o].object.apply_session_pose(&pose);
                     let parent = self.objects[o].group_parent();
                     self.objects[o].owner = ObjectOwner::World { parent };
                 }
                 for &s in folded_sketches {
                     self.sketches[s]
                         .apply_transform(&pose)
-                        .expect("session pose is invertible by construction");
+                        .expect("a similarity maps a sketch plane: the session pose was validated one at open");
                     self.def_sketches.remove(&s);
                 }
                 // Un-fold created groups/instances back to world (the
@@ -18329,6 +18981,13 @@ impl Document {
     /// stable across undo/redo (undone creations are hidden, not deleted), so
     /// redo never has to remap ids.
     pub fn redo(&mut self) -> Result<DocChange, DocumentError> {
+        let mut change = self.redo_step()?;
+        self.complete_change(&mut change);
+        Ok(change)
+    }
+
+    /// One [`Document::redo`] step, before [`Document::complete_change`].
+    fn redo_step(&mut self) -> Result<DocChange, DocumentError> {
         let action = self.redo.pop().ok_or(DocumentError::NothingToRedo)?;
         if let DocAction::Compound { actions, .. } = &action {
             let checkpoint = self.clone();
@@ -18337,8 +18996,13 @@ impl Document {
                 self.redo.push(child.clone());
             }
             let mut change = DocChange::default();
+            self.validation_hold += 1;
             for _ in 0..actions.len() {
-                match self.redo() {
+                let child = self.redo_step();
+                if child.is_err() {
+                    self.validation_hold -= 1;
+                }
+                match child {
                     Ok(child_change) => merge_doc_change(&mut change, child_change),
                     Err(error) => {
                         // Mirror of the undo side: roll back and keep the
@@ -18349,6 +19013,7 @@ impl Document {
                     }
                 }
             }
+            self.validation_hold -= 1;
             self.undo.actions.truncate(undo_start);
             self.undo.push(action);
             self.debug_validate();
@@ -18406,6 +19071,16 @@ impl Document {
             DocAction::ConsumedScaffolding { .. } => unreachable!(
                 "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
             ),
+            &DocAction::SketchOwnerChanged { sketch, next, .. } => {
+                self.apply_sketch_owner(sketch, next);
+                let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    components_touched,
+                    instances_touched,
+                    ..Default::default()
+                }
+            }
             &DocAction::CopiedSketchIslands { copy } => {
                 // Redo a copy: unhide the new sketch again (its contents
                 // survived hiding bit-exactly). The source stays untouched.
@@ -18654,6 +19329,7 @@ impl Document {
             }
             DocAction::Transform {
                 objects,
+                sketches,
                 forward,
                 reanchored,
                 ..
@@ -18670,6 +19346,14 @@ impl Document {
                     );
                     self.objects[*id].object = fresh;
                 }
+                for (id, sk) in sketches {
+                    let mut fresh = sk.clone();
+                    fresh.apply_transform(forward).expect(
+                        "re-applying the recorded pre-transform sketch snapshot cannot fail",
+                    );
+                    self.sketches[*id] = fresh;
+                }
+                let sketches_touched: Vec<SketchId> = sketches.iter().map(|&(id, _)| id).collect();
                 let objects_touched: Vec<ObjectId> = objects.iter().map(|&(id, _)| id).collect();
                 // See the matching undo comment for the def-owned-target
                 // touched-list rationale.
@@ -18696,7 +19380,7 @@ impl Document {
                 }
                 DocChange {
                     objects_touched,
-                    sketches_touched: Vec::new(),
+                    sketches_touched,
                     groups_touched: Vec::new(),
                     instances_touched,
                     components_touched,
@@ -18705,7 +19389,7 @@ impl Document {
             }
             DocAction::TransformSketchIsland {
                 sketch,
-                island,
+                islands,
                 prior,
                 forward,
             } => {
@@ -18713,13 +19397,13 @@ impl Document {
                 // `island` inside a FRESH CLONE of the SAME recorded
                 // pre-transform snapshot — deterministic float ops on
                 // identical operands reproduce the original commit
-                // bit-for-bit (see the doc comment above). `island` is
-                // guaranteed present in `prior`: it was validated live at
+                // bit-for-bit (see the doc comment above). `islands` are
+                // guaranteed present in `prior`: they were validated live at
                 // the exact moment `prior` was captured, and `prior` never
                 // changes afterward.
                 let sketch = *sketch;
                 let mut fresh = prior.clone();
-                fresh.apply_transform_island(*island, forward).expect(
+                fresh.apply_transform_islands(islands, forward).expect(
                     "re-applying the recorded pre-transform snapshot cannot fail: the \
                      same transform already applied once without refusing",
                 );
@@ -18801,6 +19485,21 @@ impl Document {
                     groups_touched: Vec::new(),
                     instances_touched: instances.iter().map(|&(i, _)| i).collect(),
                     components_touched: Vec::new(),
+                    guides_touched: Vec::new(),
+                }
+            }
+            DocAction::RearrangedSketchVertex { sketch, after, .. } => {
+                // Redo a re-arranging vertex drag by restoring the recorded
+                // post-drag snapshot verbatim.
+                let sketch = *sketch;
+                self.sketches[sketch] = (**after).clone();
+                let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
+                DocChange {
+                    objects_touched: Vec::new(),
+                    sketches_touched: vec![sketch],
+                    groups_touched: Vec::new(),
+                    instances_touched,
+                    components_touched,
                     guides_touched: Vec::new(),
                 }
             }
@@ -18968,11 +19667,13 @@ impl Document {
                     }
                 }
                 // Un-hide any sketch this definition owned when it was
-                // dissolved (the matching undo's counterpart above).
+                // dissolved (the matching undo's counterpart above). The
+                // re-folded objects' own sketches fold with them.
+                self.resync_owned_frames();
                 let sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
-                    .filter(|&(sid, &c)| c == component && self.hidden_sketches.contains(sid))
+                    .filter(|&(sid, &c)| c == component && self.sketch_tombstoned(sid))
                     .map(|(&sid, _)| sid)
                     .collect();
                 for &sid in &sketches_touched {
@@ -19233,7 +19934,7 @@ impl Document {
                 let sketches_touched: Vec<SketchId> = self
                     .def_sketches
                     .iter()
-                    .filter(|&(sid, &c)| c == new_def && self.hidden_sketches.contains(sid))
+                    .filter(|&(sid, &c)| c == new_def && self.sketch_tombstoned(sid))
                     .map(|(&sid, _)| sid)
                     .collect();
                 for &sid in &sketches_touched {
@@ -19575,6 +20276,9 @@ impl Document {
     /// visible Object passes the topology validator.
     #[inline]
     fn debug_validate(&self) {
+        if self.validation_hold > 0 {
+            return; // mid-compound: checked once the compound completes
+        }
         // Torture mode (docs/dev/DEVELOPMENT.md): run the topology validator on every
         // visible object after every op, **always-on** (release included), so a
         // corruption that slips past an op's own backstop surfaces here at the
@@ -19596,6 +20300,49 @@ impl Document {
             self.debug_validate_tree();
             self.debug_validate_sids();
             self.debug_validate_materials();
+            self.debug_validate_owned_sketches();
+        }
+    }
+
+    /// Every live object-owned sketch (unified drafting §3.3): its owner is
+    /// a live object in the same frame (the sketch's definition, if any, is
+    /// the owner's); its plane carries at least one coplanar, same-facing
+    /// face of the owner (I8); and none of its edges duplicates an edge of
+    /// the owner (I7 — drawing the solid already holds is topology, never
+    /// sketch).
+    fn debug_validate_owned_sketches(&self) {
+        for (&sid, &oid) in &self.object_sketches {
+            if self.sketch_tombstoned(&sid) {
+                continue;
+            }
+            let rec = self
+                .objects
+                .get(oid)
+                .expect("an object-owned sketch names a stale object — kernel bug");
+            assert_eq!(
+                self.object_owner_component(oid),
+                self.sketch_owner_component(sid),
+                "object-owned sketch {sid:?} is in a different frame than its owner {oid:?} — kernel bug"
+            );
+            let sk = &self.sketches[sid];
+            let plane = sk.plane();
+            assert!(
+                object_has_face_on_plane(&rec.object, &plane),
+                "object-owned sketch {sid:?} lies on no face of its owner {oid:?} (I8) — kernel bug"
+            );
+            let near = |a: Point3, b: Point3| a.approx_eq(b, crate::tol::POINT_MERGE);
+            for e in sk.edges().values() {
+                let (p, q) = (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+                let dup = rec.object.edges().keys().any(|ek| {
+                    rec.object.edge_endpoints(ek).is_some_and(|(a, b)| {
+                        (near(a, p) && near(b, q)) || (near(a, q) && near(b, p))
+                    })
+                });
+                assert!(
+                    !dup,
+                    "object-owned sketch {sid:?} repeats an edge of its owner {oid:?} (I7) — kernel bug"
+                );
+            }
         }
     }
 
@@ -20202,8 +20949,10 @@ fn library_copy_entity_attrs(dst: &mut Document, src: &Document, from: &EntityRe
 /// Copies one solid across documents: a lossless [`Object`] clone with its
 /// material references remapped into `dst`'s palette (content-deduplicated),
 /// optionally baking `bake` into the copy's geometry (validated by the
-/// caller — [`Object::apply_transform`] would refuse a singular or
-/// reflecting transform, so a pre-validated bake cannot fail). The copy gets
+/// caller: both callers run [`Object::check_transform`] on every world
+/// solid they copy before copying anything, and the check is exactly
+/// [`Object::apply_transform`]'s own validation on the same geometry, so
+/// a pre-validated bake cannot fail). The copy gets
 /// a fresh empty history ([`Document::make_unique`]'s posture), carries
 /// name, tags, attrs, and the user-hidden flag, and is recorded in `ctx`.
 fn library_copy_object(
@@ -20283,6 +21032,27 @@ fn library_copy_object(
         dst.user_hidden_objects.insert(new_oid);
     }
     ctx.all_objects.push(new_oid);
+
+    // The object's owned sketches ride along, baked by the same pose and
+    // owned by the copy (registered under the new definition too when the
+    // copy is a definition member — same frame as its owner). A bake that
+    // cannot map a sketch's plane (an extreme anisotropic scale) omits that
+    // one drawing aid rather than panicking mid-mutation, like a guide.
+    for s in src.object_owned_sketches(oid) {
+        let mut sk = src.sketches[s].clone();
+        if let Some(t) = bake
+            && sk.apply_transform(t).is_err()
+        {
+            continue;
+        }
+        let new_s = dst.insert_sketch_record(sk);
+        library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
+        dst.object_sketches.insert(new_s, new_oid);
+        if let ObjectOwner::Definition { def, .. } = dst.objects[new_oid].owner {
+            dst.def_sketches.insert(new_s, def);
+        }
+        ctx.all_sketches.push(new_s);
+    }
     new_oid
 }
 
@@ -20355,7 +21125,10 @@ fn library_copy_def(
     let def_sketches: Vec<SketchId> = src
         .def_sketches
         .iter()
-        .filter(|&(s, &c)| c == cid && !src.hidden_sketches.contains(s))
+        .filter(|&(s, &c)| {
+            // Object-owned sketches were copied with their owner above.
+            c == cid && !src.sketch_tombstoned(s) && !src.object_sketches.contains_key(s)
+        })
         .map(|(&s, _)| s)
         .collect();
     for s in def_sketches {

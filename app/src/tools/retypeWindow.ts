@@ -49,6 +49,10 @@ export interface RetypeScene {
   history_generation(): bigint
   scene_undo(): { free(): void }
   scene_redo(): { free(): void }
+  /** Undo-stack depth: the NET step count. The generation counts every
+   *  push, so a bracketed gesture (its inner edits drained into one
+   *  compound step) moves it by more than one; the depth moves by one. */
+  undo_depth?(): number
 }
 
 export type RetypeOutcome = 'ok' | 'stale' | 'failed' | 'closed'
@@ -124,29 +128,50 @@ export class RetypeWindow<Spec> {
     }
     for (let i = 0; i < hot.entries; i += 1) this.scene.scene_undo().free()
     const genAfterUndo = this.genN()
+    const depthAfterUndo = this.depth()
     if (recommit(hot.spec)) {
-      this.hot = { spec: next(hot.spec), historyGen: this.gen(), entries: Math.max(1, Number(this.genN() - genAfterUndo)) }
+      // Entries the commit left on the undo stack, counted by depth (a
+      // bracketed gesture is one step however many edits it drained).
+      this.hot = { spec: next(hot.spec), historyGen: this.gen(), entries: Math.max(1, this.stepsSince(depthAfterUndo, genAfterUndo)) }
       return 'ok'
     }
     try {
-      const recorded = Number(this.genN() - genAfterUndo)
+      // Generation moved = something was recorded: the redo stack is gone,
+      // so redo is only valid when the generation did not move at all (a
+      // refused bracketed gesture aborts back to exactly the state it
+      // opened on, generation included).
+      const churned = this.genN() !== genAfterUndo
+      const recorded = this.stepsSince(depthAfterUndo, genAfterUndo)
       let entries = hot.entries
-      if (recorded === 0) {
+      if (!churned) {
         for (let i = 0; i < hot.entries; i += 1) this.scene.scene_redo().free()
       } else {
         for (let i = 0; i < recorded; i += 1) this.scene.scene_undo().free()
         const genBeforeRestore = this.genN()
+        const depthBeforeRestore = this.depth()
         if (!restore(hot.spec)) {
           this.hot = null
           return 'failed'
         }
-        entries = Math.max(1, Number(this.genN() - genBeforeRestore))
+        entries = Math.max(1, this.stepsSince(depthBeforeRestore, genBeforeRestore))
       }
       this.hot = { spec: hot.spec, historyGen: this.gen(), entries }
     } catch {
       this.hot = null
     }
     return 'failed'
+  }
+
+  private depth(): number | null {
+    return typeof this.scene.undo_depth === 'function' ? this.scene.undo_depth() : null
+  }
+
+  /** Net undo steps recorded since `depthBefore` (falling back to the
+   *  generation delta for a scene without a depth). */
+  private stepsSince(depthBefore: number | null, genBefore: bigint): number {
+    const d = this.depth()
+    if (d !== null && depthBefore !== null) return Math.max(0, d - depthBefore)
+    return Number(this.genN() - genBefore)
   }
 
   private gen(): string {

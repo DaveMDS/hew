@@ -1380,3 +1380,527 @@ fn refacet_curve_mints_a_new_island_id_as_documented() {
     // And re-querying is sufficient: the fresh id resolves to the whole ring.
     assert_eq!(s.islands()[after].edges.len(), 48);
 }
+
+// ============================================================================
+// Stage 0 of unified drafting: a moved shape arranges exactly like a drawn
+// one; contact is metric (length-independent); history replays byte-exactly.
+// ============================================================================
+
+use kernel::{Document, SketchIslandId, Transform, Vec3};
+
+/// One region as comparable data: its outer ring plus its hole rings.
+#[derive(Debug, Clone)]
+struct RegionRings {
+    outer: Vec<Point3>,
+    holes: Vec<Vec<Point3>>,
+}
+
+fn region_rings(s: &Sketch) -> Vec<RegionRings> {
+    s.regions()
+        .values()
+        .map(|r| {
+            let ring = |ids: &[SketchVertexId]| -> Vec<Point3> {
+                ids.iter().map(|&v| s.vertices()[v].position).collect()
+            };
+            RegionRings {
+                outer: ring(&r.outer),
+                holes: r.holes.iter().map(|h| ring(h)).collect(),
+            }
+        })
+        .collect()
+}
+
+/// Cyclic ring equality within `tol::POINT_MERGE`.
+fn ring_eq(a: &[Point3], b: &[Point3]) -> bool {
+    a.len() == b.len()
+        && (0..a.len())
+            .any(|k| (0..a.len()).all(|i| a[i].approx_eq(b[(i + k) % a.len()], tol::POINT_MERGE)))
+}
+
+/// Multiset equality under a pairwise predicate (greedy matching is exact
+/// here because equal rings are interchangeable).
+fn multiset_eq<T>(a: &[T], b: &[T], eq: impl Fn(&T, &T) -> bool) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut used = vec![false; b.len()];
+    a.iter()
+        .all(|x| match (0..b.len()).find(|&j| !used[j] && eq(x, &b[j])) {
+            Some(j) => {
+                used[j] = true;
+                true
+            }
+            None => false,
+        })
+}
+
+fn regions_eq(a: &Sketch, b: &Sketch) -> bool {
+    let (ra, rb) = (region_rings(a), region_rings(b));
+    multiset_eq(&ra, &rb, |x, y| {
+        ring_eq(&x.outer, &y.outer) && multiset_eq(&x.holes, &y.holes, |p, q| ring_eq(p, q))
+    })
+}
+
+/// The edge set as sorted, undirected, quantized endpoint pairs.
+fn edge_set(s: &Sketch) -> Vec<((i64, i64), (i64, i64))> {
+    let q = |p: Point3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64);
+    let mut v: Vec<_> = s
+        .edges()
+        .values()
+        .map(|e| {
+            let (a, b) = (
+                q(s.vertices()[e.from].position),
+                q(s.vertices()[e.to].position),
+            );
+            if a <= b { (a, b) } else { (b, a) }
+        })
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+fn vertex_xy(s: &Sketch, x: f64, y: f64) -> SketchVertexId {
+    s.vertices()
+        .iter()
+        .find(|(_, v)| v.position.approx_eq(pt(x, y), tol::POINT_MERGE))
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("no vertex at ({x}, {y})"))
+}
+
+fn island_xy(s: &Sketch, x: f64, y: f64) -> SketchIslandId {
+    let v = vertex_xy(s, x, y);
+    let e = s
+        .edges()
+        .iter()
+        .find(|(_, e)| e.from == v || e.to == v)
+        .map(|(id, _)| id)
+        .expect("vertex has an edge");
+    s.island_of_edge(e).expect("edge has an island")
+}
+
+fn draw_rect_into(s: &mut Sketch, x0: f64, y0: f64, x1: f64, y1: f64) {
+    for (a, b) in rect_segments(x0, y0, x1, y1) {
+        s.add_segment(a, b).unwrap();
+    }
+}
+
+fn shift(r: (f64, f64, f64, f64), dx: f64, dy: f64) -> (f64, f64, f64, f64) {
+    (r.0 + dx, r.1 + dy, r.2 + dx, r.3 + dy)
+}
+
+fn translate(dx: f64, dy: f64) -> Transform {
+    Transform::translation(Vec3::new(dx, dy, 0.0))
+}
+
+type Rect = (f64, f64, f64, f64);
+
+/// Draw `fixed`, draw `moved` far away, move it by `(dx, dy)`; compare with a
+/// fresh sketch where `fixed` and the translated `moved` were just drawn.
+fn assert_move_equals_draw(fixed: Rect, moved: Rect, dx: f64, dy: f64, expect_regions: usize) {
+    let mut s = xy_sketch();
+    draw_rect_into(&mut s, fixed.0, fixed.1, fixed.2, fixed.3);
+    draw_rect_into(&mut s, moved.0, moved.1, moved.2, moved.3);
+    let island = island_xy(&s, moved.0, moved.1);
+    s.apply_transform_island(island, &translate(dx, dy))
+        .expect("the move is accepted");
+
+    let mut drawn = xy_sketch();
+    draw_rect_into(&mut drawn, fixed.0, fixed.1, fixed.2, fixed.3);
+    let m = shift(moved, dx, dy);
+    draw_rect_into(&mut drawn, m.0, m.1, m.2, m.3);
+
+    assert_eq!(drawn.regions().len(), expect_regions, "fixture sanity");
+    assert_eq!(edge_set(&s), edge_set(&drawn), "same edges");
+    assert!(
+        regions_eq(&s, &drawn),
+        "moved: {:?}\ndrawn: {:?}",
+        region_rings(&s),
+        region_rings(&drawn)
+    );
+}
+
+#[test]
+fn move_onto_exact_coincidence_equals_draw_in_place() {
+    assert_move_equals_draw((0.0, 0.0, 2.0, 2.0), (5.0, 0.0, 7.0, 2.0), -5.0, 0.0, 1);
+}
+
+#[test]
+fn move_onto_half_overlap_equals_draw_in_place() {
+    assert_move_equals_draw((0.0, 0.0, 2.0, 2.0), (5.0, 0.0, 7.0, 2.0), -6.0, 0.0, 3);
+}
+
+#[test]
+fn move_across_a_corner_equals_draw_in_place() {
+    assert_move_equals_draw((0.0, 0.0, 2.0, 2.0), (5.0, 5.0, 7.0, 7.0), -4.0, -4.0, 3);
+}
+
+#[test]
+fn move_inside_a_larger_rectangle_becomes_its_hole() {
+    let mut s = xy_sketch();
+    draw_rect_into(&mut s, 0.0, 0.0, 10.0, 10.0);
+    draw_rect_into(&mut s, 20.0, 0.0, 22.0, 2.0);
+    let island = island_xy(&s, 20.0, 0.0);
+    s.apply_transform_island(island, &translate(-18.0, 3.0))
+        .unwrap();
+    let with_hole = region_rings(&s)
+        .iter()
+        .filter(|r| r.holes.len() == 1)
+        .count();
+    assert_eq!(
+        with_hole, 1,
+        "the big region adopts the moved shape as a hole"
+    );
+    assert_move_equals_draw(
+        (0.0, 0.0, 10.0, 10.0),
+        (20.0, 0.0, 22.0, 2.0),
+        -18.0,
+        3.0,
+        2,
+    );
+}
+
+#[test]
+fn move_around_a_smaller_rectangle_adopts_it_as_a_hole() {
+    let mut s = xy_sketch();
+    draw_rect_into(&mut s, 4.0, 4.0, 5.0, 5.0);
+    draw_rect_into(&mut s, 20.0, 0.0, 28.0, 8.0);
+    let island = island_xy(&s, 20.0, 0.0);
+    s.apply_transform_island(island, &translate(-18.0, 1.0))
+        .unwrap();
+    let with_hole = region_rings(&s)
+        .iter()
+        .filter(|r| r.holes.len() == 1)
+        .count();
+    assert_eq!(with_hole, 1, "the moved ring surrounds the small one");
+    assert_move_equals_draw((4.0, 4.0, 5.0, 5.0), (20.0, 0.0, 28.0, 8.0), -18.0, 1.0, 2);
+}
+
+#[test]
+fn batch_move_does_not_arrange_against_a_moved_islands_old_position() {
+    // A lands where C WAS; C moves away in the same batch. The result must be
+    // the final configuration drawn fresh, not A arranged with C's old edges.
+    let mut s = xy_sketch();
+    draw_rect_into(&mut s, 0.0, 0.0, 2.0, 2.0); // A
+    draw_rect_into(&mut s, 4.0, 1.0, 6.0, 3.0); // C: overlaps A's destination
+    let a = island_xy(&s, 0.0, 0.0);
+    let c = island_xy(&s, 4.0, 1.0);
+    assert_ne!(a, c);
+    s.apply_transform_islands(&[a, c], &translate(3.0, 0.0))
+        .unwrap();
+
+    let mut drawn = xy_sketch();
+    draw_rect_into(&mut drawn, 3.0, 0.0, 5.0, 2.0);
+    draw_rect_into(&mut drawn, 7.0, 1.0, 9.0, 3.0);
+    assert_eq!(edge_set(&s), edge_set(&drawn));
+    assert!(regions_eq(&s, &drawn));
+    assert_eq!(s.regions().len(), 2);
+}
+
+#[test]
+fn vertex_drag_onto_an_edge_interior_splits_that_edge() {
+    let build = |end: (f64, f64)| {
+        let mut s = xy_sketch();
+        s.add_segment(pt(10.0, 0.0), pt(14.0, 0.0)).unwrap();
+        s.add_segment(pt(11.0, 2.0), pt(end.0, end.1)).unwrap();
+        s
+    };
+    let mut s = build((12.0, 3.0));
+    let v = vertex_xy(&s, 12.0, 3.0);
+    s.move_vertex_arranging(v, pt(12.0, 0.0)).unwrap();
+    let drawn = build((12.0, 0.0));
+    assert_eq!(s.edges().len(), 3, "the long edge split in two");
+    assert_eq!(edge_set(&s), edge_set(&drawn));
+    assert!(regions_eq(&s, &drawn));
+}
+
+#[test]
+fn vertex_drag_onto_a_non_adjacent_vertex_welds() {
+    let mut s = xy_sketch();
+    s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    s.add_segment(pt(1.0, 0.0), pt(1.0, 1.0)).unwrap();
+    s.add_segment(pt(1.0, 1.0), pt(0.0, 1.0)).unwrap();
+    let v = vertex_xy(&s, 0.0, 1.0);
+    s.move_vertex_arranging(v, pt(0.0, 0.0)).unwrap();
+
+    let mut drawn = xy_sketch();
+    drawn.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    drawn.add_segment(pt(1.0, 0.0), pt(1.0, 1.0)).unwrap();
+    drawn.add_segment(pt(1.0, 1.0), pt(0.0, 0.0)).unwrap();
+    assert_eq!(s.vertices().len(), 3, "the two ends are one vertex");
+    assert_eq!(s.regions().len(), 1, "the triangle closes");
+    assert_eq!(edge_set(&s), edge_set(&drawn));
+    assert!(regions_eq(&s, &drawn));
+}
+
+#[test]
+fn vertex_drag_across_an_edge_splits_it() {
+    let mut s = xy_sketch();
+    s.add_segment(pt(3.0, 0.0), pt(3.0, 4.0)).unwrap();
+    s.add_segment(pt(0.0, 1.0), pt(1.0, 1.0)).unwrap();
+    let v = vertex_xy(&s, 1.0, 1.0);
+    s.move_vertex_arranging(v, pt(5.0, 1.0)).unwrap();
+
+    let mut drawn = xy_sketch();
+    drawn.add_segment(pt(3.0, 0.0), pt(3.0, 4.0)).unwrap();
+    drawn.add_segment(pt(0.0, 1.0), pt(5.0, 1.0)).unwrap();
+    assert_eq!(edge_set(&s), edge_set(&drawn));
+    assert_eq!(s.edges().len(), 4, "both lines split at the crossing");
+    assert!(regions_eq(&s, &drawn));
+}
+
+#[test]
+fn vertex_drag_onto_the_adjacent_vertex_still_refuses() {
+    let mut s = xy_sketch();
+    s.add_segment(pt(0.0, 0.0), pt(1.0, 0.0)).unwrap();
+    s.add_segment(pt(1.0, 0.0), pt(1.0, 1.0)).unwrap();
+    let v = vertex_xy(&s, 1.0, 0.0);
+    let before = s.clone();
+    let err = s.move_vertex_arranging(v, pt(0.0, 0.0)).unwrap_err();
+    assert_eq!(err, SketchError::DegenerateSegment);
+    assert!(s == before, "a refusal leaves the sketch untouched");
+}
+
+// -------------------------------------------------- history through Document
+
+fn ground_plane() -> Plane {
+    Plane::from_point_normal(pt(0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)).unwrap()
+}
+
+fn doc_with_rects(rects: &[Rect]) -> (Document, kernel::SketchId) {
+    let mut doc = Document::new();
+    let sid = doc.add_sketch(ground_plane());
+    doc.begin_sketch_gesture(sid).unwrap();
+    for r in rects {
+        draw_rect_into(doc.sketch_mut(sid).unwrap(), r.0, r.1, r.2, r.3);
+    }
+    doc.end_sketch_gesture(sid).unwrap();
+    (doc, sid)
+}
+
+/// Run `op`, then undo and redo it; every state's save bytes must match the
+/// state it restores.
+fn assert_op_replays_byte_exactly(
+    doc: &mut Document,
+    op: impl FnOnce(&mut Document),
+) -> Result<(), TestCaseError> {
+    let before = doc.save();
+    op(doc);
+    let after = doc.save();
+    if after == before {
+        return Ok(()); // a refused / no-op edit records nothing
+    }
+    doc.undo().expect("undo succeeds");
+    prop_assert_eq!(&doc.save(), &before, "undo is byte-identical");
+    doc.redo().expect("redo succeeds");
+    prop_assert_eq!(&doc.save(), &after, "redo is byte-identical");
+    Ok(())
+}
+
+#[test]
+fn arranging_island_move_undoes_and_redoes_byte_exactly() {
+    let (mut doc, sid) = doc_with_rects(&[(0.0, 0.0, 2.0, 2.0), (5.0, 0.0, 7.0, 2.0)]);
+    let island = island_xy(doc.sketch(sid).unwrap(), 5.0, 0.0);
+    let before = doc.save();
+    doc.transform_sketch_island(sid, island, &translate(-6.0, 0.0))
+        .expect("the arranging move is accepted");
+    let after = doc.save();
+    assert_ne!(before, after);
+    assert_eq!(doc.sketch(sid).unwrap().regions().len(), 3);
+    doc.undo().unwrap();
+    assert_eq!(doc.save(), before, "undo is byte-identical");
+    doc.redo().unwrap();
+    assert_eq!(doc.save(), after, "redo is byte-identical");
+}
+
+#[test]
+fn arranging_vertex_drag_undoes_and_redoes_byte_exactly() {
+    let (mut doc, sid) = doc_with_rects(&[(0.0, 0.0, 2.0, 2.0)]);
+    {
+        doc.begin_sketch_gesture(sid).unwrap();
+        let s = doc.sketch_mut(sid).unwrap();
+        s.add_segment(pt(3.0, 1.0), pt(4.0, 1.0)).unwrap();
+        doc.end_sketch_gesture(sid).unwrap();
+    }
+    let v = vertex_xy(doc.sketch(sid).unwrap(), 3.0, 1.0);
+    let before = doc.save();
+    // Drag the loose end across the rectangle's right side.
+    doc.move_sketch_vertex(sid, v, pt(1.0, 1.0))
+        .expect("accepted");
+    let after = doc.save();
+    assert_ne!(before, after);
+    doc.undo().unwrap();
+    assert_eq!(doc.save(), before, "undo is byte-identical");
+    doc.redo().unwrap();
+    assert_eq!(doc.save(), after, "redo is byte-identical");
+}
+
+fn lattice_rect() -> impl Strategy<Value = Rect> {
+    (0..12i32, 0..12i32, 1..6i32, 1..6i32).prop_map(|(x, y, w, h)| {
+        let (x, y) = (f64::from(x) * 0.5, f64::from(y) * 0.5);
+        (x, y, x + f64::from(w) * 0.5, y + f64::from(h) * 0.5)
+    })
+}
+
+proptest! {
+    /// Random lattice rectangles, one random island moved by a random lattice
+    /// translation (often onto the others), undone, redone: bytes identical
+    /// each way.
+    #[test]
+    fn island_move_undo_redo_is_byte_identical(
+        rects in proptest::collection::vec(lattice_rect(), 1..5),
+        pick in any::<usize>(),
+        dx in -8..8i32,
+        dy in -8..8i32,
+    ) {
+        let (mut doc, sid) = doc_with_rects(&rects);
+        let ids: Vec<SketchIslandId> = doc.sketch(sid).unwrap().islands().keys().collect();
+        prop_assume!(!ids.is_empty());
+        let island = ids[pick % ids.len()];
+        let t = translate(f64::from(dx) * 0.5, f64::from(dy) * 0.5);
+        assert_op_replays_byte_exactly(&mut doc, |d| {
+            let _ = d.transform_sketch_island(sid, island, &t);
+        })?;
+    }
+}
+
+// ------------------------------------------------------- metric contact
+
+/// A plane with an exact in-plane basis, so tests can place points at exact
+/// in-plane offsets on any orientation.
+struct Frame {
+    plane: Plane,
+    o: Point3,
+    e1: Vec3,
+    e2: Vec3,
+}
+
+impl Frame {
+    fn new(normal: Vec3) -> Frame {
+        let n = normal.normalized().unwrap();
+        let reference = if n.x.abs() < 0.9 {
+            Vec3::new(1.0, 0.0, 0.0)
+        } else {
+            Vec3::new(0.0, 1.0, 0.0)
+        };
+        let e1 = n.cross(reference).normalized().unwrap();
+        let e2 = n.cross(e1).normalized().unwrap();
+        let o = Point3::new(0.0, 0.0, 0.0);
+        Frame {
+            plane: Plane::from_point_normal(o, n).unwrap(),
+            o,
+            e1,
+            e2,
+        }
+    }
+
+    fn p(&self, x: f64, y: f64) -> Point3 {
+        Point3::new(
+            self.o.x + x * self.e1.x + y * self.e2.x,
+            self.o.y + x * self.e1.y + y * self.e2.y,
+            self.o.z + x * self.e1.z + y * self.e2.z,
+        )
+    }
+}
+
+fn frames() -> Vec<Frame> {
+    vec![
+        Frame::new(Vec3::new(0.0, 0.0, 1.0)),
+        Frame::new(Vec3::new(0.3, 0.4, 0.866_025_403_784_438_6)),
+    ]
+}
+
+const LENGTHS: [f64; 3] = [1e-3, 1.0, 1e3];
+
+#[test]
+fn contact_is_metric_a_near_end_splits_regardless_of_edge_length() {
+    for f in frames() {
+        for &len in &LENGTHS {
+            for (off, splits) in [(0.9e-9, true), (1.1e-9, false)] {
+                let mut s = Sketch::on_plane(f.plane);
+                s.add_segment(f.p(0.0, 0.0), f.p(len, 0.0)).unwrap();
+                // A segment ending `off` above the long edge's interior.
+                let added = s.add_segment(f.p(len / 2.0, len), f.p(len / 2.0, off));
+                let added = added.unwrap_or_else(|e| panic!("len {len} off {off}: {e:?}"));
+                assert_eq!(
+                    !added.split_edges.is_empty(),
+                    splits,
+                    "len {len}, off {off:e}"
+                );
+                assert_eq!(
+                    s.edges().len(),
+                    if splits { 3 } else { 2 },
+                    "len {len}, off {off:e}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_near_end_proper_crossing_splits_both_for_every_length() {
+    // Acute crossing (5 degrees) whose crossing point lies 2e-9 m from an end
+    // of each segment, on opposite sides so the two ends are 4e-9 apart (no
+    // vertex merge): each end is within POINT_MERGE of the other segment
+    // (2e-9 * sin 5deg), so each touches the other and both split.
+    let angle = 5.0_f64.to_radians();
+    let d = (angle.cos(), angle.sin());
+    let tip = 2e-9;
+    for f in frames() {
+        for &len in &LENGTHS {
+            let x = (len - tip, 0.0);
+            let mut s = Sketch::on_plane(f.plane);
+            let first = s.add_segment(f.p(0.0, 0.0), f.p(len, 0.0)).unwrap();
+            assert_eq!(first.new_edges.len(), 1);
+            let second = s
+                .add_segment(
+                    f.p(x.0 - tip * d.0, -tip * d.1),
+                    f.p(x.0 + len * d.0, len * d.1),
+                )
+                .unwrap();
+            assert_eq!(
+                second.split_edges.len(),
+                1,
+                "len {len}: first segment splits"
+            );
+            assert_eq!(
+                second.split_edges[0].1.len(),
+                2,
+                "len {len}: into two fragments"
+            );
+            // Four vertices: s1's ends and s2's ends, plus nothing else — each
+            // end of one lies ON the other, so the 4e-9 m middle fragment is
+            // shared (it is s1's tail and s2's head), and three edges remain:
+            // s1's head, the shared middle, and s2's tail.
+            assert_eq!(s.vertices().len(), 4, "len {len}");
+            assert_eq!(s.edges().len(), 3, "len {len}: both segments split");
+        }
+    }
+}
+
+/// Found by the world-sketch fuzzer (pre-existing: reproduces on the commit
+/// before the metric-contact work). Offsetting inward the C-shaped region
+/// that wraps most of a rectangle draws a C-shaped loop around it. The
+/// region tracer assigned holes by the loop's vertex centroid, which for a
+/// C lies inside the rectangle, so the rectangle's region took the loop as
+/// a HOLE lying outside its own outer ring and `profile()` failed
+/// `MalformedRegion`. Holes are now placed by a point strictly inside the
+/// hole loop.
+#[test]
+fn offset_ring_enclosing_a_region_does_not_malform_it() {
+    let mut s = xy_sketch();
+    draw_rect_into(&mut s, 4.0, 2.5, 7.0, 4.0);
+    let first = s.regions().keys().next().unwrap();
+    s.offset_region(first, 0.25).unwrap();
+    draw_rect_into(&mut s, 2.0, 1.0, 4.0, 3.0);
+    // The region wrapping the inner rectangle: a notched ring, no holes.
+    let wrap = s
+        .regions()
+        .iter()
+        .find(|(_, r)| r.outer.len() == 10)
+        .map(|(id, _)| id)
+        .expect("the wrapping region exists");
+    s.offset_region(wrap, -0.1).unwrap();
+    for rid in s.regions().keys() {
+        assert!(s.profile(rid).is_ok(), "region {rid:?} has no profile");
+    }
+}

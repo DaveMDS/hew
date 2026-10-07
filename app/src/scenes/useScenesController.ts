@@ -27,6 +27,7 @@ import { nodeKey } from '../panels/treeModel'
 import type { NodeRef } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 import { buildFrameThumbnail } from '../viewport/frameThumbnail'
+import { setKernelHidden } from '../tools/planeUnits'
 import { getSceneTransitions, SCENE_TRANSITION_MS, subscribe as subscribeTransitions } from '../settings/sceneTransitions'
 import {
   PROP_ALL,
@@ -271,7 +272,7 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
           const objectIds = Array.from(resolved.hidden_object_ids())
           const instanceIds = Array.from(resolved.hidden_instance_ids())
           api?.setHidden(objectIds, instanceIds)
-          s?.set_hidden(new BigUint64Array(objectIds), new BigUint64Array(instanceIds))
+          if (s !== undefined && s !== null) setKernelHidden(s, objectIds, instanceIds)
         }
         const dj = resolved.display_json()
         if (dj !== undefined) {

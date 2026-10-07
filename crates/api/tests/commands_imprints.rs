@@ -17,7 +17,6 @@
 use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
 use kernel::Document;
 use serde_json::{Value, json};
-use std::f64::consts::FRAC_PI_2;
 
 // ----------------------------------------------------------------- fixtures
 // (mirrors commands_face_imprint.rs's fixture set — each integration test
@@ -286,7 +285,7 @@ fn sub_face_imprint_is_listed_moved_rotated_scaled_and_deleted() {
         "hew.solid.rotate_imprint",
         json!({
             "imprint": imprint_at(&object_id, center),
-            "angle": FRAC_PI_2,
+            "angle": 0.3,
             "about": center
         }),
     );
@@ -528,5 +527,129 @@ fn move_imprint_on_a_plain_face_point_refuses_not_an_imprint() {
         doc.save(),
         before,
         "a refused move leaves the document untouched"
+    );
+}
+
+// ========================================================= curve units
+
+#[test]
+fn imprints_lists_a_circle_cut_apart_by_a_rectangle_as_one_curve_unit() {
+    // A circle drawn across the rectangle's right side lands as two runs,
+    // each listed as a chord; `curve_units` names them as the one circle,
+    // each run with the `at` locator its chord entry carries.
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_rect",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "corner_a": [0.05, 0.05, 0.2],
+            "corner_b": [0.15, 0.15, 0.2]
+        }),
+    );
+    // Before the circle: no curve units at all (the field is always there).
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    assert_eq!(listed["curve_units"], json!([]));
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.1, 0.1, 0.2]) },
+            "center": [0.15, 0.1, 0.2],
+            "radius": 0.02
+        }),
+    );
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    let units = listed["curve_units"].as_array().unwrap();
+    assert_eq!(units.len(), 1);
+    let unit = &units[0];
+    assert_eq!(unit["closed"], true);
+    approx_point(&unit["curve"]["center"], [0.15, 0.1, 0.2], 1e-12);
+    assert!((unit["curve"]["radius"].as_f64().unwrap() - 0.02).abs() < 1e-12);
+    let runs = unit["runs"].as_array().unwrap();
+    assert_eq!(runs.len(), 2);
+    let chord_ats: Vec<&Value> = listed["imprints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["kind"] == "chord")
+        .map(|f| &f["at"])
+        .collect();
+    for run in runs {
+        assert!(
+            chord_ats.contains(&&run["at"]),
+            "each run is a listed chord"
+        );
+        assert!(run["path"].as_array().unwrap().len() >= 2);
+    }
+}
+
+/// A whole circle no line cuts lists as a one-run curve unit whose run
+/// locator names that circle: passing it to move_imprint moves the circle.
+#[test]
+fn a_whole_circles_run_locator_moves_it() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    let object_id = build_box(
+        &mut conn,
+        &mut doc,
+        2,
+        [0.0, 0.0, 0.0],
+        [0.2, 0.2, 0.0],
+        0.2,
+    );
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_circle",
+        json!({
+            "plane": { "face": face_at(&object_id, [0.02, 0.02, 0.2]) },
+            "center": [0.14, 0.1, 0.2],
+            "radius": 0.03
+        }),
+    );
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.imprints",
+        json!({ "object": object_id }),
+    );
+    let at = listed["curve_units"][0]["runs"][0]["at"].clone();
+    assert!(at.is_array(), "the run carries a locator: {listed}");
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.move_imprint",
+        json!({ "imprint": { "object": object_id, "at": at }, "offset": [0.01, 0.0, 0.0] }),
     );
 }

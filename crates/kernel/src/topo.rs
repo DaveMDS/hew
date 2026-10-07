@@ -79,6 +79,18 @@ pub struct Edge {
     /// rebuild edges fresh. A soft edge must be interior (have a twin) —
     /// pinned by the validator. Persisted in geometry buffer v6.
     pub soft: bool,
+    /// The regular polygon this edge is a side (or a piece of a side) of,
+    /// when it was drawn as one: the polygon's circumcircle. The sides ARE
+    /// the geometry, so no analytic consumer reads it (no surface, rim, or
+    /// smoothing comes of it); the drafting engine lifts marked edges back
+    /// into one polygon chain, so a polygon drawn on a face selects as one
+    /// and offers its center, exactly as on the ground. Like `soft`, it
+    /// survives a split (a piece of a side is still that polygon's) and is
+    /// dropped only where the edge does not survive (booleans rebuild edges
+    /// fresh); like `curve`, it maps under a similarity and is dropped under
+    /// any other transform (a stretched polygon is no longer regular).
+    /// Persisted in geometry buffer v7.
+    pub polygon: Option<crate::sketch::CurveGeom>,
 }
 
 /// Whether a loop is a face's outer boundary or a hole.
@@ -569,6 +581,28 @@ impl Object {
     /// slot-order visit, first-appearance grouping.
     pub fn edge_curve_rims(&self) -> Vec<AnalyticRim> {
         self.edge_curve_rims_with(&self.analytic_rims())
+    }
+
+    /// The centers of the regular polygons drawn on this object's faces
+    /// (edges carrying [`Edge::polygon`]), once each, with a face one of its
+    /// sides bounds — the [`crate::sketch::Sketch::polygon_centers`] of a
+    /// face drawing, offered to inference as center snaps.
+    pub fn edge_polygon_centers(&self) -> Vec<(Point3, FaceId)> {
+        let mut out: Vec<(Point3, FaceId)> = Vec::new();
+        for edge in self.edges.values() {
+            let Some(g) = edge.polygon else {
+                continue;
+            };
+            if out
+                .iter()
+                .any(|(c, _)| c.approx_eq(g.center, crate::tol::POINT_MERGE))
+            {
+                continue;
+            }
+            let face = self.loops[self.half_edges[edge.half_edge].loop_id].face;
+            out.push((g.center, face));
+        }
+        out
     }
 
     /// [`Object::edge_curve_rims`] against wall rims the caller already

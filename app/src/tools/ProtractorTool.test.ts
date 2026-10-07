@@ -412,3 +412,35 @@ describe('ProtractorTool — screen-constant disk scaling', () => {
     expect(disk.scale.x).toBeGreaterThan(0)
   })
 })
+
+
+describe('ProtractorTool — a clicked angle is exactly the displayed angle', () => {
+  const raw = (37.46 * Math.PI) / 180 // shows "37.5°"
+  function sweep(kind: string, typed: string | null) {
+    const { tool, wasmScene, onMeasurement } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY) // apex
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), RAY) // baseline
+    const s = makeSnap({ x: Math.cos(raw), y: Math.sin(raw), z: 0, kind })
+    tool.onPointerMove(s, RAY)
+    if (typed === null) tool.onPointerDown(s, RAY)
+    else {
+      for (const ch of typed) tool.onKey(makeKeyEvent(ch))
+      tool.onKey(makeKeyEvent('Enter'))
+    }
+    const args = (wasmScene.add_guide_line as ReturnType<typeof vi.fn>).mock.calls[0] as number[]
+    return { dir: args.slice(3), onMeasurement }
+  }
+
+  it('a free click commits the same guide direction as typing the shown angle', () => {
+    const clicked = sweep('ground', null)
+    expect(clicked.onMeasurement).toHaveBeenCalledWith('37.5°')
+    expect(clicked.dir).toEqual(sweep('ground', '37.5').dir)
+    expect(clicked.dir[0]).toBeCloseTo(Math.cos((37.5 * Math.PI) / 180), 15)
+  })
+
+  it('a hard-snapped (endpoint) click keeps its exact direction', () => {
+    const d = sweep('endpoint', null).dir
+    expect(d[0]).toBeCloseTo(Math.cos(raw), 14)
+    expect(d[1]).toBeCloseTo(Math.sin(raw), 14)
+  })
+})

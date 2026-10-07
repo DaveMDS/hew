@@ -54,7 +54,7 @@ test('a rectangle drawn to two edge midpoints of a face imprints and its piece p
 
   // No refusal toast, and the enclosed quarter is now its own face: a ray
   // into it and a ray into the rest of the top land on different faces.
-  await expect(page.getByText(/fully inside the face/)).toHaveCount(0)
+  await expect(page.getByText(/would run off the face/)).toHaveCount(0)
   const [inside, outside] = await page.evaluate(() => {
     const h = window.__hew_test!
     return [h.pickFace([0.5, 0.75, 5], [0, 0, -1]), h.pickFace([1.5, 0.25, 5], [0, 0, -1])]

@@ -1304,8 +1304,9 @@ test('Guides (Tape Measure): Shift latches the nearest axis and holds it through
   await page.mouse.up()
   await expect(page.getByText('Click to place the parallel guide', { exact: false })).toBeVisible()
 
-  // Pull straight up the box's own front face — a pure-Z offset.
-  const zPull = await toPage([1, 0, 0.3])
+  // Pull straight up the box's own front face — a pure-Z offset, far enough
+  // (about 24 px) to leave the clicked midpoint's 18 px hold.
+  const zPull = await toPage([1, 0, 0.4])
   await page.mouse.move(zPull.x, zPull.y, { steps: 8 })
   await page.waitForTimeout(80)
 

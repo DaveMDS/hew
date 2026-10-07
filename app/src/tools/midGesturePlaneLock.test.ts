@@ -8,6 +8,11 @@
  * it; the same arrow again reverts to whatever plane the anchor would have
  * resolved onto unlocked (`nextGestureLockPlane`, drawPlane.ts).
  *
+ * (Each commit is now ONE draft begun with `draft_begin_plane`; the
+ * assertions below keep the old split — `planeCalls` are the drafts begun
+ * on an axis (non-ground) plane, `groundBegins(scene)` the ones begun on
+ * the ground plane.)
+ *
  * One shared parameterized suite drives Rectangle/Circle/Polygon through a
  * common `DrawToolUnderTest` surface (mirrors idlePlaneLock.test.ts); Arc's
  * three-click chord/bulge shape gets its own describe block below.
@@ -18,7 +23,8 @@ import { RectangleTool } from './RectangleTool'
 import { CircleTool } from './CircleTool'
 import { PolygonTool } from './PolygonTool'
 import { ArcTool } from './ArcTool'
-import { makeSketchPlaneCache, type SketchPlaneCache } from './sketchGesture'
+import { draftMock } from './draftMock'
+import { isGroundPlane } from './drawPlane'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
@@ -52,8 +58,20 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
 }
 
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
-type PlaneCall = [number, number, number, number, number, number]
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
+type PlaneCall = number[]
+
+/** The [origin, normal] of every `draft_begin_plane` call, in order. */
+function allBegins(scene: unknown): PlaneCall[] {
+  const f = (scene as { draft_begin_plane: { mock: { calls: unknown[][] } } }).draft_begin_plane
+  return f.mock.calls.map((c) => c.slice(0, 6) as number[])
+}
+const onGround = (c: PlaneCall) =>
+  isGroundPlane([c[0], c[1], c[2]], [c[3], c[4], c[5]])
+/** How many drafts were begun on the ground plane (the old `begin_ground_sketch`). */
+function groundBegins(scene: unknown): number {
+  return allBegins(scene).filter(onGround).length
+}
 
 /** A hoverable non-ground sketch — the y=0 plane, normal -Y — used ONLY by
  *  the "idle lock beats sketch-hover" test below, to make that precedence
@@ -66,60 +84,36 @@ function makeWasmScene(opts: { frame?: number[]; sketchPick?: bigint } = {}) {
   const planes = new Map<bigint, Float64Array>(
     opts.sketchPick !== undefined ? [[opts.sketchPick, TILTED_PLANE]] : [],
   )
-  const segmentCalls: SegmentCall[] = []
-  const planeCalls: PlaneCall[] = []
-  let sketchCounter = 90n
-  let nextRegionsCreated: bigint[] = []
+  const dm = draftMock()
 
   const scene = {
     axes: vi.fn(() => new Float64Array(opts.frame ?? WORLD_FRAME_FLAT)),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, new Float64Array([0, 0, 0, 0, 0, 1]))
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planeCalls.push([px, py, pz, nx, ny, nz])
-        planes.set(sketchCounter, new Float64Array([px, py, pz, nx, ny, nz]))
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined), // never an eligible face in these fixtures
     pick_sketch: vi.fn(() => opts.sketchPick),
     sketch_plane: vi.fn((h: bigint) => planes.get(h)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_begin_curve: vi.fn(),
-    sketch_begin_curve_with: vi.fn(),
-    sketch_begin_polygon_with: vi.fn(),
-    sketch_end_curve: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        const rc = nextRegionsCreated
-        nextRegionsCreated = []
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array(rc),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return {
-    scene: scene as unknown as WasmScene,
-    segmentCalls,
-    planeCalls,
-    setNextRegionsCreated: (rc: bigint[]) => { nextRegionsCreated = rc },
-  }
+  // Live views: every segment, and the drafts begun on an axis (non-ground) plane.
+  const segmentCalls = new Proxy([] as SegmentCall[], {
+    get(_t, k) {
+      const live: SegmentCall[] = dm.log.segments.map((sg) => ({
+        a: sg.slice(0, 3) as SegmentCall['a'],
+        b: sg.slice(3, 6) as SegmentCall['b'],
+      }))
+      return Reflect.get(live, k)
+    },
+  })
+  const planeCalls = new Proxy([] as PlaneCall[], {
+    get(_t, k) {
+      return Reflect.get(allBegins(scene).filter((c) => !onGround(c)), k)
+    },
+  })
+  return { scene: scene as unknown as WasmScene, segmentCalls, planeCalls }
 }
 
 /** The subset of each draw tool's public surface these tests drive. */
@@ -133,7 +127,7 @@ interface DrawToolUnderTest {
 
 interface Driver {
   name: string
-  make(scene: WasmScene, cache?: SketchPlaneCache): DrawToolUnderTest
+  make(scene: WasmScene): DrawToolUnderTest
   /** Click ONE anchor point — leaves the tool anchored (single-point stage,
    *  nothing committed yet). */
   anchor(tool: DrawToolUnderTest, a: readonly [number, number, number]): void
@@ -145,22 +139,22 @@ interface Driver {
 const DRIVERS: Driver[] = [
   {
     name: 'Rectangle',
-    make: (scene, cache) =>
-      new RectangleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new RectangleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     anchor: (tool, a) => tool.onPointerDown(makeSnap(a), RAY),
     finish: (tool, b) => tool.onPointerDown(makeSnap(b), RAY),
   },
   {
     name: 'Circle',
-    make: (scene, cache) =>
-      new CircleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new CircleTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     anchor: (tool, a) => tool.onPointerDown(makeSnap(a), RAY),
     finish: (tool, b) => tool.onPointerDown(makeSnap(b), RAY),
   },
   {
     name: 'Polygon',
-    make: (scene, cache) =>
-      new PolygonTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn(), cache) as unknown as DrawToolUnderTest,
+    make: (scene) =>
+      new PolygonTool(scene, new THREE.Group(), vi.fn(), vi.fn(), vi.fn(), vi.fn()) as unknown as DrawToolUnderTest,
     anchor: (tool, a) => tool.onPointerDown(makeSnap(a), RAY),
     finish: (tool, b) => tool.onPointerDown(makeSnap(b), RAY),
   },
@@ -177,7 +171,7 @@ describe.each(DRIVERS)('$name — mid-gesture plane lock (design §2a)', ({ name
     tool.onKey(makeKeyEvent('ArrowRight')) // red/X lock, through the anchor
     finish(tool, [2, 9, 5]) // on the new plane: x fixed at the anchor's 2
 
-    expect(scene.begin_ground_sketch).not.toHaveBeenCalled()
+    expect(groundBegins(scene)).toBe(0)
     expect(planeCalls).toHaveLength(1)
     // Plane passes through the ANCHOR (2,3,0), normal = world +X.
     expect(planeCalls[0]).toEqual([2, 3, 0, 1, 0, 0])
@@ -192,8 +186,8 @@ describe.each(DRIVERS)('$name — mid-gesture plane lock (design §2a)', ({ name
     tool.onKey(makeKeyEvent('ArrowRight')) // same arrow — lock off, revert to natural
     finish(tool, [7, 9, 0])
 
-    expect(planeCalls).toHaveLength(0) // never mint an axis-plane sketch
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(planeCalls).toHaveLength(0) // never begin a draft on an axis plane
+    expect(groundBegins(scene)).toBe(1)
     expect(segmentCalls.every((s) => s.a[2] === 0 && s.b[2] === 0)).toBe(true) // ground fast path
   })
 
@@ -244,7 +238,7 @@ describe.each(DRIVERS)('$name — mid-gesture plane lock (design §2a)', ({ name
     finish(tool, [7, 9, 0])
 
     expect(planeCalls).toHaveLength(0)
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(groundBegins(scene)).toBe(1)
     expect(segmentCalls.every((s) => s.a[2] === 0 && s.b[2] === 0)).toBe(true)
   })
 
@@ -325,7 +319,7 @@ describe.each(DRIVERS)('$name — mid-gesture plane lock (design §2a)', ({ name
 
     expect(planeCalls).toHaveLength(1)
     expect(planeCalls[0]).toEqual([2, 3, 4, 1, 0, 0])
-    expect(scene.sketch_begin_gesture).not.toHaveBeenCalledWith(TILTED_SKETCH)
+    expect(scene.draft_begin_sketch).not.toHaveBeenCalled()
   })
 })
 
@@ -364,7 +358,7 @@ describe('Arc — mid-gesture plane lock (design §2a, chord stage only)', () =>
     tool.onPointerDown(makeSnap([3.5, 4.5, 0]), RAY) // bulge — commits on the ground
 
     expect(planeCalls).toHaveLength(0)
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(groundBegins(scene)).toBe(1)
     expect(segmentCalls.every((s) => s.a[2] === 0 && s.b[2] === 0)).toBe(true)
   })
 
@@ -398,7 +392,7 @@ describe('Arc — mid-gesture plane lock (design §2a, chord stage only)', () =>
 
     tool.onPointerDown(makeSnap([2, 1, 0]), RAY) // bulge — commits on the ORIGINAL (ground) plane
 
-    expect(planeCalls).toHaveLength(0) // no axis-plane sketch was minted
-    expect(scene.begin_ground_sketch).toHaveBeenCalledTimes(1)
+    expect(planeCalls).toHaveLength(0) // no draft was begun on an axis plane
+    expect(groundBegins(scene)).toBe(1)
   })
 })

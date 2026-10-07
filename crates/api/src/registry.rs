@@ -407,7 +407,49 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Offset a region boundary within its sketch.",
+            "Offset a region boundary within its sketch, or a face or plane region by its unit key.",
+        );
+        add(
+            "hew.sketch.units",
+            R,
+            Kernel,
+            Std,
+            "List a plane's drawing as units: islands of edges (with where each is stored) and regions.",
+        );
+        add(
+            "hew.sketch.move",
+            M,
+            Kernel,
+            Std,
+            "Move drawing units (islands, edges, circles, regions) on a plane by an offset.",
+        );
+        add(
+            "hew.sketch.rotate",
+            M,
+            Kernel,
+            Std,
+            "Rotate drawing units on a plane about the plane normal through a point.",
+        );
+        add(
+            "hew.sketch.scale",
+            M,
+            Kernel,
+            Std,
+            "Scale drawing units on a plane about a center, uniformly or per axis.",
+        );
+        add(
+            "hew.sketch.copy",
+            M,
+            Kernel,
+            Std,
+            "Copy drawing units on a plane by an offset.",
+        );
+        add(
+            "hew.sketch.delete",
+            M,
+            Kernel,
+            Std,
+            "Delete drawing units from a plane.",
         );
         // hew.solid — watertight-by-construction operations.
         add(
@@ -459,43 +501,43 @@ impl Registry {
             Std,
             "Sweep a profile along an edge-chain path, as the tool does.",
         );
-        // hew.solid — editable imprints: drawn-but-not-yet-pushed shapes,
-        // recovered structurally and listable/movable/deletable before
-        // they're ever pushed/pulled.
+        // hew.solid — editable imprints, kept for compatibility: drawn units
+        // on an object's drawing planes, implemented over the drafting
+        // engine's plane units (hew.sketch.units/move/... are the general form).
         add(
             "hew.solid.imprints",
             R,
             Kernel,
             Std,
-            "List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).",
+            "Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per drawing plane; hew.sketch.units is the general form.",
         );
         add(
             "hew.solid.move_imprint",
             M,
             Kernel,
             Std,
-            "Slide an imprint (sub-face or chord) on its face by a translation.",
+            "Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.",
         );
         add(
             "hew.solid.rotate_imprint",
             M,
             Kernel,
             Std,
-            "Turn an imprint on its face about the face normal through a pivot point.",
+            "Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.",
         );
         add(
             "hew.solid.scale_imprint",
             M,
             Kernel,
             Std,
-            "Uniformly scale an imprint on its face about an anchor point.",
+            "Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.",
         );
         add(
             "hew.solid.delete_imprint",
             M,
             Kernel,
             Std,
-            "Delete an imprint (sub-face or chord), dissolving it back into its face.",
+            "Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.",
         );
         // hew.entity — transforms and lifecycle.
         add("hew.entity.rename", M, Kernel, Req, "Rename an entity.");
@@ -3017,17 +3059,35 @@ impl Registry {
             // documents. Every draw command's result is a `oneOf` of this
             // and `sketch_result_schema`, distinguished by which plane
             // spec variant the call actually used.
+            let touched_units_schema = serde_json::json!({
+                "type": "array",
+                "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["edge", "region"] },
+                        "key": { "type": "string", "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them" },
+                        "store": { "type": "string", "enum": ["topology", "owned", "free"], "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face" },
+                        "object_id": { "type": "string", "description": "the owning solid, for topology and owned" },
+                        "sketch_id": { "type": "string", "description": "the sketch holding the drawing, for owned and free when it has one" }
+                    },
+                    "required": ["kind", "key", "store"]
+                }
+            });
             let face_imprint_result_schema = |token_doc: &str| {
                 serde_json::json!({
                     "type": "object",
-                    "properties": { "object_id": { "type": "string" } },
-                    "required": ["object_id"],
+                    "properties": {
+                        "object_id": { "type": "string" },
+                        "units": touched_units_schema.clone()
+                    },
+                    "required": ["object_id", "units"],
                     "description": format!(
-                        "on-face drawing (plane spec {{\"face\": <locator>}}) imprints the solid's face instead of creating a sketch region; mints {token_doc}"
+                        "on-face drawing (plane spec {{\"face\": <locator>}}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints {token_doc} when the draw produced a face"
                     )
                 })
             };
-            let split_face_tokens = "transaction-scoped face tokens \"a\"/\"b\" naming the two faces the cut produced (HEW_API.md §5.2/§5.4)";
+            let split_face_tokens = "transaction-scoped face tokens \"a\"/\"b\" naming the faces either side of the path's last cut — for a single cut, the two faces it produced (HEW_API.md §5.2/§5.4)";
             let split_face_inner_tokens = "transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4)";
             // Refusals common to every face-imprint path (both
             // `SplitFace` and `SplitFaceInner` route through
@@ -3068,9 +3128,6 @@ impl Registry {
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
-                    "path_too_short",
-                    "endpoint_not_on_boundary",
-                    "path_not_simple",
                 ],
                 face_imprint_common_refusals(),
             ]
@@ -3100,8 +3157,6 @@ impl Registry {
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
-                    "loop_not_strictly_inside",
-                    "loop_self_intersects",
                 ],
                 face_imprint_common_refusals(),
             ]
@@ -3138,8 +3193,6 @@ impl Registry {
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
-                    "loop_not_strictly_inside",
-                    "loop_self_intersects",
                     "curve_claim_off_loop",
                 ],
                 face_imprint_common_refusals(),
@@ -3190,13 +3243,8 @@ impl Registry {
                     "ambiguous_locator",
                     // Open-sweep, `close: "open"` (`SplitFace`) face-mode
                     // refusals:
-                    "path_too_short",
-                    "endpoint_not_on_boundary",
-                    "path_not_simple",
                     // Closed-loop (`SplitFaceInner`) face-mode refusals —
                     // a full-turn sweep, or `close: "pie"`/`"segment"`:
-                    "loop_not_strictly_inside",
-                    "loop_self_intersects",
                     "curve_claim_off_loop",
                 ],
                 face_imprint_common_refusals(),
@@ -3229,8 +3277,6 @@ impl Registry {
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
-                    "loop_not_strictly_inside",
-                    "loop_self_intersects",
                     "sides_above_cap",
                 ],
                 face_imprint_common_refusals(),
@@ -3244,20 +3290,31 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "region": { "type": "string" },
-                    "distance": { "type": "number", "description": "positive grows the material, negative shrinks it" }
+                    "region": { "type": "string", "description": "a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units (a face or plane region)" },
+                    "distance": { "type": "number", "description": "positive grows the material, negative shrinks it" },
+                    "plane": plane_schema.clone()
                 },
                 "required": ["region", "distance"]
             });
             cmd.result_schema = serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "sketch": { "type": "string" },
-                    "region_ids": { "type": "array", "items": { "type": "string" } },
-                    "region_id": { "type": "string", "description": "present when exactly one region resulted" },
-                    "curve_ids": { "type": "array", "items": { "type": "string" } }
-                },
-                "required": ["sketch", "region_ids", "curve_ids"]
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {
+                            "sketch": { "type": "string" },
+                            "region_ids": { "type": "array", "items": { "type": "string" } },
+                            "region_id": { "type": "string", "description": "present when exactly one region resulted" },
+                            "curve_ids": { "type": "array", "items": { "type": "string" } }
+                        },
+                        "required": ["sketch", "region_ids", "curve_ids"]
+                    },
+                    {
+                        "type": "object",
+                        "description": "the unit-key form (`plane` given): the plane units the offset made",
+                        "properties": { "units": touched_units_schema.clone() },
+                        "required": ["units"]
+                    }
+                ]
             });
             cmd.refusals = vec![
                 "unknown_region",
@@ -3266,7 +3323,186 @@ impl Registry {
                 "offset_collapsed",
                 "unknown_sketch",
                 "unknown_entity",
+                "unknown_unit",
+                "draft_boundary_edge_touched",
             ];
+
+            // hew.sketch.units / move / rotate / scale / copy / delete —
+            // the drafting-engine unit verbs (commands/draft.rs).
+            let units_param = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "items": { "type": "string" },
+                "description": "unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges)"
+            });
+            let edit_result = serde_json::json!({
+                "type": "object",
+                "properties": { "units": touched_units_schema.clone() },
+                "required": ["units"],
+                "description": "the plane units the edit made (new keys after the edit); empty for delete"
+            });
+            let edit_refusals = || {
+                vec![
+                    "unknown_unit",
+                    "draft_boundary_edge_touched",
+                    "unknown_sketch",
+                    "unknown_entity",
+                    "locator_missed",
+                    "ambiguous_locator",
+                    "point_off_plane",
+                    "degenerate_segment",
+                ]
+            };
+
+            let cmd = commands
+                .get_mut("hew.sketch.units")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "plane": plane_schema.clone() },
+                "required": ["plane"]
+            });
+            let point_array = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "units": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": { "type": "string", "description": "isl_<hex16>" },
+                                "edges": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": { "type": "string", "description": "edg_<hex16>" },
+                                            "a": point_array.clone(),
+                                            "b": point_array.clone(),
+                                            "store": { "type": "string", "enum": ["topology", "owned", "free"] },
+                                            "object_id": { "type": "string" },
+                                            "sketch_id": { "type": "string" },
+                                            "curve": {
+                                                "type": "object",
+                                                "description": "present when the edge is a facet of an analytic circle",
+                                                "properties": {
+                                                    "key": { "type": "string", "description": "crv_<hex16>" },
+                                                    "center": point_array.clone(),
+                                                    "radius": { "type": "number" }
+                                                }
+                                            }
+                                        },
+                                        "required": ["key", "a", "b", "store"]
+                                    }
+                                }
+                            },
+                            "required": ["key", "edges"]
+                        }
+                    },
+                    "regions": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": { "type": "string", "description": "rgn_<hex16>" },
+                                "outer": { "type": "array", "items": point_array.clone() },
+                                "holes": { "type": "array", "items": { "type": "array", "items": point_array.clone() } },
+                                "object_id": { "type": "string", "description": "the solid under the region, when one is" },
+                                "face": { "type": "object", "description": "a face locator ({object, at}) for the region when it IS a face of that solid — pass it to hew.solid.push_pull" },
+                                "extrudable": { "type": "boolean", "description": "true when the region lies over no face and hew.solid.extrude takes it as a new Object" }
+                            },
+                            "required": ["key", "outer", "holes", "extrudable"]
+                        }
+                    }
+                },
+                "required": ["units", "regions"]
+            });
+            cmd.refusals = vec![
+                "unknown_sketch",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands.get_mut("hew.sketch.move").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plane": plane_schema.clone(),
+                    "units": units_param.clone(),
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "translation [x, y, z] in meters; must stay in the plane" }
+                },
+                "required": ["plane", "units", "offset"]
+            });
+            cmd.result_schema = edit_result.clone();
+            cmd.refusals = edit_refusals();
+
+            let cmd = commands
+                .get_mut("hew.sketch.rotate")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plane": plane_schema.clone(),
+                    "units": units_param.clone(),
+                    "axis_point": point_schema.clone(),
+                    "angle": { "type": "number", "description": "radians, counter-clockwise seen from the plane normal side" }
+                },
+                "required": ["plane", "units", "axis_point", "angle"]
+            });
+            cmd.result_schema = edit_result.clone();
+            cmd.refusals = edit_refusals();
+
+            let cmd = commands
+                .get_mut("hew.sketch.scale")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plane": plane_schema.clone(),
+                    "units": units_param.clone(),
+                    "center": point_schema.clone(),
+                    "factor": { "type": "number", "description": "uniform scale; give this or `factors`" },
+                    "factors": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "per-axis [sx, sy, sz] in world axes; must keep the drawing in its plane" }
+                },
+                "required": ["plane", "units", "center"]
+            });
+            cmd.result_schema = edit_result.clone();
+            cmd.refusals = edit_refusals();
+
+            let cmd = commands.get_mut("hew.sketch.copy").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plane": plane_schema.clone(),
+                    "units": units_param.clone(),
+                    "offset": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["plane", "units", "offset"]
+            });
+            cmd.result_schema = edit_result.clone();
+            cmd.refusals = edit_refusals();
+
+            let cmd = commands
+                .get_mut("hew.sketch.delete")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plane": plane_schema.clone(),
+                    "units": units_param.clone()
+                },
+                "required": ["plane", "units"]
+            });
+            cmd.result_schema = edit_result.clone();
+            cmd.refusals = edit_refusals();
         }
         {
             let face_locator_schema = serde_json::json!({
@@ -3287,22 +3523,27 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "region": { "type": "string" },
-                    "distance": { "type": "number" }
+                    "region": { "type": "string", "description": "a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units" },
+                    "distance": { "type": "number" },
+                    "plane": { "type": "object", "description": "HEW_API.md §7 plane spec naming the drafting context a unit-key `region` belongs to. A region over no face extrudes as a new Object; a region that is a face of a solid push/pulls that face (result as hew.solid.push_pull); a region over a face that cannot hold it refuses region_not_pushable" }
                 },
                 "required": ["region", "distance"]
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "object_id": { "type": "string" } },
-                "required": ["object_id"],
-                "description": "mints face tokens \"base\", \"top\", \"side.<n>\" (boundary-loop order) — HEW_API.md §5.4's normative example"
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "a through-cut's resulting pieces (unit-key form over a face, as hew.solid.push_pull)" }
+                },
+                "description": "mints face tokens \"base\", \"top\", \"side.<n>\" (boundary-loop order) — HEW_API.md §5.4's normative example — when a new Object results"
             });
             cmd.refusals = vec![
                 "distance_too_small",
                 "degenerate_geometry",
                 "unknown_region",
                 "unknown_entity",
+                "unknown_unit",
+                "region_not_pushable",
             ];
 
             let cmd = commands
@@ -3479,7 +3720,7 @@ impl Registry {
             // share).
             let imprint_locator_schema = serde_json::json!({
                 "type": "object",
-                "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines"
+                "description": "HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {\"$face\":\"label#key\"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point)"
             });
             let point_or_derived_schema = serde_json::json!({
                 "oneOf": [
@@ -3490,16 +3731,8 @@ impl Registry {
             let imprint_refusals = || {
                 vec![
                     "not_in_plane",
-                    "nested_not_flat",
-                    "not_an_inner_face",
-                    "loop_self_intersects",
-                    "loop_not_strictly_inside",
-                    "point_not_on_face",
-                    "not_a_chord",
-                    "endpoint_not_on_boundary",
-                    "path_not_simple",
-                    "would_corrupt",
                     "not_an_imprint",
+                    "draft_boundary_edge_touched",
                     "unknown_object",
                     "unknown_entity",
                     "locator_missed",
@@ -3527,18 +3760,35 @@ impl Registry {
                             "type": "object",
                             "properties": {
                                 "kind": { "type": "string", "enum": ["sub_face", "chord"] },
-                                "at": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "sub_face: an interior point clear of any nested imprint; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint" },
+                                "at": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "sub_face: an interior point clear of any nested sub-face; chord: the midpoint of the run's first segment — the locator to pass to move_imprint/rotate_imprint/scale_imprint/delete_imprint" },
                                 "loop": { "type": "array", "items": { "type": "array" }, "description": "sub_face only: the outer loop's positions, cycle order" },
                                 "curve": { "description": "sub_face only: {center, radius} when the whole loop is one drawn circle, else null" },
                                 "curves": { "type": "array", "description": "per edge of the loop (sub_face) or run (chord), in order: {center, radius} when that edge is a facet of a drawn circle or arc, else null — a pie, segment, or edge-to-edge arc reports its arc here" },
-                                "nested": { "type": "integer", "description": "sub_face only: count of directly nested imprints" },
+                                "nested": { "type": "integer", "description": "sub_face only: count of sub-faces lying inside this one" },
+                                "holes": { "type": "array", "items": { "type": "array" }, "description": "sub_face only: the hole loops' positions" },
+                                "normal": { "type": "array", "items": { "type": "number" }, "description": "the drawing plane's normal" },
+                                "region": { "type": "string", "description": "sub_face only: the region's unit key (rgn_…) on that plane, as hew.sketch.units reports it" },
+                                "unit": { "type": "string", "description": "the island's unit key (isl_…) on that plane, as hew.sketch.units reports it" },
                                 "path": { "type": "array", "items": { "type": "array" }, "description": "chord only: the run's vertex positions, first to last" }
                             },
                             "required": ["kind", "at"]
                         }
+                    },
+                    "curve_units": {
+                        "type": "array",
+                        "description": "drawn circles and arcs (whole or cut by other drawing into several runs) on the object's drawing planes: each {closed, curve: {center, radius}, runs: [{at, path}]}, a run that is a chord above carrying that chord's at locator — the whole drawn curve, a circle when closed, else an arc",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "closed": { "type": "boolean" },
+                                "curve": { "type": "object" },
+                                "runs": { "type": "array", "items": { "type": "object" } }
+                            },
+                            "required": ["closed", "curve", "runs"]
+                        }
                     }
                 },
-                "required": ["imprints"]
+                "required": ["imprints", "curve_units"]
             });
             cmd.refusals = vec!["unknown_object", "unknown_entity"];
 

@@ -2,8 +2,8 @@
  * CircleTool — two-click faceted-circle (regular N-gon) sketching.
  *
  * A "circle" here is a faceted regular N-gon (true arcs are out of scope —
- * see). It decomposes into N chained `sketch_add_segment` calls (plane
- * mode) or one `split_face_inner` call with N loop points (face mode) —
+ * see). It decomposes into N chained `draft_add_segment` calls inside a
+ * circle bracket, committed as one draft (plane and face mode alike) —
  * mirroring exactly how RectangleTool works with 4 corners. No kernel change
  * is needed; push/pull then works for free once a closed loop forms a
  * region.
@@ -35,10 +35,10 @@
  *   2. Move: rubber-band N-gon preview whose first vertex passes through the
  *      cursor (radius = distance from center to cursor; start angle = angle
  *      from center to cursor)
- *   3. Second click: commit — N sketch_add_segment calls chaining
+ *   3. Second click: commit — N draft_add_segment calls chaining
  *      vertex[i] -> vertex[i+1], last one vertex[N-1] -> vertex[0] (using
- *      the SAME stored vertex[0] coords for exact closure), via
- *      `runSketchGesture`
+ *      the SAME stored vertex[0] coords for exact closure), in
+ *      one `runDraft`
  *   4. Esc between clicks: cancel stage 1
  *   Calls onCommit() after each successful commit so the viewport can
  *   refresh scene geometry and trigger re-render.
@@ -46,8 +46,8 @@
  * Face mode (an eligible Object face is under the cursor):
  *   1. First click on an eligible face: anchor center (on face plane)
  *   2. Move: rubber-band N-gon preview projected onto that face plane
- *   3. Second click: commit — split_face_inner() on that face
- *      with N loop points
+ *   3. Second click: commit — one `runDraft` on that face
+ *      with N loop segments
  *   4. Esc: cancel
  *   Calls onFaceImprint(objectId) after each successful imprint so the
  *   viewport can refresh the scene.
@@ -66,14 +66,16 @@ import type { V3 } from '../viewport/geoHelpers'
 import { circlePolygonGround, circlePolygonFace, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editLengthBuffer, isLengthInputKey, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
-import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import type { SketchTarget } from './sketchGesture'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { PlanePin } from './planePin'
 
 import { segmentsPerTurn } from './arcMath'
@@ -179,11 +181,6 @@ export class CircleTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
-  /** Cached plane-mode sketch handles — the Viewport passes one cache
-   *  shared by every draw tool, so mixed-tool profiles land in a single
-   *  sketch per plane. */
-  private readonly sketchCache: SketchPlaneCache
-
   /** The current editing context (component-edit-parity.md phase A1) — see
    *  LineTool's identical fields for the full rationale. */
   private _editContext: EditContext = { kind: 'top' }
@@ -242,7 +239,6 @@ export class CircleTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
   ) {
     this.wasmScene = wasmScene
     this.preview = previewGroup
@@ -250,7 +246,6 @@ export class CircleTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
-    this.sketchCache = sketchCache
     this.retype = new RetypeWindow(wasmScene)
   }
 
@@ -320,8 +315,8 @@ export class CircleTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
   }
 
   /**
@@ -339,6 +334,8 @@ export class CircleTool implements Tool {
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+      () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
+      snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
     )
   }
 
@@ -472,7 +469,7 @@ export class CircleTool implements Tool {
         if (drawPlane !== null) return drawPlane
       }
     }
-    return this._resolveIdleTarget(ray).plane
+    return this._resolveIdleTarget(ray, snap).plane
   }
 
   /**
@@ -797,7 +794,6 @@ export class CircleTool implements Tool {
    * all and reset. Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchCache.clear()
     this.cancel()
   }
 
@@ -815,6 +811,22 @@ export class CircleTool implements Tool {
     }
     const radius = Math.hypot(cursor[0] - center[0], cursor[1] - center[1], cursor[2] - center[2])
     this.onMeasurementCb(`R ${formatLength(radius)}`)
+  }
+
+  /**
+   * Second click on a FREE pick (displayedValue.ts): commit the radius the
+   * measurement box shows through the typed path, so the circle is exactly
+   * what typing that radius would make. False (caller commits the raw
+   * click) for a hard snap or a displayed radius of zero.
+   */
+  private _commitDisplayed(snap: Snap | null, center: V3, cursor: V3): boolean {
+    if (!isFreePick(snap, center)) return false
+    const r = displayedLength(Math.hypot(cursor[0] - center[0], cursor[1] - center[1], cursor[2] - center[2]))
+    if (!(r > 0)) return false
+    if (this.planeStage.kind === 'anchored') this._lastPlaneCursor = cursor
+    else this._lastFaceCursor = cursor
+    this._commitTyped(r)
+    return true
   }
 
   /**
@@ -970,6 +982,9 @@ export class CircleTool implements Tool {
         return
       }
 
+      // A free pick commits the DISPLAYED radius, exactly as if typed.
+      if (this._commitDisplayed(snap, center, cursor)) return
+
       const committed = this._commitPlaneCircle(plane, target, center, cursor)
       this.planeStage = { kind: 'idle' }
       this.typed = ''
@@ -980,10 +995,12 @@ export class CircleTool implements Tool {
     }
   }
 
-  /** Commit a circle (N chained `sketch_add_segment` calls bracketed as one
-   *  curve chain) into `target`'s sketch — used by both ground and
-   *  non-ground plane/sketch mode (real face mode instead imprints via
-   *  `split_face_inner_with_curve`, see `_commitFaceCircle`). */
+  /** Commit a circle as ONE draft on `target`'s plane: the N facet segments
+   *  chain inside a circle bracket (`draft_begin_curve_with`), so the whole
+   *  circle is one selectable curve carrying its exact analytic
+   *  center/radius (the true-curves design) wherever it lowers — face
+   *  topology, an owned sketch, or a free sketch. Used by ground, non-ground
+   *  plane and sketch mode (face mode: `_commitFaceVerts`). */
   private _commitPlaneCircle(plane: DrawPlane, target: SketchTarget, center: V3, rim: V3): boolean {
     const verts = plane.ground
       ? circlePolygonGround(
@@ -994,64 +1011,26 @@ export class CircleTool implements Tool {
       : circlePolygonFace(center, rim, plane.normal, faceSegments(center, rim))
     if (verts === null || verts.length === 0) return false // degenerate — ignore
 
+    // World radius (a draft maps lengths through an instance pose itself).
+    const radius = plane.ground
+      ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
+      : segmentLength(center, rim)
+    return this._runCircleDraft(draftTargetFromSketchTarget(target), verts, center, radius)
+  }
+
+  private _runCircleDraft(
+    target: Parameters<typeof runDraft>[1],
+    verts: V3[],
+    center: V3,
+    radius: number,
+  ): boolean {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
-        let lastRegionsCreated: bigint[] = []
-        // The whole circle is ONE curve chain — clicking any facet later
-        // selects (and deletes) the circle as a unit — and it carries the
-        // exact analytic circle the facets approximate (durable
-        // center/radius — the true-curves design). `center[2]` is exactly 0
-        // on the ground plane (the legacy fast path), or the plane-frame
-        // world z on any other plane.
-        // `toLocal`: identity for a world target, pose⁻¹ for a definition-
-        // owned one (component-edit-parity.md phase A2) — see
-        // `runSketchGesture`'s doc. The curve's analytic center is local
-        // too, so a later push-through still recognizes the cylinder.
-        const localCenter = toLocal(center)
-        // World target: the EXACT legacy radius formula (bit-identical to
-        // before this refactor). Definition-owned target: the radius is
-        // measured LOCALLY (localCenter to the local-mapped rim) instead of
-        // the world radius — correct under a uniformly-scaled instance pose
-        // too, not just translation/rotation/mirror (the ground-plane 2-D
-        // fast path only applies to a WORLD ground sketch; a def-owned
-        // target's auxiliary plane can be ground-shaped in world space while
-        // still needing the general local computation). A non-uniform scale
-        // turns the local loop into an ellipse no single radius describes
-        // exactly; the kernel refuses that mismatched claim typed rather
-        // than accept a wrong analytic identity.
-        const radius = target.instance === null
-          ? (plane.ground
-              ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
-              : segmentLength(center, rim))
-          : (() => {
-              const localRim = toLocal(rim)
-              return Math.hypot(
-                localRim[0] - localCenter[0],
-                localRim[1] - localCenter[1],
-                localRim[2] - localCenter[2],
-              )
-            })()
-        this.wasmScene.sketch_begin_curve_with(sketch, localCenter[0], localCenter[1], localCenter[2], radius)
-        try {
-          for (let i = 0; i < verts.length; i++) {
-            const p = toLocal(verts[i])
-            const q = toLocal(verts[(i + 1) % verts.length])
-            const report = this.wasmScene.sketch_add_segment(
-              sketch,
-              p[0], p[1], p[2],
-              q[0], q[1], q[2],
-            )
-            try {
-              const rc = report.regions_created()
-              lastRegionsCreated = Array.from(rc)
-            } finally {
-              report.free()
-            }
-          }
-        } finally {
-          this.wasmScene.sketch_end_curve(sketch)
-        }
-        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, 'Circle', (d) =>
+        addDraftLoop(this.wasmScene, d, verts, { kind: 'circle', center, radius }),
+      )
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
       return true
     } catch (err) {
@@ -1094,6 +1073,7 @@ export class CircleTool implements Tool {
 
       const verts = circlePolygonFace(center, cursorOnPlane, normal, faceSegments(center, cursorOnPlane))
       if (verts === null) return // degenerate — ignore
+      if (this._commitDisplayed(snap, center, cursorOnPlane)) return
 
       this.faceStage = { kind: 'idle' }
       this.typed = ''
@@ -1147,46 +1127,17 @@ export class CircleTool implements Tool {
    * (the kernel refuses a claim that does not describe the loop).
    */
   private _commitFaceVerts(object: bigint, face: bigint, verts: V3[], center: V3): boolean {
-    // Flatten the N vertices into a Float64Array of xyz triples
-    const loopPts = new Float64Array(verts.length * 3)
-    for (let i = 0; i < verts.length; i++) {
-      loopPts[i * 3 + 0] = verts[i][0]
-      loopPts[i * 3 + 1] = verts[i][1]
-      loopPts[i * 3 + 2] = verts[i][2]
-    }
     const radius = Math.hypot(
       verts[0][0] - center[0],
       verts[0][1] - center[1],
       verts[0][2] - center[2],
     )
-
-    try {
-      const centerArr = new Float64Array([center[0], center[1], center[2]])
-      // Inside a component instance's editing context (component-edit-
-      // parity.md phase A2), `object` is a definition member —
-      // `split_face_inner_with_curve_in_instance` maps the loop/center
-      // through the instance's pose⁻¹ and routes through `apply_def_op`.
-      if (this._activeInstance !== null) {
-        this.wasmScene.split_face_inner_with_curve_in_instance(
-          this._activeInstance,
-          object,
-          face,
-          loopPts,
-          centerArr,
-          radius,
-        )
-      } else {
-        this.wasmScene.split_face_inner_with_curve(object, face, loopPts, centerArr, radius)
-      }
-      this.onFaceImprint(object)
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-      return false
-    }
+    return this._runCircleDraft(
+      { kind: 'face', object, face, instance: this._activeInstance },
+      verts,
+      center,
+      radius,
+    )
   }
 
   // ------------------------------------------------------------------ preview

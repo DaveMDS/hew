@@ -1,15 +1,21 @@
 /**
- * OffsetTool unit tests — Path A (object face → `offset_face`) and Path B
- * (sketch region → gesture-bracketed `sketch_offset_region`), drag-sign
- * semantics, typed VCB entry, and Esc. Mirrors the fake-WasmScene pattern
- * used by PushPullTool.test.ts.
+ * OffsetTool unit tests — the region under the cursor (a face's, a free
+ * sketch's, the ground's) resolves through the plane's `plane_units_json`
+ * listing and commits as ONE draft on that context
+ * (`draft_begin_ctx` + `draft_offset_region`), drag-sign semantics, typed
+ * VCB entry, retype, and Esc. Mirrors the fake-WasmScene pattern used by
+ * PushPullTool.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { OffsetTool } from './OffsetTool'
 import type { Snap } from './types'
+import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { ctxOfPlane, keyToId } from './planeUnits'
+import { draftMock, type DraftLog } from './draftMock'
+import { planeUnitsMock, ringUnit, hexKey, type MockListing, type MockRegion } from './planeUnitsMock'
 
 /** Ray straight down at (x, y). */
 function rayAt(x: number, y: number): Ray {
@@ -42,17 +48,35 @@ function makeRegionPick(sketch: bigint, region: bigint) {
   }
 }
 
-/** A 2×2 square boundary on the ground (region) or at z=1 (face). */
-function squareBoundary(z: number): Float32Array {
-  return new Float32Array([0, 0, z, 2, 0, z, 2, 2, z, 0, 2, z])
-}
-
 function makeEdgePick(sketch: bigint, edge: bigint) {
   return {
     sketch: () => sketch,
     edge: () => edge,
     free: vi.fn(),
   }
+}
+
+type P = [number, number, number]
+/** A 2×2 square ring at height z. */
+const square = (z: number): P[] => [[0, 0, z], [2, 0, z], [2, 2, z], [0, 2, z]]
+
+/** The ground context and the context of the face at z = 1 (+Z). */
+const CTX_GROUND = ctxOfPlane([0, 0, 0], [0, 0, 1]) as string
+const CTX_FACE = ctxOfPlane([0, 0, 1], [0, 0, 1]) as string
+/** The ground plane inside the entered instance 42 (same plane, instance-tagged context). */
+const CTX_GROUND_IN_42 = ctxOfPlane([0, 0, 0], [0, 0, 1], 42n) as string
+/** The key of the one region the default listings hold. */
+const REGION = 7
+
+/** A free profile `(sketch 9, region 7)` on the ground. */
+const GROUND_LISTING: MockListing = {
+  units: [ringUnit(1, 21, square(0))],
+  regions: [{ key: REGION, outer: square(0), extrude: { sketch: 9, region: 7 } }],
+}
+/** A drawn square on a box top (object 3, face 4) at z = 1. */
+const FACE_LISTING: MockListing = {
+  units: [ringUnit(2, 31, square(1), { kind: 'topology', object: 3 })],
+  regions: [{ key: REGION, outer: square(1), over: { object: 3, face: 4 } }],
 }
 
 function makeWasmScene(opts: {
@@ -70,39 +94,41 @@ function makeWasmScene(opts: {
   /** `instance_pose` result (default identity). `undefined` simulates a
    *  stale instance. */
   instancePose?: Float64Array | undefined
-} = {}): WasmScene {
-  const offsetReport = {
-    new_edges: () => new BigUint64Array([]),
-    new_curves: () => new BigUint64Array([]),
-    regions_created: () => new BigUint64Array([11n]),
-    regions_removed: () => new BigUint64Array([]),
-    free: vi.fn(),
-  }
+  /** `node_parent` result (default none: a plain top-level object). */
+  nodeParent?: unknown
+  /** Plane listings by context (default: the ground square and the face square). */
+  listings?: Record<string, MockListing>
+  /** Objects the committed draft reports as changed. */
+  ctxObjects?: bigint[]
+} = {}): WasmScene & { draftLog: DraftLog } {
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   const instancePose = 'instancePose' in opts
     ? opts.instancePose
     : new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+  const dm = draftMock({ ctxObjects: opts.ctxObjects ?? (opts.facePick !== undefined ? [3n] : []) })
+  const units = planeUnitsMock(opts.listings ?? { [CTX_GROUND]: GROUND_LISTING, [CTX_FACE]: FACE_LISTING, [CTX_GROUND_IN_42]: GROUND_LISTING })
   return {
+    draftLog: dm.log,
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     pick_sketch_edge: vi.fn(() => opts.edgePick),
     sketch_edge_endpoints: vi.fn(() => opts.edgeEndpoints),
-    sketch_regions: vi.fn(() => BigUint64Array.from([7n])),
     sketch_plane: vi.fn(() => (sketchPlane !== undefined ? new Float64Array(sketchPlane) : undefined)),
-    face_boundary: vi.fn(() => squareBoundary(1)),
     face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
-    region_boundary: vi.fn(() => squareBoundary(0)),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_offset_region: vi.fn(() => offsetReport),
-    sketch_offset_region_preview: vi.fn(() => new Float64Array([1, 3, 0.5, 0.5, 0, 1.5, 0.5, 0, 1, 1.5, 0])),
-    offset_face: vi.fn(() => 77n),
-    offset_face_preview: vi.fn(() => new Float64Array([0.5, 0.5, 1, 1.5, 0.5, 1, 1, 1.5, 1])),
+    face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
     instance_pose: vi.fn(() => instancePose),
-  } as unknown as WasmScene
+    node_parent: vi.fn(() => opts.nodeParent),
+    ...units,
+    ...dm.members,
+  } as unknown as WasmScene & { draftLog: DraftLog }
 }
+
+/** The `draft_offset_region` calls of a scene: `[draft, regionKey, distance]`. */
+const offsetCalls = (scene: WasmScene) => (scene.draft_offset_region as ReturnType<typeof vi.fn>).mock.calls as [bigint, bigint, number][]
+/** The context strings the scene's drafts opened on. */
+const beganCtxs = (scene: WasmScene) => (scene as unknown as { draftLog: DraftLog }).draftLog.begins.map((b) => b.args[0] as string)
 
 function makeTool(scene: WasmScene) {
   const preview = new THREE.Group()
@@ -115,7 +141,7 @@ function makeTool(scene: WasmScene) {
 }
 
 describe('OffsetTool — Path B (sketch region)', () => {
-  it('click, drag inside, click commits a negative (inward) gesture-bracketed offset', () => {
+  it('click, drag inside, click commits a negative (inward) offset in one draft', () => {
     const regionPick = makeRegionPick(9n, 7n)
     const scene = makeWasmScene({ regionPick })
     const { tool, onCommit, onToast } = makeTool(scene)
@@ -126,13 +152,13 @@ describe('OffsetTool — Path B (sketch region)', () => {
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
 
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(9n)
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(call[0]).toBe(9n)
-    expect(call[1]).toBe(7n)
+    // ONE draft on the ground's context holds the whole offset.
+    expect(beganCtxs(scene)).toEqual([CTX_GROUND])
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
+    expect(call[1]).toBe(keyToId(hexKey(REGION)))
     expect(call[2]).toBeCloseTo(-0.5)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(9n)
+    expect((scene as unknown as { draftLog: DraftLog }).draftLog.ended).toBe(1)
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onToast).not.toHaveBeenCalled()
   })
@@ -146,11 +172,11 @@ describe('OffsetTool — Path B (sketch region)', () => {
     tool.onPointerMove(null, rayAt(1, -0.75))
     tool.onPointerDown(null, rayAt(1, -0.75))
 
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(0.75)
   })
 
-  it('renders the kernel-computed preview loops while dragging', () => {
+  it('renders the offset ghost loop while dragging', () => {
     const regionPick = makeRegionPick(9n, 7n)
     const scene = makeWasmScene({ regionPick })
     const { tool, preview } = makeTool(scene)
@@ -158,20 +184,21 @@ describe('OffsetTool — Path B (sketch region)', () => {
     tool.onPointerDown(null, rayAt(1, 1))
     tool.onPointerMove(null, rayAt(1, 0.5))
 
-    expect(scene.sketch_offset_region_preview).toHaveBeenCalled()
     expect(preview.children.length).toBeGreaterThan(0)
+    // Nothing reaches the kernel until the commit click.
+    expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
   })
 
-  it('a preview the kernel refuses (collapse) draws nothing but keeps the drag alive', () => {
+  it('a collapsing distance draws no ghost but keeps the drag alive', () => {
     const regionPick = makeRegionPick(9n, 7n)
     const scene = makeWasmScene({ regionPick })
-    ;(scene.sketch_offset_region_preview as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      throw new Error('OffsetCollapsed: the offset distance collapses the boundary')
-    })
     const { tool, preview } = makeTool(scene)
 
     tool.onPointerDown(null, rayAt(1, 1))
-    tool.onPointerMove(null, rayAt(1, 0.999))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    expect(preview.children.length).toBeGreaterThan(0)
+    // The centre of the 2 m square: an inward offset of 1 m closes it up.
+    tool.onPointerMove(null, rayAt(1, 1))
 
     expect(preview.children).toHaveLength(0)
     expect(tool.capturingInput()).toBe(true)
@@ -198,13 +225,13 @@ describe('OffsetTool — Path B (sketch region)', () => {
     // A click in that state commits nothing — the memorized distance from
     // the earlier valid move must never be committed blind.
     tool.onPointerDown(null, awayRay)
-    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+    expect(offsetCalls(scene)).toHaveLength(0)
     expect(tool.capturingInput()).toBe(true)
 
     // Back over the plane, the drag resumes and commits normally.
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
+    expect(offsetCalls(scene)).toHaveLength(1)
   })
 
   it('is suppressed inside an editing context (region offset is a top-level act)', () => {
@@ -227,11 +254,14 @@ describe('OffsetTool — Path B (sketch region)', () => {
 describe('OffsetTool — Path B on a rotated sketch (sketch_plane normal)', () => {
   it('measures the offset in the sketch\'s OWN plane (XZ, normal +Y), not the ground XY plane', () => {
     const regionPick = makeRegionPick(9n, 7n)
-    const scene = makeWasmScene({ regionPick, sketchPlane: [0, 0, 0, 0, 1, 0] })
-    // A 2x2 square boundary lying in the XZ plane (y = 0).
-    ;(scene.region_boundary as ReturnType<typeof vi.fn>).mockReturnValue(
-      new Float32Array([0, 0, 0, 2, 0, 0, 2, 0, 2, 0, 0, 2]),
-    )
+    // A 2x2 square lying in the XZ plane (y = 0), listed under that plane's context.
+    const xz: P[] = [[0, 0, 0], [2, 0, 0], [2, 0, 2], [0, 0, 2]]
+    const ctxXZ = ctxOfPlane([0, 0, 0], [0, 1, 0]) as string
+    const scene = makeWasmScene({
+      regionPick,
+      sketchPlane: [0, 0, 0, 0, 1, 0],
+      listings: { [ctxXZ]: { units: [ringUnit(1, 21, xz)], regions: [{ key: REGION, outer: xz, extrude: { sketch: 9, region: 7 } }] } },
+    })
     const { tool, onCommit, onToast } = makeTool(scene)
 
     // A ray straight down -Y — parallel to the ground (XY) plane, so a
@@ -245,11 +275,11 @@ describe('OffsetTool — Path B on a rotated sketch (sketch_plane normal)', () =
     tool.onPointerMove(null, rayXZ(1, 0.5))
     tool.onPointerDown(null, rayXZ(1, 0.5))
 
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(call[0]).toBe(9n)
-    expect(call[1]).toBe(7n)
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
+    expect(call[1]).toBe(keyToId(hexKey(REGION)))
     expect(call[2]).toBeCloseTo(-0.5) // 0.5 m inside the boundary along Z
+    expect(beganCtxs(scene)).toEqual([ctxXZ])
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onToast).not.toHaveBeenCalled()
   })
@@ -287,10 +317,9 @@ describe('OffsetTool — Path B, click ON a boundary edge (edge fallback)', () =
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
 
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(call[0]).toBe(9n)
-    expect(call[1]).toBe(7n)
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
+    expect(call[1]).toBe(keyToId(hexKey(REGION)))
     expect(call[2]).toBeCloseTo(-0.5)
     expect(onCommit).toHaveBeenCalledTimes(1)
     expect(onToast).not.toHaveBeenCalled()
@@ -325,7 +354,7 @@ describe('OffsetTool — Path B, click ON a boundary edge (edge fallback)', () =
     const { tool } = makeTool(scene)
     tool.onPointerDown(null, rayAt(5.5, 5))
     expect(tool.capturingInput()).toBe(false)
-    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+    expect(offsetCalls(scene)).toHaveLength(0)
   })
 
   it('a stale edge (endpoints gone) leaves the tool idle instead of throwing', () => {
@@ -352,7 +381,7 @@ describe('OffsetTool — Path B, click ON a boundary edge (edge fallback)', () =
 })
 
 describe('OffsetTool — Path A (object face)', () => {
-  it('click, drag, click commits offset_face with the picked handles', () => {
+  it('click, drag, click commits ONE draft on the face\'s plane context', () => {
     const facePick = makeFacePick(3n, 4n)
     const scene = makeWasmScene({ facePick })
     const { tool, onFaceImprint, onToast } = makeTool(scene)
@@ -361,19 +390,33 @@ describe('OffsetTool — Path A (object face)', () => {
     tool.onPointerMove(null, rayAt(1, 0.25))
     tool.onPointerDown(null, rayAt(1, 0.25))
 
-    expect(scene.offset_face).toHaveBeenCalledTimes(1)
-    const call = (scene.offset_face as ReturnType<typeof vi.fn>).mock.calls[0]
-    expect(call[0]).toBe(3n)
-    expect(call[1]).toBe(4n)
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
+    expect(beganCtxs(scene)).toEqual([CTX_FACE])
+    expect(call[1]).toBe(keyToId(hexKey(REGION)))
     expect(call[2]).toBeCloseTo(-0.25)
     expect(onFaceImprint).toHaveBeenCalledWith(3n)
     expect(onToast).not.toHaveBeenCalled()
   })
 
+  it('a face of an object inside a group (not entered) shows the ineligible-face hint, never a silent no-op', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick, nodeParent: { kind: 1, id: 9n } })
+    const { tool, onToast, onFaceImprint } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 1))
+
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/inside a group/i)
+    expect(tool.capturingInput()).toBe(false)
+    expect(beganCtxs(scene)).toEqual([])
+    expect(onFaceImprint).not.toHaveBeenCalled()
+  })
+
   it('surfaces a kernel refusal as a toast, back at idle', () => {
     const facePick = makeFacePick(3n, 4n)
     const scene = makeWasmScene({ facePick })
-    ;(scene.offset_face as ReturnType<typeof vi.fn>).mockImplementation(() => {
+    ;(scene.draft_end as ReturnType<typeof vi.fn>).mockImplementation(() => {
       throw new Error('OffsetCollapsed: the offset distance collapses the boundary')
     })
     const { tool, onToast, onFaceImprint } = makeTool(scene)
@@ -386,6 +429,63 @@ describe('OffsetTool — Path A (object face)', () => {
     expect(onToast.mock.calls[0][1]).toBe('OffsetCollapsed')
     expect(onFaceImprint).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
+    // The refused draft was cancelled, leaving the document untouched.
+    expect((scene as unknown as { draftLog: DraftLog }).draftLog.cancelled).toBe(1)
+  })
+
+  it('an OUTWARD offset past the face edge is accepted (the kernel splits it into face and free parts)', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick, ctxObjects: [3n] })
+    const { tool, onToast, onFaceImprint, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, -0.5))
+    tool.onPointerDown(null, rayAt(1, -0.5))
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(beganCtxs(scene)).toEqual([CTX_FACE])
+    expect(offsetCalls(scene)[0][2]).toBeCloseTo(0.5)
+    expect(onFaceImprint).toHaveBeenCalledWith(3n)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('a report naming objects AND sketches refreshes both (a straddling offset)', () => {
+    const facePick = makeFacePick(3n, 4n)
+    const scene = makeWasmScene({ facePick, ctxObjects: [3n] })
+    ;(scene.draft_end as ReturnType<typeof vi.fn>).mockReturnValue(
+      JSON.stringify({ objects: [3], sketches: [9], kept_as_sketch: [] }),
+    )
+    const { tool, onFaceImprint, onCommit } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, -0.5))
+    tool.onPointerDown(null, rayAt(1, -0.5))
+
+    expect(onFaceImprint).toHaveBeenCalledWith(3n)
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+
+  it('a click on the boundary line of a drawn shape on the face picks that shape, not the face around it', () => {
+    const inner: P[] = [[0.5, 0.5, 1], [1.5, 0.5, 1], [1.5, 1.5, 1], [0.5, 1.5, 1]]
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: {
+        [CTX_FACE]: {
+          units: [ringUnit(2, 31, inner, { kind: 'topology', object: 3 })],
+          regions: [
+            { key: 8, outer: inner, over: { object: 3, face: 5 } },
+            { key: 9, outer: square(1), holes: [inner], over: { object: 3, face: 4 } },
+          ],
+        },
+      },
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(null, rayAt(1, 0.5)) // ON the inner square's bottom edge
+    tool.onPointerMove(null, rayAt(1, 0.25))
+    tool.onPointerDown(null, rayAt(1, 0.25))
+
+    expect(offsetCalls(scene)[0][1]).toBe(keyToId(hexKey(8)))
   })
 })
 
@@ -402,7 +502,7 @@ describe('OffsetTool — typed distance (VCB)', () => {
     }
     tool.onKey(makeKeyEvent('Enter'))
 
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(-0.75)
   })
 
@@ -417,7 +517,7 @@ describe('OffsetTool — typed distance (VCB)', () => {
     }
     tool.onKey(makeKeyEvent('Enter'))
 
-    const call = (scene.offset_face as ReturnType<typeof vi.fn>).mock.calls[0]
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(-0.2)
   })
 
@@ -439,7 +539,7 @@ describe('OffsetTool — typed distance (VCB)', () => {
     }
     tool.onKey(makeKeyEvent('Enter'))
 
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(-0.3)
   })
 
@@ -461,7 +561,7 @@ describe('OffsetTool — typed distance (VCB)', () => {
     }
     tool.onKey(makeKeyEvent('Enter'))
 
-    const call = (scene.offset_face as ReturnType<typeof vi.fn>).mock.calls[0]
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(0.4)
   })
 })
@@ -479,7 +579,7 @@ describe('OffsetTool — cancel and status hint', () => {
     expect(tool.capturingInput()).toBe(false)
     expect(preview.children).toHaveLength(0)
     expect(onMeasurement).toHaveBeenLastCalledWith('')
-    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+    expect(offsetCalls(scene)).toHaveLength(0)
   })
 
   it('guidance follows the stage', () => {
@@ -504,7 +604,7 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
   const INSTANCE = 42n
   const COMPONENT = 5n
 
-  it('a component member face is refused with a clear hint (no offset_face wasm surface for it)', () => {
+  it('a component member face is refused with a clear hint', () => {
     const facePick = makeFacePick(3n, 4n, INSTANCE)
     const scene = makeWasmScene({ facePick })
     const { tool, onToast } = makeTool(scene)
@@ -513,7 +613,7 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
     tool.onPointerDown(null, rayAt(1, 1))
 
     expect(tool.capturingInput()).toBe(false)
-    expect(scene.offset_face_preview).not.toHaveBeenCalled()
+    expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(String(onToast.mock.calls[0][0])).toContain('sketch region')
   })
@@ -541,8 +641,9 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
     expect(call[0]).toBe(INSTANCE)
     expect(scene.pick_sketch_region).not.toHaveBeenCalled()
 
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    expect((scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(99n)
+    expect(offsetCalls(scene)).toHaveLength(1)
+    // The draft opened on the instance-tagged context of the def-owned sketch's plane.
+    expect(beganCtxs(scene)).toEqual([CTX_GROUND_IN_42])
   })
 
   it('a miss from pick_sketch_region_in_instance (no def-owned region under the cursor) offsets nothing', () => {
@@ -554,7 +655,7 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
 
     expect(scene.pick_sketch_region_in_instance).toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
-    expect(scene.sketch_offset_region).not.toHaveBeenCalled()
+    expect(offsetCalls(scene)).toHaveLength(0)
   })
 
   // The boundary/normal this drag measures against (`region_boundary`/
@@ -564,9 +665,16 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
   // silently measures against the wrong (unposed) boundary location.
   it('a def-owned region drag is posed into WORLD space under a translated instance', () => {
     const regionPickInInstance = makeRegionPick(99n, 7n)
+    const shifted = square(0).map(([x, y, z]): P => [x + 10, y, z])
     const scene = makeWasmScene({
       regionPickInInstance,
       instancePose: new Float64Array([1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0]), // +10 in X
+      listings: {
+        [CTX_GROUND_IN_42]: {
+          units: [ringUnit(1, 21, shifted)],
+          regions: [{ key: REGION, outer: shifted, extrude: { sketch: 99, region: 7 } }],
+        },
+      },
     })
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
@@ -579,8 +687,8 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
     tool.onPointerMove(null, rayAt(11, 0.5))
     tool.onPointerDown(null, rayAt(11, 0.5))
 
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(-0.5)
   })
 
@@ -607,8 +715,8 @@ describe('OffsetTool — instance editing context (component-edit-parity.md phas
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
 
-    expect(scene.sketch_offset_region).toHaveBeenCalledTimes(1)
-    const call = (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(offsetCalls(scene)).toHaveLength(1)
+    const call = offsetCalls(scene)[0]
     expect(call[2]).toBeCloseTo(-0.5)
   })
 })
@@ -627,7 +735,7 @@ describe('OffsetTool — top-level click on an instance face (component-edit-par
     tool.onPointerDown(null, rayAt(1, 1))
 
     expect(tool.capturingInput()).toBe(false)
-    expect(scene.offset_face_preview).not.toHaveBeenCalled()
+    expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(String(onToast.mock.calls[0][0])).toContain('sketch region')
   })
@@ -646,7 +754,7 @@ describe('OffsetTool — setEditContext aborts an armed gesture on a genuine cha
 
     expect(tool.capturingInput()).toBe(false)
     tool.onPointerDown(null, rayAt(1, 0.5))
-    expect(scene.sketch_offset_region).not.toHaveBeenCalled() // the cancelled gesture never commits
+    expect(offsetCalls(scene)).toHaveLength(0) // the cancelled gesture never commits
   })
 
   it('re-pushing the SAME context is a no-op — an armed drag survives it untouched', () => {
@@ -670,23 +778,18 @@ describe('OffsetTool — retype the distance after the commit', () => {
   function makeRetypeScene(opts: Parameters<typeof makeWasmScene>[0] = {}) {
     const base = makeWasmScene(opts) as unknown as Record<string, unknown>
     let gen = 1n
-    let changed = 0
-    const baseOffset = base.sketch_offset_region as (...args: unknown[]) => unknown
-    const baseFace = base.offset_face as (...args: unknown[]) => unknown
+    const baseEnd = base.draft_end as (d: bigint) => string
     const scene = {
       ...base,
       history_generation: vi.fn(() => gen),
-      sketch_begin_gesture: vi.fn(() => { changed = 0 }),
-      sketch_offset_region: vi.fn((...args: unknown[]) => { const r = baseOffset(...args); changed += 1; return r }),
-      sketch_end_gesture: vi.fn(() => { if (changed > 0) gen += 1n }),
-      offset_face: vi.fn((...args: unknown[]) => { const r = baseFace(...args); gen += 1n; return r }),
+      draft_end: vi.fn((d: bigint) => { const r = baseEnd(d); gen += 1n; return r }),
       scene_undo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
       scene_redo: vi.fn(() => { gen += 1n; return { free: vi.fn() } }),
     }
     return scene as unknown as WasmScene
   }
   const typeIn = (tool: OffsetTool, text: string) => { for (const ch of text) tool.onKey(makeKeyEvent(ch)); tool.onKey(makeKeyEvent('Enter')) }
-  const regionDistances = (scene: WasmScene) => (scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[2] as number)
+  const regionDistances = (scene: WasmScene) => offsetCalls(scene).map((c) => c[2])
 
   it('a profile offset redone at a typed distance keeps its inward direction; a negative value flips it', () => {
     const scene = makeRetypeScene({ regionPick: makeRegionPick(9n, 7n) })
@@ -701,22 +804,22 @@ describe('OffsetTool — retype the distance after the commit', () => {
     typeIn(tool, '0.2')
     expect(scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(regionDistances(scene)[1]).toBeCloseTo(-0.2, 9)
-    expect((scene.sketch_offset_region as ReturnType<typeof vi.fn>).mock.calls[1].slice(0, 2)).toEqual([9n, 7n])
+    expect(offsetCalls(scene)[1][1]).toBe(keyToId(hexKey(REGION)))
     typeIn(tool, '-0.2')
     expect(regionDistances(scene)[2]).toBeCloseTo(0.2, 9)
     expect(onCommit).toHaveBeenCalledTimes(3)
   })
 
-  it('a face offset retypes through offset_face', () => {
+  it('a face offset retypes through a fresh draft on the face context', () => {
     const scene = makeRetypeScene({ facePick: makeFacePick(3n, 4n) })
     const { tool, onFaceImprint } = makeTool(scene)
     tool.onPointerDown(null, rayAt(1, 1))
     tool.onPointerMove(null, rayAt(1, 0.5))
     tool.onPointerDown(null, rayAt(1, 0.5))
-    expect(scene.offset_face).toHaveBeenCalledTimes(1)
+    expect(offsetCalls(scene)).toHaveLength(1)
     typeIn(tool, '0.3')
     expect(scene.scene_undo).toHaveBeenCalledTimes(1)
-    const calls = (scene.offset_face as ReturnType<typeof vi.fn>).mock.calls
+    const calls = offsetCalls(scene)
     expect(calls.length).toBe(2)
     expect(Math.abs(calls[1][2] as number)).toBeCloseTo(0.3, 9)
     expect(Math.sign(calls[1][2] as number)).toBe(Math.sign(calls[0][2] as number))
@@ -734,5 +837,52 @@ describe('OffsetTool — retype the distance after the commit', () => {
     expect(onToast).toHaveBeenCalledWith('Move more before committing the offset')
     tool.onPointerDown(null, rayAt(1, 1)) // picks again → window closed
     expect(tool.capturingInput()).toBe(true)
+  })
+})
+
+
+describe('OffsetTool — a clicked distance is exactly the displayed distance', () => {
+  const prev = getLengthUnit()
+  function drag(snap: Snap | null, y: number) {
+    const scene = makeWasmScene({ regionPick: makeRegionPick(9n, 7n) })
+    const { tool, onMeasurement } = makeTool(scene)
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(snap, rayAt(1, y))
+    tool.onPointerDown(snap, rayAt(1, y))
+    return {
+      d: offsetCalls(scene)[0][2] as number,
+      onMeasurement,
+    }
+  }
+
+  it('a free click outside the boundary commits the shown +12.3 mm', () => {
+    setLengthUnit('mm')
+    try {
+      const r = drag(null, -0.0123456)
+      expect(r.onMeasurement).toHaveBeenCalledWith('12.3 mm')
+      expect(r.d).toBe(12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a free click inside commits the shown negative distance', () => {
+    setLengthUnit('mm')
+    try {
+      expect(drag(makeSnap({ kind: 'on-face', x: 1, y: 0.0123456 }), 0.0123456).d).toBe(-12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a hard-snapped (endpoint) click keeps the exact projected distance', () => {
+    setLengthUnit('mm')
+    try {
+      const r = drag(makeSnap({ kind: 'endpoint', x: 1, y: -0.0123456, z: 0 }), -0.0123456)
+      expect(r.d).toBeCloseTo(0.0123456, 15)
+      expect(r.d).not.toBe(12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
   })
 })

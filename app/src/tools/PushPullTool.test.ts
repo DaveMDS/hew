@@ -9,8 +9,11 @@ import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { PushPullTool } from './PushPullTool'
 import type { Snap } from './types'
+import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { ctxOfPlane } from './planeUnits'
+import { planeUnitsMock, type MockListing } from './planeUnitsMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -62,11 +65,15 @@ function makeWasmScene(opts: {
    *  the active component (component-edit-parity.md phase A2). */
   memberSketches?: bigint[]
   componentThroughResults?: bigint[]
+  /** Plane listings by context (the face / sketch plane's `plane_units_json`).
+   *  Absent: the scene lists nothing and the struck face stands. */
+  listings?: Record<string, MockListing>
 } = {}): WasmScene {
   const faceNormal = opts.faceNormal ?? [0, 0, 1]
   const facePlane = opts.facePlane ?? [0, 0, 0, ...faceNormal]
   const sketchPlane = 'sketchPlane' in opts ? opts.sketchPlane : [0, 0, 0, 0, 0, 1]
   return {
+    ...(opts.listings !== undefined ? planeUnitsMock(opts.listings) : {}),
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
     // `pick_sketch_region` only ever walks WORLD-tree sketches — Path B calls
@@ -172,7 +179,7 @@ describe('PushPullTool — Path A (object face)', () => {
     const scene = makeWasmScene({
       facePick: makeFacePick(3n, 4n),
       parents: new Map([[3n, 9n]]),          // grouped → ineligible
-      regionPick: makeRegionPick(50n, 51n),  // live region behind it
+      regionPick: makeRegionPick(50n, 51n, 2),  // live region behind it (farther along the ray)
     })
     const { tool, onToast } = makeTool(scene)
 
@@ -192,7 +199,7 @@ describe('PushPullTool — Path A (object face)', () => {
   it('an ineligible (instanced) face over a region consumes the click with the component hint', () => {
     const scene = makeWasmScene({
       facePick: makeFacePick(3n, 4n, 12n),
-      regionPick: makeRegionPick(50n, 51n),
+      regionPick: makeRegionPick(50n, 51n, 2), // under it, farther along the ray
     })
     const { tool, onToast } = makeTool(scene)
 
@@ -201,6 +208,19 @@ describe('PushPullTool — Path A (object face)', () => {
     expect(scene.extrude_region).not.toHaveBeenCalled()
     expect(tool.capturingInput()).toBe(false)
     expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+  })
+
+  it('free drawing lying ON an ineligible face (drawn on a component from outside) takes the click and extrudes', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n, 12n),
+      regionPick: makeRegionPick(50n, 51n), // same depth: the drawing sits on the face
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), RAY)
+
+    expect(tool.capturingInput()).toBe(true)
+    expect(onToast).not.toHaveBeenCalled()
   })
 
   it('inside a GROUP context the refusal is the scoped hint, never the group default', () => {
@@ -653,12 +673,16 @@ describe('PushPullTool — in-instance ghost preview matches the plain-object sw
     // click misses outright — "normal === null ... treated exactly like a
     // miss"), then gone by the time the ghost preview asks for it again —
     // the genuine "instance vanished mid-drag" case.
-    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValueOnce(TRANSLATED_POSE).mockReturnValue(undefined)
+    // (However many lookups the click itself makes — normal, plane context —
+    // the pose is live for ALL of them and gone only after the click.)
+    let poseLive = true
+    ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockImplementation(() => (poseLive ? TRANSLATED_POSE : undefined))
     const { tool, preview } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
     tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
 
     tool.onPointerDown(makeSnap({ x: 5, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    poseLive = false
     expect(tool.capturingInput()).toBe(true)
     tool.onPointerMove(makeSnap({ x: 5, y: 0, z: 1, kind: 'endpoint' }), RAY)
 
@@ -956,7 +980,7 @@ describe('PushPullTool — snapConstraint (design v1.1 Lane E "Push/Pull face-fi
     const scene = makeWasmScene({
       facePick: makeFacePick(3n, 4n),
       parents: new Map([[3n, 9n]]), // grouped → ineligible
-      regionPick: makeRegionPick(50n, 51n), // a real region along the SAME ray
+      regionPick: makeRegionPick(50n, 51n, 2), // a real region along the SAME ray, behind the face
       sketchPlane: [0, 0, 7, 0, 0, 1], // a distinctive plane — must never surface
     })
     const { tool } = makeTool(scene)
@@ -1248,5 +1272,165 @@ describe('PushPullTool — a drawn region in front of an object face wins the pi
     const { tool } = makeTool(scene)
     const longRay: Ray = { origin: [0, 0, 5], direction: [0, 0, -2] }
     expect(tool.snapConstraint?.(longRay)?.constraintPlane).toEqual({ point: [1, 2, 3], normal: [0, 0, 1] })
+  })
+})
+
+
+describe('PushPullTool — a clicked depth is exactly the displayed depth', () => {
+  const prev = getLengthUnit()
+  const pushPullDistance = (scene: WasmScene): number =>
+    (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0][2] as number
+  // A horizontal ray crossing the push axis at z = 12.3456 mm (shows "12.3 mm").
+  const SIDE: Ray = { origin: [1, 0, 0.0123456], direction: [-1, 0, 0] }
+
+  function pull(kind: string, depthSnap: number, ray: Ray = SIDE) {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool, onMeasurement } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'on-face' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: depthSnap, kind }), ray)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: depthSnap, kind }), ray)
+    return { d: pushPullDistance(scene), onMeasurement }
+  }
+
+  it('a free click commits the shown distance', () => {
+    setLengthUnit('mm')
+    try {
+      const r = pull('on-face', 0.0123456)
+      expect(r.onMeasurement).toHaveBeenCalledWith('12.3 mm')
+      expect(r.d).toBe(12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a free inward click commits the shown negative distance (typed sign rules)', () => {
+    setLengthUnit('mm')
+    try {
+      const r = pull('on-face', -0.0123456, { origin: [1, 0, -0.0123456], direction: [-1, 0, 0] })
+      expect(r.d).toBe(-12.3 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a hard-snap depth (endpoint) stays exact', () => {
+    setLengthUnit('mm')
+    try {
+      expect(pull('endpoint', 0.0123456).d).toBeCloseTo(0.0123456, 15)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+})
+
+
+// The plane is the drafting context (unified drafting §4.6): the region under
+// the cursor resolves through the plane's listing. A region over the struck
+// object's face pushes that face; a free region extrudes as a profile; a
+// region over the object that no face can hold (a pinch of an owned sketch)
+// refuses with the RegionNotPushable copy.
+describe('PushPullTool — routing through the plane listing', () => {
+  /** The context of the default face plane (origin, +Z). */
+  const CTX = ctxOfPlane([0, 0, 0], [0, 0, 1]) as string
+  const sq = (x0: number, y0: number, x1: number, y1: number): [number, number, number][] => [[x0, y0, 0], [x1, y0, 0], [x1, y1, 0], [x0, y1, 0]]
+  const faceRay = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+
+  it('a region drawn on the face pushes its own sub-face, whichever face the ray struck', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: { [CTX]: { regions: [{ key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 11 } }] } },
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'endpoint' }), faceRay(1, 1))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), faceRay(1, 1))
+
+    const call = (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(3n)
+    expect(call[1]).toBe(11n)
+    expect(call[2]).toBeCloseTo(2)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a bare face (its region lists the struck face) pushes that face as before', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: { [CTX]: { regions: [{ key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 4 } }] } },
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'endpoint' }), faceRay(1, 1))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), faceRay(1, 1))
+
+    expect((scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0].slice(0, 2)).toEqual([3n, 4n])
+  })
+
+  it.each([
+    ['pinch', 'RegionPinched', 'single point'],
+    ['sliver', 'RegionSliver', 'too thin'],
+    ['other', 'RegionNotPushable', 'part of it is drawn'],
+    [undefined, 'RegionNotPushable', 'part of it is drawn'],
+  ])('a face-less region over the object (why=%s) toasts %s', (why, code, text) => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: {
+        [CTX]: {
+          regions: [
+            { key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 4 }, holes: [sq(0.5, 0.5, 1.5, 1.5)] },
+            { key: 2, outer: sq(0.5, 0.5, 1.5, 1.5), over: { object: 3, face: null, ...(why ? { why } : {}) } },
+          ],
+        },
+      },
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'endpoint' }), faceRay(1, 1))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe(code)
+    expect(String(onToast.mock.calls[0][0])).toContain(text)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+  })
+
+  it('a pinched region (over the object, no face) toasts RegionNotPushable and starts nothing', () => {
+    const scene = makeWasmScene({
+      facePick: makeFacePick(3n, 4n),
+      listings: {
+        [CTX]: {
+          regions: [
+            { key: 1, outer: sq(0, 0, 2, 2), over: { object: 3, face: 4 }, holes: [sq(0.5, 0.5, 1.5, 1.5)] },
+            { key: 2, outer: sq(0.5, 0.5, 1.5, 1.5), over: { object: 3, face: null } },
+          ],
+        },
+      },
+    })
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'endpoint' }), faceRay(1, 1))
+
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('RegionNotPushable')
+    expect(String(onToast.mock.calls[0][0])).toContain("can't be pushed or pulled")
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+
+    // The face around the pinch still pushes as the face.
+    tool.onPointerDown(makeSnap({ x: 0.25, y: 0.25, z: 0, kind: 'endpoint' }), faceRay(0.25, 0.25))
+    expect(tool.capturingInput()).toBe(true)
+  })
+
+  it('a free region (listing names its sketch and region) extrudes as a profile', () => {
+    const scene = makeWasmScene({
+      regionPick: makeRegionPick(9n, 7n),
+      listings: { [CTX]: { regions: [{ key: 1, outer: sq(0, 0, 2, 2), extrude: { sketch: 9, region: 7 } }] } },
+    })
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0, kind: 'endpoint' }), faceRay(1, 1))
+    tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 2, kind: 'endpoint' }), faceRay(1, 1))
+
+    const call = (scene.extrude_region as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(9n)
+    expect(call[1]).toBe(7n)
+    expect(call[2]).toBeCloseTo(2)
+    expect(scene.push_pull).not.toHaveBeenCalled()
   })
 })

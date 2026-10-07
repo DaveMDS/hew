@@ -195,6 +195,7 @@ import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, arrowToAxis, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, instanceOf, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
@@ -320,6 +321,10 @@ export type OnGesturePoint = (points: readonly [number, number, number][]) => vo
  *  endpoints lies outside it — points the user at what actually resizes. */
 const SESSION_SCOPE_RESCALE_DECLINE_MESSAGE =
   "That measurement reaches outside the open group or component — measure its own geometry to resize it."
+
+/** Toast for a typed offset with no side to put the guide on yet — the cursor
+ *  is still on the edge, so the distance has no direction. */
+const NO_OFFSET_SIDE_MESSAGE = 'Move the cursor to the side the guide should go, then type the distance.'
 
 /** Half-length of the previewed parallel-guide line (meters). */
 const GUIDE_HALF_LENGTH = 50
@@ -1039,6 +1044,11 @@ export class TapeMeasureTool implements Tool {
 
   // ── Tool interface ──────────────────────────────────────────────────────
 
+  /** Whether the cursor that placed the parallel guide's current offset was
+   *  a FREE pick (displayedValue.ts) — false until the first move, so a
+   *  click straight after the edge tap keeps its exact (zero) offset. */
+  private _parallelCursorFree = false
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     if (snap === null) return
 
@@ -1046,6 +1056,7 @@ export class TapeMeasureTool implements Tool {
       this.stage.lastRay = ray
       // `_updateParallelOrigin` now owns `_snapProjected` for this stage (the
       // offset-plane-projection fix) — no unconditional reset here.
+      this._parallelCursorFree = isFreePick(snap)
       this._updateParallelOrigin([snap.x, snap.y, snap.z])
       // WP-7 item 2: retry a Shift latch that was degenerate at press time
       // (cursor still on the edge) now that the cursor has moved.
@@ -1096,6 +1107,7 @@ export class TapeMeasureTool implements Tool {
         // the top of a new gesture.
         this.offsetLock = null
         this._offsetAxisRejectedHint = null
+        this._parallelCursorFree = false
         this.stage = {
           kind: 'parallel',
           edgePoint,
@@ -1129,6 +1141,18 @@ export class TapeMeasureTool implements Tool {
     }
 
     if (this.stage.kind === 'parallel') {
+      // A guide placed by a free cursor lands at the DISPLAYED offset, as if
+      // typed (side from the cursor, magnitude from the readout). A guide
+      // placed from a hard snap keeps its exact origin.
+      if (this._parallelCursorFree) {
+        const rel = subV3(this.stage.origin, this.stage.edgePoint)
+        const relLen = Math.sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2])
+        const shown = displayedLength(relLen)
+        if (relLen >= 1e-9 && shown > 0) {
+          this._commitFromTyped(shown)
+          return
+        }
+      }
       this._commitParallelGuide(this.stage.origin, this.stage.edgeDir)
       return
     }
@@ -1141,8 +1165,20 @@ export class TapeMeasureTool implements Tool {
       // it's the SAME method `onPointerMove`'s preview just called, so a
       // click always commits to exactly the point the preview was showing.
       const { p0, p0OnGeometry, p0Attribution } = this.stage
-      const p1 = this._measurePoint(snap, ray)
+      let p1 = this._measurePoint(snap, ray)
       const p1OnGeometry = snapOnGeometry(snap)
+      // A free-space endpoint (where a guide is dropped) lands at the
+      // DISPLAYED distance along p0 -> p1, exactly as a typed distance does
+      // (`_commitFromTyped`). A point on real geometry is a measurement of
+      // that geometry and stays exact.
+      if (!p1OnGeometry && isFreePick(snap, p0)) {
+        const rel = subV3(p1, p0)
+        const relLen = Math.sqrt(rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2])
+        const shown = displayedLength(relLen)
+        if (relLen >= 1e-9 && shown > 1e-6) {
+          p1 = pointAlong(p0, [rel[0] / relLen, rel[1] / relLen, rel[2] / relLen], shown)
+        }
+      }
       const p1Attribution = attributionOf(snap)
       // A real second click (not a typed distance — `_commitFromTyped` never
       // calls this) — remember it for the retroactive-rescale recall
@@ -1960,6 +1996,7 @@ export class TapeMeasureTool implements Tool {
           // the same degenerate input. Nothing committed — freeze would
           // show a misleading stale typed echo, so clear instead.
           this._resetToIdle('clear')
+          this.onToast(NO_OFFSET_SIDE_MESSAGE)
           return
         }
         const sign = dotV3(rel, offsetPlane.u) < 0 ? -1 : 1
@@ -1977,6 +2014,7 @@ export class TapeMeasureTool implements Tool {
           // No offset direction yet (cursor sitting on the edge) — nothing
           // committed, so clear rather than freeze.
           this._resetToIdle('clear')
+          this.onToast(NO_OFFSET_SIDE_MESSAGE)
           return
         }
         dir = [rel[0] / relLen, rel[1] / relLen, rel[2] / relLen]

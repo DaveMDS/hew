@@ -17,6 +17,59 @@ import { TagsPanel } from './TagsPanel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { getLengthUnit, setLengthUnit } from '../settings/units'
+import type { NodeRef } from './treeModel'
+
+// ---------------------------------------------------------------------------
+// Plane-listing helpers — a drawn thing is a draft ref into a plane's
+// `plane_units_json` listing (planeUnits.ts), not a sketch handle.
+// ---------------------------------------------------------------------------
+
+const hexKey = (n: number): string => n.toString(16).padStart(16, '0')
+const GROUND_CTX = '{"plane":[0,0,0,0,0,1]}'
+const OTHER_CTX = '{"plane":[0,0,1,0,0,1]}'
+const CIRCLE_CURVE = 0xc9
+const draftOf = (kind: NodeRef['kind'], ctx: string, key: number): NodeRef => ({ kind, id: BigInt(key), ctx, key: hexKey(key) })
+type StoreJson = { kind: 'free'; sketch: number } | { kind: 'topology'; object: number }
+
+/** `n` facet edges (keys 100..) of a circle, or plain line edges when
+ *  `circle` is false, in one unit (key 50) of a plane. */
+function planeEdgesJson(n: number, circle: boolean, z: number, store: StoreJson): { units: unknown[]; regions: unknown[] } {
+  const edges = Array.from({ length: n }, (_v, i) => {
+    const t0 = (2 * Math.PI * i) / n
+    const t1 = (2 * Math.PI * (i + 1)) / n
+    return {
+      key: hexKey(100 + i),
+      a: [Math.cos(t0), Math.sin(t0), z],
+      b: [Math.cos(t1), Math.sin(t1), z],
+      store,
+      curve: circle ? { center: [0, 0, z], radius: 1 } : null,
+    }
+  })
+  // A circle's facets form one curve RUN (the piece a click selects); a plain
+  // line polygon has none.
+  const curves = circle
+    ? [{ key: hexKey(0xd1), curve_key: hexKey(CIRCLE_CURVE), kind: 'circle', center: [0, 0, z], radius: 1, edges: edges.map((e) => e.key) }]
+    : []
+  return { units: [{ key: hexKey(50), edges, curves }], regions: [] }
+}
+/** One free-sketch shape (unit `key`) of four plain lines on the ground. */
+function freeShapeListing(key: number): { units: unknown[]; regions: unknown[] } {
+  const l = planeEdgesJson(4, false, 0, { kind: 'free', sketch: 5 })
+  ;(l.units[0] as { key: string }).key = hexKey(key)
+  return l
+}
+/** A kernel pick that answers an edge's midpoint with that edge, its unit and
+ *  (for a circle facet) the circle's curve key. */
+function pickByMidpoint(listing: { units: { key: string; edges: { key: string; a: number[]; b: number[]; curve: unknown }[] }[] }) {
+  return (_ctx: string, ray: Float64Array): string => {
+    for (const u of listing.units) for (const e of u.edges) {
+      if (Math.abs((e.a[0] + e.b[0]) / 2 - ray[0]) < 1e-9 && Math.abs((e.a[1] + e.b[1]) / 2 - ray[1]) < 1e-9) {
+        return JSON.stringify({ edge: e.key, unit: u.key, curve: e.curve ? hexKey(CIRCLE_CURVE) : null })
+      }
+    }
+    return 'null'
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Mock Scene factory — provides only the methods the panels actually call.
@@ -36,9 +89,11 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     sketch_curve_geom: () => undefined as Float64Array | undefined,
     sketch_curve_edges: () => new BigUint64Array(),
     sketch_curve_chain: () => new BigUint64Array(),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_refacet_curve: vi.fn(),
+    sketch_plane: () => undefined as Float64Array | undefined,
+    draft_begin_ctx: vi.fn(() => 7n),
+    draft_refacet_curve: vi.fn(),
+    draft_end: vi.fn(() => '{"objects":[],"sketches":[],"kept_as_sketch":[]}'),
+    draft_cancel: vi.fn(),
     top_level_nodes: () => [],
     object_name: (_id: bigint) => undefined as string | undefined,
     group_name: (_id: bigint) => undefined as string | undefined,
@@ -813,6 +868,25 @@ describe('ObjectInfoPanel', () => {
     expect(onGeometryChanged).not.toHaveBeenCalled()
   })
 
+  it('shows "Shape" + a "drawing" subtitle for a shape drawn only in a free sketch off the ground', () => {
+    const listing = planeEdgesJson(4, false, 2, { kind: 'free', sketch: 20 })
+    const ctx = '{"plane":[0,0,2,0,0,1]}'
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({ plane_units_json: () => JSON.stringify(listing) })}
+        docRev={0}
+        selectedIds={[draftOf('draft-island', ctx, 50)]}
+        onNameChanged={vi.fn()}
+        onGeometryChanged={vi.fn()}
+        onTagsChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Shape')).toBeInTheDocument()
+    expect(screen.getByTestId('object-info-store')).toHaveTextContent('drawing')
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  })
+
   it('shows "Sketch" + its positional label for a sketch selection, with no help boilerplate', () => {
     const scene = makeScene({
       sketch_ids: () => new BigUint64Array([10n, 20n, 30n]),
@@ -821,7 +895,7 @@ describe('ObjectInfoPanel', () => {
       <ObjectInfoPanel
         scene={scene}
         docRev={0}
-        selectedIds={[{ kind: 'sketch-island', id: 120n, sketch: 20n }]}
+        selectedIds={[{ kind: 'sketch', id: 20n }]}
         onNameChanged={vi.fn()}
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
@@ -832,6 +906,7 @@ describe('ObjectInfoPanel', () => {
     // Island 120n of sketch 20n is row index 1 in the outliner's flattened
     // island list → "Sketch 2" (1-based, matching the tree's label).
     expect(screen.getByText('Sketch 2')).toBeInTheDocument()
+    // (A selected drawn SHAPE is labelled "Shape" — see the draft-ref tests.)
     // The old explanatory boilerplate is gone — just the real fields.
     expect(screen.queryByText(/naming and tags are not yet supported/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/a drawn line/i)).not.toBeInTheDocument()
@@ -886,7 +961,7 @@ describe('ObjectInfoPanel', () => {
           sketch_ids: () => new BigUint64Array([10n]),
         })}
         docRev={0}
-        selectedIds={[{ kind: 'sketch-island', id: 110n, sketch: 10n }]}
+        selectedIds={[{ kind: 'sketch', id: 10n }]}
         onNameChanged={vi.fn()}
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
@@ -954,45 +1029,33 @@ describe('ObjectInfoPanel', () => {
 
   // -------------------------------------------------------------------------
   // Segments — SketchUp's Entity Info "Segments", for a drawn circle only.
-  // Editing it re-facets the existing circle in place.
+  // Editing it re-facets the existing circle in place, as one draft on the
+  // circle's plane.
   // -------------------------------------------------------------------------
 
-  /** A scene whose sketch 5 holds one curve chain (id 9) reachable from
-   *  edge 3. `geom` present = a CIRCLE (a polygon answers `undefined`). */
+  /** A scene whose ground plane holds one unit: a circle of `facets` edges
+   *  when `circle` is true (a plain closed line polygon otherwise — its sides
+   *  are its geometry, not facets of a circle). The same listing answers a
+   *  second plane (OTHER_CTX) so two circles can share a curve key. */
   function curveScene(opts: {
-    geom?: Float64Array
+    circle?: boolean
     facets?: number
     refacet?: (...args: unknown[]) => unknown
   } = {}) {
-    const n = opts.facets ?? 24
+    const listing = planeEdgesJson(opts.facets ?? 24, opts.circle ?? true, 0, { kind: 'free', sketch: 5 })
     return makeScene({
-      sketch_ids: () => new BigUint64Array([5n]),
-      sketch_island_ids: () => new BigUint64Array([50n]),
-      sketch_edge_island: () => 50n,
-      sketch_edge_curve: () => 9n,
-      sketch_curve_geom: () =>
-        opts.geom === undefined ? undefined : opts.geom,
-      sketch_curve_edges: () =>
-        new BigUint64Array(Array.from({ length: n }, (_, i) => BigInt(100 + i))),
-      sketch_curve_chain: () => new BigUint64Array([200n, 201n]),
-      sketch_refacet_curve:
-        opts.refacet ??
-        vi.fn(() => ({
-          new_edges: () => new BigUint64Array([210n, 211n]),
-          removed_edges: () => new BigUint64Array(),
-          regions_created: () => new BigUint64Array(),
-          regions_removed: () => new BigUint64Array(),
-          free: vi.fn(),
-        })),
+      plane_units_json: () => JSON.stringify(listing),
+      pick_plane_unit: pickByMidpoint(listing as never),
+      ...(opts.refacet ? { draft_refacet_curve: opts.refacet } : {}),
     })
   }
 
-  const CURVE_SELECTION = [{ kind: 'sketch-curve' as const, id: 3n, sketch: 5n }]
+  const CURVE_SELECTION = [draftOf('draft-curve', GROUND_CTX, CIRCLE_CURVE)]
 
   it('shows a drawn circle\u2019s current facet count in the Segments field', () => {
     render(
       <ObjectInfoPanel
-        scene={curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })}
+        scene={curveScene({ circle: true, facets: 24 })}
         docRev={0}
         selectedIds={CURVE_SELECTION}
         onNameChanged={vi.fn()}
@@ -1005,12 +1068,12 @@ describe('ObjectInfoPanel', () => {
     expect(input.value).toBe('24')
   })
 
-  it('shows no Segments field for a polygon chain \u2014 its sides are its geometry, not facets of a circle', () => {
+  it('shows no Segments field for edges with no circle \u2014 a polygon\u2019s sides are its geometry, not facets of a circle', () => {
     render(
       <ObjectInfoPanel
-        scene={curveScene({ geom: undefined, facets: 6 })}
+        scene={curveScene({ circle: false, facets: 6 })}
         docRev={0}
-        selectedIds={CURVE_SELECTION}
+        selectedIds={[draftOf('draft-island', GROUND_CTX, 50)]}
         onNameChanged={vi.fn()}
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
@@ -1018,12 +1081,12 @@ describe('ObjectInfoPanel', () => {
       />,
     )
     expect(screen.queryByLabelText('Segments')).not.toBeInTheDocument()
-    // It is still recognisably a curve chain.
-    expect(screen.getByText('Curve')).toBeInTheDocument()
+    // It is still recognisably a drawn shape.
+    expect(screen.getByText('Shape')).toBeInTheDocument()
   })
 
-  it('re-facets the circle on Enter, in one gesture, and re-points the selection', () => {
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+  it('re-facets the circle on Enter, in one draft, and re-points the selection', () => {
+    const scene = curveScene({ circle: true, facets: 24 })
     const onSelectMany = vi.fn()
     const onDocumentChanged = vi.fn()
     const onGeometryChanged = vi.fn()
@@ -1042,22 +1105,21 @@ describe('ObjectInfoPanel', () => {
     fireEvent.change(input, { target: { value: '48' } })
     fireEvent.blur(input)
 
-    expect(scene.sketch_refacet_curve).toHaveBeenCalledWith(5n, 9n, 48)
-    // Bracketed as exactly one undo step.
-    expect(scene.sketch_begin_gesture).toHaveBeenCalledWith(5n)
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
-    // Every old edge is dead, including the one the selection named, so the
-    // selection is re-pointed at the rebuilt chain's representative.
-    expect(onSelectMany).toHaveBeenCalledWith([
-      { kind: 'sketch-curve', id: 200n, sketch: 5n },
-    ])
+    expect(scene.draft_refacet_curve).toHaveBeenCalledWith(7n, BigInt(CIRCLE_CURVE), 48)
+    // Bracketed as exactly one undo step: one draft on the circle's plane.
+    expect(scene.draft_begin_ctx).toHaveBeenCalledWith(GROUND_CTX, 'Segments')
+    expect(scene.draft_end).toHaveBeenCalledWith(7n)
+    // The curve key hashes only centre and radius, so it survives the
+    // rebuild: the selection is re-pointed at the same curve (was: at the
+    // rebuilt chain's new representative edge).
+    expect(onSelectMany).toHaveBeenCalledWith([draftOf('draft-curve', GROUND_CTX, CIRCLE_CURVE)])
     // A re-facet changes drawn geometry: the repaint path, not bare bookkeeping.
     expect(onGeometryChanged).toHaveBeenCalledTimes(1)
     expect(onDocumentChanged).not.toHaveBeenCalled()
   })
 
   it('Escape reverts the Segments field to the current facet count without committing', () => {
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const scene = curveScene({ circle: true, facets: 24 })
     render(
       <ObjectInfoPanel
         scene={scene}
@@ -1073,7 +1135,7 @@ describe('ObjectInfoPanel', () => {
     fireEvent.change(input, { target: { value: '48' } })
     fireEvent.keyDown(input, { key: 'Escape' })
     expect(input.value).toBe('24')
-    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+    expect(scene.draft_refacet_curve).not.toHaveBeenCalled()
   })
 
   // Mirrors dialogs.test.tsx's expectEscapeStopsPropagationToWindow: reverting
@@ -1081,7 +1143,7 @@ describe('ObjectInfoPanel', () => {
   // or it would ALSO fire the Viewport's own Escape handling (context-pop)
   // directly underneath this field.
   it('stops the Segments field’s Escape from bubbling to window', () => {
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const scene = curveScene({ circle: true, facets: 24 })
     render(
       <ObjectInfoPanel
         scene={scene}
@@ -1105,7 +1167,7 @@ describe('ObjectInfoPanel', () => {
   })
 
   it('refuses a count below the floor visibly, without touching the kernel', () => {
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const scene = curveScene({ circle: true, facets: 24 })
     const onToast = vi.fn()
     render(
       <ObjectInfoPanel
@@ -1123,8 +1185,8 @@ describe('ObjectInfoPanel', () => {
     fireEvent.change(input, { target: { value: '3' } })
     fireEvent.blur(input)
 
-    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
-    expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
+    expect(scene.draft_refacet_curve).not.toHaveBeenCalled()
+    expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onToast.mock.calls[0][1]).toBe('SegmentsBelowFloor')
     // The field springs back to the truth rather than showing a value the
@@ -1134,7 +1196,7 @@ describe('ObjectInfoPanel', () => {
 
   it('surfaces a kernel refusal as a toast and restores the field', () => {
     const scene = curveScene({
-      geom: new Float64Array([0, 0, 0, 1]),
+      circle: true,
       facets: 24,
       refacet: vi.fn(() => {
         throw new Error('CurveNotRefacetable: only a whole circle')
@@ -1160,9 +1222,9 @@ describe('ObjectInfoPanel', () => {
 
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onToast.mock.calls[0][1]).toBe('CurveNotRefacetable')
-    // The gesture is closed even on the refusal path, so the tools are not
-    // left mid-gesture.
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
+    // The draft is closed (cancelled) even on the refusal path, so the tools
+    // are not left mid-gesture.
+    expect(scene.draft_cancel).toHaveBeenCalledWith(7n)
     expect(onSelectMany).not.toHaveBeenCalled()
     expect(input.value).toBe('24')
   })
@@ -1173,7 +1235,7 @@ describe('ObjectInfoPanel', () => {
     // surface `SegmentsAboveCap` like any other refusal rather than leaving
     // the field showing a count the model does not have.
     const scene = curveScene({
-      geom: new Float64Array([0, 0, 0, 1]),
+      circle: true,
       facets: 24,
       refacet: vi.fn(() => {
         throw new Error('SegmentsAboveCap: a circle allows at most 1024 segments')
@@ -1197,24 +1259,24 @@ describe('ObjectInfoPanel', () => {
     fireEvent.blur(input)
 
     // It really was forwarded — the panel does not second-guess the cap.
-    expect(scene.sketch_refacet_curve).toHaveBeenCalledWith(5n, 9n, 99999)
+    expect(scene.draft_refacet_curve).toHaveBeenCalledWith(7n, BigInt(CIRCLE_CURVE), 99999)
     expect(onToast).toHaveBeenCalledTimes(1)
     expect(onToast.mock.calls[0][1]).toBe('SegmentsAboveCap')
-    expect(scene.sketch_end_gesture).toHaveBeenCalledWith(5n)
+    expect(scene.draft_cancel).toHaveBeenCalledWith(7n)
     expect(input.value).toBe('24')
   })
 
-  it('does not carry uncommitted text between two circles that share a curve handle', () => {
-    // Curve handles are slotmap keys scoped PER SKETCH, so the first curve on
-    // one plane and the first on another collide. If the field's identity key
-    // ignored the sketch, typed text would survive the selection change and
+  it('does not carry uncommitted text between two circles that share a curve key', () => {
+    // The same curve key can be reached on two different planes (a circle's
+    // key hashes only its centre and radius). If the field's identity key
+    // ignored the plane, typed text would survive the selection change and
     // the next blur would commit it onto the wrong circle.
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const scene = curveScene({ circle: true, facets: 24 })
     const view = render(
       <ObjectInfoPanel
         scene={scene}
         docRev={0}
-        selectedIds={[{ kind: 'sketch-curve', id: 3n, sketch: 5n }]}
+        selectedIds={[draftOf('draft-curve', GROUND_CTX, CIRCLE_CURVE)]}
         onNameChanged={vi.fn()}
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
@@ -1223,12 +1285,12 @@ describe('ObjectInfoPanel', () => {
     )
     fireEvent.change(screen.getByLabelText('Segments'), { target: { value: '64' } })
 
-    // A DIFFERENT sketch, same curve handle (9n), same facet count (24).
+    // A DIFFERENT plane, same curve key, same facet count (24).
     view.rerender(
       <ObjectInfoPanel
         scene={scene}
         docRev={1}
-        selectedIds={[{ kind: 'sketch-curve', id: 3n, sketch: 6n }]}
+        selectedIds={[draftOf('draft-curve', OTHER_CTX, CIRCLE_CURVE)]}
         onNameChanged={vi.fn()}
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
@@ -1239,11 +1301,11 @@ describe('ObjectInfoPanel', () => {
     const input = screen.getByLabelText('Segments') as HTMLInputElement
     expect(input.value).toBe('24')
     fireEvent.blur(input)
-    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+    expect(scene.draft_refacet_curve).not.toHaveBeenCalled()
   })
 
   it('does nothing at all when the count is unchanged', () => {
-    const scene = curveScene({ geom: new Float64Array([0, 0, 0, 1]), facets: 24 })
+    const scene = curveScene({ circle: true, facets: 24 })
     render(
       <ObjectInfoPanel
         scene={scene}
@@ -1256,8 +1318,8 @@ describe('ObjectInfoPanel', () => {
       />,
     )
     fireEvent.blur(screen.getByLabelText('Segments'))
-    expect(scene.sketch_begin_gesture).not.toHaveBeenCalled()
-    expect(scene.sketch_refacet_curve).not.toHaveBeenCalled()
+    expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
+    expect(scene.draft_refacet_curve).not.toHaveBeenCalled()
   })
 })
 
@@ -1978,6 +2040,8 @@ describe('DocumentTree', () => {
       top_level_nodes: () => [{ kind: 'object', id: 1n }],
       object_ids: () => new BigUint64Array([1n]),
       sketch_ids: () => new BigUint64Array([5n]),
+      sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+      plane_units_json: () => JSON.stringify(freeShapeListing(105)),
     })
     const onSelect = vi.fn()
     const { container } = render(
@@ -1994,22 +2058,22 @@ describe('DocumentTree', () => {
     expect(objectRow).toBe(sketchRow)
     expect(container.querySelector('[data-node-icon="sketch"]')).not.toBeNull()
     fireEvent.click(screen.getByText('Sketch 1'))
-    // Rows are ISLANDS — the connected-shape unit — carrying their sketch.
-    expect(onSelect).toHaveBeenCalledWith(
-      { kind: 'sketch-island', id: 105n, sketch: 5n },
-      false,
-    )
+    // Rows are SHAPES (draft-island) — the connected-shape unit — carrying
+    // their plane context and the kernel's unit key.
+    expect(onSelect).toHaveBeenCalledWith(draftOf('draft-island', GROUND_CTX, 105), false)
   })
 
   it('highlights the sketch row selected from the canvas (canvas → tree)', () => {
     const scene = makeScene({
       sketch_ids: () => new BigUint64Array([5n]),
+      sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+      plane_units_json: () => JSON.stringify(freeShapeListing(105)),
     })
     render(
       <DocumentTree
         {...docTreeBase}
         scene={scene}
-        selectedIds={[{ kind: 'sketch-island', id: 105n, sketch: 5n }]}
+        selectedIds={[draftOf('draft-island', GROUND_CTX, 105)]}
       />,
     )
     const row = screen.getByText('Sketch 1').closest('div')

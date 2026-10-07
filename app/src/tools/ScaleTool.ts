@@ -62,13 +62,14 @@
 
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
+import { displayedFactor, isFreePick } from './displayedValue'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
-import { findImprint, imprintSegments } from './imprints'
+import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
@@ -78,7 +79,7 @@ import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
-import { collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeRefFromJs } from '../panels/treeModel'
 
 export type OnScaleCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
@@ -450,7 +451,16 @@ export class ScaleTool implements Tool {
       const cursor = this._resolveCursor(snap, ray)
       if (cursor !== null) this.stage.lastCursor = cursor
       const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
-      const factors = this._currentFactors()
+      let factors = this._currentFactors()
+      // A free pick commits the DISPLAYED per-axis factors (×f.toFixed(2)),
+      // exactly as if typed. A typed buffer still wins, and a hard snap or a
+      // factor that would display as 0 keeps the raw value.
+      if (isFreePick(snap) && this._parseTypedFactors() === null) {
+        factors = factors.map((f) => {
+          const d = displayedFactor(f)
+          return d !== 0 ? d : f
+        }) as Vec3
+      }
       const pivot = this._pivot()
 
       this.stage = { kind: 'idle' }
@@ -647,37 +657,18 @@ export class ScaleTool implements Tool {
         )
       : null
     for (const node of nodes) {
-      if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
-        continue // not transformable — contributes nothing to the box
-      }
-      if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
-        // A drawn shape on a face: its own line work bounds the gizmo.
-        const feature = findImprint(this.wasmScene, node)
-        if (feature === null) continue // stale — nothing to bound
-        const segs = imprintSegments(feature, activePose)
-        for (let i = 0; i + 2 < segs.length; i += 3) {
-          pt.set(segs[i], segs[i + 1], segs[i + 2])
-          box.expandByPoint(pt)
-        }
-        continue
-      }
-      if (node.kind === 'sketch-island' && node.sketch !== undefined) {
-        let lines: Float32Array
-        try {
-          lines = this.wasmScene.sketch_island_lines(node.sketch, node.id)
-        } catch {
-          // An out-of-plane transform of one island in a multi-island sketch
-          // detaches it into a new sketch, so the old island handle is stale
-          // immediately after a successful commit. React's selection prune
-          // follows asynchronously; omit that stale node from this one
-          // synchronous gizmo rebuild instead of turning a successful Scale
-          // into an UnknownIsland UI error.
-          continue
-        }
-        for (let i = 0; i + 2 < lines.length; i += 3) {
-          pt.set(lines[i], lines[i + 1], lines[i + 2])
-          if (activePoseMatrix !== null) pt.applyMatrix4(activePoseMatrix)
-          box.expandByPoint(pt)
+      if (isDraftKind(node.kind)) {
+        // A drawn shape: its own line work (world coordinates, instanced or
+        // not) bounds the gizmo. An edge or curve bounds the shape it moves.
+        const r = resolveDraft(this.wasmScene, node)
+        // A stale ref (the commit just re-keyed it, React's prune follows
+        // asynchronously) contributes nothing to this synchronous rebuild.
+        if (r === null || r.unit === null) continue
+        for (const e of r.unit.edges) {
+          for (const p of [e.a, e.b]) {
+            pt.set(p[0], p[1], p[2])
+            box.expandByPoint(pt)
+          }
         }
         continue
       }
@@ -1164,12 +1155,7 @@ export class ScaleTool implements Tool {
   /** Commit, then open the retype window on the result (an identity scale
    *  records nothing and opens nothing). */
   private _commitAndArm(spec: RetypeSpec): void {
-    const genBefore = this.wasmScene.history_generation()
-    // No typed-size window for a moved chord: its run is re-cut on every
-    // commit and on the window's own undo (see MoveTool).
-    if (this._commit(spec.nodes, spec.pivot, spec.factors) && !spec.nodes.some((n) => n.kind === 'imprint-chord')) {
-      this.retype.armFrom(spec, genBefore)
-    }
+    if (this._commit(spec.nodes, spec.pivot, spec.factors)) this.retype.arm(spec)
   }
 
   /**
@@ -1224,15 +1210,14 @@ export class ScaleTool implements Tool {
   private _commit(nodes: NodeRef[], pivot: Vec3, factors: Vec3): boolean {
     const isIdentity =
       Math.abs(factors[0] - 1) < 1e-9 && Math.abs(factors[1] - 1) < 1e-9 && Math.abs(factors[2] - 1) < 1e-9
-    // A chord imprint's move re-cuts its run (fresh edge handles), so the
-    // commit hands back the re-keyed selection; everything else is the same
-    // node it was.
+    // A drawn shape's commit hands back the selection re-found by geometry;
+    // everything else is the same node it was.
     let committed: NodeRef[] = nodes
     if (!isIdentity) {
       try {
         const affine = nonUniformScaleAboutPivot(factors[0], factors[1], factors[2], pivot)
         const affineF64 = affineToFloat64(affine)
-        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance)
+        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance, 'Scale')
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -1244,7 +1229,7 @@ export class ScaleTool implements Tool {
     this.onCommit(committed)
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be
     // grabbed right away — handles stay stable through a transform (kernel
-    // strong guarantee; a re-cut chord is re-keyed above), so `committed`
+    // strong guarantee; a drawn shape is re-found above), so `committed`
     // is still valid.
     if (committed.length > 0) this._showGizmo(committed)
     return !isIdentity

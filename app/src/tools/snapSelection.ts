@@ -9,16 +9,30 @@
  * place. Adding a new provenance kind is a compile error until this resolver
  * handles it (`never`-checked switch).
  *
- * The returned ref is what a CLICK selects (a sketch edge/curve, a region's
- * island, or a solid's node); a drag moves that ref, and the transform layer
- * already lifts a sketch edge/curve to the island it belongs to
+ * The returned ref is what a CLICK selects (a drawn edge/curve, a region's
+ * shape, or a solid's node); a drag moves that ref, and the transform layer
+ * already lifts a drawn edge/curve to the shape (island) it belongs to
  * (`transformSelection`), so the drag arm needs no separate edge→island step.
+ *
+ * Everything DRAWN resolves through one path (unified-drafting design §8):
+ * the snap or ray names a PLANE (a solid face's plane, a sketch's plane, or
+ * the ground), and the kernel's `pick_plane_unit` answers which drawing unit
+ * — whatever store it lives in — is under the ray there.
  */
 
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
-import { chordNearPoint, chordThroughSegment, imprintRef, readImprints, subFaceImprint } from './imprints'
+import type { Scene as WasmScene } from '../wasm/loader'
+import {
+  ctxOfFace,
+  ctxOfSketch,
+  draftRef,
+  objectsOf,
+  pickDraftRef,
+  readPlaneUnits,
+  type PlaneUnitsScene,
+} from './planeUnits'
 
 export type SnapPick =
   | { kind: 'object'; object: bigint; instance?: bigint }
@@ -107,15 +121,20 @@ export interface SelectScene {
   pick_face(
     ox: number, oy: number, oz: number, dx: number, dy: number, dz: number,
   ): { object(): bigint; face?(): bigint; instance(): bigint | undefined; depth(): number; free(): void } | undefined
-  /** The object's imprints (imprints.ts); optional so test doubles without
-   *  it simply never resolve an imprint. */
-  face_features?(object: bigint): string
-  /** A solid edge's endpoints, for matching a snapped edge to a chord run. */
+  /** A solid edge's endpoints (kept for test doubles; no longer read). */
   edge_endpoints?(object: bigint, edge: bigint): Float64Array | number[] | undefined
-  /** The WORLD endpoints of a definition member's edge seen through a placement. */
-  edge_endpoints_in_instance?(instance: bigint, object: bigint, edge: bigint): Float64Array | number[] | undefined
-  /** A placement's 3x4 pose, for posing definition-local chord paths into world. */
+  /** A placement's 3x4 pose, for planes of definition-owned sketches. */
   instance_pose?(instance: bigint): Float64Array | number[] | undefined
+  /** A sketch's plane `[px,py,pz,nx,ny,nz]`, or `undefined` when stale. */
+  sketch_plane?(sketch: bigint): Float64Array | number[] | undefined
+  /** A solid face's plane and normal, for the context of a struck face. */
+  face_plane?(object: bigint, face: bigint): ArrayLike<number>
+  face_normal?(object: bigint, face: bigint): ArrayLike<number>
+  /** The drawing on a plane (planeUnits.ts). Optional so test doubles
+   *  without it simply never resolve a drawn thing. */
+  plane_units_json?(ctx: string): string
+  pick_plane_unit?(ctx: string, ray: Float64Array, tolerance: number): string
+  history_generation?(): bigint
 }
 
 /** Everything `resolveSelectableRef` needs from its host, so the resolution is
@@ -132,6 +151,10 @@ export interface ResolveDeps {
   cameraForward: readonly [number, number, number]
   /** The render far plane (meters, AXIAL). Read live from the camera. */
   cameraFar: number
+  /** World size of one screen pixel at a world point, through the live
+   *  camera (`CameraRig.worldPerPixel`): turns the chord pick's pixel radius
+   *  into a world distance at whatever zoom and model scale is on screen. */
+  worldPerPixelAt: (point: readonly [number, number, number]) => number
   /** Whether the shapes drawn on this object's faces may be picked even
    *  though the object itself resolves to nothing selectable — the entered
    *  object of an object context (its own face click deselects; its
@@ -139,27 +162,105 @@ export interface ResolveDeps {
   imprintEligible?: (objectId: bigint, instanceId: bigint | undefined) => boolean
 }
 
-/** A drawn sketch region → its island NodeRef (or the whole sketch). */
-function regionRef(scene: SelectScene, sketch: bigint, region: bigint): NodeRef {
-  const island = scene.sketch_region_island(sketch, region)
-  return island !== undefined
-    ? { kind: 'sketch-island', id: island, sketch }
-    : { kind: 'sketch', id: sketch }
+/** Screen distance (pixels) within which a click counts as ON a drawn line —
+ *  the same radius as a construction guide's pick (`GUIDE_PICK_PX`). A screen
+ *  distance, not a world one, so a line on a millimetre part and a line on a
+ *  house are picked alike. */
+const DRAFT_PICK_PX = 8
+
+const planeScene = (deps: ResolveDeps): PlaneUnitsScene => deps.scene as unknown as PlaneUnitsScene
+const wasm = (deps: ResolveDeps): WasmScene => deps.scene as unknown as WasmScene
+
+/** Whether a drawn thing is selectable in the active editing context: at the
+ * top level everything is; inside a context only drawing on an object the
+ * context makes eligible (its topology or owned stores) is — a free-standing
+ * sketch is out of scope there, exactly as it always was. */
+function draftInScope(ref: NodeRef, instance: bigint | undefined, deps: ResolveDeps): boolean {
+  if (deps.context.length === 0) return true
+  if (deps.scene.plane_units_json === undefined) return false
+  const objects = objectsOf(planeScene(deps), ref)
+  return objects.some((o) => deps.imprintEligible?.(o, instance) === true)
 }
 
-/** A sketch edge → the CURVE it belongs to (an arc/circle's facets act as one)
- * else that single line — the exact ref the click has always selected. */
-function edgeRef(scene: SelectScene, sketch: bigint, edge: bigint): NodeRef {
-  const chain = scene.sketch_curve_chain(sketch, edge)
-  return chain.length > 1
-    ? { kind: 'sketch-curve', id: chain[0], sketch }
-    : { kind: 'sketch-edge', id: edge, sketch }
+/** The drawing under `ray` on the plane `ctx`, as a selection ref. */
+function pickInCtx(
+  ctx: string | null,
+  ray: Ray,
+  at: readonly [number, number, number] | undefined,
+  instance: bigint | undefined,
+  deps: ResolveDeps,
+  /** False for a drawing the active instance's own scoped probe found: it is
+   *  in scope by construction, free or not. */
+  scoped = true,
+): NodeRef | null {
+  if (ctx === null || deps.scene.pick_plane_unit === undefined) return null
+  const point = at ?? [ray.origin[0], ray.origin[1], ray.origin[2]]
+  const tol = DRAFT_PICK_PX * deps.worldPerPixelAt(point)
+  const ref = pickDraftRef(planeScene(deps), ctx, ray, tol)
+  return ref !== null && (!scoped || draftInScope(ref, instance, deps)) ? ref : null
 }
 
-/** Squared distance from `p` to the segment `a`–`b`, world space. Used only
- * to RANK candidate fragments of one curve id by proximity to a click — a
- * facet chord is a good enough proxy for "nearest point on the arc" at
- * selection scale, and the ranking only needs to be consistent, not exact. */
+/** A drawn curve's analytic snap point (center / quadrant / tangent /
+ * polygon center) → the curve RUN it belongs to, in the sketch's plane. The
+ * nearest run edge to the snap position wins (a rim point lies on it; a
+ * center lies within epsilon of the run's center), the lowest edge key on a
+ * tie. */
+function curveSnapRef(
+  ctx: string | null,
+  point: readonly [number, number, number],
+  deps: ResolveDeps,
+): NodeRef | null {
+  if (ctx === null) return null
+  const pu = readPlaneUnits(planeScene(deps), ctx)
+  if (pu === null) return null
+  let best: { run: string; edge: string; d: number } | null = null
+  for (const u of pu.units) {
+    for (const run of u.curves) {
+      const dc = Math.hypot(point[0] - run.center[0], point[1] - run.center[1], point[2] - run.center[2])
+      for (const k of run.edges) {
+        const e = pu.edgeByKey.get(k)?.edge
+        if (e === undefined) continue
+        const d = Math.min(Math.sqrt(pointSegmentDistSq(point, e.a, e.b)), dc < 1e-6 && run.radius !== null ? 0 : Infinity)
+        if (!Number.isFinite(d)) continue
+        if (best === null || d < best.d - 1e-9 || (Math.abs(d - best.d) <= 1e-9 && e.key < best.edge)) {
+          best = { run: run.key, edge: e.key, d }
+        }
+      }
+    }
+  }
+  if (best === null) return null
+  // A run of one facet is just a line.
+  const only = pu.runByKey.get(best.run)?.run
+  return only !== undefined && only.edges.length > 1
+    ? draftRef('draft-curve', ctx, best.run)
+    : draftRef('draft-edge', ctx, best.edge)
+}
+
+/** The drawn edge a sketch snap names, matched by its endpoints. */
+function sketchEdgeRef(
+  ctx: string | null,
+  ends: ArrayLike<number> | undefined,
+  deps: ResolveDeps,
+): NodeRef | null {
+  if (ctx === null || ends === undefined || ends.length < 6) return null
+  const pu = readPlaneUnits(planeScene(deps), ctx)
+  if (pu === null) return null
+  const near = (a: readonly number[], i: number) =>
+    Math.abs(a[0] - ends[i]) <= 1e-6 && Math.abs(a[1] - ends[i + 1]) <= 1e-6 && Math.abs(a[2] - ends[i + 2]) <= 1e-6
+  for (const u of pu.units) {
+    for (const e of u.edges) {
+      if ((near(e.a, 0) && near(e.b, 3)) || (near(e.a, 3) && near(e.b, 0))) {
+        const run = pu.runOfEdge.get(e.key)
+        return run !== undefined && run.edges.length > 1
+          ? draftRef('draft-curve', ctx, run.key)
+          : draftRef('draft-edge', ctx, e.key)
+      }
+    }
+  }
+  return null
+}
+
+/** Squared distance from `p` to the segment `a`–`b`, world space. */
 function pointSegmentDistSq(
   p: readonly [number, number, number],
   a: readonly [number, number, number],
@@ -177,74 +278,6 @@ function pointSegmentDistSq(
   const dy = p[1] - (a[1] + aby * t)
   const dz = p[2] - (a[2] + abz * t)
   return dx * dx + dy * dy + dz * dz
-}
-
-/** Squared-distance tolerance (world units²) below which two candidate
- * fragments are treated as EQUIDISTANT from the click — the shared
- * intersection vertex between two fragments lands here, both distances
- * being (up to float noise) exactly zero. Matches
- * [`tol::POINT_MERGE`](../../../crates/kernel/src/tol.rs) (1e-9 m) rather
- * than reinventing a tolerance. */
-const TIE_DIST_SQ = 1e-18
-
-/** A drawn curve CHAIN → the ref a click on that curve selects, or null when
- * the chain has no live edges (a stale handle).
- *
- * Curve identity is durable across sticky splits (the true-curves design):
- * once other geometry crosses a drawn circle, one curve id legitimately
- * names several DISCONNECTED arc fragments (`sketch_curve_edges` returns
- * every edge sharing the id, with no connectivity check). A click's snap
- * resolves to a curve-level analytic point (center / quadrant / tangent),
- * not an edge, so which fragment the user meant has to be recovered from
- * WHERE they clicked: `point` is the resolved snap position, close to the
- * actual cursor even when the snap itself is gravity-boosted onto an
- * analytic point (`GRAVITY_ANALYTIC_POINT` pulls from further away than a
- * plain edge, but not further than the fragment under the cursor).
- *
- * Ranks the curve's edges by distance from `point` to that edge's chord and
- * hands the nearest one to `edgeRef`, which expands it through the
- * connectivity-aware `curve_chain_at` — so the selection is the contiguous
- * fragment under the cursor, the unit a user means by "this arc", not
- * whichever fragment happens to hold the lowest id.
- *
- * Ties (within `TIE_DIST_SQ` — the point sits on the shared intersection
- * vertex between two fragments, equidistant from both) resolve to the
- * LOWEST edge id, so the outcome stays deterministic; the same rule covers
- * a caller with no location data (every candidate then ties at the
- * fallback distance), preserving `edgeRef`'s prior "lowest id" behaviour
- * for that degenerate case.
- *
- * Routed deliberately through `edgeRef` rather than minting a ref from the
- * curve handle directly: a `NodeRef{kind: 'sketch-curve'}` is identified by a
- * representative EDGE everywhere else in the app (the Outliner, Object Info,
- * transform lifting), so an analytic-point click and a rim-edge click must
- * produce the *same* ref, not two spellings of one curve. When only one edge
- * survives, `edgeRef` degrades to that `sketch-edge`. */
-function curveRef(
-  scene: SelectScene,
-  sketch: bigint,
-  curve: bigint,
-  point: readonly [number, number, number],
-): NodeRef | null {
-  const edges = scene.sketch_curve_edges(sketch, curve)
-  if (edges.length === 0) return null
-  let best = edges[0]
-  let bestDistSq = Infinity
-  for (const e of edges) {
-    const ends = scene.sketch_edge_endpoints?.(sketch, e)
-    const distSq =
-      ends !== undefined && ends.length >= 6
-        ? pointSegmentDistSq(point, [ends[0], ends[1], ends[2]], [ends[3], ends[4], ends[5]])
-        : Infinity
-    if (distSq < bestDistSq - TIE_DIST_SQ) {
-      best = e
-      bestDistSq = distSq
-    } else if (distSq <= bestDistSq + TIE_DIST_SQ && e < best) {
-      best = e
-      bestDistSq = Math.min(bestDistSq, distSq)
-    }
-  }
-  return edgeRef(scene, sketch, best)
 }
 
 /** Reject a solid hit beyond the render far plane. `depth` is the RADIAL
@@ -278,75 +311,57 @@ function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolea
   }
 }
 
-/** Refine a resolved plain-object pick to the IMPRINT under the cursor, if
- * the click landed on one (docs/design/editable-face-sketches.md §3.1:
- * click inside a drawn shape selects the shape; the object is one click
- * away anywhere else). Only a pick that resolved to the object ITSELF
- * (`kind === 'object'`, same id as the hit — never a wrapping group or a
- * non-entered instance) is refined, so grouped/instanced solids keep their
- * explicit double-click editing step.
+/** Refine a resolved plain-object pick to the DRAWING under the cursor, if
+ * the click landed on one (docs/design/editable-face-sketches.md §3.1: click
+ * inside a drawn shape selects the shape; the object is one click away
+ * anywhere else). Only a pick that resolved to the object ITSELF (`kind ===
+ * 'object'`, same id as the hit — never a wrapping group or a non-entered
+ * instance) is refined, so grouped/instanced solids keep their explicit
+ * double-click editing step.
  *
- * Two routes, edge first: a snap parked on one of the object's edges whose
- * endpoints match a segment of a chord run selects that run (the drawn
- * line has no face of its own to hit); otherwise the face the ray struck,
- * when it is an imprint sub-face, selects that imprint. A snap that is
- * merely NEAR a chord (within `CHORD_PICK_M` of the resolved point) also
- * selects it, so a line drawn across a face is clickable without an exact
- * edge snap. */
-function refineToImprint(
+ * The struck face names the plane (its world plane, through the instance
+ * when there is one); the kernel's plane-unit pick says what is drawn under
+ * the ray there — a line or curve within `DRAFT_PICK_PX` screen pixels, else
+ * the shape whose fill the ray lands in. A click on bare face (or on the face
+ * around a shape) refines to nothing and the object stands. Near is measured
+ * from the snap point when the snap is on this object, else from `hitPoint`
+ * — where the ray meets the struck face — so a click on a guide or axis
+ * lying over a drawn line (a cue snap with no object) still finds the line
+ * under it. `hitPoint` is world space. */
+function refineToDraft(
   resolved: NodeRef | null,
   hitObject: bigint,
   hitFace: bigint | undefined,
   hitInstance: bigint | undefined,
+  hitPoint: [number, number, number] | undefined,
   snap: Snap | null,
+  ray: Ray,
   deps: ResolveDeps,
 ): NodeRef | null {
   const isPlainObject = resolved !== null && resolved.kind === 'object' && resolved.id === hitObject
   const isEnteredObject = resolved === null && deps.imprintEligible?.(hitObject, hitInstance) === true
   if (!isPlainObject && !isEnteredObject) return resolved
-  if (deps.scene.face_features === undefined) return resolved
-  let features = readImprints(deps.scene as { face_features(object: bigint): string }, hitObject)
-  if (features.length === 0) return resolved
-  // A definition member's features answer in DEFINITION-local space; the
-  // snap is in world. Pose the chord paths through the placement so the
-  // click tests below compare like with like.
-  if (hitInstance !== undefined) {
-    const pose = deps.scene.instance_pose?.(hitInstance)
-    if (pose === undefined) return resolved
-    features = features.map((f) => f.kind === 'chord' ? { ...f, path: f.path.map((p) => posePoint(pose, p)) } : f)
-  }
-  if (snap !== null && snap.object === hitObject && snap.elementKind === 'edge' && snap.element !== undefined) {
-    const ends = hitInstance !== undefined
-      ? deps.scene.edge_endpoints_in_instance?.(hitInstance, hitObject, snap.element)
-      : deps.scene.edge_endpoints?.(hitObject, snap.element)
-    if (ends !== undefined && ends.length >= 6) {
-      const run = chordThroughSegment(features, [ends[0], ends[1], ends[2]], [ends[3], ends[4], ends[5]])
-      if (run !== null) return imprintRef(hitObject, run)
-    }
-  }
-  if (snap !== null && snap.object === hitObject) {
-    const run = chordNearPoint(features, [snap.x, snap.y, snap.z], CHORD_PICK_M)
-    if (run !== null) return imprintRef(hitObject, run)
-  }
-  if (hitFace !== undefined) {
-    const sub = subFaceImprint(features, hitFace)
-    if (sub !== null) return imprintRef(hitObject, sub)
-  }
-  return resolved
+  if (deps.scene.plane_units_json === undefined || hitFace === undefined) return resolved
+  const ctx = ctxOfFace(wasm(deps), hitObject, hitFace, hitInstance ?? null)
+  const at: [number, number, number] | undefined =
+    snap !== null && snap.object === hitObject ? [snap.x, snap.y, snap.z] : hitPoint
+  if (ctx === null || deps.scene.pick_plane_unit === undefined) return resolved
+  const point = at ?? [ray.origin[0], ray.origin[1], ray.origin[2]]
+  const ref = pickDraftRef(planeScene(deps), ctx, ray, DRAFT_PICK_PX * deps.worldPerPixelAt(point))
+  // Inside an editing context only drawing on an object the context makes
+  // eligible is selectable: a free sketch coplanar with the face is not.
+  return ref !== null && draftInScope(ref, hitInstance, deps) ? ref : resolved
 }
 
-function posePoint(pose: ArrayLike<number>, p: readonly [number, number, number]): [number, number, number] {
-  return [
-    pose[0] * p[0] + pose[1] * p[1] + pose[2] * p[2] + pose[3],
-    pose[4] * p[0] + pose[5] * p[1] + pose[6] * p[2] + pose[7],
-    pose[8] * p[0] + pose[9] * p[1] + pose[10] * p[2] + pose[11],
-  ]
+/** Where `ray` meets a face picked `depth` along it (a distance along the
+ * ray, whatever the direction's length), or undefined for a degenerate ray. */
+function pointAlongRay(ray: Ray, depth: number): [number, number, number] | undefined {
+  const [dx, dy, dz] = ray.direction
+  const len = Math.hypot(dx, dy, dz)
+  if (!(len > 0) || !Number.isFinite(depth)) return undefined
+  const k = depth / len
+  return [ray.origin[0] + dx * k, ray.origin[1] + dy * k, ray.origin[2] + dz * k]
 }
-
-/** World distance within which a click counts as ON a drawn chord line
- *  (the face beneath is what the ray actually hits). Millimetre scale, the
- *  same order as an edge's rendered width at working zoom. */
-const CHORD_PICK_M = 2e-3
 
 /** The VISIBLE solid under the ray (bounded to the far plane), context-scoped,
  * or null. Shared by the `fallback` path, so a click and a drag are bounded
@@ -366,7 +381,8 @@ function solidUnderRay(ray: Ray, deps: ResolveDeps, snap: Snap | null = null): N
     const object = facePick.object()
     const instance = facePick.instance()
     const resolved = deps.resolveObject(object, instance)
-    return refineToImprint(resolved, object, facePick.face?.(), instance, snap, deps)
+    const hit = pointAlongRay(ray, facePick.depth())
+    return refineToDraft(resolved, object, facePick.face?.(), instance, hit, snap, ray, deps)
   } finally {
     facePick.free()
   }
@@ -390,12 +406,19 @@ export function resolveSelectableRef(
   const topLevel = deps.context.length === 0
   const deepest = topLevel ? undefined : deps.context[deps.context.length - 1]
   const activeInstance = deepest?.kind === 'instance' ? deepest.id : undefined
+  const sketchCtx = (sketch: bigint, instance: bigint | undefined): string | null => {
+    // A scene double without `sketch_plane` cannot name a sketch's plane.
+    if (deps.scene.sketch_plane === undefined) return null
+    return ctxOfSketch(wasm(deps), sketch, instance ?? null)
+  }
   // Definition sketches are rendered through the active instance but are not
   // duplicated into the global inference index per placement. Probe that
   // scoped geometry before interpreting a solid snap, otherwise the member
   // face beneath a visible sketch would always win and the sketch would
   // remain unselectable. Edge first preserves the usual "line on a filled
-  // region selects the line; interior selects the region" behavior.
+  // region selects the line; interior selects the region" behavior. The
+  // probe finds the sketch (so its plane); the plane-unit pick resolves the
+  // drawing.
   if (
     activeInstance !== undefined &&
     deps.scene.pick_sketch_region_in_instance !== undefined &&
@@ -409,7 +432,9 @@ export function resolveSelectableRef(
     if (edgePick !== undefined) {
       try {
         if (scopedSketchVisible(edgePick.depth(), ray, deps)) {
-          return edgeRef(deps.scene, edgePick.sketch(), edgePick.edge())
+          const at = pointAlongRay(ray, edgePick.depth())
+          const ref = pickInCtx(sketchCtx(edgePick.sketch(), activeInstance), ray, at, activeInstance, deps, false)
+          if (ref !== null) return ref
         }
       } finally {
         edgePick.free()
@@ -423,7 +448,9 @@ export function resolveSelectableRef(
     if (regionPick !== undefined) {
       try {
         if (scopedSketchVisible(regionPick.depth(), ray, deps)) {
-          return regionRef(deps.scene, regionPick.sketch(), regionPick.region())
+          const at = pointAlongRay(ray, regionPick.depth())
+          const ref = pickInCtx(sketchCtx(regionPick.sketch(), activeInstance), ray, at, activeInstance, deps, false)
+          if (ref !== null) return ref
         }
       } finally {
         regionPick.free()
@@ -434,7 +461,7 @@ export function resolveSelectableRef(
   switch (pick.kind) {
     case 'object': {
       // An object snap (a corner, an edge, a face point) resolves to the
-      // node as before, then refines to the imprint under the cursor — the
+      // node as before, then refines to the drawing under the cursor — the
       // ray pick supplies the struck face the snap itself does not carry.
       const resolved = deps.resolveObject(pick.object, pick.instance)
       const refinable =
@@ -446,33 +473,36 @@ export function resolveSelectableRef(
         ray.direction[0], ray.direction[1], ray.direction[2],
       )
       let hitFace: bigint | undefined
+      let hitPoint: [number, number, number] | undefined
       if (facePick !== undefined) {
         try {
-          if (facePick.object() === pick.object) hitFace = facePick.face?.()
+          if (facePick.object() === pick.object) {
+            hitFace = facePick.face?.()
+            hitPoint = pointAlongRay(ray, facePick.depth())
+          }
         } finally {
           facePick.free()
         }
       }
-      return refineToImprint(resolved, pick.object, hitFace, pick.instance, snap, deps)
+      return refineToDraft(resolved, pick.object, hitFace, pick.instance, hitPoint, snap, ray, deps)
     }
     case 'sketch-region':
-      // A top-level sketch is out of scope inside a context → resolve the
-      // in-context thing under the ray (the fallback), never the sketch.
-      if (topLevel) return regionRef(deps.scene, pick.sketch, pick.region)
-      break
     case 'sketch-edge':
-      if (topLevel) return edgeRef(deps.scene, pick.sketch, pick.edge)
-      break
     case 'sketch-curve': {
-      // Same context rule as the other sketch kinds. A curve whose edges are
-      // all gone yields null here and falls through to the ray re-probe,
-      // rather than selecting nothing at all. `snap` is always non-null here
-      // (classifySnapPick only reaches 'sketch-curve' from a real snap) — the
-      // `snap` guard just keeps TypeScript's narrowing honest.
-      if (topLevel && snap) {
-        const ref = curveRef(deps.scene, pick.sketch, pick.curve, [snap.x, snap.y, snap.z])
-        if (ref !== null) return ref
+      // A top-level drawing is out of scope inside a context → resolve the
+      // in-context thing under the ray (the fallback), never the sketch.
+      if (!topLevel || snap === null) break
+      const ctx = sketchCtx(pick.sketch, undefined)
+      let ref: NodeRef | null = null
+      if (pick.kind === 'sketch-curve') {
+        // A curve's analytic point lies on no edge (a center) or on one of
+        // several crowding facets — find its circle from where it IS.
+        ref = curveSnapRef(ctx, [snap.x, snap.y, snap.z], deps)
+      } else if (pick.kind === 'sketch-edge') {
+        ref = sketchEdgeRef(ctx, deps.scene.sketch_edge_endpoints?.(pick.sketch, pick.edge), deps)
       }
+      ref ??= pickInCtx(ctx, ray, [snap.x, snap.y, snap.z], undefined, deps)
+      if (ref !== null) return ref
       break
     }
     case 'fallback':
@@ -482,8 +512,10 @@ export function resolveSelectableRef(
   }
 
   // Fallback (a provenance-less snap, or a sketch snap out of context):
-  // resolve what is actually under the ray. Sketch pickers are top-level only;
-  // the solid pick is far-plane bounded and context-scoped.
+  // resolve what is actually under the ray. Sketch pickers are top-level only
+  // (they find the sketch, hence the plane); the solid pick is far-plane
+  // bounded and context-scoped; with no sketch under the ray the drawing, if
+  // any, is on the ground plane.
   if (topLevel) {
     const regionPick = deps.scene.pick_sketch_region(
       ray.origin[0], ray.origin[1], ray.origin[2],
@@ -491,7 +523,8 @@ export function resolveSelectableRef(
     )
     if (regionPick !== undefined) {
       try {
-        return regionRef(deps.scene, regionPick.sketch(), regionPick.region())
+        const ref = pickInCtx(sketchCtx(regionPick.sketch(), undefined), ray, undefined, undefined, deps)
+        if (ref !== null) return ref
       } finally {
         regionPick.free()
       }
@@ -502,7 +535,8 @@ export function resolveSelectableRef(
     )
     if (edgePick !== undefined) {
       try {
-        return edgeRef(deps.scene, edgePick.sketch(), edgePick.edge())
+        const ref = pickInCtx(sketchCtx(edgePick.sketch(), undefined), ray, undefined, undefined, deps)
+        if (ref !== null) return ref
       } finally {
         edgePick.free()
       }

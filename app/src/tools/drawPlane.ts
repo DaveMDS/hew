@@ -292,7 +292,7 @@ export function drawPlaneCue(params: {
  */
 export class SketchPickCache {
   private cache: { ray: Ray; handle: bigint | null } | null = null
-  private targetCache: { ray: Ray; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
+  private targetCache: { ray: Ray; key: string; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
     null
 
   pickFor(wasmScene: WasmScene, ray: Ray): bigint | null {
@@ -314,12 +314,13 @@ export class SketchPickCache {
   targetFor(
     ray: Ray,
     compute: () => { plane: DrawPlane; target: SketchTarget },
+    key = '',
   ): { plane: DrawPlane; target: SketchTarget } {
-    if (this.targetCache !== null && this.targetCache.ray === ray) {
+    if (this.targetCache !== null && this.targetCache.ray === ray && this.targetCache.key === key) {
       return this.targetCache.resolved
     }
     const resolved = compute()
-    this.targetCache = { ray, resolved }
+    this.targetCache = { ray, key, resolved }
     return resolved
   }
 
@@ -485,6 +486,8 @@ export function resolveIdleDrawTarget(
   sketchPickCache: SketchPickCache,
   ray: Ray,
   editContext: EditContext,
+  foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
+  foreignKey = '',
 ): { plane: DrawPlane; target: SketchTarget } {
   const instance = instanceOf(editContext)
   return sketchPickCache.targetFor(ray, () => {
@@ -505,13 +508,30 @@ export function resolveIdleDrawTarget(
           !plane.ground &&
           rayLandsOnSketch(wasmScene, sketchHandle, plane, ray, instance)
         ) {
-          return { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
+          // A sketch behind a face the ray struck first is not what the
+          // cursor is on; one lying on that face (equal depth) still is.
+          const hit = pointOnPlane(ray, plane)
+          const ff = editContext.kind === 'top' && foreignFace !== undefined ? foreignFace() : null
+          const sketchDepth = hit === null ? 0 : Math.hypot(hit[0] - ray.origin[0], hit[1] - ray.origin[1], hit[2] - ray.origin[2])
+          if (ff === null || sketchDepth <= ff.depth + 1e-6) {
+            return { plane, target: { kind: 'existing', handle: sketchHandle, instance } }
+          }
         }
+      }
+    }
+    // A face of a group member or component instance, struck from outside at
+    // the top level: draw on that face's world plane as free drawing (the
+    // way SketchUp does), not on the ground beneath it.
+    if (editContext.kind === 'top' && foreignFace !== undefined) {
+      const ff = foreignFace()
+      if (ff !== null) {
+        const facePlane = drawPlaneThrough(ff.point, ff.normal)
+        if (facePlane !== null) return { plane: facePlane, target: { kind: 'plane', plane: facePlane, instance: null } }
       }
     }
     const plane = groundDrawPlane()
     return { plane, target: { kind: 'plane', plane, instance } }
-  })
+  }, foreignKey)
 }
 
 /**
@@ -534,6 +554,8 @@ export function resolveClickDrawTarget(
   snap: Snap | null,
   ray: Ray,
   editContext: EditContext,
+  foreignFace?: () => { point: V3; normal: V3; depth: number } | null,
+  foreignKey = '',
 ): { plane: DrawPlane; target: SketchTarget } | null {
   if (idlePlaneLock !== null) {
     if (snap === null) return null
@@ -541,7 +563,7 @@ export function resolveClickDrawTarget(
     const plane = axisDrawPlane(idlePlaneLock, clickedPoint, getDrawingAxes(wasmScene))
     return { plane, target: { kind: 'plane', plane, instance: instanceOf(editContext) } }
   }
-  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext)
+  return resolveIdleDrawTarget(wasmScene, sketchPickCache, ray, editContext, foreignFace, foreignKey)
 }
 
 /**

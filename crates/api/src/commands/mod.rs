@@ -105,6 +105,7 @@ pub mod attrs;
 /// it carries no `handler`.
 mod camera;
 pub mod doc;
+pub mod draft;
 pub mod entity;
 pub mod history;
 pub mod library;
@@ -122,6 +123,7 @@ pub mod view;
 pub fn handler(name: &str) -> Option<Handler> {
     query::handler(name)
         .or_else(|| sketch::handler(name))
+        .or_else(|| draft::handler(name))
         .or_else(|| solid::handler(name))
         .or_else(|| entity::handler(name))
         .or_else(|| structure::handler(name))

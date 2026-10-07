@@ -125,12 +125,12 @@ test('a single selected segment is swept alone', async ({ page }) => {
   )
   expect(island).toBeTruthy()
 
-  // ONE Select click on ONE segment -> a single sketch-edge, not the island.
+  // ONE Select click on ONE segment -> a single draft-edge, not the island.
   await page.keyboard.press(' ')
   await clickWorld(page, [0, 1, 0]) // midpoint of the first leg
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
 
   // Follow Me, then the profile.
@@ -157,7 +157,7 @@ test('control: the whole island (triple-clicked) sweeps the full L path', async 
   await page.mouse.click(p.x, p.y, { clickCount: 3 })
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-island'
+    return sel.length === 1 && sel[0].kind === 'draft-island'
   })
 
   await page.getByRole('radio', { name: 'Follow Me' }).click()

@@ -86,6 +86,25 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "SketchGestureAlreadyOpen" => {
             "The drawing tools got out of step. Press Escape and try again."
         }
+        "SketchOwnerMismatch" => {
+            "That drawing can't belong to this object: it doesn't lie on any of the object's faces."
+        }
+        "DraftAlreadyOpen" => {
+            "Another drawing step is still in progress. Finish or cancel it first."
+        }
+        "DraftNotOpen" => "There is no drawing step in progress to finish.",
+        "DraftBoundaryEdgeTouched" => {
+            "A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself."
+        }
+        "RegionNotPushable" => {
+            "That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead."
+        }
+        "RegionPinched" => {
+            "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
+        }
+        "RegionSliver" => {
+            "That shape is too thin to push or pull — the face can't hold a sliver that small."
+        }
         "SketchGestureNotOpen" => "The drawing tools got out of step. Press Escape and try again.",
         "DegenerateGuide" => {
             "The guide needs a definite direction. Drag a little further before dropping it."
@@ -196,7 +215,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "The drawn outline and its circle disagree, so the imprint was refused. Redraw the circle; if it keeps failing, use Report Bug."
         }
         "LoopNotStrictlyInside" => {
-            "The shape must sit fully inside the face, clear of its edges. Draw it a little smaller or further from the boundary."
+            "The shape can't go there: it would run off the face, touch an edge or another shape at just one point, or leave a piece too small to keep. A shape being moved can't overlap another one either. Keep it on the face, and draw across or along edges instead of touching them at one point."
         }
         "LoopSelfIntersects" => {
             "The shape's outline crosses itself. Draw a simple, non-crossing outline."
@@ -205,18 +224,17 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Only a shape drawn fully inside a face can be removed this way. Select the imprinted inner face itself."
         }
         "NotInPlane" => {
-            "A shape drawn on a face stays on that face and keeps its proportions — it can slide, turn, or scale evenly on it, but not stretch one way, tilt off it, or mirror. Use a corner grip to scale it, or move it along the face."
+            "A shape on a face can only move within the face's plane. Slide, turn, or scale it on the face, or delete it and draw it again where you want it."
         }
         "NestedNotFlat" => {
             "Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first."
         }
         "NotAChord" => {
-            "That edge is not a drawn shape — only lines drawn on a face can be moved or deleted this way."
+            "Only a shape drawn on a face can be moved or deleted this way — and one that other shapes cut into pieces (or a line whose two sides also meet along another line) can be deleted but not moved. Delete it and draw it again where you want it."
         }
         "WouldCorrupt" => {
             "That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again."
         }
-        "BadLoop" => "The outline needs at least three points.",
         "OperandNotSolid" => {
             "Combining needs watertight solids on both sides. Check each object's solid status in the Object Info panel."
         }
@@ -418,12 +436,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "BadCount" => {
             "Hew's own request to the model kernel asked for an invalid copy count. If this keeps happening, use Report Bug."
-        }
-        "BadCurve" => {
-            "Hew's own request to the model kernel carried a malformed circle. If this keeps happening, use Report Bug."
-        }
-        "BadPath" => {
-            "Hew's own request to the model kernel carried a malformed path. If this keeps happening, use Report Bug."
         }
         "BadAnchor" => {
             "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."

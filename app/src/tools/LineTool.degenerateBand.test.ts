@@ -31,6 +31,7 @@ import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { segmentLength } from './lineInput'
 import type { Ray } from '../viewport/math'
+import { draftMock } from './draftMock'
 
 /** `kernel::tol::PLANE_DIST` / `kernel::tol::POINT_MERGE` (both 1e-9 m). */
 const PLANE_DIST = 1e-9
@@ -56,71 +57,46 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
 }
 
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
 
 /**
- * A mock kernel scene enforcing the real `Sketch::add_segment` refusals:
- * `PointOffPlane` within `tol::PLANE_DIST` AND `DegenerateSegment` for
- * endpoints within `tol::POINT_MERGE` — the second is what makes an
- * under-refusing tool gate fail loudly here instead of being silently
- * accepted by a permissive mock.
+ * A mock kernel scene enforcing the real draft refusals: `PointOffPlane`
+ * within `tol::PLANE_DIST` (the shared draft mock's `enforcePlane`) AND
+ * `DegenerateSegment` for endpoints within `tol::POINT_MERGE` — the second
+ * is what makes an under-refusing tool gate fail loudly here instead of
+ * being silently accepted by a permissive mock.
  */
 function makeWasmScene() {
-  const planes = new Map<bigint, [number, number, number, number, number, number]>()
-  const segmentCalls: SegmentCall[] = []
-  let sketchCounter = 90n
-
-  const distanceToPlane = (p: readonly [number, number, number], plane: readonly number[]): number => {
-    const [ox, oy, oz, nx, ny, nz] = plane
-    return nx * (p[0] - ox) + ny * (p[1] - oy) + nz * (p[2] - oz)
-  }
-
+  const dm = draftMock({ enforcePlane: true })
+  const inner = dm.members.draft_add_segment
+  const draft_add_segment = vi.fn(
+    (d: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
+      if (Math.hypot(bx - ax, by - ay, bz - az) < POINT_MERGE)
+        throw new Error('DegenerateSegment: segment endpoints coincide')
+      return inner(d, ax, ay, az, bx, by, bz)
+    },
+  )
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, [0, 0, 0, 0, 0, 1])
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planes.set(sketchCounter, [px, py, pz, nx, ny, nz])
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
-    sketch_plane: vi.fn((h: bigint) => {
-      const p = planes.get(h)
-      return p === undefined ? undefined : new Float64Array(p)
-    }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        const plane = planes.get(sketch)
-        if (plane === undefined) throw new Error('UnknownSketch: no such sketch')
-        if (Math.abs(distanceToPlane([ax, ay, az], plane)) > PLANE_DIST)
-          throw new Error('PointOffPlane: point 0 is off the sketch plane')
-        if (Math.abs(distanceToPlane([bx, by, bz], plane)) > PLANE_DIST)
-          throw new Error('PointOffPlane: point 1 is off the sketch plane')
-        if (Math.hypot(bx - ax, by - ay, bz - az) < POINT_MERGE)
-          throw new Error('DegenerateSegment: segment endpoints coincide')
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array([]),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
+    draft_add_segment,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),
   }
-  return { scene: scene as unknown as WasmScene, segmentCalls }
+  // A live array view of the draft log's segments as {a, b} pairs.
+  const view = new Proxy([] as SegmentCall[], {
+    get(_t, k) {
+      const live: SegmentCall[] = dm.log.segments.map((sg) => ({
+        a: sg.slice(0, 3) as SegmentCall['a'],
+        b: sg.slice(3, 6) as SegmentCall['b'],
+      }))
+      return Reflect.get(live, k)
+    },
+  })
+  return { scene: scene as unknown as WasmScene, segmentCalls: view }
 }
 
 function makeTool(scene: WasmScene) {
@@ -238,8 +214,7 @@ describe('LineTool — face mode shares the same kernel-line gate', () => {
       node_parent: vi.fn(() => undefined),
       face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
       face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
-      split_face: vi.fn(() => ({ free: vi.fn() })),
-      split_face_in_instance: vi.fn(() => ({ free: vi.fn() })),
+      ...draftMock().members,
       clear_transient_segments: vi.fn(),
       add_transient_segment: vi.fn(),
     }

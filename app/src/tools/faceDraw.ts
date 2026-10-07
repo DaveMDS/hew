@@ -18,12 +18,16 @@
  *
  * What happens on an INELIGIBLE face differs by tool class, deliberately:
  *
- * - The DRAW tools fall through to ground mode and draw on the plane
- *   beneath. Drawing is additive and fully previewed — the rubber-band
- *   shows exactly where the ink will land before anything commits — and
- *   drawing on the ground plane through whatever stands above it is these
- *   tools' long-standing top-level behavior (SketchUp's too). Pinned in
- *   RectangleTool.test.ts / LineTool.test.ts ("grouped → ground mode").
+ * - The DRAW tools draw on that face's WORLD plane as free drawing, the way
+ *   SketchUp draws loose geometry on a group's or component's face from
+ *   outside: the cursor reads "On Face", the draft commits in the plane's
+ *   context (world, no instance, no object), and the ink lands sitting on
+ *   the face — not inside the group/component and not on the ground beneath
+ *   it (`ineligibleFacePlane`, consumed by `resolveIdleDrawTarget`). This
+ *   applies at the top level only; inside an editing context the tools
+ *   keep their scoped rules. Faces of plain objects are eligible and are
+ *   drawn on directly, as before. Pinned in RectangleTool.test.ts /
+ *   LineTool.test.ts ("grouped → free drawing on the face's plane").
  * - PUSH/PULL instead CONSUMES the click with an explanatory toast
  *   (PushPullTool). Its fallthrough target would be an existing sketch
  *   region along the same ray — falling through would silently start a
@@ -176,6 +180,21 @@ export function distanceOffPlane(p: V3, point: V3, normal: V3): number {
   return normal[0] * (p[0] - point[0]) + normal[1] * (p[1] - point[1]) + normal[2] * (p[2] - point[2])
 }
 
+/** Why an ineligible face refused, phrased as the way in — shared by every
+ *  tool that fails closed on one (Push/Pull, Offset). Inside ANY editing
+ *  context the refusal is the scope ('step out' is the only honest
+ *  guidance); at the top level an instanced pick belongs to a component and
+ *  anything else was a grouped face. `verb` names the tool's action. */
+export function ineligibleFaceHint(verb: string, contextScoped: boolean, instance: bigint | undefined): string {
+  if (contextScoped) {
+    return `${verb} is scoped to what you are editing — press Esc to step out first`
+  }
+  if (instance !== undefined) {
+    return 'That face is part of a component — double-click it to edit the component'
+  }
+  return 'That face is inside a group — double-click to enter the group and edit it'
+}
+
 /**
  * The default tool-local policy (used when the Viewport hasn't injected one):
  * scoped to the entered object inside a context; at top level, plain
@@ -193,6 +212,47 @@ export function defaultFaceEligible(
   if (instance !== undefined) return false
   // kind 0 = object; a defined parent means it lives inside a group.
   return wasmScene.node_parent(0, object) === undefined
+}
+
+/** An INELIGIBLE face under the cursor — a face of a group member or a
+ *  component instance at the top level — as the world plane the draw tools
+ *  draw on instead: a point on it, its WORLD unit normal, and the hit's
+ *  depth along the ray. */
+export interface IneligibleFacePlane {
+  point: V3
+  normal: V3
+  depth: number
+}
+
+/** The world plane of the face under `ray` when it was hit but is NOT
+ *  eligible for direct drawing (`null` for a miss, an eligible face, or a
+ *  stale handle). Uses the same memoized pick as `FacePickCache.pickFor`;
+ *  instanced faces map through the instance the ray struck them through. */
+export function ineligibleFacePlane(
+  wasmScene: WasmScene,
+  cache: FacePickCache,
+  ray: Ray,
+  isEligible: FaceEligible,
+  snap: Snap | null = null,
+): IneligibleFacePlane | null {
+  // A click ON an ineligible object's edge or corner: the plain ray misses
+  // there, so the ranked boundary pick answers, over INELIGIBLE faces only.
+  // An eligible face holding the snapped point wins first (its tool takes
+  // face mode before ever asking for this).
+  if (snapOnObjectBoundary(snap)) {
+    const p: V3 = [snap.x, snap.y, snap.z]
+    if (cache.faceThrough(wasmScene, ray, isEligible, null, [p]) !== null) return null
+    const through = cache.faceThrough(wasmScene, ray, isEligible, null, [p], true)
+    if (through !== null) {
+      return { point: through.point, normal: through.normal, depth: Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2]) }
+    }
+  }
+  if (cache.pickFor(wasmScene, ray, isEligible) !== null) return null
+  const raw = cache.rawPickFor(ray)
+  if (raw === null) return null
+  const plane = worldFacePlane(wasmScene, raw.object, raw.face, raw.instance ?? null)
+  if (plane === null) return null
+  return { point: plane.point, normal: plane.normal, depth: raw.depth }
 }
 
 /** Angular nudge of the boundary probes in `FacePickCache.faceThrough` —
@@ -295,8 +355,9 @@ export class FacePickCache {
     isEligible: FaceEligible,
     activeInstance: bigint | null,
     through: readonly V3[],
+    ineligible = false,
   ): FaceThroughPick | null {
-    const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}`
+    const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}|${ineligible ? 'x' : ''}`
     if (this.throughCache !== null && this.throughCache.ray === ray && this.throughCache.key === key) {
       return this.throughCache.pick
     }
@@ -308,8 +369,8 @@ export class FacePickCache {
       const id = `${raw.object}:${raw.face}:${raw.instance ?? ''}`
       if (seen.has(id)) return
       seen.add(id)
-      if (!isEligible(raw.object, raw.instance)) return
-      const plane = worldFacePlane(wasmScene, raw.object, raw.face, activeInstance)
+      if (isEligible(raw.object, raw.instance) === ineligible) return
+      const plane = worldFacePlane(wasmScene, raw.object, raw.face, ineligible ? (raw.instance ?? null) : activeInstance)
       if (plane === null) return
       for (const p of through) {
         if (Math.abs(distanceOffPlane(p, plane.point, plane.normal)) > FACE_PLANE_EPS_M) return

@@ -39,6 +39,7 @@ import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
+import { draftMock } from './draftMock'
 
 const PLANE_DIST = 1e-9
 
@@ -63,74 +64,46 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
 }
 
-type SegmentCall = { sketch: bigint; a: [number, number, number]; b: [number, number, number] }
-type PlaneCall = [number, number, number, number, number, number]
+type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
+type PlaneCall = number[]
 
 /**
- * A mock kernel scene whose `sketch_add_segment` enforces plane membership
- * exactly like the real `Sketch::add_segment` (`PointOffPlane` within
- * `kernel::tol::PLANE_DIST`) — same harness as LineTool.rehome.test.ts, so
- * an un-re-homed off-plane commit FAILS here the way the kernel would
- * refuse it, rather than being silently accepted.
+ * A mock kernel scene on the shared draft mock with `enforcePlane`: it
+ * throws `PointOffPlane` within the kernel's plane tolerance — same harness
+ * as LineTool.rehome.test.ts, so an un-re-homed off-plane commit FAILS here
+ * the way the kernel would refuse it, rather than being silently accepted.
+ * `planeCalls` lists the [origin, normal] of every `draft_begin_plane` (one
+ * per commit, the ground segment's included).
  */
 function makeWasmScene() {
-  const planes = new Map<bigint, [number, number, number, number, number, number]>()
-  const segmentCalls: SegmentCall[] = []
-  const planeCalls: PlaneCall[] = []
+  const dm = draftMock({ enforcePlane: true })
   const transientCalls: number[][] = []
-  let sketchCounter = 90n
-
-  const distanceToPlane = (p: readonly [number, number, number], plane: readonly number[]): number => {
-    const [ox, oy, oz, nx, ny, nz] = plane
-    return nx * (p[0] - ox) + ny * (p[1] - oy) + nz * (p[2] - oz)
-  }
-
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     history_generation: vi.fn(() => 1n),
-    begin_ground_sketch: vi.fn(() => {
-      sketchCounter += 1n
-      planes.set(sketchCounter, [0, 0, 0, 0, 0, 1])
-      return sketchCounter
-    }),
-    begin_sketch_on_plane: vi.fn(
-      (px: number, py: number, pz: number, nx: number, ny: number, nz: number) => {
-        sketchCounter += 1n
-        planeCalls.push([px, py, pz, nx, ny, nz])
-        planes.set(sketchCounter, [px, py, pz, nx, ny, nz])
-        return sketchCounter
-      },
-    ),
     pick_face: vi.fn(() => undefined),
     pick_sketch: vi.fn(() => undefined),
-    sketch_plane: vi.fn((h: bigint) => {
-      const p = planes.get(h)
-      return p === undefined ? undefined : new Float64Array(p)
-    }),
-    sketch_begin_gesture: vi.fn(),
-    sketch_end_gesture: vi.fn(),
-    sketch_add_segment: vi.fn(
-      (sketch: bigint, ax: number, ay: number, az: number, bx: number, by: number, bz: number) => {
-        const plane = planes.get(sketch)
-        if (plane === undefined) throw new Error('UnknownSketch: no such sketch')
-        const da = distanceToPlane([ax, ay, az], plane)
-        const db = distanceToPlane([bx, by, bz], plane)
-        if (Math.abs(da) > PLANE_DIST) throw new Error('PointOffPlane: point 0 is off the sketch plane')
-        if (Math.abs(db) > PLANE_DIST) throw new Error('PointOffPlane: point 1 is off the sketch plane')
-        segmentCalls.push({ sketch, a: [ax, ay, az], b: [bx, by, bz] })
-        return {
-          new_edges: () => new BigUint64Array([]),
-          regions_created: () => new BigUint64Array([]),
-          regions_removed: () => new BigUint64Array([]),
-          free: vi.fn(),
-        }
-      },
-    ),
+    ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn((...args: number[]) => {
       transientCalls.push(args)
     }),
   }
+  const segmentCalls = new Proxy([] as SegmentCall[], {
+    get(_t, k) {
+      const live: SegmentCall[] = dm.log.segments.map((sg) => ({
+        a: sg.slice(0, 3) as SegmentCall['a'],
+        b: sg.slice(3, 6) as SegmentCall['b'],
+      }))
+      return Reflect.get(live, k)
+    },
+  })
+  const planeCalls = new Proxy([] as PlaneCall[], {
+    get(_t, k) {
+      const live: PlaneCall[] = dm.log.begins.map((b) => b.args.slice(0, 6) as number[])
+      return Reflect.get(live, k)
+    },
+  })
   return { scene: scene as unknown as WasmScene, segmentCalls, planeCalls, transientCalls }
 }
 
@@ -199,11 +172,12 @@ describe('LineTool — the 3d-line staircase: closing back onto the chain origin
     expect(segmentCalls[3].a).toEqual([1, 1, 1])
     expect(segmentCalls[3].b).toEqual([0, 0, 0])
 
-    // It re-homed: a NEW sketch on a NEW plane through the anchor that
-    // genuinely contains both endpoints — not the y = 1 sketch of segment 3.
-    expect(segmentCalls[3].sketch).not.toBe(segmentCalls[2].sketch)
-    expect(planeCalls).toHaveLength(3) // x = 0, y = 1, then the closing plane
-    const closing = planeCalls[2]
+    // It re-homed: a NEW draft on a NEW plane through the anchor that
+    // genuinely contains both endpoints — not the y = 1 plane of segment 3.
+    expect(planeCalls[3]).not.toEqual(planeCalls[2])
+    // ground, x = 0, y = 1, then the closing plane (one draft per commit)
+    expect(planeCalls).toHaveLength(4)
+    const closing = planeCalls[3]
     expect(closing.slice(0, 3)).toEqual([1, 1, 1])
     const [px, py, pz, nx, ny, nz] = closing
     const dOrigin = nx * (0 - px) + ny * (0 - py) + nz * (0 - pz)

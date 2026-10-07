@@ -5,18 +5,17 @@
  * circle, there is no "true polygon" underneath that the edges approximate.
  * But a polygon still HAS a center: the user placed one, and dragged a
  * circumradius from it. Plane mode therefore commits N chained
- * `sketch_add_segment` calls inside a POLYGON curve bracket
- * (`sketch_begin_polygon_with`), which records exactly that center and
+ * `draft_add_segment` calls inside a POLYGON curve bracket
+ * (`draft_begin_polygon_with`), which records exactly that center and
  * radius. The chain then selects and deletes as one unit and offers its
  * center to inference the way a circle's does — while the kernel's
  * `SketchCurveKind::Polygon` keeps the circumcircle from being mistaken for
  * a curve: no quadrant or tangent snaps on points lying on no edge, no
  * concentric-arc offset, no cylindrical wall swept on extrusion.
  *
- * Face mode still imprints with one plain `split_face_inner` call and N loop
- * points, carrying no analytic identity onto the solid — the same posture it
- * has always had, and the same one CircleTool's `split_face_inner_with_curve`
- * deliberately departs from for a real curve.
+ * Face mode commits the same polygon bracket as one draft on the face; the
+ * engine lowers it into face topology. Only the center is recorded — the
+ * polygon carries no circle identity onto the solid.
  *
  * Two modes:
  *
@@ -45,10 +44,10 @@
  *   2. Move: rubber-band N-gon preview whose first vertex passes through the
  *      cursor (circumradius = distance from center to cursor; start angle =
  *      angle from center to cursor)
- *   3. Second click: commit — N sketch_add_segment calls chaining
+ *   3. Second click: commit — N draft_add_segment calls chaining
  *      vertex[i] -> vertex[i+1], last one vertex[N-1] -> vertex[0] (using
- *      the SAME stored vertex[0] coords for exact closure), via
- *      `runSketchGesture`
+ *      the SAME stored vertex[0] coords for exact closure), in
+ *      one `runDraft`
  *   4. Esc between clicks: cancel stage 1
  *   Calls onCommit() after each successful commit so the viewport can
  *   refresh scene geometry and trigger re-render.
@@ -60,7 +59,7 @@
  * Face mode (an eligible Object face is under the cursor):
  *   1. First click on an eligible face: anchor center (on face plane)
  *   2. Move: rubber-band N-gon preview projected onto that face plane
- *   3. Second click: commit — split_face_inner() on that face with N loop
+ *   3. Second click: commit — one `runDraft` on that face with N loop
  *      points
  *   4. Esc: cancel
  *   Calls onFaceImprint(objectId) after each successful imprint so the
@@ -90,14 +89,16 @@ import type { V3 } from '../viewport/geoHelpers'
 import { circlePolygonGround, circlePolygonFace, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
+import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { editPolygonBuffer, isPolygonInputKey, parsePolygonSideCount, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
-import { runSketchGesture, makeSketchPlaneCache, type SketchPlaneCache, type SketchTarget } from './sketchGesture'
+import type { SketchTarget } from './sketchGesture'
+import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { PlanePin } from './planePin'
 
 /** SketchUp parity default (design §1). */
@@ -210,11 +211,6 @@ export class PolygonTool implements Tool {
    *  via `setSideCount`/`OnSideCountChange`. */
   private sides: number = DEFAULT_POLYGON_SIDES
 
-  /** Cached plane-mode sketch handles — the Viewport passes one cache
-   *  shared by every draw tool, so mixed-tool profiles land in a single
-   *  sketch per plane. */
-  private readonly sketchCache: SketchPlaneCache
-
   /** The current editing context (component-edit-parity.md phase A1) — see
    *  LineTool's identical fields for the full rationale. */
   private _editContext: EditContext = { kind: 'top' }
@@ -274,7 +270,6 @@ export class PolygonTool implements Tool {
     onToast: OnToast,
     onFaceImprint: OnFaceImprint,
     onMeasurement: OnMeasurement = () => { /* no-op */ },
-    sketchCache: SketchPlaneCache = makeSketchPlaneCache(),
     onSideCountChange: OnSideCountChange = () => { /* no-op */ },
   ) {
     this.wasmScene = wasmScene
@@ -283,7 +278,6 @@ export class PolygonTool implements Tool {
     this.onFaceImprint = onFaceImprint
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
-    this.sketchCache = sketchCache
     this.onSideCountChangeCb = onSideCountChange
     this.retype = new RetypeWindow(wasmScene)
   }
@@ -366,8 +360,8 @@ export class PolygonTool implements Tool {
    * ruled out face mode (which takes priority), so no `_activeContext`
    * re-check is needed here.
    */
-  private _resolveIdleTarget(ray: Ray): { plane: DrawPlane; target: SketchTarget } {
-    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext)
+  private _resolveIdleTarget(ray: Ray, snap: Snap | null = null): { plane: DrawPlane; target: SketchTarget } {
+    return resolveIdleDrawTarget(this.wasmScene, this._sketchPickCache, ray, this._editContext, () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap), snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '')
   }
 
   /**
@@ -385,6 +379,8 @@ export class PolygonTool implements Tool {
     if (pinned !== null) return pinned
     return resolveClickDrawTarget(
       this.wasmScene, this._sketchPickCache, this.idlePlaneLock, snap, ray, this._editContext,
+      () => ineligibleFacePlane(this.wasmScene, this._pickCache, ray, (o, i) => this._isEligible(o, i), snap),
+      snapOnObjectBoundary(snap) ? `${snap.x},${snap.y},${snap.z}` : '',
     )
   }
 
@@ -518,7 +514,7 @@ export class PolygonTool implements Tool {
         if (drawPlane !== null) return drawPlane
       }
     }
-    return this._resolveIdleTarget(ray).plane
+    return this._resolveIdleTarget(ray, snap).plane
   }
 
   /**
@@ -840,7 +836,6 @@ export class PolygonTool implements Tool {
    * all and reset. Called by the Viewport from `notifyLoaded`.
    */
   onDocumentReset(): void {
-    this.sketchCache.clear()
     this.cancel()
   }
 
@@ -860,6 +855,21 @@ export class PolygonTool implements Tool {
     }
     const radius = Math.hypot(cursor[0] - center[0], cursor[1] - center[1], cursor[2] - center[2])
     this.onMeasurementCb(`R ${formatLength(radius)}`)
+  }
+
+  /**
+   * Second click on a FREE pick (displayedValue.ts): commit the circumradius
+   * the measurement box shows through the typed path. False (caller commits
+   * the raw click) for a hard snap or a displayed radius below tolerance.
+   */
+  private _commitDisplayed(snap: Snap | null, center: V3, cursor: V3): boolean {
+    if (!isFreePick(snap, center)) return false
+    const r = displayedLength(Math.hypot(cursor[0] - center[0], cursor[1] - center[1], cursor[2] - center[2]))
+    if (!(r >= DEGENERATE_RADIUS_M)) return false
+    if (this.planeStage.kind === 'anchored') this._lastPlaneCursor = cursor
+    else this._lastFaceCursor = cursor
+    this._commitTyped(r)
+    return true
   }
 
   /**
@@ -1044,6 +1054,9 @@ export class PolygonTool implements Tool {
         return
       }
 
+      // A free pick commits the DISPLAYED circumradius, exactly as if typed.
+      if (this._commitDisplayed(snap, center, cursor)) return
+
       const committed = this._commitPlanePolygon(plane, target, center, cursor)
       this.planeStage = { kind: 'idle' }
       this.typed = ''
@@ -1054,10 +1067,9 @@ export class PolygonTool implements Tool {
     }
   }
 
-  /** Commit a polygon (N `sketch_add_segment` calls bracketed as one POLYGON
-   *  chain) into `target`'s sketch — used by both ground and non-ground
-   *  plane/sketch mode (real face mode instead imprints via
-   *  `split_face_inner`, see `_commitFacePolygon`).
+  /** Commit a polygon (N `draft_add_segment` calls bracketed as one POLYGON
+   *  chain) as one draft on `target`'s plane — used by both ground and
+   *  non-ground plane/sketch mode (face mode: `_commitFacePolygon`).
    *
    *  The chain carries the drawn center and circumradius, which is what makes
    *  a polygon's center inferable and selectable the way a circle's is. It
@@ -1071,57 +1083,31 @@ export class PolygonTool implements Tool {
       : circlePolygonFace(center, rim, plane.normal, this.sides)
     if (verts === null || verts.length === 0) return false // degenerate — ignore
 
+    // World circumradius (a draft maps lengths through an instance pose itself).
+    const radius = plane.ground
+      ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
+      : segmentLength(center, rim)
+    return this._runPolygonDraft(draftTargetFromSketchTarget(target), verts, center, radius)
+  }
+
+  /** The whole polygon is ONE chain inside a POLYGON bracket
+   *  (`draft_begin_polygon_with`): the sides ARE the geometry, so the chain
+   *  gets a center and nothing else — no quadrant or tangent snaps on a
+   *  circumcircle no edge lies on, no concentric-arc offset, no cylindrical
+   *  wall on extrusion. One draft = one undo step, in either mode. */
+  private _runPolygonDraft(
+    target: Parameters<typeof runDraft>[1],
+    verts: V3[],
+    center: V3,
+    radius: number,
+  ): boolean {
     try {
-      runSketchGesture(this.wasmScene, this.sketchCache, target, (sketch, toLocal) => {
-        let lastRegionsCreated: bigint[] = []
-        // The whole polygon is ONE chain, carrying the center the user
-        // placed and the circumradius they dragged — so clicking a side
-        // later selects the polygon as a unit, and its center is offered to
-        // inference exactly as a circle's is. It is stamped as a POLYGON,
-        // not a circle: `sketch_begin_polygon_with` records that the sides
-        // ARE the geometry, so the chain gets a center and nothing else — no
-        // quadrant or tangent snaps on a circumcircle no edge lies on, no
-        // concentric-arc offset, no cylindrical wall on extrusion.
-        // `toLocal`: identity for a world target, pose⁻¹ for a definition-
-        // owned one (component-edit-parity.md phase A2) — see
-        // `runSketchGesture`'s doc. World target: the exact legacy radius
-        // formula. Definition-owned target: measured LOCALLY (matches
-        // CircleTool's identical fix) so a uniformly-scaled instance's
-        // circumradius snap hint is correct too.
-        const localCenter = toLocal(center)
-        const radius = target.instance === null
-          ? (plane.ground
-              ? Math.hypot(rim[0] - center[0], rim[1] - center[1])
-              : segmentLength(center, rim))
-          : (() => {
-              const localRim = toLocal(rim)
-              return Math.hypot(
-                localRim[0] - localCenter[0],
-                localRim[1] - localCenter[1],
-                localRim[2] - localCenter[2],
-              )
-            })()
-        this.wasmScene.sketch_begin_polygon_with(sketch, localCenter[0], localCenter[1], localCenter[2], radius)
-        try {
-          for (let i = 0; i < verts.length; i++) {
-            const p = toLocal(verts[i])
-            const q = toLocal(verts[(i + 1) % verts.length])
-            const report = this.wasmScene.sketch_add_segment(
-              sketch,
-              p[0], p[1], p[2],
-              q[0], q[1], q[2],
-            )
-            try {
-              const rc = report.regions_created()
-              lastRegionsCreated = Array.from(rc)
-            } finally {
-              report.free()
-            }
-          }
-        } finally {
-          this.wasmScene.sketch_end_curve(sketch)
-        }
-        this.onCommit({ sketchHandle: sketch, regionsCreated: lastRegionsCreated })
+      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, 'Polygon', (d) =>
+        addDraftLoop(this.wasmScene, d, verts, { kind: 'polygon', center, radius }),
+      )
+      refreshAfterDraft(report, {
+        onObject: (o) => this.onFaceImprint(o),
+        onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
       return true
     } catch (err) {
@@ -1177,6 +1163,7 @@ export class PolygonTool implements Tool {
       ) {
         return
       }
+      if (this._commitDisplayed(snap, center, cursorOnPlane)) return
 
       this.faceStage = { kind: 'idle' }
       this.typed = ''
@@ -1218,33 +1205,12 @@ export class PolygonTool implements Tool {
     const verts = circlePolygonFace(center, rim, normal, this.sides)
     if (verts === null) return false // degenerate — ignore
 
-    // Flatten the N vertices into a Float64Array of xyz triples
-    const loopPts = new Float64Array(verts.length * 3)
-    for (let i = 0; i < verts.length; i++) {
-      loopPts[i * 3 + 0] = verts[i][0]
-      loopPts[i * 3 + 1] = verts[i][1]
-      loopPts[i * 3 + 2] = verts[i][2]
-    }
-
-    try {
-      // Plain imprint — no curve identity (design §4/§8), unlike Circle's
-      // split_face_inner_with_curve. Inside a component instance's editing
-      // context (component-edit-parity.md phase A2), `object` is a
-      // definition member — route through the instance-aware wrapper.
-      if (this._activeInstance !== null) {
-        this.wasmScene.split_face_inner_in_instance(this._activeInstance, object, face, loopPts)
-      } else {
-        this.wasmScene.split_face_inner(object, face, loopPts)
-      }
-      this.onFaceImprint(object)
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      const message = kernelErrorMessage(code ?? 'Unknown', rawMsg)
-      this.onToast(message, code ?? undefined)
-      return false
-    }
+    return this._runPolygonDraft(
+      { kind: 'face', object, face, instance: this._activeInstance },
+      verts,
+      center,
+      segmentLength(center, rim),
+    )
   }
 
   // ------------------------------------------------------------------ preview

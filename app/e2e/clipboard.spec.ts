@@ -184,7 +184,7 @@ test('a sketch-only selection refuses Copy with a toast, not a crash', async ({ 
   await clickWorld(page, ctx, 0.5, 0.5, 0)
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-island'
+    return sel.length === 1 && sel[0].kind === 'draft-island'
   })
   await page.keyboard.press('Control+c')
   await expect(page.getByText(/Sketch geometry can't be copied yet/)).toBeVisible()

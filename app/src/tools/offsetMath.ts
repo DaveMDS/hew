@@ -1,11 +1,11 @@
 /**
  * offsetMath — pure in-plane helpers for the Offset tool.
  *
- * The kernel owns the offset geometry itself (`sketch_offset_region` /
- * `offset_face` and their previews); these helpers only turn the cursor
- * position into the SIGNED drag distance the kernel calls take (negative =
- * toward the material, i.e. the cursor is inside the boundary) and decode
- * the preview's multi-loop wire format.
+ * The kernel owns the offset geometry itself (`draft_offset_region`); these
+ * helpers turn the cursor position into the SIGNED drag distance the kernel
+ * call takes (negative = toward the material, i.e. the cursor is inside the
+ * boundary), build the live ghost loops (`offsetRegionLoops`), and keep the
+ * legacy `sketch_offset_region_preview` wire-format decoder.
  */
 
 import { facePlaneBasis, type V3 } from '../viewport/geoHelpers'
@@ -72,7 +72,7 @@ export function signedOffsetDistance(
 }
 
 /**
- * Decode `sketch_offset_region_preview`'s wire format —
+ * Decode the legacy `sketch_offset_region_preview` wire format —
  * `[loopCount, n₀, x,y,z × n₀, n₁, …]` — into one flat `[x,y,z, …]` array
  * per loop. Malformed input yields the loops that decode cleanly.
  */
@@ -181,4 +181,102 @@ export function boundaryContainsEdge(
     }
   }
   return false
+}
+
+/** Sharpest corner (as `1 + cos` of the turn between adjacent offset
+ *  normals) a mitre follows before the preview gives up: below this the
+ *  corner spikes, and the kernel refuses the same shape (`OffsetCollapsed`). */
+const MITRE_MIN_DOT = 0.05
+
+/**
+ * The offset of ONE ring by mitring its edges, in the plane with unit
+ * `normal`. `shift` is the signed distance each edge moves toward its LEFT
+ * (`normal × edge`) — the caller picks the sign that grows or shrinks the
+ * material. `null` when a corner spikes or the ring collapses (turns
+ * inside out).
+ */
+function mitreRing(ring: readonly V3[], normal: V3, shift: number): number[] | null {
+  const n = ring.length
+  if (n < 3) return null
+  const left: V3[] = []
+  for (let i = 0; i < n; i++) {
+    const a = ring[i]
+    const b = ring[(i + 1) % n]
+    const ex = b[0] - a[0], ey = b[1] - a[1], ez = b[2] - a[2]
+    const lx = normal[1] * ez - normal[2] * ey
+    const ly = normal[2] * ex - normal[0] * ez
+    const lz = normal[0] * ey - normal[1] * ex
+    const len = Math.hypot(lx, ly, lz)
+    if (len < 1e-12) return null
+    left.push([lx / len, ly / len, lz / len])
+  }
+  const out: number[] = []
+  for (let i = 0; i < n; i++) {
+    const m1 = left[(i + n - 1) % n]
+    const m2 = left[i]
+    const dot = m1[0] * m2[0] + m1[1] * m2[1] + m1[2] * m2[2]
+    const k = 1 + dot
+    if (k < MITRE_MIN_DOT) return null
+    const p = ring[i]
+    out.push(
+      p[0] + (shift * (m1[0] + m2[0])) / k,
+      p[1] + (shift * (m1[1] + m2[1])) / k,
+      p[2] + (shift * (m1[2] + m2[2])) / k,
+    )
+  }
+  // A ring that turned inside out has the opposite orientation.
+  const before = ringArea(ring, normal)
+  const flat: V3[] = []
+  for (let i = 0; i < n; i++) flat.push([out[i * 3], out[i * 3 + 1], out[i * 3 + 2]])
+  const after = ringArea(flat, normal)
+  if (Math.abs(after) < 1e-12 || Math.sign(after) !== Math.sign(before)) return null
+  return out
+}
+
+/** Signed area of a planar ring about `normal` (positive counter-clockwise). */
+function ringArea(ring: readonly V3[], normal: V3): number {
+  let cx = 0, cy = 0, cz = 0
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i]
+    const b = ring[(i + 1) % ring.length]
+    cx += a[1] * b[2] - a[2] * b[1]
+    cy += a[2] * b[0] - a[0] * b[2]
+    cz += a[0] * b[1] - a[1] * b[0]
+  }
+  return 0.5 * (cx * normal[0] + cy * normal[1] + cz * normal[2])
+}
+
+/**
+ * The live Offset preview: the loops of a region's offset by `distance`
+ * (positive grows the material: the outer ring moves out, each hole's ring
+ * moves in), mitred in the region's plane. The kernel's `draft_offset_region`
+ * is the truth at commit; this is the ghost the cursor drags — exact for
+ * straight edges, and for an arc's facets within the facet sagitta.
+ * `null` when the distance collapses a ring or spikes a corner, so no ghost
+ * draws, as before.
+ */
+export function offsetRegionLoops(
+  outer: readonly V3[],
+  holes: readonly (readonly V3[])[],
+  normal: V3,
+  distance: number,
+): number[][] | null {
+  const loops: number[][] = []
+  // Growing material moves an outer ring AWAY from its interior and a hole
+  // ring TOWARD its interior. A counter-clockwise ring's interior is on the
+  // left of its edges, a clockwise one's on the right.
+  const side = (ring: readonly V3[], toInterior: boolean): number => {
+    const ccw = ringArea(ring, normal) >= 0
+    const interiorIsLeft = ccw
+    return toInterior === interiorIsLeft ? 1 : -1
+  }
+  const o = mitreRing(outer, normal, distance * side(outer, false))
+  if (o === null) return null
+  loops.push(o)
+  for (const h of holes) {
+    const r = mitreRing(h, normal, distance * side(h, true))
+    // A hole that closes up simply vanishes from the preview.
+    if (r !== null) loops.push(r)
+  }
+  return loops
 }

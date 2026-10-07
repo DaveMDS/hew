@@ -31,13 +31,20 @@
 //! ray axis, and its angular distance is divided by `w` before ranking. The
 //! normalized distance every candidate is ranked by is therefore "the
 //! aperture at which this candidate would just have been admitted" — one
-//! scale, directly comparable across kinds, and `w = 1` is exactly the
-//! unweighted behavior.
+//! scale, directly comparable across kinds, and `w = 1` ranks exactly as
+//! unweighted (admission still honors the base reach below).
+//!
+//! Separately from weights, named points — endpoints, midpoints, centers,
+//! quadrants — are always admitted out to [`POINT_SNAP_REACH`] apertures,
+//! since a point is a far smaller target than a line ([`SnapWeights::reach`]
+//! is the larger of the two). That base reach changes admission only, never
+//! the ranking distance.
 //!
 //! Two guards keep that from turning into a land grab.
 //!
 //! *Reach never steals.* A candidate admitted only because its weight widened
-//! the cone — angular distance past the query's own `aperture` — ranks behind
+//! the cone — angular distance past its kind's base reach (the query's own
+//! `aperture`, or [`POINT_SNAP_REACH`] of it for a named point) — ranks behind
 //! **every** candidate inside the plain aperture, whatever its kind. Gravity
 //! reaches into space nothing else was competing for; it never overrules the
 //! thing the cursor is actually on. Without this, a circle quadrant two
@@ -282,6 +289,17 @@ impl SnapKind {
             SnapKind::Perpendicular => 9,
         }
     }
+
+    /// How far, in multiples of the query `aperture`, this kind is admitted
+    /// before any gravity weight applies — see [`POINT_SNAP_REACH`].
+    pub const fn point_reach(self) -> f64 {
+        match self {
+            SnapKind::Endpoint | SnapKind::Center | SnapKind::Quadrant | SnapKind::Midpoint => {
+                POINT_SNAP_REACH
+            }
+            _ => GRAVITY_NEUTRAL,
+        }
+    }
 }
 
 /// The neutral gravity weight: the kind behaves exactly as it did before
@@ -300,6 +318,38 @@ pub const GRAVITY_NEUTRAL: f64 = 1.0;
 /// small enough that aiming squarely at a facet endpoint still gets it (that
 /// endpoint's normalized distance is then ~0, and nothing beats zero).
 pub const GRAVITY_ANALYTIC_POINT: f64 = 2.5;
+
+/// How much further than the query `aperture` a named point — an endpoint,
+/// a midpoint, a drawn curve's center or quadrant — is admitted.
+///
+/// The app derives `aperture` from one pixel radius shared by every kind,
+/// but points and lines are not equally easy to hit: a line or axis is a
+/// long target the cursor crosses anywhere along, while a point is one
+/// spot. With a single radius, a corner sitting on an axis or edge the user
+/// is already sliding along was reachable only by landing within that
+/// radius exactly, and the sliding snap won everywhere else. 1.75 turns the
+/// app's 8 px acquire radius into 14 px for points while lines keep 8 px.
+/// This is admission and the "reach never steals" guard only; the ranking
+/// still divides by the gravity weight alone, so how a center out-pulls a
+/// facet endpoint is unchanged. A gravity weight above this reach (a
+/// center's or quadrant's [`GRAVITY_ANALYTIC_POINT`]) still admits out to
+/// that weight instead. A held point releases at
+/// [`POINT_RELEASE_MARGIN`] past this, not at a line's ratio.
+pub const POINT_SNAP_REACH: f64 = 1.75;
+
+/// How far past its [`POINT_SNAP_REACH`] a held point lets go, as a
+/// fraction of the hysteresis release query's widening over the acquire
+/// radius: 0.5 of the app's 8 px → 16 px widening is 4 px, so a point
+/// acquired at 14 px releases at 18 px.
+///
+/// The release distance is also the dead zone after clicking a point: a
+/// tool anchored on a just-clicked endpoint stays on it until the cursor
+/// leaves that radius. A line's full ratio would have held a point out to
+/// 28 px, and even a line's 8 px margin (22 px) left the cursor visibly
+/// stuck on a midpoint well after leaving it. 4 px still stops the cue from
+/// flickering at the acquire boundary, and moves the release only 2 px past
+/// the 16 px it was before points reached further.
+pub const POINT_RELEASE_MARGIN: f64 = 0.5;
 
 /// The largest weight [`SnapWeights::with`] accepts. Weights widen the pick
 /// cone, and the spatial index's prune cone widens with them (see
@@ -323,6 +373,25 @@ pub const SOFT_AXIS_APERTURE_DEG: f64 = 5.0;
 
 /// [`SOFT_AXIS_APERTURE_DEG`] in radians — [`cone_test`]'s native unit.
 pub const SOFT_AXIS_APERTURE: f64 = SOFT_AXIS_APERTURE_DEG * std::f64::consts::PI / 180.0;
+
+/// The soft axis's on-screen limit, in multiples of the query `aperture`:
+/// besides lying within [`SOFT_AXIS_APERTURE`] of the drag direction, the
+/// axis line's point nearest the cursor must also be within this many pick
+/// radii of it. 1.0 makes the axis capture and let go exactly like an edge
+/// (the app's 8 px acquire, 16 px release): an inferred direction gets no
+/// more pull on screen than a real line. 1.25 still held a long drag 20 px
+/// off the axis, longer than anything else on screen.
+///
+/// The angle alone is measured from the anchor, so its reach grows with the
+/// drag: 5° is a quarter metre at the end of a 3 m drag, and the hysteresis
+/// release query's doubled cone half a metre. Near the end of a long drag
+/// the axis captured the cursor from across the screen and held it far past
+/// any point the user was aiming for — a corner on the axis was reachable
+/// only by landing on it pixel-exactly. Capping the reach on screen keeps
+/// the angle in charge for short drags, where 5° is a few pixels, and the
+/// cap in charge for long ones. Kept below [`POINT_SNAP_REACH`] so a point
+/// on the axis always captures before the axis can hold the cursor off it.
+pub const SOFT_AXIS_SCREEN_REACH: f64 = 1.0;
 
 /// Candidates whose weighted distances differ by no more than this fraction
 /// of the query aperture rank as EQUALLY distant, so the nearest-depth
@@ -418,6 +487,9 @@ pub const LOCK_ON_ANCHOR_APERTURE_FRACTION: f64 = 0.25;
 pub struct SnapWeights {
     /// Indexed by `SnapKind::index`.
     by_kind: [f64; SnapKind::COUNT],
+    /// A selection pick rather than an inference: named points get no
+    /// [`POINT_SNAP_REACH`] (see [`SnapWeights::for_picking`]).
+    picking: bool,
 }
 
 impl SnapWeights {
@@ -427,6 +499,7 @@ impl SnapWeights {
     pub const fn uniform() -> SnapWeights {
         SnapWeights {
             by_kind: [GRAVITY_NEUTRAL; SnapKind::COUNT],
+            picking: false,
         }
     }
 
@@ -465,7 +538,45 @@ impl SnapWeights {
         self.by_kind[kind.index()]
     }
 
-    /// The largest weight among the kinds the spatial index prunes for.
+    /// This profile for a selection pick: named points are admitted at the
+    /// plain aperture, like lines, instead of [`POINT_SNAP_REACH`] of it.
+    ///
+    /// The wider reach is an inference aid — it lets a drawing tool land on
+    /// a corner it is sliding toward. A click that SELECTS something asks a
+    /// different question, "what is under the cursor", and there a midpoint
+    /// 10 px away is not under it: with the reach, the middle of a face
+    /// under about 28 px across picked one of its edges instead of the face.
+    pub const fn for_picking(mut self) -> SnapWeights {
+        self.picking = true;
+        self
+    }
+
+    /// `kind`'s admission reach before gravity, in multiples of the query
+    /// aperture: [`SnapKind::point_reach`], or the plain aperture when
+    /// picking ([`SnapWeights::for_picking`]).
+    ///
+    /// `widening` is how many acquire radii this query's aperture spans —
+    /// the app's hysteresis release query runs at twice the acquire radius
+    /// and says so in [`SnapQuery::soft_axis_aperture_scale`]; every other
+    /// query passes 1. A held point releases [`POINT_RELEASE_MARGIN`] of
+    /// the widening past its reach rather than the full ratio (see there).
+    pub fn base_reach(&self, kind: SnapKind, widening: f64) -> f64 {
+        let point = kind.point_reach();
+        if self.picking || point <= GRAVITY_NEUTRAL {
+            return GRAVITY_NEUTRAL;
+        }
+        let w = widening.max(GRAVITY_NEUTRAL);
+        (point + (w - GRAVITY_NEUTRAL) * POINT_RELEASE_MARGIN) / w
+    }
+
+    /// How far, in multiples of the query aperture, `kind` is admitted: its
+    /// gravity weight, but never less than its [`SnapWeights::base_reach`].
+    pub fn reach(&self, kind: SnapKind, widening: f64) -> f64 {
+        self.weight(kind).max(self.base_reach(kind, widening))
+    }
+
+    /// The largest reach ([`SnapWeights::reach`]) among the kinds the
+    /// spatial index prunes for.
     ///
     /// The index prunes points and segments with a cone of half-angle
     /// `aperture`; a weighted kind is admitted out to `w * aperture`, so the
@@ -481,7 +592,7 @@ impl SnapWeights {
     /// scales them. Centers, quadrants, tangents, guides and axes are absent
     /// because they are never indexed — they are walked linearly, which is
     /// why the shipped profile's boost costs the prune nothing.
-    fn max_indexed(&self) -> f64 {
+    fn max_indexed(&self, widening: f64) -> f64 {
         [
             SnapKind::Endpoint,
             SnapKind::Midpoint,
@@ -489,7 +600,7 @@ impl SnapWeights {
             SnapKind::Intersection,
         ]
         .into_iter()
-        .map(|k| self.weight(k))
+        .map(|k| self.reach(k, widening))
         .fold(GRAVITY_NEUTRAL, f64::max)
     }
 }
@@ -911,6 +1022,9 @@ pub(crate) struct DefMember {
     /// few per scene and linear-walked, so placements pay no baking cost and
     /// every removal/replace path stays automatic.
     pub(crate) rims: Vec<AnalyticRim>,
+    /// Definition-space centers of polygons drawn on the member's faces
+    /// ([`Object::edge_polygon_centers`]), offered like rim centers.
+    pub(crate) polygon_centers: Vec<(Point3, kernel::FaceId)>,
     pub(crate) index: DefIndex,
 }
 
@@ -971,6 +1085,7 @@ impl DefMember {
             segments,
             faces,
             rims,
+            polygon_centers: object.edge_polygon_centers(),
             index,
         }
     }
@@ -1018,6 +1133,16 @@ impl DefMember {
         rims: &mut Vec<SceneRim>,
     ) {
         let similarity = pl.pose.similarity_scale();
+        for &(c, face) in &self.polygon_centers {
+            centers.push(ScenePoint {
+                position: pl.pose.apply_point(c),
+                source: SnapSource {
+                    object: pl.member,
+                    element: ElementRef::Face(face),
+                    instance: Some(pl.instance),
+                },
+            });
+        }
         for rim in &self.rims {
             let source = SnapSource {
                 object: pl.member,
@@ -1601,6 +1726,17 @@ impl InferenceScene {
         // and a tangent rim — a drawn circle on a face snaps like one on the
         // ground.
         let similarity = placement.similarity_scale();
+        // Polygons drawn on a face offer their centers, as on the ground.
+        for (c, face) in object.edge_polygon_centers() {
+            self.centers.push(ScenePoint {
+                position: placement.apply_point(c),
+                source: SnapSource {
+                    object: owner,
+                    element: ElementRef::Face(face),
+                    instance: None,
+                },
+            });
+        }
         let walls = object.analytic_rims();
         let drawn = object.edge_curve_rims_with(&walls);
         for rim in walls.into_iter().chain(drawn) {
@@ -1952,6 +2088,14 @@ impl InferenceScene {
             Some(scale) if scale.is_finite() && scale > 0.0 => SOFT_AXIS_APERTURE * scale,
             _ => SOFT_AXIS_APERTURE,
         };
+        // How many acquire radii this query's aperture spans (the release
+        // query declares 2 through the same field): the tie band below and
+        // a named point's reach (`SnapWeights::base_reach`) both measure
+        // against the acquire radius, not the widened one.
+        let widening = match query.soft_axis_aperture_scale {
+            Some(scale) if scale.is_finite() && scale > 0.0 => scale,
+            _ => 1.0,
+        };
 
         // Per-kind gravity (crate docs, *Gravity*): a candidate of `kind` is
         // ADMITTED within `w * aperture` instead of `aperture`. The angular
@@ -1962,10 +2106,23 @@ impl InferenceScene {
         // (`ApertureMode`) picks the cone/cylinder interpretation of
         // `aperture` (design camera.md §1); both closures forward it as-is.
         let wcone = |point: Point3, kind: SnapKind| -> Option<(f64, f64)> {
-            cone_test(origin, dir, point, aperture * weights.weight(kind), mode)
+            cone_test(
+                origin,
+                dir,
+                point,
+                aperture * weights.reach(kind, widening),
+                mode,
+            )
         };
         let wsegment = |a: Point3, b: Point3, kind: SnapKind| -> Option<(Point3, f64, f64)> {
-            segment_cone_hit(origin, dir, a, b, aperture * weights.weight(kind), mode)
+            segment_cone_hit(
+                origin,
+                dir,
+                a,
+                b,
+                aperture * weights.reach(kind, widening),
+                mode,
+            )
         };
 
         // Bounds the prune shape's radius growth per unit depth for the
@@ -1989,7 +2146,7 @@ impl InferenceScene {
         // would discard candidates the exact test accepts and `resolve` would
         // stop agreeing with `resolve_linear`. The shipped profile boosts only
         // linear-walked kinds, so it leaves this factor at 1.0.
-        let prune_aperture = aperture * weights.max_indexed();
+        let prune_aperture = aperture * weights.max_indexed(widening);
         let prune_tolerance = match mode {
             ApertureMode::Cone => {
                 let tan_aperture = (prune_aperture < std::f64::consts::FRAC_PI_2 - tol::CONE_SLACK)
@@ -2499,8 +2656,15 @@ impl InferenceScene {
                         // passes through the anchor anyway, so `Some(anchor)`
                         // would be the same origin bit for bit.
                         let pos = closest_point_on_line_to_ray(anchor, adir, None, origin, dir);
+                        // On-screen cap (`SOFT_AXIS_SCREEN_REACH`): the
+                        // angle above is measured from the anchor, so on a
+                        // long drag it alone would capture from far across
+                        // the screen.
+                        let on_screen =
+                            cone_test(origin, dir, pos, aperture * SOFT_AXIS_SCREEN_REACH, mode)
+                                .is_some();
                         let depth = (pos - origin).dot(dir);
-                        if depth > 0.0 {
+                        if on_screen && depth > 0.0 {
                             candidates.push((SnapKind::OnAxis, ang, depth, pos, None, Some(adir)));
                         }
                     }
@@ -2750,16 +2914,12 @@ impl InferenceScene {
         // already admitted — the held target losing its own hold to a
         // nearer-depth neighbour a pixel further from the cursor — so the
         // band is divided back down to one pixel of the unscaled radius.
-        let widening = match query.soft_axis_aperture_scale {
-            Some(scale) if scale.is_finite() && scale > 0.0 => scale,
-            _ => 1.0,
-        };
         let tie = aperture / widening * RANK_TIE_FRACTION;
         let rank_key = |c: &Candidate| {
             let ref_aperture = if c.0 == SnapKind::OnAxis {
                 soft_axis_aperture.max(aperture)
             } else {
-                aperture
+                aperture * weights.base_reach(c.0, widening)
             };
             let extended = u8::from(c.1 > ref_aperture);
             (
@@ -4189,7 +4349,7 @@ mod tests {
             };
             assert_eq!(w.weight(kind), expected, "{kind:?}");
         }
-        assert_eq!(w.max_indexed(), GRAVITY_NEUTRAL);
+        assert_eq!(w.max_indexed(1.0), POINT_SNAP_REACH);
     }
 
     #[test]
@@ -4201,7 +4361,7 @@ mod tests {
             SnapKind::OnEdge,
             SnapKind::Intersection,
         ] {
-            assert_eq!(base.with(kind, 4.0).max_indexed(), 4.0, "{kind:?}");
+            assert_eq!(base.with(kind, 4.0).max_indexed(1.0), 4.0, "{kind:?}");
         }
         for kind in [
             SnapKind::Center,
@@ -4214,8 +4374,8 @@ mod tests {
             SnapKind::Perpendicular,
         ] {
             assert_eq!(
-                base.with(kind, GRAVITY_MAX).max_indexed(),
-                GRAVITY_NEUTRAL,
+                base.with(kind, GRAVITY_MAX).max_indexed(1.0),
+                POINT_SNAP_REACH,
                 "{kind:?} is never indexed, so it must not widen the prune"
             );
         }
@@ -5935,7 +6095,9 @@ mod tests {
     #[test]
     fn soft_axis_snap_honors_soft_axis_aperture_scale_for_hysteresis() {
         let scene = InferenceScene::new();
-        let anchor = Point3::new(0.0, 0.0, 0.0);
+        // Lifted 1 m off the ground so the world X axis (a different line
+        // now) sits far outside every cone below.
+        let anchor = Point3::new(0.0, 0.0, 1.0);
         // Right-triangle construction (mirrors `resolve_snaps_to_x_axis`):
         // ray origin (5, 3, h) looking along -Y. Because the ray direction
         // is perpendicular to the X axis, the closest point on the
@@ -5945,7 +6107,7 @@ mod tests {
         let seven_deg: f64 = 7.0_f64.to_radians();
         let h = seven_deg.tan() * 5.0;
         let ray = PickRay {
-            origin: Point3::new(5.0, 3.0, h),
+            origin: Point3::new(5.0, 3.0, 1.0 + h),
             direction: Vec3::new(0.0, -1.0, 0.0),
         };
 
@@ -5954,7 +6116,11 @@ mod tests {
             ray,
             anchor: Some(anchor),
             lock: None,
-            aperture: 0.01, // tight point-snap aperture — irrelevant to OnAxis's own tolerance
+            // The eye sees the 7° offset as ~11.6° (0.202 rad: `h` against
+            // the 3 m eye-to-axis distance). 0.21 rad lets the soft axis's
+            // on-screen cap (`SOFT_AXIS_SCREEN_REACH` × 0.21) admit it, so
+            // only the angular tolerance decides.
+            aperture: 0.21,
             aperture_mode: ApertureMode::Cone,
             constraint_plane: None,
             soft_axis_aperture_scale: None,
@@ -5975,6 +6141,206 @@ mod tests {
             .expect("a 2x-scaled query (the app's hysteresis release query) must still reach 7°");
         assert_eq!(snap.kind, SnapKind::OnAxis);
         assert_eq!(snap.direction, Some(Vec3::new(1.0, 0.0, 0.0)));
+    }
+
+    /// A long-drag fixture shared by the soft-axis cap and point-reach
+    /// tests: the anchor at a 3 m cube's top corner (0, 0, 3), the far top
+    /// corner (3, 0, 3) on the +X soft axis through it, an ordinary 3/4
+    /// view, and a pick aperture of 8 px at a 60° field of view over 900 px.
+    const LONG_DRAG_EYE: Point3 = Point3::new(1.5, -8.0, 8.0);
+    const LONG_DRAG_APERTURE: f64 = 8.0 * (60.0 * std::f64::consts::PI / 180.0) / 900.0;
+
+    fn long_drag_query(target: Point3, weights: SnapWeights) -> SnapQuery {
+        SnapQuery {
+            weights,
+            ray: PickRay {
+                origin: LONG_DRAG_EYE,
+                direction: (target - LONG_DRAG_EYE).normalized().unwrap(),
+            },
+            anchor: Some(Point3::new(0.0, 0.0, 3.0)),
+            lock: None,
+            aperture: LONG_DRAG_APERTURE,
+            aperture_mode: ApertureMode::Cone,
+            constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
+        }
+    }
+
+    /// The angle, seen from `LONG_DRAG_EYE`, between two points — how far
+    /// apart they are on screen, in the aperture's own unit.
+    fn long_drag_screen_angle(a: Point3, b: Point3) -> f64 {
+        let da = (a - LONG_DRAG_EYE).normalized().unwrap();
+        let db = (b - LONG_DRAG_EYE).normalized().unwrap();
+        da.dot(db).clamp(-1.0, 1.0).acos()
+    }
+
+    /// Near the end of a 3 m drag along an axis, a cursor 20 cm off the axis
+    /// is well inside the 5° drag-direction tolerance (about 3.8°) but many
+    /// pick radii away on screen: the soft axis must not capture it, while a
+    /// cursor a fraction of a pick radius off still does. Before the
+    /// on-screen cap, the angle alone captured from 25 cm away (and held
+    /// out to 50 cm through the release query's doubled cone).
+    #[test]
+    fn soft_axis_capture_is_capped_on_screen_at_the_end_of_a_long_drag() {
+        let scene = InferenceScene::new();
+        let off = Point3::new(2.8, 0.0, 3.2);
+        let on_axis = Point3::new(2.8, 0.0, 3.0);
+        assert!(
+            long_drag_screen_angle(off, on_axis) > SOFT_AXIS_SCREEN_REACH * LONG_DRAG_APERTURE,
+            "fixture: the 20 cm offset must sit past the on-screen cap"
+        );
+        let snap = scene.resolve(&long_drag_query(off, SnapWeights::default()));
+        assert!(
+            snap.is_none_or(|s| s.kind != SnapKind::OnAxis),
+            "20 cm off the axis at the end of a 3 m drag must not capture, got {snap:?}"
+        );
+
+        let near = Point3::new(2.8, 0.0, 3.004);
+        let snap = scene
+            .resolve(&long_drag_query(near, SnapWeights::default()))
+            .expect("4 mm off the axis is within the on-screen cap");
+        assert_eq!(snap.kind, SnapKind::OnAxis);
+        assert_eq!(snap.direction, Some(Vec3::new(1.0, 0.0, 0.0)));
+    }
+
+    /// A corner sitting on the soft axis captures out to `POINT_SNAP_REACH`
+    /// pick radii (the cursor 1.5 radii short of it, still ON the axis line
+    /// the soft axis would otherwise hold), in both gravity profiles; past
+    /// that reach the axis wins again.
+    #[test]
+    fn a_corner_on_the_soft_axis_captures_at_point_reach() {
+        let mut scene = InferenceScene::new();
+        let corner = Point3::new(3.0, 0.0, 3.0);
+        scene.add_sketch(
+            SketchId::default(),
+            &[(SketchEdgeId::default(), corner, Point3::new(3.0, 3.0, 3.0))],
+        );
+        // Walk back along the axis until the corner sits 1.5 radii away on
+        // screen — past the old 1-radius reach, inside the new one.
+        let at_radii = |radii: f64| {
+            let mut x = 3.0;
+            while long_drag_screen_angle(Point3::new(x, 0.0, 3.0), corner)
+                < radii * LONG_DRAG_APERTURE
+            {
+                x -= 1e-4;
+            }
+            Point3::new(x, 0.0, 3.0)
+        };
+        for weights in [SnapWeights::default(), SnapWeights::uniform()] {
+            let snap = scene
+                .resolve(&long_drag_query(at_radii(1.5), weights))
+                .expect("the corner is within point reach");
+            assert_eq!(snap.kind, SnapKind::Endpoint, "{weights:?}");
+            assert!(
+                snap.position.approx_eq(corner, tol::POINT_MERGE),
+                "{weights:?}"
+            );
+
+            let snap = scene
+                .resolve(&long_drag_query(at_radii(POINT_SNAP_REACH + 0.1), weights))
+                .expect("past point reach the soft axis still holds");
+            assert_eq!(snap.kind, SnapKind::OnAxis, "{weights:?}");
+        }
+    }
+
+    /// A selection pick ([`SnapWeights::for_picking`]) gets no point reach:
+    /// a corner 1.5 pick radii off the cursor, which an inference query
+    /// captures, is not under the cursor for a click that selects.
+    #[test]
+    fn a_selection_pick_gets_no_point_reach() {
+        let mut scene = InferenceScene::new();
+        let corner = Point3::new(3.0, 0.0, 3.0);
+        scene.add_sketch(
+            SketchId::default(),
+            &[(SketchEdgeId::default(), corner, Point3::new(3.0, 3.0, 3.0))],
+        );
+        let mut x = 3.0;
+        while long_drag_screen_angle(Point3::new(x, 0.0, 3.0), corner) < 1.5 * LONG_DRAG_APERTURE {
+            x -= 1e-4;
+        }
+        let aim = Point3::new(x, 0.0, 3.0);
+        for weights in [SnapWeights::default(), SnapWeights::uniform()] {
+            let infer = SnapQuery {
+                anchor: None,
+                ..long_drag_query(aim, weights)
+            };
+            assert_eq!(
+                scene.resolve(&infer).map(|s| s.kind),
+                Some(SnapKind::Endpoint)
+            );
+            assert_eq!(scene.resolve(&infer), scene.resolve_linear(&infer));
+            let pick = SnapQuery {
+                weights: weights.for_picking(),
+                ..infer
+            };
+            assert_eq!(scene.resolve(&pick), None, "{weights:?}");
+            assert_eq!(scene.resolve_linear(&pick), None, "{weights:?}");
+        }
+    }
+
+    /// The hysteresis release query (twice the acquire aperture, declared
+    /// through `soft_axis_aperture_scale`) holds a point out to 2.25 acquire
+    /// radii — its 1.75 reach plus `POINT_RELEASE_MARGIN` — not the full
+    /// 3.5 that scaling the reach by the ratio would give.
+    #[test]
+    fn a_held_point_releases_with_the_margin_a_line_gets() {
+        let mut scene = InferenceScene::new();
+        let corner = Point3::new(3.0, 0.0, 3.0);
+        scene.add_sketch(
+            SketchId::default(),
+            &[(SketchEdgeId::default(), corner, Point3::new(3.0, 3.0, 3.0))],
+        );
+        let release = |radii: f64| {
+            let mut x = 3.0;
+            while long_drag_screen_angle(Point3::new(x, 0.0, 3.0), corner)
+                < radii * LONG_DRAG_APERTURE
+            {
+                x -= 1e-5;
+            }
+            let q = SnapQuery {
+                anchor: None,
+                aperture: 2.0 * LONG_DRAG_APERTURE,
+                soft_axis_aperture_scale: Some(2.0),
+                ..long_drag_query(Point3::new(x, 0.0, 3.0), SnapWeights::default())
+            };
+            assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+            scene.resolve(&q).map(|s| s.kind)
+        };
+        assert_eq!(release(2.1), Some(SnapKind::Endpoint));
+        assert_eq!(release(2.4), None);
+    }
+
+    /// The point reach is for named points only: an edge 1.5 pick radii off
+    /// the cursor, a metre from its midpoint and ends, is not admitted.
+    #[test]
+    fn point_reach_does_not_widen_an_edge() {
+        let mut scene = InferenceScene::new();
+        let a = Point3::new(3.0, -1.0, 3.0);
+        let b = Point3::new(3.0, 3.0, 3.0);
+        scene.add_sketch(SketchId::default(), &[(SketchEdgeId::default(), a, b)]);
+        let on_edge = Point3::new(3.0, 2.0, 3.0);
+        let mut x = 3.0;
+        while long_drag_screen_angle(Point3::new(x, 2.0, 3.0), on_edge) < 1.5 * LONG_DRAG_APERTURE {
+            x -= 1e-4;
+        }
+        let query = SnapQuery {
+            anchor: None,
+            ..long_drag_query(Point3::new(x, 2.0, 3.0), SnapWeights::default())
+        };
+        let snap = scene.resolve(&query);
+        assert!(
+            snap.is_none_or(|s| s.kind != SnapKind::OnEdge),
+            "an edge 1.5 radii away must not capture, got {snap:?}"
+        );
+        let query = SnapQuery {
+            anchor: None,
+            ..long_drag_query(Point3::new(3.0 - 1e-4, 2.0, 3.0), SnapWeights::default())
+        };
+        assert_eq!(
+            scene.resolve(&query).map(|s| s.kind),
+            Some(SnapKind::OnEdge)
+        );
     }
 
     /// `remove_guide` is idempotent and unregisters: a removed guide no

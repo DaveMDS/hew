@@ -1064,9 +1064,44 @@ export interface ScenesUpdateParams {
 export interface ScenesUpdateResult {}
 
 /**
+ * `hew.sketch.copy` (v1) — Copy drawing units on a plane by an offset.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_unit, draft_boundary_edge_touched, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, point_off_plane, degenerate_segment
+ */
+export interface SketchCopyParams {
+  offset: [number, number, number]
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+  /** unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges) */
+  units: string[]
+}
+
+export interface SketchCopyResult {
+  /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
+  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+}
+
+/**
+ * `hew.sketch.delete` (v1) — Delete drawing units from a plane.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_unit, draft_boundary_edge_touched, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, point_off_plane, degenerate_segment
+ */
+export interface SketchDeleteParams {
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+  /** unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges) */
+  units: string[]
+}
+
+export interface SketchDeleteResult {
+  /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
+  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+}
+
+/**
  * `hew.sketch.draw_arc` (v1) — Draw an arc on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, path_too_short, endpoint_not_on_boundary, path_not_simple, loop_not_strictly_inside, loop_self_intersects, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawArcParams {
   center: [number, number, number] | UnspecifiedShape
@@ -1083,12 +1118,12 @@ export interface SketchDrawArcParams {
   start_angle: number
 }
 
-export type SketchDrawArcResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string }
+export type SketchDrawArcResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_circle` (v1) — Draw a circle on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_below_floor, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, loop_not_strictly_inside, loop_self_intersects, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, segments_below_floor, segments_above_cap, unknown_entity, locator_missed, ambiguous_locator, curve_claim_off_loop, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawCircleParams {
   center: [number, number, number] | UnspecifiedShape
@@ -1099,12 +1134,12 @@ export interface SketchDrawCircleParams {
   segments?: number
 }
 
-export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string }
+export type SketchDrawCircleResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_line` (v1) — Draw a line (chain) on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, path_too_short, endpoint_not_on_boundary, path_not_simple, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawLineParams {
   /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
@@ -1112,12 +1147,12 @@ export interface SketchDrawLineParams {
   points: ([number, number, number] | UnspecifiedShape)[]
 }
 
-export type SketchDrawLineResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string }
+export type SketchDrawLineResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_polygon` (v1) — Draw a regular N-gon on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, loop_not_strictly_inside, loop_self_intersects, sides_above_cap, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_curve, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, sides_above_cap, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawPolygonParams {
   center: [number, number, number] | UnspecifiedShape
@@ -1127,12 +1162,12 @@ export interface SketchDrawPolygonParams {
   sides: number
 }
 
-export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string }
+export type SketchDrawPolygonResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
  * `hew.sketch.draw_rect` (v1) — Draw an axis-aligned rectangle on a plane spec.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, loop_not_strictly_inside, loop_self_intersects, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
+ * Refusals: point_off_plane, degenerate_segment, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, unknown_object, unknown_component, unknown_face, point_not_on_face, would_corrupt
  */
 export interface SketchDrawRectParams {
   corner_a: [number, number, number] | UnspecifiedShape
@@ -1141,34 +1176,107 @@ export interface SketchDrawRectParams {
   plane: UnspecifiedShape
 }
 
-export type SketchDrawRectResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string }
+export type SketchDrawRectResult = { curve_id?: string; region_id?: string; region_ids: string[]; sketch: string } | { object_id: string; units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
 
 /**
- * `hew.sketch.offset` (v1) — Offset a region boundary within its sketch.
+ * `hew.sketch.move` (v1) — Move drawing units (islands, edges, circles, regions) on a plane by an offset.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_unit, draft_boundary_edge_touched, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, point_off_plane, degenerate_segment
+ */
+export interface SketchMoveParams {
+  /** translation [x, y, z] in meters; must stay in the plane */
+  offset: [number, number, number]
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+  /** unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges) */
+  units: string[]
+}
+
+export interface SketchMoveResult {
+  /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
+  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+}
+
+/**
+ * `hew.sketch.offset` (v1) — Offset a region boundary within its sketch, or a face or plane region by its unit key.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: unknown_region, malformed_region, offset_too_small, offset_collapsed, unknown_sketch, unknown_entity
+ * Refusals: unknown_region, malformed_region, offset_too_small, offset_collapsed, unknown_sketch, unknown_entity, unknown_unit, draft_boundary_edge_touched
  */
 export interface SketchOffsetParams {
   /** positive grows the material, negative shrinks it */
   distance: number
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane?: UnspecifiedShape
+  /** a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units (a face or plane region) */
   region: string
 }
 
-export interface SketchOffsetResult {
-  curve_ids: string[]
-  /** present when exactly one region resulted */
-  region_id?: string
-  region_ids: string[]
-  sketch: string
+export type SketchOffsetResult = { curve_ids: string[]; region_id?: string; region_ids: string[]; sketch: string } | { units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[] }
+
+/**
+ * `hew.sketch.rotate` (v1) — Rotate drawing units on a plane about the plane normal through a point.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_unit, draft_boundary_edge_touched, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, point_off_plane, degenerate_segment
+ */
+export interface SketchRotateParams {
+  /** radians, counter-clockwise seen from the plane normal side */
+  angle: number
+  axis_point: [number, number, number] | UnspecifiedShape
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+  /** unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges) */
+  units: string[]
+}
+
+export interface SketchRotateResult {
+  /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
+  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
 }
 
 /**
- * `hew.solid.delete_imprint` (v1) — Delete an imprint (sub-face or chord), dissolving it back into its face.
+ * `hew.sketch.scale` (v1) — Scale drawing units on a plane about a center, uniformly or per axis.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ * Refusals: unknown_unit, draft_boundary_edge_touched, unknown_sketch, unknown_entity, locator_missed, ambiguous_locator, point_off_plane, degenerate_segment
+ */
+export interface SketchScaleParams {
+  center: [number, number, number] | UnspecifiedShape
+  /** uniform scale; give this or `factors` */
+  factor?: number
+  /** per-axis [sx, sy, sz] in world axes; must keep the drawing in its plane */
+  factors?: [number, number, number]
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+  /** unit keys from hew.sketch.units: isl_<hex16> (an island: all its edges), edg_<hex16> (one edge), crv_<hex16> (every facet of one circle), rgn_<hex16> (a region's ring edges that are drawing edges) */
+  units: string[]
+}
+
+export interface SketchScaleResult {
+  /** the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it */
+  units: ({ key: string; kind: "edge" | "region"; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]
+}
+
+/**
+ * `hew.sketch.units` (v1) — List a plane's drawing as units: islands of edges (with where each is stored) and regions.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_sketch, unknown_entity, locator_missed, ambiguous_locator
+ */
+export interface SketchUnitsParams {
+  /** HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>} */
+  plane: UnspecifiedShape
+}
+
+export interface SketchUnitsResult {
+  regions: { extrudable: boolean; face?: UnspecifiedShape; holes: [number, number, number][][]; key: string; object_id?: string; outer: [number, number, number][] }[]
+  units: ({ edges: ({ a: [number, number, number]; b: [number, number, number]; curve?: { center?: [number, number, number]; key?: string; radius?: number }; key: string; object_id?: string; sketch_id?: string; store: "topology" | "owned" | "free" })[]; key: string })[]
+}
+
+/**
+ * `hew.solid.delete_imprint` (v1) — Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
  */
 export interface SolidDeleteImprintParams {
-  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point) */
   imprint: UnspecifiedShape
 }
 
@@ -1179,15 +1287,20 @@ export interface SolidDeleteImprintResult {
 /**
  * `hew.solid.extrude` (v1) — Extrude a region into a new Object, consuming the profile.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: distance_too_small, degenerate_geometry, unknown_region, unknown_entity
+ * Refusals: distance_too_small, degenerate_geometry, unknown_region, unknown_entity, unknown_unit, region_not_pushable
  */
 export interface SolidExtrudeParams {
   distance: number
+  /** HEW_API.md §7 plane spec naming the drafting context a unit-key `region` belongs to. A region over no face extrudes as a new Object; a region that is a face of a solid push/pulls that face (result as hew.solid.push_pull); a region over a face that cannot hold it refuses region_not_pushable */
+  plane?: UnspecifiedShape
+  /** a sketch region id; with `plane`, a region unit key rgn_<hex16> from hew.sketch.units */
   region: string
 }
 
 export interface SolidExtrudeResult {
-  object_id: string
+  object_id?: string
+  /** a through-cut's resulting pieces (unit-key form over a face, as hew.solid.push_pull) */
+  object_ids?: string[]
 }
 
 /**
@@ -1205,7 +1318,7 @@ export interface SolidFollowMeResult {
 }
 
 /**
- * `hew.solid.imprints` (v1) — List an object's drawn-but-not-yet-pushed imprints (sub-faces and chords).
+ * `hew.solid.imprints` (v1) — Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per drawing plane; hew.sketch.units is the general form.
  * Tier: Standard · Class: read-only · Served: kernel
  * Refusals: unknown_object, unknown_entity
  */
@@ -1214,7 +1327,9 @@ export interface SolidImprintsParams {
 }
 
 export interface SolidImprintsResult {
-  imprints: ({ at: [number, number, number]; curve?: UnspecifiedShape; curves?: unknown[]; kind: "sub_face" | "chord"; loop?: unknown[][]; nested?: number; path?: unknown[][] })[]
+  /** drawn circles and arcs (whole or cut by other drawing into several runs) on the object's drawing planes: each {closed, curve: {center, radius}, runs: [{at, path}]}, a run that is a chord above carrying that chord's at locator — the whole drawn curve, a circle when closed, else an arc */
+  curve_units: { closed: boolean; curve: UnspecifiedShape; runs: UnspecifiedShape[] }[]
+  imprints: ({ at: [number, number, number]; curve?: UnspecifiedShape; curves?: unknown[]; holes?: unknown[][]; kind: "sub_face" | "chord"; loop?: unknown[][]; nested?: number; normal?: number[]; path?: unknown[][]; region?: string; unit?: string })[]
 }
 
 /**
@@ -1234,12 +1349,12 @@ export interface SolidIntersectResult {
 }
 
 /**
- * `hew.solid.move_imprint` (v1) — Slide an imprint (sub-face or chord) on its face by a translation.
+ * `hew.solid.move_imprint` (v1) — Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
  */
 export interface SolidMoveImprintParams {
-  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point) */
   imprint: UnspecifiedShape
   offset: [number, number, number]
 }
@@ -1267,15 +1382,15 @@ export interface SolidPushPullResult {
 }
 
 /**
- * `hew.solid.rotate_imprint` (v1) — Turn an imprint on its face about the face normal through a pivot point.
+ * `hew.solid.rotate_imprint` (v1) — Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
+ * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
  */
 export interface SolidRotateImprintParams {
   about: [number, number, number] | UnspecifiedShape
   /** radians */
   angle: number
-  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point) */
   imprint: UnspecifiedShape
 }
 
@@ -1284,15 +1399,15 @@ export interface SolidRotateImprintResult {
 }
 
 /**
- * `hew.solid.scale_imprint` (v1) — Uniformly scale an imprint on its face about an anchor point.
+ * `hew.solid.scale_imprint` (v1) — Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: not_in_plane, nested_not_flat, not_an_inner_face, loop_self_intersects, loop_not_strictly_inside, point_not_on_face, not_a_chord, endpoint_not_on_boundary, path_not_simple, would_corrupt, not_an_imprint, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
+ * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, no_such_point
  */
 export interface SolidScaleImprintParams {
   about: [number, number, number] | UnspecifiedShape
   /** uniform scale factor */
   factor: number
-  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face imprint; for a CHORD imprint, the same shape read instead as a point on one of its lines */
+  /** HEW_API.md §5.2 face locator ({object,at} | {object,ray} | {"$face":"label#key"}) naming a sub-face; {object,at} also picks a CHORD when the point lies on one of its lines (a chord is tried first, then the sub-face containing the point) */
   imprint: UnspecifiedShape
 }
 
@@ -1677,12 +1792,18 @@ export class HewApiClient {
   }
 
   readonly sketch = {
+    copy: (params: SketchCopyParams): Promise<SketchCopyResult> => this.mutate('hew.sketch.copy', params),
+    delete: (params: SketchDeleteParams): Promise<SketchDeleteResult> => this.mutate('hew.sketch.delete', params),
     drawArc: (params: SketchDrawArcParams): Promise<SketchDrawArcResult> => this.mutate('hew.sketch.draw_arc', params),
     drawCircle: (params: SketchDrawCircleParams): Promise<SketchDrawCircleResult> => this.mutate('hew.sketch.draw_circle', params),
     drawLine: (params: SketchDrawLineParams): Promise<SketchDrawLineResult> => this.mutate('hew.sketch.draw_line', params),
     drawPolygon: (params: SketchDrawPolygonParams): Promise<SketchDrawPolygonResult> => this.mutate('hew.sketch.draw_polygon', params),
     drawRect: (params: SketchDrawRectParams): Promise<SketchDrawRectResult> => this.mutate('hew.sketch.draw_rect', params),
+    move: (params: SketchMoveParams): Promise<SketchMoveResult> => this.mutate('hew.sketch.move', params),
     offset: (params: SketchOffsetParams): Promise<SketchOffsetResult> => this.mutate('hew.sketch.offset', params),
+    rotate: (params: SketchRotateParams): Promise<SketchRotateResult> => this.mutate('hew.sketch.rotate', params),
+    scale: (params: SketchScaleParams): Promise<SketchScaleResult> => this.mutate('hew.sketch.scale', params),
+    units: (params: SketchUnitsParams): Promise<SketchUnitsResult> => this.call('hew.sketch.units', params),
   }
 
   readonly solid = {

@@ -243,6 +243,33 @@ export function rectangleDimensionAxes(normal: V3): { first: V3; second: V3 } | 
 }
 
 /**
+ * Which way each of `rectangleDimensionAxes`' two axes grows when a typed
+ * `W,D` has no cursor heading to follow (+1 along the axis as returned, -1
+ * against it). `facePlaneBasis`'s handedness is arbitrary — on a −Y wall its
+ * width axis points toward −X, and on a top face too — so growing "+" along
+ * the raw axis sends a rectangle typed right after a click off to the left of
+ * where it reads on screen, often straight out of the face.
+ *
+ * The default reads like the ground does: a horizontal plane grows toward
+ * +X then +Y; any other plane grows right then up as seen from outside it
+ * (up is +Z, or up the slope; right is up × outward normal), so the same
+ * typed pair lands on the near side of the click on every wall.
+ */
+export function defaultGrowthSigns(normal: V3, axes: { first: V3; second: V3 }): [1 | -1, 1 | -1] {
+  const { first, second } = axes
+  const sign = (n: number): 1 | -1 => (n < 0 ? -1 : 1)
+  if (Math.abs(first[2]) < 1e-9 && Math.abs(second[2]) < 1e-9) {
+    // Horizontal: `first` is the axis nearer world X, `second` the other.
+    const fx = Math.abs(first[0]) > 1e-9 ? first[0] : first[1]
+    const sy = Math.abs(second[1]) > 1e-9 ? second[1] : second[0]
+    return [sign(fx), sign(sy)]
+  }
+  // Otherwise `second` is the axis that climbs and `first` the level one.
+  const right: V3 = [-normal[1], normal[0], 0]
+  return [sign(first[0] * right[0] + first[1] * right[1]), sign(second[2])]
+}
+
+/**
  * Build a faceted regular N-gon's vertices on the ground plane (Z=0), given
  * a center and a point on the rim (the first click's radius/start-angle).
  *

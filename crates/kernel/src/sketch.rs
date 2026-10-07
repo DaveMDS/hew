@@ -33,7 +33,8 @@
 use slotmap::{SlotMap, new_key_type};
 
 use crate::geom2d::{
-    boundaries_contact, plane_axes, point_inside_polygon, polygon_is_simple, signed_area_on_plane,
+    boundaries_contact, interior_point_of_loops, plane_axes, point_inside_polygon,
+    polygon_is_simple, signed_area_on_plane,
 };
 use crate::math::{Plane, Point3, Vec3};
 use crate::tol;
@@ -87,6 +88,34 @@ pub struct CurveGeom {
     pub center: Point3,
     /// Circle radius in meters, > [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
     pub radius: f64,
+}
+
+impl CurveGeom {
+    /// The side count `n` of the regular polygon this circle circumscribes
+    /// whose side lies along `a`→`b`, or `None` if no regular polygon's side
+    /// does: the segment must lie inside the circle on a line at the
+    /// polygon's apothem `radius·cos(π/n)` from the center, for a whole
+    /// `n ≥ 3`. A piece of a side (split where something crossed it) passes;
+    /// a side whose corner was dragged off the circle does not.
+    pub fn polygon_side_count(&self, a: Point3, b: Point3) -> Option<u32> {
+        let r = self.radius;
+        if !(r.is_finite() && r > crate::tol::POINT_MERGE) {
+            return None;
+        }
+        let tol = crate::tol::PLANE_DIST.max(r * 1e-9);
+        if (a - self.center).length() > r + tol || (b - self.center).length() > r + tol {
+            return None;
+        }
+        let d = (b - a).normalized().ok()?;
+        let f = self.center - a;
+        let apothem = (f - d * f.dot(d)).length();
+        let ratio = (apothem / r).clamp(-1.0, 1.0);
+        let n = (std::f64::consts::PI / ratio.acos()).round();
+        if !(3.0..=100_000.0).contains(&n) {
+            return None;
+        }
+        ((apothem - r * (std::f64::consts::PI / n).cos()).abs() <= tol).then_some(n as u32)
+    }
 }
 
 /// What a chain's [`CurveGeom`] actually *claims* — the difference between a
@@ -309,6 +338,17 @@ pub struct EdgeRemoved {
     pub regions_created: Vec<SketchRegionId>,
 }
 
+/// What [`Sketch::move_vertex_arranging`] did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VertexMoved {
+    /// The vertex's position before the drag.
+    pub old_pos: Point3,
+    /// `false`: the vertex moved in place and every handle is valid.
+    /// `true`: the drag touched other geometry and its incident edges were
+    /// replayed through the sticky rules; handles of that geometry are fresh.
+    pub rearranged: bool,
+}
+
 /// Typed failures of sketch operations. Nothing is repaired silently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SketchError {
@@ -453,6 +493,20 @@ pub struct Sketch {
     /// `begin_curve`/`end_curve` bracket is open. Transient tool state — a
     /// gesture snapshot restores it with the rest of the sketch.
     active_curve: Option<SketchCurveId>,
+    /// Transient drafting state (never saved, ignored by equality): while
+    /// set, [`Sketch::add_segment`] first moves each endpoint within
+    /// [`tol::POINT_MERGE`] of existing geometry onto it — a vertex, else the
+    /// nearest edge's line (its end when the foot lands within the
+    /// tolerance of it) — so drawing that touches an edge splits it
+    /// straight. A drafting working sketch sets it; plain sketches keep the
+    /// contact-at-the-point behaviour.
+    snap_to_existing: bool,
+    /// Transient drafting state (never saved, ignored by equality): the
+    /// points where drawing was split by a solid's own edge when the draft
+    /// opened, carried along when the drawing at them is moved or copied
+    /// ([`Sketch::apply_transform_edges`], [`Sketch::copy_edges_transformed`]),
+    /// so the drafting engine can heal a seam moved off the boundary.
+    seams: Vec<Point3>,
 }
 
 /// Everything an undo needs to re-insert consumed scaffolding
@@ -489,7 +543,93 @@ impl Sketch {
             curves: SlotMap::with_key(),
             active_curve: None,
             islands: SlotMap::with_key(),
+            snap_to_existing: false,
+            seams: Vec::new(),
         }
+    }
+
+    /// Turns endpoint snapping onto existing geometry on or off (see the
+    /// field `snap_to_existing`). Drafting turns it on for its working
+    /// sketch.
+    pub(crate) fn set_snap_to_existing(&mut self, on: bool) {
+        self.snap_to_existing = on;
+    }
+
+    /// Sets the seam points (see the field `seams`).
+    pub(crate) fn set_seams(&mut self, seams: Vec<Point3>) {
+        self.seams = seams;
+    }
+
+    /// The seam points, carried through moves and copies.
+    pub(crate) fn seams(&self) -> &[Point3] {
+        &self.seams
+    }
+
+    /// `t` of every seam that is an endpoint of one of `edges` (the drawing
+    /// about to move or be copied by `t`), read from this sketch BEFORE the
+    /// edit: a copy can split or merge those very edges in its target.
+    fn carried_seams(&self, edges: &[SketchEdgeId], t: &crate::Transform) -> Vec<Point3> {
+        if self.seams.is_empty() {
+            return Vec::new();
+        }
+        let ends: Vec<Point3> = edges
+            .iter()
+            .flat_map(|&e| {
+                let ed = self.edges[e];
+                [
+                    self.vertices[ed.from].position,
+                    self.vertices[ed.to].position,
+                ]
+            })
+            .collect();
+        self.seams
+            .iter()
+            .filter(|&&s| ends.iter().any(|q| q.approx_eq(s, tol::POINT_MERGE)))
+            .map(|&s| t.apply_point(s))
+            .collect()
+    }
+
+    /// Adds the seam positions `pts` not already present.
+    fn add_seams(&mut self, pts: Vec<Point3>) {
+        for q in pts {
+            if !self.seams.iter().any(|s| s.approx_eq(q, tol::POINT_MERGE)) {
+                self.seams.push(q);
+            }
+        }
+    }
+
+    /// `p` moved onto existing geometry within [`tol::POINT_MERGE`]: an
+    /// existing vertex, else the foot on the nearest edge (that edge's end
+    /// when the foot lies within the tolerance of it); `p` itself when
+    /// nothing is that close.
+    fn snapped_endpoint(&self, p: Point3) -> Point3 {
+        let m = tol::POINT_MERGE;
+        if let Some(v) = self.vertices.values().find(|v| v.position.approx_eq(p, m)) {
+            return v.position;
+        }
+        let mut best: Option<(f64, Point3)> = None;
+        for e in self.edges.values() {
+            let (a, b) = (self.vertices[e.from].position, self.vertices[e.to].position);
+            let ab = b - a;
+            let len2 = ab.length_squared();
+            if len2 <= 0.0 {
+                continue;
+            }
+            let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+            let q = a + ab * t;
+            let d = (q - p).length();
+            if d <= m && best.is_none_or(|(bd, _)| d < bd) {
+                let q = if q.approx_eq(a, m) {
+                    a
+                } else if q.approx_eq(b, m) {
+                    b
+                } else {
+                    q
+                };
+                best = Some((d, q));
+            }
+        }
+        best.map_or(p, |(_, q)| q)
     }
 
     /// The sketch plane.
@@ -880,15 +1020,10 @@ impl Sketch {
         }
     }
 
-    /// Rigidly move ONE island by an in-plane transform, refusing anything
-    /// that would interact with other islands' geometry (a landing that
-    /// merges vertices, crosses edges, or grazes within tolerance is
-    /// [`SketchError::WouldRetopologize`] — sticky welding across a whole
-    /// island move is not supported). The transform must keep every vertex
-    /// on the sketch plane ([`SketchError::PointOffPlane`] otherwise); the
-    /// caller (the document layer) has already vetted invertibility and
-    /// rejected reflections. Strong guarantee: untouched on `Err`.
-    /// [`Sketch::apply_transform_island`]'s checks without the commit:
+    /// Rigidly move ONE island by an in-plane transform. The single-island
+    /// case of [`Sketch::apply_transform_islands`].
+    ///
+    /// [`Sketch::apply_transform_island`]'s acceptance without the commit:
     /// `Ok(())` iff the move would be accepted. Callers batching several
     /// island moves validate ALL of them first so a refusal aborts the whole
     /// batch instead of leaving earlier islands moved.
@@ -901,14 +1036,124 @@ impl Sketch {
         probe.apply_transform_island(island, t)
     }
 
+    /// Rigidly move ONE island by an in-plane transform; see
+    /// [`Sketch::apply_transform_islands`].
     pub fn apply_transform_island(
         &mut self,
         island: SketchIslandId,
         t: &crate::Transform,
     ) -> Result<(), SketchError> {
-        let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
-        let island_edges: std::collections::BTreeSet<SketchEdgeId> =
-            isl.edges.iter().copied().collect();
+        self.apply_transform_islands(&[island], t)
+    }
+
+    /// Adds a transformed COPY of `edges` to this sketch, landing like the
+    /// same lines drawn there (the copy arranges with whatever it meets; the
+    /// originals stay). One curve bracket per source chain.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownEdge`]; [`SketchError::PointOffPlane`] for an
+    /// off-plane landing; any typed refusal of the replay. Strong guarantee.
+    pub fn copy_edges_transformed(
+        &mut self,
+        edges: &[SketchEdgeId],
+        t: &crate::Transform,
+    ) -> Result<(), SketchError> {
+        if edges.iter().any(|e| !self.edges.contains_key(*e)) {
+            return Err(SketchError::UnknownEdge);
+        }
+        let source = self.clone();
+        let mut target = self.clone();
+        source.replay_edges_into(edges, t, &mut target)?;
+        target.add_seams(source.carried_seams(edges, t));
+        *self = target;
+        Ok(())
+    }
+
+    /// Moves a set of EDGES (not whole islands) by one in-plane transform,
+    /// landing them exactly as the same lines drawn there would: they are
+    /// removed and replayed through [`Sketch::add_segment`] at their
+    /// transformed positions (one curve bracket per chain, map-or-drop curve
+    /// geometry). The drafting engine's move: a drawing unit there is an
+    /// island of drawing edges, which can share vertices with a solid's
+    /// fixed boundary that must not move with it. Handles of the moved
+    /// geometry are fresh.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownEdge`] for a stale edge;
+    /// [`SketchError::PointOffPlane`] for an off-plane landing; any typed
+    /// refusal of the replay. Strong guarantee: untouched on `Err`.
+    pub fn apply_transform_edges(
+        &mut self,
+        edges: &[SketchEdgeId],
+        t: &crate::Transform,
+    ) -> Result<(), SketchError> {
+        if edges.iter().any(|e| !self.edges.contains_key(*e)) {
+            return Err(SketchError::UnknownEdge);
+        }
+        for &e in edges {
+            let ed = self.edges[e];
+            for v in [ed.from, ed.to] {
+                let p = t.apply_point(self.vertices[v].position);
+                if self.plane.signed_distance(p).abs() > tol::PLANE_DIST {
+                    return Err(SketchError::PointOffPlane { which: 0 });
+                }
+            }
+        }
+        let set: std::collections::BTreeSet<SketchEdgeId> = edges.iter().copied().collect();
+        let mut moved = self.clone();
+        moved.add_seams(self.carried_seams(edges, t));
+        moved.remove_edges(&set);
+        self.replay_edges_into(edges, t, &mut moved)?;
+        *self = moved;
+        Ok(())
+    }
+
+    /// Move a SET of islands together by one in-plane transform. The
+    /// transform must keep every vertex on the sketch plane
+    /// ([`SketchError::PointOffPlane`] otherwise); the caller (the document
+    /// layer) has already vetted invertibility and rejected reflections.
+    ///
+    /// A moved shape lands exactly as the same shape DRAWN there would
+    /// (unified-drafting decision 4): where it touches, crosses, or overlaps
+    /// geometry outside the set, the sticky rules split and merge with it.
+    /// Two mechanisms, one result:
+    ///
+    /// - **Clear landing** (no moved edge comes within
+    ///   [`tol::POINT_MERGE`] of any other edge): the vertices move in place.
+    ///   Every edge, vertex, island, and curve handle stays valid, and a
+    ///   region keeps its id while its outer cycle is unchanged. Curve
+    ///   geometry rides along iff the whole chain moved under a similarity
+    ///   (map-or-drop): a chain straddling the set's boundary can no longer
+    ///   be described by one circle, so its geometry drops.
+    /// - **Touching landing**: the set's edges are removed and replayed
+    ///   through [`Sketch::add_segment`] at their transformed positions
+    ///   ([`Sketch::rebuild_islands_transformed`]'s replay, onto this
+    ///   sketch). Handles of the moved geometry are fresh; callers re-query,
+    ///   as after any reshaping mutation. Each moved curve chain becomes one
+    ///   new chain carrying the mapped circle; members left behind keep the
+    ///   source chain.
+    ///
+    /// Regions and islands re-derive in both cases, so a shape moved inside
+    /// a closed loop becomes its hole, as a drawn one would. All islands move
+    /// together: removing the whole set before replaying any of it keeps one
+    /// moved island from arranging against another's old position.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownIsland`] for any stale island id;
+    /// [`SketchError::PointOffPlane`] for an off-plane landing; any typed
+    /// refusal of the replay (a tolerance-collapsing transform merging a
+    /// moved edge's ends) propagates. Strong guarantee: untouched on `Err`.
+    pub fn apply_transform_islands(
+        &mut self,
+        islands: &[SketchIslandId],
+        t: &crate::Transform,
+    ) -> Result<(), SketchError> {
+        let mut island_edges: std::collections::BTreeSet<SketchEdgeId> =
+            std::collections::BTreeSet::new();
+        for &island in islands {
+            let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+            island_edges.extend(isl.edges.iter().copied());
+        }
         let mut island_verts: std::collections::BTreeSet<SketchVertexId> =
             std::collections::BTreeSet::new();
         for &eid in &island_edges {
@@ -927,19 +1172,8 @@ impl Sketch {
             s.vertices[v].position = p;
         }
 
-        // Interference with everything OUTSIDE the island: crossings, vertex
-        // merges, and within-tolerance grazes all refuse.
-        let near = |p: Point3, a: Point3, b: Point3| -> bool {
-            let ab = b - a;
-            let len2 = ab.dot(ab);
-            let t = if len2 <= tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH {
-                0.0
-            } else {
-                ((p - a).dot(ab) / len2).clamp(0.0, 1.0)
-            };
-            let c = Point3::new(a.x + ab.x * t, a.y + ab.y * t, a.z + ab.z * t);
-            (p - c).length() <= tol::POINT_MERGE
-        };
+        // Does the landing touch anything OUTSIDE the set? Crossings, vertex
+        // merges, and within-tolerance grazes all count.
         let moved_segs: Vec<(Point3, Point3)> = island_edges
             .iter()
             .map(|&eid| {
@@ -947,26 +1181,29 @@ impl Sketch {
                 (s.vertices[e.from].position, s.vertices[e.to].position)
             })
             .collect();
-        for (oid, oe) in &s.edges {
+        let touches = s.edges.iter().any(|(oid, oe)| {
             if island_edges.contains(&oid) {
-                continue;
+                return false;
             }
             let (r, w) = (s.vertices[oe.from].position, s.vertices[oe.to].position);
-            for &(p, q) in &moved_segs {
-                if crate::geom2d::segments_intersect(p, q, r, w)
-                    || near(p, r, w)
-                    || near(q, r, w)
-                    || near(r, p, q)
-                    || near(w, p, q)
-                {
-                    return Err(SketchError::WouldRetopologize);
-                }
-            }
+            moved_segs
+                .iter()
+                .any(|&(p, q)| crate::geom2d::segments_intersect(p, q, r, w))
+        });
+
+        if touches {
+            // Arrange: remove the whole set, then replay it transformed
+            // through the sticky machinery, exactly as a draw would land.
+            let mut arranged = self.clone();
+            arranged.remove_edges(&island_edges);
+            self.replay_islands_into(islands, t, &mut arranged)?;
+            *self = arranged;
+            return Ok(());
         }
 
-        // Curve geometry rides along iff the whole chain moved: a chain
-        // entirely inside the island maps (map-or-drop contract, see
-        // apply_transform); a chain straddling the island boundary — possible
+        // Clear landing: the vertices moved in place above. Curve geometry
+        // rides along iff the whole chain moved (map-or-drop, see
+        // apply_transform); a chain straddling the set's boundary — possible
         // after partial deletion split its edges across components — can no
         // longer be described by one circle, so its geometry drops.
         let scale = in_plane_similarity_scale(t, s.plane.normal());
@@ -997,33 +1234,25 @@ impl Sketch {
             };
         }
 
+        // Containment may have changed even though nothing touched (a shape
+        // moved into a closed loop becomes its hole; out of one, no longer):
+        // re-derive regions — ids survive while outer cycles are unchanged —
+        // and islands.
+        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
+            s.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        s.recompute_regions_with_diff(&old_regions);
+        s.recompute_islands();
+
         *self = s;
         Ok(())
-    }
-
-    /// A NEW sketch holding this sketch's `island` with `t` baked in, on
-    /// `plane`. The single-island case of [`Sketch::rebuild_islands_transformed`],
-    /// which the out-of-plane island detach
-    /// ([`Document::transform_sketch_island`]) uses: a sketch is planar, so an
-    /// island leaving the plane moves to a sketch of its own.
-    ///
-    /// [`Document::transform_sketch_island`]: crate::Document::transform_sketch_island
-    pub(crate) fn rebuild_island_transformed(
-        &self,
-        island: SketchIslandId,
-        t: &crate::Transform,
-        plane: Plane,
-    ) -> Result<Sketch, SketchError> {
-        self.rebuild_islands_transformed(&[island], t, plane)
     }
 
     /// A NEW sketch holding this sketch's `islands` with `t` baked in, on
     /// `plane` (the source plane mapped through `t`; the caller computes it
     /// because plane mapping errors are transform-typed, not sketch-typed).
     /// This is the builder for the document layer's out-of-plane sketch COPY
-    /// ([`Document::copy_sketch_islands`]) and, in its single-island form, the
-    /// island DETACH ([`Document::transform_sketch_island`]). Pure — `self` is
-    /// untouched.
+    /// ([`Document::copy_sketch_islands`]) and the island DETACH
+    /// ([`Document::transform_sketch_islands`]). Pure — `self` is untouched.
     ///
     /// Every listed island's edges are replayed through the ordinary sticky
     /// machinery ONTO ONE fresh sketch, so regions and islands re-derive
@@ -1052,7 +1281,7 @@ impl Sketch {
     /// refusal of the replay ([`Sketch::add_segment`] /
     /// [`Sketch::begin_curve_with`]) propagates with nothing built.
     ///
-    /// [`Document::transform_sketch_island`]: crate::Document::transform_sketch_island
+    /// [`Document::transform_sketch_islands`]: crate::Document::transform_sketch_islands
     /// [`Document::copy_sketch_islands`]: crate::Document::copy_sketch_islands
     pub(crate) fn rebuild_islands_transformed(
         &self,
@@ -1060,14 +1289,72 @@ impl Sketch {
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let scale = in_plane_similarity_scale(t, self.plane.normal());
         let mut fresh = Sketch::on_plane(plane);
-        // One shared chain-emitted set across every island: a curve chain is
-        // one connected component, so it lives in exactly one island, but the
-        // set also makes the loop robust to a duplicate island id in the list.
+        self.replay_islands_into(islands, t, &mut fresh)?;
+        Ok(fresh)
+    }
+
+    /// Replays this sketch's `islands`, with `t` baked in, into `target`
+    /// through the ordinary sticky machinery ([`Sketch::add_segment`]), one
+    /// curve bracket per source chain. The shared engine of
+    /// [`Sketch::rebuild_islands_transformed`] (onto a fresh sketch) and the
+    /// arranging arm of [`Sketch::apply_transform_islands`] (back onto this
+    /// sketch, after removing the originals). `target` is left partially
+    /// written on `Err`; callers pass a clone.
+    fn replay_islands_into(
+        &self,
+        islands: &[SketchIslandId],
+        t: &crate::Transform,
+        target: &mut Sketch,
+    ) -> Result<(), SketchError> {
+        let mut edges: Vec<SketchEdgeId> = Vec::new();
+        for &island in islands {
+            let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
+            for &e in &isl.edges {
+                if !edges.contains(&e) {
+                    edges.push(e);
+                }
+            }
+        }
+        self.replay_edges_into(&edges, t, target)
+    }
+
+    /// A NEW sketch on `plane` holding exactly `edges` of this sketch with
+    /// `t` baked in, replayed through the sticky machinery (one curve
+    /// bracket per source chain, map-or-drop curve geometry). Pure. The
+    /// builder for moving PART of an object-owned sketch with a pushed face.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownEdge`] for a stale edge; any typed refusal of
+    /// the replay propagates with nothing built.
+    pub(crate) fn rebuild_edges_transformed(
+        &self,
+        edges: &[SketchEdgeId],
+        t: &crate::Transform,
+        plane: Plane,
+    ) -> Result<Sketch, SketchError> {
+        let mut fresh = Sketch::on_plane(plane);
+        self.replay_edges_into(edges, t, &mut fresh)?;
+        Ok(fresh)
+    }
+
+    /// Replays `edges` of this sketch, with `t` baked in, into `target`
+    /// through [`Sketch::add_segment`], one curve bracket per source chain
+    /// (its members in `edges` order). Curve geometry maps when `t` restricted
+    /// to this sketch's plane is a similarity and drops otherwise. `target` is
+    /// left partially written on `Err`; callers pass a clone or a fresh sketch.
+    fn replay_edges_into(
+        &self,
+        edges: &[SketchEdgeId],
+        t: &crate::Transform,
+        target: &mut Sketch,
+    ) -> Result<(), SketchError> {
+        if edges.iter().any(|e| !self.edges.contains_key(*e)) {
+            return Err(SketchError::UnknownEdge);
+        }
+        let scale = in_plane_similarity_scale(t, self.plane.normal());
         let mut emitted: std::collections::BTreeSet<SketchCurveId> =
             std::collections::BTreeSet::new();
-
         let endpoints = |eid: SketchEdgeId| {
             let e = self.edges[eid];
             (
@@ -1075,51 +1362,44 @@ impl Sketch {
                 t.apply_point(self.vertices[e.to].position),
             )
         };
-
-        for &island in islands {
-            let isl = self.islands.get(island).ok_or(SketchError::UnknownIsland)?;
-            for &eid in &isl.edges {
-                match self.edges[eid].curve {
-                    None => {
-                        let (a, b) = endpoints(eid);
-                        fresh.add_segment(a, b)?;
+        for &eid in edges {
+            match self.edges[eid].curve {
+                None => {
+                    let (a, b) = endpoints(eid);
+                    target.add_segment(a, b)?;
+                }
+                Some(cid) => {
+                    if !emitted.insert(cid) {
+                        continue; // this chain already replayed with its first edge
                     }
-                    Some(cid) => {
-                        if !emitted.insert(cid) {
-                            continue; // this chain already replayed with its first edge
+                    // One bracket per source chain, so the fresh edges are
+                    // one selectable unit again.
+                    match (self.curves.get(cid).copied().flatten(), scale) {
+                        (Some(a), Some(sc)) => {
+                            target.begin_curve_with_kind(
+                                CurveGeom {
+                                    center: t.apply_point(a.geom.center),
+                                    radius: a.geom.radius * sc,
+                                },
+                                a.kind,
+                            )?;
                         }
-                        // One bracket per source chain, so the fresh edges are
-                        // one selectable unit again.
-                        match (self.curves.get(cid).copied().flatten(), scale) {
-                            (Some(a), Some(sc)) => {
-                                fresh.begin_curve_with_kind(
-                                    CurveGeom {
-                                        center: t.apply_point(a.geom.center),
-                                        radius: a.geom.radius * sc,
-                                    },
-                                    a.kind,
-                                )?;
-                            }
-                            _ => {
-                                fresh.begin_curve();
-                            }
+                        _ => {
+                            target.begin_curve();
                         }
-                        // Deterministic member order: the island's stored edge
-                        // order, filtered to this chain.
-                        for &member in isl
-                            .edges
-                            .iter()
-                            .filter(|&&m| self.edges[m].curve == Some(cid))
-                        {
-                            let (a, b) = endpoints(member);
-                            fresh.add_segment(a, b)?;
-                        }
-                        fresh.end_curve();
                     }
+                    for &member in edges.iter().filter(|&&m| self.edges[m].curve == Some(cid)) {
+                        let (a, b) = endpoints(member);
+                        if let Err(e) = target.add_segment(a, b) {
+                            target.end_curve();
+                            return Err(e);
+                        }
+                    }
+                    target.end_curve();
                 }
             }
         }
-        Ok(fresh)
+        Ok(())
     }
 
     /// Current closed regions (read-only). Kept up to date by every mutation;
@@ -1152,6 +1432,9 @@ impl Sketch {
         if transform.determinant() < 0.0 {
             return Err(crate::TransformError::Reflection);
         }
+        // The plane first: an invertible but extremely anisotropic map can
+        // still squash it to no direction, refused before anything moves.
+        let plane = transform.apply_plane(&self.plane)?;
         // Curve geometry maps when the transform is an in-plane similarity
         // (center through the point map, radius by the uniform factor) and is
         // DROPPED otherwise — a non-uniform in-plane scale turns the circle
@@ -1172,11 +1455,8 @@ impl Sketch {
                 _ => None,
             };
         }
-        // Remap the plane (cannot fail on a validated non-singular map),
-        // then move every vertex onto it.
-        self.plane = transform
-            .apply_plane(&self.plane)
-            .expect("apply_plane on a validated non-singular transform");
+        // Remap the plane, then move every vertex onto it.
+        self.plane = plane;
         for v in self.vertices.values_mut() {
             v.position = transform.apply_point(v.position);
         }
@@ -1199,10 +1479,124 @@ impl Sketch {
     pub fn add_segment(&mut self, from: Point3, to: Point3) -> Result<SegmentAdded, SketchError> {
         // Strong guarantee: work on a clone, validate everything that can fail,
         // then swap.
+        let (from, to) = if self.snap_to_existing {
+            (self.snapped_endpoint(from), self.snapped_endpoint(to))
+        } else {
+            (from, to)
+        };
         let mut s = self.clone();
+        if s.snap_to_existing {
+            for p in [from, to] {
+                s.split_circle_facet_at(p)?;
+            }
+        }
         let report = s.add_segment_inner(from, to)?;
         *self = s;
         Ok(report)
+    }
+
+    /// When `p` lies on a drawn circle or arc (on its exact circle) inside
+    /// one facet's span but on none of its points, splits that facet at `p`
+    /// into two chords of the same circle in the same chain, so drawing that
+    /// ends on the curve (a quadrant, any point the curve's own snaps offer)
+    /// meets it there rather than a sagitta outside it. Returns whether it
+    /// split.
+    fn split_circle_facet_at(&mut self, p: Point3) -> Result<bool, SketchError> {
+        let m = tol::POINT_MERGE;
+        let found = self.edges.iter().find_map(|(id, e)| {
+            let c = e.curve?;
+            let an = self.curve_analytic(c)?;
+            if an.kind != SketchCurveKind::Circle {
+                return None;
+            }
+            let g = an.geom;
+            if ((p - g.center).length() - g.radius).abs() > tol::PLANE_DIST.max(g.radius * 1e-9) {
+                return None;
+            }
+            let (a, b) = (self.vertices[e.from].position, self.vertices[e.to].position);
+            if p.approx_eq(a, m) || p.approx_eq(b, m) {
+                return None;
+            }
+            let ab = b - a;
+            let len2 = ab.length_squared();
+            if len2 <= 0.0 {
+                return None;
+            }
+            // Inside the span the facet subtends: projects into the chord, on
+            // the side of the center the chord's arc bulges to.
+            let t = (p - a).dot(ab) / len2;
+            let mid = a + ab * 0.5;
+            (t > 0.0 && t < 1.0 && (mid - g.center).dot(p - g.center) > 0.0)
+                .then_some((id, a, b, c))
+        });
+        let Some((e, a, b, c)) = found else {
+            return Ok(false);
+        };
+        self.remove_edge_inner(e);
+        let saved = self.active_curve;
+        self.active_curve = Some(c);
+        let added = self
+            .add_segment_inner(a, p)
+            .and_then(|_| self.add_segment_inner(p, b));
+        self.active_curve = saved;
+        added?;
+        Ok(true)
+    }
+
+    /// Merges the two edges meeting at `v` into one when `v` is a straight
+    /// pass-through: exactly two edges use it, they run on one line (within
+    /// [`tol::POINT_MERGE`]) in one direction, and they belong to the same
+    /// curve chain or to none. The merged edge keeps that chain. `Ok(false)`
+    /// (unchanged) when `v` is not such a point. Strong guarantee.
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownVertex`] for a stale handle; any error the
+    /// re-insertion raises (never for a true pass-through).
+    pub(crate) fn dissolve_straight_vertex(
+        &mut self,
+        v: SketchVertexId,
+    ) -> Result<bool, SketchError> {
+        let p = self
+            .vertices
+            .get(v)
+            .ok_or(SketchError::UnknownVertex)?
+            .position;
+        let incident: Vec<SketchEdgeId> = self
+            .edges
+            .iter()
+            .filter(|(_, e)| e.from == v || e.to == v)
+            .map(|(id, _)| id)
+            .collect();
+        let [e1, e2] = incident[..] else {
+            return Ok(false);
+        };
+        let (d1, d2) = (self.edges[e1], self.edges[e2]);
+        if d1.curve != d2.curve {
+            return Ok(false);
+        }
+        let other = |e: SketchEdge| if e.from == v { e.to } else { e.from };
+        let (a, c) = (
+            self.vertices[other(d1)].position,
+            self.vertices[other(d2)].position,
+        );
+        let ac = c - a;
+        let len = ac.length();
+        if len <= tol::POINT_MERGE
+            || ac.cross(p - a).length() / len > tol::POINT_MERGE
+            || (p - a).dot(c - p) <= 0.0
+        {
+            return Ok(false);
+        }
+        let mut s = self.clone();
+        s.remove_edge_inner(e1);
+        s.remove_edge_inner(e2);
+        let saved = s.active_curve;
+        s.active_curve = d1.curve;
+        let added = s.add_segment_inner(a, c);
+        s.active_curve = saved;
+        added?;
+        *self = s;
+        Ok(true)
     }
 
     /// Removes one edge (the eraser tool), deleting vertices that become
@@ -1638,6 +2032,77 @@ impl Sketch {
 
         *self = s;
         Ok(old_pos)
+    }
+
+    /// Drags vertex `v` to `new_pos` the way the same lines DRAWN there would
+    /// land (unified-drafting decision 4). When the drag touches nothing
+    /// ([`Sketch::move_vertex`] accepts it), the vertex moves in place and
+    /// every handle stays valid. When it would land on another vertex, cross
+    /// or touch another edge, or run along one, the incident edges are
+    /// removed and replayed through [`Sketch::add_segment`] from `new_pos`:
+    /// they weld, split, and merge exactly as freshly drawn lines, regions
+    /// re-derive, and handles of the replayed geometry are fresh. Either
+    /// way, each curve chain through `v` keeps its identity (its members stay
+    /// one selectable unit) and drops its analytic circle, which a dragged
+    /// facet no longer lies on (map-or-drop).
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownVertex`], [`SketchError::PointOffPlane`], and
+    /// [`SketchError::DegenerateSegment`] (an incident edge collapsing onto
+    /// its other end) exactly as [`Sketch::move_vertex`]; a pinching drag the
+    /// in-place path refuses as an invalid profile is likewise refused.
+    /// Strong guarantee: untouched on `Err`.
+    pub fn move_vertex_arranging(
+        &mut self,
+        v: SketchVertexId,
+        new_pos: Point3,
+    ) -> Result<VertexMoved, SketchError> {
+        match self.move_vertex(v, new_pos) {
+            Ok(old_pos) => {
+                return Ok(VertexMoved {
+                    old_pos,
+                    rearranged: false,
+                });
+            }
+            Err(SketchError::WouldRetopologize) => {}
+            Err(e) => return Err(e),
+        }
+        let old_pos = self.vertices[v].position;
+        let incident: Vec<(SketchEdgeId, SketchEdge)> = self
+            .edges
+            .iter()
+            .filter(|(_, e)| e.from == v || e.to == v)
+            .map(|(id, e)| (id, *e))
+            .collect();
+
+        let mut s = self.clone();
+        let doomed: std::collections::BTreeSet<SketchEdgeId> =
+            incident.iter().map(|&(id, _)| id).collect();
+        s.remove_edges(&doomed);
+        let prior_active = s.active_curve;
+        for &(_, e) in &incident {
+            let (a, b) = if e.from == v {
+                (new_pos, self.vertices[e.to].position)
+            } else {
+                (self.vertices[e.from].position, new_pos)
+            };
+            // Re-attach the replayed edge to its own chain, so the chain stays
+            // one unit; its circle drops below.
+            s.active_curve = e.curve;
+            let added = s.add_segment_inner(a, b);
+            s.active_curve = prior_active;
+            added?;
+        }
+        for &(_, e) in &incident {
+            if let Some(cid) = e.curve {
+                s.curves[cid] = None;
+            }
+        }
+        *self = s;
+        Ok(VertexMoved {
+            old_pos,
+            rearranged: true,
+        })
     }
 
     /// The scaffolding edges only `region` needs: the edges on its boundary
@@ -2236,7 +2701,17 @@ impl Sketch {
             edge_id: SketchEdgeId,
             // (s_param, position) for each interior split point on this edge.
             splits: Vec<(f64, Point3)>,
+            // The edge's length, to read its parameters metrically.
+            len: f64,
         }
+
+        // Parameters are read METRICALLY: `t` on a segment of length `len` is
+        // strictly interior iff it lies more than `POINT_MERGE` metres from
+        // both ends along it, and two parameters coincide iff they are less
+        // than `POINT_MERGE` metres apart.
+        let interior =
+            |t: f64, len: f64| t * len > tol::POINT_MERGE && (1.0 - t) * len > tol::POINT_MERGE;
+        let new_len = ((tp.0 - fp.0).powi(2) + (tp.1 - fp.1).powi(2)).sqrt();
 
         let mut existing_splits: Vec<ExistingEdgeSplit> = Vec::new();
         // t-params along the new segment where we need to insert a vertex
@@ -2251,6 +2726,7 @@ impl Sketch {
             let eq_ = proj(self.vertices[edge.to].position);
 
             let mut edge_splits: Vec<(f64, Point3)> = Vec::new();
+            let ext_len = ((eq_.0 - ep.0).powi(2) + (eq_.1 - ep.1).powi(2)).sqrt();
 
             // Find all intersections between the new segment [fp,tp] and this
             // existing edge [ep,eq_].
@@ -2265,22 +2741,22 @@ impl Sketch {
                         point,
                     } => {
                         // Interior crossing: splits both segments.
-                        if t_new > tol::POINT_MERGE && t_new < 1.0 - tol::POINT_MERGE {
+                        if interior(t_new, new_len) {
                             new_seg_t_params.push(t_new);
                         }
-                        if s_existing > tol::POINT_MERGE && s_existing < 1.0 - tol::POINT_MERGE {
+                        if interior(s_existing, ext_len) {
                             edge_splits.push((s_existing, point));
                         }
                     }
                     Intersection2D::NewEndpointOnExisting { s_existing, point } => {
                         // New segment endpoint lands on interior of existing edge.
-                        if s_existing > tol::POINT_MERGE && s_existing < 1.0 - tol::POINT_MERGE {
+                        if interior(s_existing, ext_len) {
                             edge_splits.push((s_existing, point));
                         }
                     }
                     Intersection2D::ExistingEndpointOnNew { t_new, .. } => {
                         // Existing endpoint lands on interior of new segment.
-                        if t_new > tol::POINT_MERGE && t_new < 1.0 - tol::POINT_MERGE {
+                        if interior(t_new, new_len) {
                             new_seg_t_params.push(t_new);
                         }
                     }
@@ -2292,13 +2768,13 @@ impl Sketch {
                     } => {
                         // Rule 4: collinear overlap.
                         for t in t_params_on_new {
-                            if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
+                            if interior(t, new_len) {
                                 new_seg_t_params.push(t);
                             }
                         }
                         let _ = points_on_new; // used above via t_params_on_new
                         for (s, p) in s_params_on_existing.into_iter().zip(points_on_existing) {
-                            if s > tol::POINT_MERGE && s < 1.0 - tol::POINT_MERGE {
+                            if interior(s, ext_len) {
                                 edge_splits.push((s, p));
                             }
                         }
@@ -2310,6 +2786,7 @@ impl Sketch {
                 existing_splits.push(ExistingEdgeSplit {
                     edge_id: eid,
                     splits: edge_splits,
+                    len: ext_len,
                 });
             }
         }
@@ -2348,14 +2825,15 @@ impl Sketch {
         for esplit in existing_splits {
             // Deduplicate and sort split points by s param.
             let mut splits = esplit.splits;
+            let len = esplit.len;
             splits.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-            splits.dedup_by(|a, b| (a.0 - b.0).abs() < tol::POINT_MERGE);
+            splits.dedup_by(|a, b| (a.0 - b.0).abs() * len < tol::POINT_MERGE);
 
             // Remove zero-length fragments: skip if s is at 0 or 1 (already
             // covered by snapping).
             let splits: Vec<(f64, Point3)> = splits
                 .into_iter()
-                .filter(|(s, _)| *s > tol::POINT_MERGE && *s < 1.0 - tol::POINT_MERGE)
+                .filter(|(s, _)| interior(*s, len))
                 .collect();
 
             if splits.is_empty() {
@@ -2401,7 +2879,7 @@ impl Sketch {
         // ── Step 7: collect t-params along the new segment, materialise verts ──
         // Deduplicate and sort.
         new_seg_t_params.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        new_seg_t_params.dedup_by(|a, b| (*a - *b).abs() < tol::POINT_MERGE);
+        new_seg_t_params.dedup_by(|a, b| (*a - *b).abs() * new_len < tol::POINT_MERGE);
 
         // Build the sequence of vertex ids along the new segment.
         let seg_dir = to_pos - from_pos;
@@ -2409,9 +2887,9 @@ impl Sketch {
         for &t in &new_seg_t_params {
             let pos = from_pos + seg_dir * t;
             // t == 0.0 -> from_vid, t == 1.0 -> to_vid
-            let vid = if (t - 0.0).abs() < tol::POINT_MERGE {
+            let vid = if t * new_len < tol::POINT_MERGE {
                 from_vid
-            } else if (t - 1.0).abs() < tol::POINT_MERGE {
+            } else if (1.0 - t) * new_len < tol::POINT_MERGE {
                 to_vid
             } else {
                 self.find_or_create_vertex(pos, &mut report.new_vertices)
@@ -2797,19 +3275,25 @@ impl Sketch {
 
         for &(hole_ci, hole_area) in &hole_candidates {
             let hole_cycle = &cycles[hole_ci];
-            // Representative point: the centroid of the hole's vertices, which
-            // lies in the hole's interior. A boundary vertex is unreliable for
-            // point-in-polygon and, being shared with neighbouring cycles,
-            // could land exactly on another cycle's edge.
-            let n = hole_cycle.len() as f64;
-            let (mut sx, mut sy, mut sz) = (0.0, 0.0, 0.0);
-            for &vid in hole_cycle {
-                let p = self.vertices[vid].position;
-                sx += p.x;
-                sy += p.y;
-                sz += p.z;
-            }
-            let rep_pos = Point3::new(sx / n, sy / n, sz / n);
+            // Representative point: a point strictly inside the hole loop
+            // ([`interior_point_of_loops`], a scanline clear of every vertex).
+            // A boundary vertex is unreliable for point-in-polygon and, being
+            // shared with neighbouring cycles, could land exactly on another
+            // cycle's edge; the vertex centroid is no better for a concave
+            // hole — a C-shaped loop's centroid lies outside it, inside
+            // whatever the C wraps around, which then wrongly took the loop
+            // as its hole (found by the world-sketch fuzzer: an inward offset
+            // of a notched ring). The centroid stays only as the fallback for
+            // a loop too degenerate to scan.
+            let hole_pts: Vec<Point3> = hole_cycle
+                .iter()
+                .map(|&vid| self.vertices[vid].position)
+                .collect();
+            let rep_pos = interior_point_of_loops(&hole_pts, &[], normal).unwrap_or_else(|| {
+                let n = hole_pts.len() as f64;
+                let sum = hole_pts.iter().fold(Vec3::ZERO, |acc, p| acc + p.to_vec());
+                Point3::ORIGIN + sum / n
+            });
 
             // Assign the hole to the *smallest* enclosing outer cycle, while
             // excluding two things: (1) the hole's own reverse-wound twin — the
@@ -2886,6 +3370,8 @@ impl Sketch {
             curves: SlotMap::with_key(),
             active_curve: None,
             islands: SlotMap::with_key(),
+            snap_to_existing: false,
+            seams: Vec::new(),
         }
     }
 
@@ -2942,8 +3428,18 @@ enum Intersection2D {
 /// (given as 2D projections `nf`, `nt`) and the existing edge `e` (2D
 /// projections `ef`, `et`).
 ///
-/// Returns zero or more intersection events.  The projections are passed for
-/// efficiency; world-space positions are reconstructed from parameters.
+/// Every contact is classified METRICALLY, against [`tol::POINT_MERGE`] in
+/// metres — the tolerance every face-side gate uses (the drafting engine,
+/// `split_face`), so a sketch and a solid's face agree on what touches what.
+/// Distance tests run first: an end of one segment within `POINT_MERGE` of
+/// the other's interior is a T-contact; both ends of one within
+/// `POINT_MERGE` of the other's line is collinear overlap. Only when no end
+/// touches is a PROPER crossing decided, exactly, by orientation signs
+/// ([`crate::geom2d::orient2d`]), so a crossing is never missed however
+/// acute and never invented by rounding. Only events in the open interior
+/// of the relevant segment (more than `POINT_MERGE` from both its ends,
+/// measured along it) are returned; end-to-end coincidences are the
+/// caller's vertex snapping.
 #[allow(clippy::too_many_arguments)]
 fn seg_seg_intersections_2d(
     nf: (f64, f64), // new segment from
@@ -2959,82 +3455,62 @@ fn seg_seg_intersections_2d(
     // Reconstruct 3D position from 2D plane coords. `anchor` carries the
     // out-of-plane component (the plane need not pass through the origin); the
     // 2D coords supply the in-plane displacement.
-    let pos_from_2d = |u: f64, v: f64| -> Point3 { anchor + u_ax * u + v_ax * v };
+    let pos_from_2d = |p: (f64, f64)| -> Point3 { anchor + u_ax * p.0 + v_ax * p.1 };
+    let eps = tol::POINT_MERGE;
 
-    let d_new = (nt.0 - nf.0, nt.1 - nf.1);
-    let d_ext = (et.0 - ef.0, et.1 - ef.1);
+    let sub = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0, a.1 - b.1);
+    let dot = |a: (f64, f64), b: (f64, f64)| a.0 * b.0 + a.1 * b.1;
+    let cross = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
 
-    // Cross product (2D): a × b = ax*by - ay*bx
-    let cross_2d = |a: (f64, f64), b: (f64, f64)| a.0 * b.1 - a.1 * b.0;
+    let d_new = sub(nt, nf);
+    let d_ext = sub(et, ef);
+    let new_len2 = dot(d_new, d_new);
+    let ext_len2 = dot(d_ext, d_ext);
+    let new_len = new_len2.sqrt();
+    let ext_len = ext_len2.sqrt();
+    if new_len <= eps || ext_len <= eps {
+        return Vec::new(); // degenerate segment: nothing to classify
+    }
 
-    let denom = cross_2d(d_new, d_ext);
+    // Parameter of `p`'s projection onto the line `a + d·t` (unclamped).
+    let param = |p: (f64, f64), a: (f64, f64), d: (f64, f64), len2: f64| dot(sub(p, a), d) / len2;
+    // Perpendicular distance from `p` to the infinite line `a + d·t`.
+    let line_dist =
+        |p: (f64, f64), a: (f64, f64), d: (f64, f64), len: f64| cross(d, sub(p, a)).abs() / len;
+    // Strictly inside a segment of length `len`: more than `eps` from both
+    // ends, measured along it.
+    let interior = |t: f64, len: f64| t * len > eps && (1.0 - t) * len > eps;
 
-    if denom.abs() < tol::POINT_MERGE * tol::POINT_MERGE {
-        // Parallel or collinear.
-        // Check if they are actually collinear (ef lies on the line through nf,nt).
-        let nf_to_ef = (ef.0 - nf.0, ef.1 - nf.1);
-        let collinear_check = cross_2d(d_new, nf_to_ef).abs();
-        // Use a length-scaled threshold.
-        let new_len = (d_new.0 * d_new.0 + d_new.1 * d_new.1).sqrt();
-        if new_len < tol::POINT_MERGE {
-            return Vec::new(); // degenerate new segment, skip
-        }
-        if collinear_check / new_len > tol::POINT_MERGE {
-            return Vec::new(); // parallel but not collinear
-        }
+    let ef_on_new_line = line_dist(ef, nf, d_new, new_len) <= eps;
+    let et_on_new_line = line_dist(et, nf, d_new, new_len) <= eps;
+    let nf_on_ext_line = line_dist(nf, ef, d_ext, ext_len) <= eps;
+    let nt_on_ext_line = line_dist(nt, ef, d_ext, ext_len) <= eps;
 
-        // Collinear: project all four endpoints onto the new segment's axis.
-        // t=0 -> nf, t=1 -> nt; also compute s=0 -> ef, s=1 -> et.
-        let project_onto_new = |p: (f64, f64)| -> f64 {
-            ((p.0 - nf.0) * d_new.0 + (p.1 - nf.1) * d_new.1) / (new_len * new_len)
-        };
-        let ext_len_sq = d_ext.0 * d_ext.0 + d_ext.1 * d_ext.1;
-        let ext_len = ext_len_sq.sqrt();
-        let project_onto_ext = |p: (f64, f64)| -> f64 {
-            if ext_len < tol::POINT_MERGE {
-                return 0.0;
-            }
-            ((p.0 - ef.0) * d_ext.0 + (p.1 - ef.1) * d_ext.1) / ext_len_sq
-        };
-
-        let t_ef = project_onto_new(ef);
-        let t_et = project_onto_new(et);
-        let s_nf = project_onto_ext(nf);
-        let s_nt = project_onto_ext(nt);
-
-        // Gather t-params on the new segment for the existing endpoints that
-        // land in its interior.
+    if (ef_on_new_line && et_on_new_line) || (nf_on_ext_line && nt_on_ext_line) {
+        // Collinear (to within tolerance): rule 4, overlap. Each end of one
+        // segment lying strictly inside the other splits it there.
         let mut t_params_on_new: Vec<f64> = Vec::new();
         let mut points_on_new: Vec<Point3> = Vec::new();
-        for (t, ep2d) in [(t_ef, ef), (t_et, et)] {
-            if t > tol::POINT_MERGE && t < 1.0 - tol::POINT_MERGE {
+        for (ep2d, vid) in [(ef, edge.from), (et, edge.to)] {
+            let t = param(ep2d, nf, d_new, new_len2);
+            if interior(t, new_len) {
                 t_params_on_new.push(t);
-                // Use the actual existing vertex position for accuracy.
-                let pos = if (t - t_ef).abs() < tol::POINT_MERGE {
-                    vertices[edge.from].position
-                } else {
-                    vertices[edge.to].position
-                };
-                let _ = ep2d;
-                points_on_new.push(pos);
+                // The existing vertex's own bits, not a reconstruction.
+                points_on_new.push(vertices[vid].position);
             }
         }
-
-        // Gather s-params on the existing segment for the new endpoints that
-        // land in its interior.
         let mut s_params_on_existing: Vec<f64> = Vec::new();
         let mut points_on_existing: Vec<Point3> = Vec::new();
-        for (s, np2d) in [(s_nf, nf), (s_nt, nt)] {
-            if s > tol::POINT_MERGE && s < 1.0 - tol::POINT_MERGE {
+        for np2d in [nf, nt] {
+            let s = param(np2d, ef, d_ext, ext_len2);
+            if interior(s, ext_len) {
                 s_params_on_existing.push(s);
-                points_on_existing.push(pos_from_2d(np2d.0, np2d.1));
+                points_on_existing.push(pos_from_2d(np2d));
             }
         }
-
         if t_params_on_new.is_empty() && s_params_on_existing.is_empty() {
-            return Vec::new(); // no overlap or just touching at endpoints
+            return Vec::new(); // disjoint along the line, or touching at ends
         }
-
         return vec![Intersection2D::Collinear {
             t_params_on_new,
             s_params_on_existing,
@@ -3043,65 +3519,52 @@ fn seg_seg_intersections_2d(
         }];
     }
 
-    // Non-parallel: compute parametric intersection.
-    let nf_to_ef = (ef.0 - nf.0, ef.1 - nf.1);
-    let t = cross_2d(nf_to_ef, d_ext) / denom;
-    let s = cross_2d(nf_to_ef, d_new) / denom;
+    // T-contacts: an end of one segment within `eps` of the other's interior.
+    let mut events: Vec<Intersection2D> = Vec::new();
+    for (np2d, on_line) in [(nf, nf_on_ext_line), (nt, nt_on_ext_line)] {
+        let s = param(np2d, ef, d_ext, ext_len2);
+        if on_line && interior(s, ext_len) {
+            events.push(Intersection2D::NewEndpointOnExisting {
+                s_existing: s,
+                point: pos_from_2d(np2d),
+            });
+        }
+    }
+    for (ep2d, vid, on_line) in [
+        (ef, edge.from, ef_on_new_line),
+        (et, edge.to, et_on_new_line),
+    ] {
+        let t = param(ep2d, nf, d_new, new_len2);
+        if on_line && interior(t, new_len) {
+            events.push(Intersection2D::ExistingEndpointOnNew {
+                t_new: t,
+                _point: vertices[vid].position,
+            });
+        }
+    }
+    if !events.is_empty() {
+        // Two non-collinear lines meet once: a touching end IS the contact.
+        return events;
+    }
 
-    let eps = tol::POINT_MERGE;
-
-    // Determine which kind of event this is based on t and s positions.
-    let t_interior = t > eps && t < 1.0 - eps;
-    let s_interior = s > eps && s < 1.0 - eps;
-    let t_at_0 = t.abs() < eps;
-    let t_at_1 = (t - 1.0).abs() < eps;
-    let s_at_0 = s.abs() < eps;
-    let s_at_1 = (s - 1.0).abs() < eps;
-
-    // The intersection point (use existing vertex pos for accuracy at endpoints).
-    let point = if s_at_0 {
-        vertices[edge.from].position
-    } else if s_at_1 {
-        vertices[edge.to].position
-    } else {
-        // Interior of existing edge: interpolate
-        let ix = ef.0 + d_ext.0 * s;
-        let iy = ef.1 + d_ext.1 * s;
-        pos_from_2d(ix, iy)
-    };
-
-    if t_interior && s_interior {
-        // Proper crossing.
+    // Proper crossing, decided exactly: each segment's ends strictly on
+    // opposite sides of the other's line. No end is within `eps` of the other
+    // segment here, so the crossing lies strictly inside both.
+    use crate::geom2d::orient2d;
+    if orient2d(ef, et, nf) * orient2d(ef, et, nt) < 0
+        && orient2d(nf, nt, ef) * orient2d(nf, nt, et) < 0
+    {
+        let denom = cross(d_new, d_ext);
+        let w = sub(ef, nf);
+        let t = (cross(w, d_ext) / denom).clamp(0.0, 1.0);
+        let s = (cross(w, d_new) / denom).clamp(0.0, 1.0);
+        let point = pos_from_2d((ef.0 + d_ext.0 * s, ef.1 + d_ext.1 * s));
         return vec![Intersection2D::Proper {
             t_new: t,
             s_existing: s,
             point,
         }];
     }
-
-    if (t_at_0 || t_at_1) && s_interior {
-        // New endpoint on existing interior (T-junction from new segment's side).
-        return vec![Intersection2D::NewEndpointOnExisting {
-            s_existing: s,
-            point,
-        }];
-    }
-
-    if t_interior && (s_at_0 || s_at_1) {
-        // Existing endpoint on new segment interior.
-        let pt = if s_at_0 {
-            vertices[edge.from].position
-        } else {
-            vertices[edge.to].position
-        };
-        return vec![Intersection2D::ExistingEndpointOnNew {
-            t_new: t,
-            _point: pt,
-        }];
-    }
-
-    // All other cases (both at endpoints) — handled by vertex snapping; no
-    // event needed here.
     Vec::new()
 }
 
@@ -3407,6 +3870,35 @@ mod tests {
             s.add_segment(*a, *b).unwrap();
         }
         s
+    }
+
+    /// A copy that lands across its own source splits the source's edges in
+    /// the target; the seams it carries are read from the source, so a seam
+    /// at a split edge's old end does not name a stale edge (a rotate-copy
+    /// array of a shape touching a face's edge once panicked here).
+    #[test]
+    fn a_copy_across_its_source_carries_seams_without_stale_edges() {
+        let mut s = make_rect_sketch(0.0, 0.0, 2.0, 1.0);
+        s.set_seams(vec![pt(0.0, 0.0), pt(2.0, 0.0)]);
+        let edges: Vec<SketchEdgeId> = s.edges().keys().collect();
+        let about = |p: Point3| {
+            crate::Transform::translation(Vec3::new(-p.x, -p.y, 0.0))
+                .then(
+                    &crate::Transform::rotation(
+                        Vec3::new(0.0, 0.0, 1.0),
+                        std::f64::consts::FRAC_PI_4,
+                    )
+                    .unwrap(),
+                )
+                .then(&crate::Transform::translation(Vec3::new(p.x, p.y, 0.0)))
+        };
+        s.copy_edges_transformed(&edges, &about(pt(1.0, 0.5)))
+            .unwrap();
+        assert!(s.edges().len() > 8, "the copy crossed and split its source");
+        assert!(
+            s.seams().len() >= 3,
+            "the corners' seams travel with the copy"
+        );
     }
 
     // ── Angular sorting around a 4-way crossing vertex ────────────────────────
@@ -3756,42 +4248,58 @@ mod tests {
     /// it would cross the other island, and refuses off-plane transforms —
     /// untouched on every refusal.
     #[test]
-    fn island_transform_moves_one_shape_and_refuses_interference() {
+    fn island_transform_moves_one_shape_and_arranges_on_contact() {
+        let left_of = |s: &Sketch| {
+            s.islands()
+                .iter()
+                .find(|(_, isl)| {
+                    let e = s.edges()[isl.edges[0]];
+                    s.vertices()[e.from].position.x < 2.0
+                })
+                .map(|(id, _)| id)
+                .unwrap()
+        };
         let mut s = two_rect_sketch();
-        let left = s
-            .islands()
-            .iter()
-            .find(|(_, isl)| {
-                let e = s.edges()[isl.edges[0]];
-                s.vertices()[e.from].position.x < 2.0
-            })
-            .map(|(id, _)| id)
-            .unwrap();
+        let left = left_of(&s);
 
-        // Clear landing: shift left rect up by 5.
+        // Clear landing: shift left rect up by 5. Moves in place, ids stable.
         let up = crate::Transform::translation(crate::math::Vec3::new(0.0, 5.0, 0.0));
         s.apply_transform_island(left, &up).unwrap();
         assert_eq!(s.islands().len(), 2, "still two islands");
         let e = s.edges()[s.islands()[left].edges[0]];
         assert!(s.vertices()[e.from].position.y >= 5.0 - 1e-9);
 
-        // Interfering landing: drop it onto the right rectangle.
-        let onto = crate::Transform::translation(crate::math::Vec3::new(3.0, -5.0, 0.0));
-        let before = s.clone();
+        // Overlapping landing: drop it half onto the right rectangle. It
+        // arranges exactly as the same rectangle DRAWN there would.
+        let onto = crate::Transform::translation(crate::math::Vec3::new(3.5, -5.0, 0.0));
+        s.apply_transform_island(left, &onto).unwrap();
+        let mut drawn = make_rect_sketch(3.5, 0.0, 4.5, 1.0);
+        for (a, b) in [
+            (pt(3.0, 0.0), pt(4.0, 0.0)),
+            (pt(4.0, 0.0), pt(4.0, 1.0)),
+            (pt(4.0, 1.0), pt(3.0, 1.0)),
+            (pt(3.0, 1.0), pt(3.0, 0.0)),
+        ] {
+            drawn.add_segment(a, b).unwrap();
+        }
+        assert_eq!(s.islands().len(), 1, "the landing merged the two shapes");
         assert_eq!(
-            s.apply_transform_island(left, &onto).unwrap_err(),
-            SketchError::WouldRetopologize
+            s.regions().len(),
+            drawn.regions().len(),
+            "move == draw: regions"
         );
         assert_eq!(
-            s.edges().len(),
-            before.edges().len(),
-            "untouched on refusal"
+            s.regions().len(),
+            3,
+            "two crescents' worth: left, overlap, right"
         );
+        assert_eq!(s.edges().len(), drawn.edges().len(), "move == draw: edges");
 
         // Off-plane landing.
         let lift = crate::Transform::translation(crate::math::Vec3::new(0.0, 0.0, 1.0));
+        let any = s.islands().keys().next().unwrap();
         assert!(matches!(
-            s.apply_transform_island(left, &lift).unwrap_err(),
+            s.apply_transform_island(any, &lift).unwrap_err(),
             SketchError::PointOffPlane { .. }
         ));
     }

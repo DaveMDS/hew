@@ -39,7 +39,7 @@ describe('deriveDockContext', () => {
 
   it('is "sketch" for a single selected sketch LINE too (same verbs, finer selection)', () => {
     expect(
-      deriveDockContext([{ kind: 'sketch-edge', id: 4n, sketch: 1n }], null),
+      deriveDockContext([{ kind: 'draft-edge', id: 4n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000004' }], null),
     ).toBe('sketch')
   })
 

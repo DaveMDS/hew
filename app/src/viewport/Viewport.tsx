@@ -45,6 +45,7 @@ import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
 import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
+import { draftEdgesToErase } from '../tools/transformSelection'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
 import { PolygonTool, DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
@@ -74,7 +75,6 @@ import { AxesTool } from '../tools/AxesTool'
 import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
 import { DimensionTool } from '../tools/DimensionTool'
 import { TextTool, type PlacedLeader } from '../tools/TextTool'
-import { makeSketchPlaneCache } from '../tools/sketchGesture'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray, ApertureBasis } from './math'
 import {
@@ -106,7 +106,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
@@ -131,7 +131,20 @@ import {
 import { CleanModifierTap } from './cleanModifierTap'
 import { MultiClickTracker } from './multiClick'
 import { resolveSelectableRef, type ResolveDeps, type SelectScene } from '../tools/snapSelection'
-import { findImprint } from '../tools/imprints'
+import {
+  allFree,
+  draftRef,
+  geometryOf,
+  isDraftRef,
+  objectsOf,
+  readPlaneUnits,
+  resolveDraft,
+  keysToArray,
+  ctxOfSketch,
+  widenCurveRef,
+} from '../tools/planeUnits'
+import { runDraft } from '../tools/draftCommit'
+import { dedupeRefs, invertWithin, objectDrawingIslands } from './drawnSelection'
 import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
@@ -2641,6 +2654,8 @@ export default function Viewport({
         },
         cameraForward: [cameraForwardV.x, cameraForwardV.y, cameraForwardV.z],
         cameraFar: camera.far,
+        worldPerPixelAt: (p) =>
+          rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
       }
     }
 
@@ -2664,15 +2679,12 @@ export default function Viewport({
       let ref = resolveSelectableRef(snap, ray, selectionDeps())
       const widen = selectIslandOnPick
       selectIslandOnPick = false
-      if (widen && ref !== null && ref.sketch !== undefined && (ref.kind === 'sketch-edge' || ref.kind === 'sketch-curve')) {
-        // A curve ref's id is its first facet edge, so the same island query
-        // serves both kinds. A stale handle simply keeps the narrow pick.
-        try {
-          const island = wasmScene.sketch_edge_island(ref.sketch, ref.id)
-          if (island !== undefined) ref = { kind: 'sketch-island', id: island, sketch: ref.sketch }
-        } catch {
-          // keep the narrow pick
-        }
+      if (widen && ref !== null && isDraftRef(ref) && (ref.kind === 'draft-edge' || ref.kind === 'draft-curve')) {
+        // A line or curve widens to the whole connected shape it belongs to
+        // (triple-click: "select all connected"). A stale ref simply keeps
+        // the narrow pick.
+        const unit = resolveDraft(wasmScene, ref)?.unit
+        if (unit !== undefined && unit !== null) ref = draftRef('draft-island', ref.ctx, unit.key)
       }
       // Snap BEFORE node, deliberately: a consumer keying inspection off
       // `onSelect` (Shop Mode's tap-to-inspect) stashes the snap in a ref
@@ -2731,13 +2743,6 @@ export default function Viewport({
     }
     toolController.onToolChange(() => reportToolHint())
     reportToolHint()
-
-    // ONE plane-keyed sketch cache shared by every draw tool (Line/
-    // Rectangle/Circle/Arc), surviving tool switches, so mixed-tool profiles
-    // drawn on the SAME plane — an arc closed by a Line chord, a rectangle
-    // meeting an arc — land in the same sketch and can close regions.
-    // Cleared (every plane's handle) when a new document replaces the Scene.
-    const sketchPlaneCache = makeSketchPlaneCache()
 
     // ------------------------------------------------- select-all + marquee
     /**
@@ -2800,20 +2805,53 @@ export default function Viewport({
       const sessionSketches = wasmScene.explode_session_sketches()
       const inScope =
         sessionSketches === undefined ? null : new Set(Array.from(sessionSketches))
-      return Array.from(wasmScene.sketch_ids())
-        .filter((id) => inScope === null || inScope.has(id))
-        .flatMap((id) =>
-          Array.from(wasmScene.sketch_island_ids(id)).map((island) => ({
-            kind: 'sketch-island' as const,
-            id: island,
-            sketch: id,
-          })),
-        )
+      // One ref per drawn shape that has an edge in an in-scope free sketch:
+      // the plane of each sketch is listed once, its shapes deduplicated.
+      const out: NodeRef[] = []
+      const seenCtx = new Set<string>()
+      for (const sid of Array.from(wasmScene.sketch_ids())) {
+        if (inScope !== null && !inScope.has(sid)) continue
+        const ctx = ctxOfSketch(wasmScene, sid)
+        if (ctx === null || seenCtx.has(ctx)) continue
+        seenCtx.add(ctx)
+        const pu = readPlaneUnits(wasmScene, ctx)
+        if (pu === null) continue
+        for (const unit of pu.units) {
+          const hasFree = unit.edges.some(
+            (e) => e.store.kind === 'free' && (inScope === null || inScope.has(e.store.sketch)),
+          )
+          if (hasFree) out.push(draftRef('draft-island', ctx, unit.key))
+        }
+      }
+      return out
+    }
+
+    /** One ref per drawn shape lying on a visible object's drawing planes —
+     *  drawing on a face (and an object's owned sketches), found through
+     *  `object_drawing_planes` and listed on the shared plane context, so the
+     *  refs equal what a click on the same drawing selects. Definition
+     *  members are posed through their instance. */
+    function visibleObjectDrawingRefs(): NodeRef[] {
+      const out: NodeRef[] = []
+      const seen = new Set<string>()
+      const collect = (objects: readonly bigint[], instance: bigint | null, pose: ArrayLike<number> | null): void =>
+        objectDrawingIslands(wasmScene, objects, instance, pose, seen, out)
+      for (const cand of visibleTopLevelCandidates()) {
+        collect(cand.leafObjects, null, null)
+        for (const inst of cand.leafInstances) {
+          const def = wasmScene.instance_def(inst)
+          const pose = wasmScene.instance_pose(inst)
+          if (def === undefined || pose === undefined) continue
+          collect(Array.from(wasmScene.component_member_objects(def)), inst, pose)
+        }
+      }
+      return out
     }
 
     /**
      * Select All (Edit ▸ Select All / ⌘A). At the top level: every visible
-     * top-level node plus every free-standing sketch. Inside a group's
+     * top-level node plus every free-standing sketch island plus every drawn
+     * shape on a visible solid's faces (one island each, as on the ground). Inside a group's
      * editing context: the group's direct members (what clicks select
      * there). Inside an instance/object context there is no multi-selectable
      * child set yet — no-op.
@@ -2833,7 +2871,7 @@ export default function Viewport({
         }
         return
       }
-      const refs = [...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs()]
+      const refs = dedupeRefs([...visibleTopLevelCandidates().map((c) => c.node), ...visibleSketchRefs(), ...visibleObjectDrawingRefs()])
       if (refs.length > 0) {
         onSelectManyRef.current?.(refs, 'replace')
         scheduleRender()
@@ -2843,7 +2881,7 @@ export default function Viewport({
     /**
      * Invert Selection (Edit ▸ Invert Selection): the complement of the
      * current selection within exactly the set Select All would pick at this
-     * level — visible top-level nodes + free sketch islands, or an open
+     * level — visible top-level nodes + drawn islands (free or on faces), or an open
      * group session's visible direct members. Sub-entity selections
      * (a line, a curve) have no per-edge complement in that set, so the
      * island that owns a selected line/curve counts as selected and stays
@@ -2868,20 +2906,10 @@ export default function Viewport({
         // out to shapes drawn beside it. A component session keeps its own
         // scoped sketches (`visibleSketchRefs` already filters those).
         const innermost = sessionStackRef.current[sessionStackRef.current.length - 1]
-        const sketches = innermost !== undefined && innermost.kind === 'group' ? [] : visibleSketchRefs()
+        const sketches = innermost !== undefined && innermost.kind === 'group' ? [] : [...visibleSketchRefs(), ...visibleObjectDrawingRefs()]
         candidates = [...visibleTopLevelCandidates().map((c) => c.node), ...sketches]
       }
-      const selected = new Set(selectedIdsRef.current.map(nodeKey))
-      for (const ref of selectedIdsRef.current) {
-        if (ref.sketch === undefined || (ref.kind !== 'sketch-edge' && ref.kind !== 'sketch-curve')) continue
-        try {
-          const island = wasmScene.sketch_edge_island(ref.sketch, ref.id)
-          if (island !== undefined) selected.add(nodeKey({ kind: 'sketch-island', id: island, sketch: ref.sketch }))
-        } catch {
-          // stale handle — nothing to exclude
-        }
-      }
-      const refs = candidates.filter((c) => !selected.has(nodeKey(c)))
+      const refs = invertWithin(wasmScene, candidates, selectedIdsRef.current)
       onSelectManyRef.current?.(refs, 'replace')
       scheduleRender()
     }
@@ -2939,11 +2967,12 @@ export default function Viewport({
       }
 
       const identity = new THREE.Matrix4()
-      for (const s of visibleSketchRefs()) {
-        // Island refs: their lines come from the island query, not the
-        // whole-sketch one (s.id is an ISLAND handle).
-        if (s.sketch === undefined) continue
-        const lines = wasmScene.sketch_island_lines(s.sketch, s.id)
+      const drawn = [...visibleSketchRefs(), ...visibleObjectDrawingRefs()]
+      const drawnSeen = new Set<string>()
+      for (const s of drawn) {
+        if (drawnSeen.has(nodeKey(s))) continue
+        drawnSeen.add(nodeKey(s))
+        const lines = geometryOf(wasmScene, s)
         if (lines.length === 0) continue
         const hit = mode === 'window'
           ? projector.allVerticesInRect(lines, identity, rect)
@@ -2991,18 +3020,27 @@ export default function Viewport({
     }
 
     function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
-      const g = pickGuide(ndcX, ndcY)
-      if (g !== null) {
-        onSelectGuideRef.current?.(g)
-        scheduleRender()
-        return
-      }
       const { snap: rawSnap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
         undefined, undefined, undefined, undefined,
         readOnlyRef.current ? 1 : undefined,
+        undefined, true,
       )
-      toolController.activeTool.onPointerDown(excludeAxisSnapForSelect(rawSnap), ray)
+      const snap = excludeAxisSnapForSelect(rawSnap)
+      const g = pickGuide(ndcX, ndcY)
+      // A line drawn on a face under the cursor wins over a guide lying
+      // along it: guides are often placed exactly on the edges a shape was
+      // drawn to, and the line is what the click is for. The guide stays
+      // selectable anywhere else along its length.
+      const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
+      const lineOnFace =
+        under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve') && !allFree(wasmScene, under)
+      if (g !== null && !lineOnFace) {
+        onSelectGuideRef.current?.(g)
+        scheduleRender()
+        return
+      }
+      toolController.activeTool.onPointerDown(snap, ray)
     }
 
     /**
@@ -3042,9 +3080,11 @@ export default function Viewport({
       // `loupePressFaceSnap`'s doc. Aperture scale 1 (the same override
       // `dispatchSelectPick` uses for Select's tap-to-inspect) so a casual
       // mid-face hold resolves as a face, not a stray nearby edge. Consulted
-      // only by the clear-face isolate decision at engage.
+      // only by the clear-face isolate decision at engage. A selection pick
+      // (`pick`), so points get no drawing-tool reach past that radius.
       loupePressFaceSnap = snapService.resolve(
         ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, 1,
+        undefined, true,
       ).snap
       loupeState = loupePress(px, py, performance.now())
       // Adversarial-review finding 4 — see `loupePointerId`'s own doc
@@ -3197,7 +3237,10 @@ export default function Viewport({
      * Null when nothing movable is under the cursor.
      */
     function pickTransformableUnderCursor(ray: Ray): NodeRef | null {
-      const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis())
+      const { snap } = snapService.resolve(
+        ray, el.clientHeight, apertureBasis(),
+        undefined, undefined, undefined, undefined, undefined, undefined, true,
+      )
       return resolveSelectableRef(snap, ray, selectionDeps())
     }
 
@@ -4245,10 +4288,6 @@ export default function Viewport({
       for (const node of nodes) {
         if (node.kind === 'object') objectIds.push(node.id)
         else if (node.kind === 'instance') instanceIds.push(node.id)
-        else if ((node.kind === 'imprint' || node.kind === 'imprint-chord') && node.object !== undefined) {
-          // A moved imprint changes only its owning object's geometry.
-          objectIds.push(node.object)
-        }
         else return undefined
       }
       return { objectIds, instanceIds }
@@ -4455,25 +4494,16 @@ export default function Viewport({
       const deletedSketches = new Set(
         nodes.filter((n) => n.kind === 'sketch').map((n) => n.id),
       )
-      const isSub = (n: NodeRef) =>
-        n.kind === 'sketch-edge' || n.kind === 'sketch-curve' || n.kind === 'sketch-island' ||
-        n.kind === 'imprint' || n.kind === 'imprint-chord'
-      const ordered = [...nodes.filter(isSub), ...nodes.filter((n) => !isSub(n))]
+      const ordered = nodes.filter((n) => !isDraftKind(n.kind))
       // Editing INSIDE a component instance's own definition (component-
       // edit-parity.md phase A2): every 'object' node in this delete routes
       // through `delete_def_member` instead — see the loop below.
       const editCtx = computeEditContext(wasmScene, activeContextRef.current)
       const activeComponent = editCtx.kind === 'instance' ? editCtx.component : null
-      // Dissolve a batch of edges as ONE gesture (one undo step); an emptied
-      // sketch husk is removed afterward.
-      const removeEdgeBatch = (sketch: bigint, edges: bigint[]): void => {
-        if (edges.length === 0) return
-        wasmScene.sketch_begin_gesture(sketch)
-        try {
-          for (const e of edges) wasmScene.sketch_remove_edge(sketch, e)
-        } finally {
-          wasmScene.sketch_end_gesture(sketch)
-        }
+      // Remove an emptied sketch husk (its own undo step). Guarded on
+      // sketch_ids: a sketch already removed (e.g. wholly consumed by an
+      // extrusion) must not be tombstoned twice.
+      const dropHusk = (sketch: bigint): void => {
         const stillListed =
           Array.from(wasmScene.sketch_ids()).includes(sketch) ||
           (
@@ -4482,6 +4512,34 @@ export default function Viewport({
           )
         if (stillListed && wasmScene.sketch_lines(sketch).length === 0) {
           wasmScene.delete_sketch(sketch)
+        }
+      }
+      // Drawn things (lines, curves, shapes on a face or over the void) delete
+      // through the drafting engine: ONE draft per plane context erases every
+      // selected unit's edges, whatever store each lives in — a shape erased
+      // from a face dissolves back into it, a free shape leaves the ground.
+      // An object also in this delete covers the drawing on it (the node
+      // delete takes it along), and a whole sketch also selected covers its
+      // free edges — a draft first would only churn.
+      const { draftEdgeKeys, huskCandidates } = draftEdgesToErase(wasmScene, nodes, deletedSketches)
+      for (const [ctx, keys] of draftEdgeKeys) {
+        try {
+          runDraft(wasmScene, { kind: 'ctx', ctx }, 'Delete', (d) => {
+            wasmScene.draft_remove_edges(d, keysToArray([...keys]))
+          })
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        }
+      }
+      for (const sketch of huskCandidates) {
+        try {
+          dropHusk(sketch)
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          const rawMsg = err instanceof Error ? err.message : String(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         }
       }
       // World node deletes (object/group/instance, NOT a definition member
@@ -4494,64 +4552,7 @@ export default function Viewport({
       const worldDeleteIds: bigint[] = []
       for (const n of ordered) {
         try {
-          if ((n.kind === 'imprint' || n.kind === 'imprint-chord') && n.object !== undefined) {
-            // A drawn shape on a face dissolves back into it (imprints.ts):
-            // a sub-face through `dissolve_imprint` (anything inside it stays
-            // on the face), a chord run through the coplanar merge. An object
-            // also in this delete covers it — the node delete takes the
-            // shape with it, and a dissolve first would only churn.
-            if (nodes.some((m) => m.kind === 'object' && m.id === n.object)) continue
-            // An earlier step in this same delete (a chord merge that
-            // re-keys a neighbouring run, an object delete) may already
-            // have consumed this ref — mirror the deletedSketches skip rather than
-            // toast a stale-handle refusal after a successful delete.
-            if (findImprint(wasmScene, n) === null) continue
-            const inInstance = activeComponent !== null && editCtx.kind === 'instance'
-            if (n.kind === 'imprint') {
-              if (inInstance) wasmScene.dissolve_imprint_in_instance(editCtx.id, n.object, n.id)
-              else wasmScene.dissolve_imprint(n.object, n.id)
-            } else if (inInstance) {
-              wasmScene.merge_faces_in_instance(editCtx.id, n.object, n.id)
-            } else {
-              wasmScene.merge_faces(n.object, n.id).free()
-            }
-            continue
-          }
-          if (n.kind === 'sketch-island' && n.sketch !== undefined) {
-            if (deletedSketches.has(n.sketch)) continue
-            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_island_edges(n.sketch, n.id)))
-            continue
-          }
-          if (n.kind === 'sketch-curve' && n.sketch !== undefined) {
-            if (deletedSketches.has(n.sketch)) continue
-            removeEdgeBatch(n.sketch, Array.from(wasmScene.sketch_curve_chain(n.sketch, n.id)))
-            continue
-          }
-          if (n.kind === 'sketch-edge' && n.sketch !== undefined) {
-            if (deletedSketches.has(n.sketch)) continue
-            // Dissolve one line: regions it separated merge back together.
-            // Bracketed in a sketch gesture so it lands as ONE undo step
-            // (the same mechanism the draw tools commit through).
-            wasmScene.sketch_begin_gesture(n.sketch)
-            try {
-              wasmScene.sketch_remove_edge(n.sketch, n.id)
-            } finally {
-              wasmScene.sketch_end_gesture(n.sketch)
-            }
-            // Deleting the last line leaves an invisible, unusable empty
-            // sketch — remove the husk too (its own undo step). Guarded on
-            // sketch_ids: a sketch already removed (e.g. wholly consumed by
-            // an extrusion) must not be tombstoned twice.
-            const stillListed =
-              Array.from(wasmScene.sketch_ids()).includes(n.sketch) ||
-              (
-                activeComponent !== null &&
-                Array.from(wasmScene.component_member_sketches(activeComponent)).includes(n.sketch)
-              )
-            if (stillListed && wasmScene.sketch_lines(n.sketch).length === 0) {
-              wasmScene.delete_sketch(n.sketch)
-            }
-          } else if (n.kind === 'sketch') {
+          if (n.kind === 'sketch') {
             wasmScene.delete_sketch(n.id)
           } else if (n.kind === 'object' && activeComponent !== null) {
             // Editing INSIDE a component instance's own definition (component-
@@ -5001,11 +5002,9 @@ export default function Viewport({
       groupSessionInfoRef.current.clear()
       lastPushedSessionRef.current = []
       onSessionChangeRef.current?.([])
-      // A new/loaded document replaced the Scene — every plane's cached
-      // sketch handle, and any handle the active tool cached itself, is now
-      // stale. Re-selecting the same tool doesn't recreate it, so reset
-      // explicitly.
-      sketchPlaneCache.clear()
+      // A new/loaded document replaced the Scene — any handle the active
+      // tool holds is now stale. Re-selecting the same tool doesn't
+      // recreate it, so reset explicitly.
       const at = toolController.activeTool
       if ('onDocumentReset' in at) {
         (at as { onDocumentReset(): void }).onDocumentReset()
@@ -5466,6 +5465,23 @@ export default function Viewport({
       }
     }
 
+    /** Per-frame guide upkeep, shared by the animation loop and `captureFrame`
+     *  (which renders out-of-band): screen-constant dashes, and each line
+     *  guide's drawn stretch sized to the view — a fixed long segment loses the
+     *  depth test to the face it lies on (guideWindow.ts). */
+    function syncGuides(effDist: number): void {
+      const wpp = rig.worldPerPixel(effDist, el.clientHeight)
+      sceneRenderer.updateGuideDashScale(wpp)
+      const dir = camera.getWorldDirection(new THREE.Vector3())
+      sceneRenderer.updateGuideExtents({
+        focus: [controls.target.x, controls.target.y, controls.target.z],
+        eye: [camera.position.x, camera.position.y, camera.position.z],
+        dir: [dir.x, dir.y, dir.z],
+        spanAtFocus: wpp * Math.max(el.clientWidth, el.clientHeight),
+        perspective: rig.projection === 'perspective',
+      })
+    }
+
     function captureFrame(): { width: number; height: number; cssWidth: number; cssHeight: number; pixels: Uint8Array } {
       // Mirror the per-frame camera-dependent updates of the animation loop
       // (this renders out-of-band, without going through it) so a captured
@@ -5474,6 +5490,7 @@ export default function Viewport({
       infiniteGrid.update(camera.position, effDist)
       updateOriginAxesFrame(originAxes, wasmScene)
       clampOriginAxes(originAxes, rig, el.clientHeight)
+      syncGuides(rig.effectiveDistance(controls.getDistance()))
       renderer.render(threeScene, camera)
       const gl = renderer.getContext()
       const width = gl.drawingBufferWidth
@@ -6142,7 +6159,6 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6167,7 +6183,6 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6192,7 +6207,6 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        sketchPlaneCache,
         // Side count persists across tool re-selection for the session
         // (design §1), the same way Paint's current material does.
         (sides) => { polygonSidesRef.current = sides },
@@ -6221,7 +6235,6 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6246,7 +6259,6 @@ export default function Viewport({
           handleSceneRefresh({ objectIds: [objectId] })
         },
         (text: string) => { onMeasurementRef.current?.(text) },
-        sketchPlaneCache,
       )
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1 — the single channel every tool consults).
@@ -6340,6 +6352,8 @@ export default function Viewport({
       // Scope the tool to the current editing context (component-edit-
       // parity.md phase A1).
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
+      // Same context-path-aware face eligibility as the draw tools.
+      tool.setFaceEligibility(faceDrawEligible)
       return tool
     }
 
@@ -7895,7 +7909,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
           : null
-        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
         // Same Select-only axis exclusion as the pointer-move path — see
         // `excludeAxisSnapForSelect`'s doc.
         const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
@@ -8007,7 +8021,7 @@ export default function Viewport({
         // Keep guide-line dashes screen-constant too, the same
         // screen-constant-pixel way the origin axes' negative halves are
         // (see SceneRenderer.updateGuideDashScale and clampOriginAxes above).
-        sceneRenderer.updateGuideDashScale(worldPerPixelAt(effDist))
+        syncGuides(effDist)
         // Billboard every annotation text quad + keep annotation colors
         // current for the resolved theme (docs/design/dimensions-text.md).
         // Reads `readAppliedTheme()` — a `dataset.theme` DOM read, NOT the
@@ -8426,7 +8440,7 @@ export default function Viewport({
         : null
       const resolved = isRawDragTool
         ? { snap: null, fromKernel: false }
-        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
       const rawSnap = resolved.snap
       // Select-only axis-kind exclusion under `readOnly` (shop-mode round-3
       // playtest finding 2) — see `excludeAxisSnapForSelect`'s doc. A no-op
@@ -8551,7 +8565,8 @@ export default function Viewport({
     // --- construction-guide picking ---------------------------------
     const GUIDE_PICK_PX = 8
     const ANNOTATION_PICK_PX = 8
-    // Matches SceneRenderer's GUIDE_LINE_HALF_LENGTH (the rendered extent).
+    // The drawn stretch follows the view (SceneRenderer.updateGuideExtents);
+    // a click can only land where the line is on screen, which it always spans.
     const GUIDE_LINE_SAMPLE_HALF = 50
 
     function worldToPixels(p: THREE.Vector3): { x: number; y: number; behind: boolean } {
@@ -8920,7 +8935,7 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
       activeTool.onPointerDown(snap, ray)
       // Shop-mode playtest finding 3: touch has no hover, so `onPointerMove`
       // (the only other `publishSnapCues` caller) never runs before a plain
@@ -8998,6 +9013,24 @@ export default function Viewport({
         }
       }
 
+      // A double-click on a piece of a drawn circle, arc, or polygon that other
+      // drawing cuts into several runs selects the whole curve (the run under
+      // the cursor is what the first click picked) instead of entering the
+      // object. Any other double-click keeps its meaning.
+      if (toolController.activeToolName === 'Select' && !isModifiedSelectPress(ev)) {
+        const { snap: rawSnap } = snapService.resolve(
+          ray, el.clientHeight, apertureBasis(),
+          undefined, undefined, undefined, undefined, undefined, undefined, true,
+        )
+        const picked = resolveSelectableRef(excludeAxisSnapForSelect(rawSnap), ray, selectionDeps())
+        const whole = picked !== null ? widenCurveRef(wasmScene, picked) : null
+        if (whole !== null && whole !== picked) {
+          onSelectRef.current?.(whole, 'replace')
+          scheduleRender()
+          return
+        }
+      }
+
       // Let the active tool consume the double-click first (e.g. LineTool
       // ending a chain) — only fall through to the default "enter context"
       // gesture below when the tool doesn't handle it (or isn't mid-gesture).
@@ -9008,7 +9041,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -9388,7 +9421,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -9808,9 +9841,7 @@ export default function Viewport({
     const leafIds: bigint[] = []
     const instanceIds: bigint[] = []
     const sketchIds: bigint[] = []
-    const sketchEdges: { sketch: bigint; edge: bigint }[] = []
-    const sketchIslands: { sketch: bigint; island: bigint }[] = []
-    const imprints: { object: bigint; kind: 'imprint' | 'imprint-chord'; id: bigint }[] = []
+    const draftSegments: Float32Array[] = []
     const getGroupMembers = (groupId: bigint): NodeRef[] =>
       wasmSceneRef.current.group_members(groupId).map((m) => ({ kind: m.kind as NodeRef['kind'], id: m.id }))
     for (const node of selectedIds) {
@@ -9818,24 +9849,10 @@ export default function Viewport({
         sketchIds.push(node.id)
         continue
       }
-      if (node.kind === 'sketch-island' && node.sketch !== undefined) {
-        sketchIslands.push({ sketch: node.sketch, island: node.id })
-        continue
-      }
-      if (node.kind === 'sketch-curve' && node.sketch !== undefined) {
-        // A curve run highlights as its member edges (resolved from the
-        // canonical representative edge).
-        for (const edge of wasmSceneRef.current.sketch_curve_chain(node.sketch, node.id)) {
-          sketchEdges.push({ sketch: node.sketch, edge })
-        }
-        continue
-      }
-      if (node.kind === 'sketch-edge' && node.sketch !== undefined) {
-        sketchEdges.push({ sketch: node.sketch, edge: node.id })
-        continue
-      }
-      if ((node.kind === 'imprint' || node.kind === 'imprint-chord') && node.object !== undefined) {
-        imprints.push({ object: node.object, kind: node.kind, id: node.id })
+      if (isDraftKind(node.kind)) {
+        // A drawn shape, curve, line, or region highlights as its own line
+        // work (world coordinates, from the plane-unit listing).
+        draftSegments.push(geometryOf(wasmSceneRef.current, node))
         continue
       }
       const { objectIds, instanceIds: leafInstanceIds } = collectLeafIds(node, getGroupMembers)
@@ -9851,9 +9868,14 @@ export default function Viewport({
       activeInstance === null ? [] : leafIds,
     )
     sceneRendererRef.current?.setSelectedSketches(sketchIds)
-    sceneRendererRef.current?.setSelectedSketchIslands(sketchIslands)
-    sceneRendererRef.current?.setSelectedSketchEdges(sketchEdges)
-    sceneRendererRef.current?.setSelectedImprints(imprints)
+    const draftTotal = draftSegments.reduce((n, a) => n + a.length, 0)
+    const draftAll = new Float32Array(draftTotal)
+    let draftAt = 0
+    for (const a of draftSegments) {
+      draftAll.set(a, draftAt)
+      draftAt += a.length
+    }
+    sceneRendererRef.current?.setSelectedDraft(draftAll)
     sceneRendererRef.current?.setSelectedSketchInstance(
       activeInstance,
     )

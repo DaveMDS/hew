@@ -54,7 +54,14 @@ use crate::transform::Transform;
 /// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
 /// `Edge::curve = None`. An imprinted circle awaiting its push-through
 /// persists its identity here (the true-curves design, playtest fix C3).
-pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
+/// v6 → v7: per-face optional regular-polygon claims
+/// ([`crate::topo::Edge::polygon`]) appended AFTER each face's edge-curve
+/// block, in the same shape (a `u8` "any" flag; when 1, for every outer
+/// edge then every hole edge, a `u8` flag + 4×f64 circumcircle center xyz +
+/// radius when present). Absent in v1-v6 files → all `Edge::polygon =
+/// None`. A polygon drawn on a face keeps its identity here (unified
+/// drafting).
+pub const GEOMETRY_FORMAT_VERSION: u32 = 7;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -203,7 +210,22 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 6;
 /// hidden node/tag sids must name live entities (the writer prunes dead
 /// ones; a reader rejects a dangling one). Geometry buffer unchanged
 /// (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 16;
+/// **v17** (unified drafting): `sketches[].owner_object` — the dense
+/// `objects[]` id of the Object a sketch belongs to (an object-owned sketch:
+/// drawing over that object's faces that is not face topology, riding with
+/// it). Optional and omitted when absent, so a document with no
+/// object-owned sketch writes the same manifest as v16 apart from the
+/// version. Gated both ways by [`OBJECT_SKETCH_OWNER_MIN_VERSION`]; a
+/// reader rejects an out-of-range id, and a sketch whose `owner` disagrees
+/// with its owner object's definition. Geometry buffer unchanged
+/// (`GEOMETRY_FORMAT_VERSION` stays 6).
+pub const MANIFEST_FORMAT_VERSION: u32 = 17;
+
+/// The manifest version at which `sketches[].owner_object` (unified
+/// drafting) was introduced. Version-gated like every sibling field: a file
+/// declaring an OLDER version that carries it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const OBJECT_SKETCH_OWNER_MIN_VERSION: u32 = 17;
 
 /// The manifest version at which `section_plane` and `scenes`
 /// (docs/design/scenes.md) were introduced. Version-gated like every
@@ -532,6 +554,21 @@ fn canonical_rotation(ring: &[Point3]) -> usize {
     best
 }
 
+/// The plane a face's outer loop gets when a file is opened: Newell's
+/// best-fit plane ([`Plane::from_polygon`]) through the ring in the order
+/// the writer emits it (rotated to its canonical start). It fails when the
+/// ring encloses too little area for a normal — twice the area under
+/// [`crate::tol::NORMALIZE_MIN_LENGTH`] m². The loader decodes every face
+/// with it and [`Object::validate`] requires every live face to pass it, so
+/// one predicate decides both and no committed state can be one the file
+/// format cannot reopen.
+pub(crate) fn outer_ring_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+    let start = canonical_rotation(ring);
+    let n = ring.len();
+    let rotated: Vec<Point3> = (0..n).map(|k| ring[(start + k) % n]).collect();
+    Plane::from_polygon(&rotated)
+}
+
 impl Object {
     /// Encodes this Object's geometry as a versioned, deterministic binary
     /// buffer (HEW_FILE_FORMAT.md; see module docs for the obligations).
@@ -615,6 +652,11 @@ impl Object {
             /// Per-hole-edge circle claims (v5), one list per hole in the
             /// same sorted order as `holes`.
             hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>>,
+            /// Per-outer-edge polygon claims (v7), canonical order as
+            /// `outer_curves`. Participates in the sort key.
+            outer_polys: Vec<Option<crate::sketch::CurveGeom>>,
+            /// Per-hole-edge polygon claims (v7), paired like `hole_curves`.
+            hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>>,
             /// Per-outer-edge SOFT flags (v6), canonical order as
             /// `outer_curves`. Participates in the sort key.
             outer_soft: Vec<bool>,
@@ -725,6 +767,16 @@ impl Object {
                     }
                     std::cmp::Ordering::Equal
                 })
+                .then_with(|| curve_seq_cmp(&a.outer_polys, &b.outer_polys))
+                .then_with(|| {
+                    for (ha, hb) in a.hole_polys.iter().zip(&b.hole_polys) {
+                        let c = curve_seq_cmp(ha, hb);
+                        if c != std::cmp::Ordering::Equal {
+                            return c;
+                        }
+                    }
+                    std::cmp::Ordering::Equal
+                })
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -798,6 +850,18 @@ impl Object {
                 })
                 .collect()
         };
+        let loop_edge_polys = |loop_id: crate::ids::LoopId,
+                               verts: &[crate::ids::VertexId]|
+         -> Vec<Option<crate::sketch::CurveGeom>> {
+            verts
+                .iter()
+                .map(|&v| {
+                    self.loop_half_edges(loop_id)
+                        .find(|&h| self.half_edges[h].origin == v)
+                        .and_then(|h| self.edges[self.half_edges[h].edge].polygon)
+                })
+                .collect()
+        };
         let loop_edge_soft =
             |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
                 verts
@@ -817,6 +881,7 @@ impl Object {
                 let (outer_verts, outer_ring) = canonical_loop(face.outer_loop);
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
                 let outer_soft = loop_edge_soft(face.outer_loop, &outer_verts);
+                let outer_polys = loop_edge_polys(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
                 type HoleFull = (
@@ -824,6 +889,7 @@ impl Object {
                     Vec<Point3>,
                     Vec<Option<crate::sketch::CurveGeom>>,
                     Vec<bool>,
+                    Vec<Option<crate::sketch::CurveGeom>>,
                 );
                 let mut holes_full: Vec<HoleFull> = face
                     .inner_loops
@@ -832,19 +898,22 @@ impl Object {
                         let (hv, hr) = canonical_loop(il);
                         let hc = loop_edge_curves(il, &hv);
                         let hs = loop_edge_soft(il, &hv);
-                        (hv, hr, hc, hs)
+                        let hp = loop_edge_polys(il, &hv);
+                        (hv, hr, hc, hs, hp)
                     })
                     .collect();
                 holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
                 let holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = holes_full
                     .iter()
-                    .map(|(v, r, _, _)| (v.clone(), r.clone()))
+                    .map(|(v, r, _, _, _)| (v.clone(), r.clone()))
                     .collect();
                 let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.iter().map(|(_, _, c, _)| c.clone()).collect();
+                    holes_full.iter().map(|(_, _, c, _, _)| c.clone()).collect();
+                let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
+                    holes_full.iter().map(|(_, _, _, _, p)| p.clone()).collect();
                 let hole_soft: Vec<Vec<bool>> = holes_full
                     .into_iter()
-                    .map(|(_, _, _, sflags)| sflags)
+                    .map(|(_, _, _, sflags, _)| sflags)
                     .collect();
                 CanonicalFace {
                     outer_verts,
@@ -858,6 +927,8 @@ impl Object {
                     surface: face.surface,
                     outer_curves,
                     hole_curves,
+                    outer_polys,
+                    hole_polys,
                     outer_soft,
                     hole_soft,
                     shell: component_ordinal[fid],
@@ -1073,6 +1144,37 @@ impl Object {
                     }
                 }
             }
+
+            // per-face polygon claims (v7): the edge-curve block's shape, for
+            // [`crate::topo::Edge::polygon`], written after it.
+            let any_poly = cf
+                .outer_polys
+                .iter()
+                .chain(cf.hole_polys.iter().flatten())
+                .any(Option::is_some);
+            if !any_poly {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                let mut write_edge = |c: &Option<crate::sketch::CurveGeom>| match c {
+                    None => buf.push(0u8),
+                    Some(g) => {
+                        buf.push(1u8);
+                        buf.extend_from_slice(&g.center.x.to_le_bytes());
+                        buf.extend_from_slice(&g.center.y.to_le_bytes());
+                        buf.extend_from_slice(&g.center.z.to_le_bytes());
+                        buf.extend_from_slice(&g.radius.to_le_bytes());
+                    }
+                };
+                for c in &cf.outer_polys {
+                    write_edge(c);
+                }
+                for hole in &cf.hole_polys {
+                    for c in hole {
+                        write_edge(c);
+                    }
+                }
+            }
         }
 
         buf
@@ -1181,6 +1283,7 @@ impl Object {
         );
         let mut edge_soft: Vec<FaceFlags> = Vec::new();
         let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
+        let mut edge_polys: Vec<FaceCurves> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -1286,7 +1389,7 @@ impl Object {
 
             // Recompute face plane from outer-loop vertices (HEW_FILE_FORMAT.md).
             let outer_pts: Vec<Point3> = outer.iter().map(|&i| positions[i]).collect();
-            let plane = Plane::from_polygon(&outer_pts).map_err(|_| DecodeError::Corrupt {
+            let plane = outer_ring_plane(&outer_pts).map_err(|_| DecodeError::Corrupt {
                 offset: r.pos,
                 what: "outer loop vertices do not span a plane",
             })?;
@@ -1418,6 +1521,14 @@ impl Object {
             };
             edge_curves.push((outer_curves, hole_curves));
 
+            // v7: per-face polygon claims, the edge-curve block's shape.
+            let polys = if version >= 7 {
+                read_claim_block(&mut r, outer.len(), &holes, "polygon")?
+            } else {
+                (Vec::new(), Vec::new()) // pre-v7: no polygon claims
+            };
+            edge_polys.push(polys);
+
             face_specs.push((outer, holes, plane, face_material, uv_frame, surface));
         }
 
@@ -1461,6 +1572,35 @@ impl Object {
                         }
                     }
                     obj.edges[e].curve = Some(g);
+                }
+            }
+        }
+
+        // Restore per-edge polygon claims (v7), positionally like the curve
+        // claims above; a shared edge's two faces must agree.
+        for (fid, (outer_polys, hole_polys)) in face_ids.iter().copied().zip(&edge_polys) {
+            let outer_loop = obj.faces[fid].outer_loop;
+            let inner_loops = obj.faces[fid].inner_loops.clone();
+            let loops = std::iter::once((outer_loop, outer_polys))
+                .chain(inner_loops.iter().copied().zip(hole_polys.iter()));
+            for (loop_id, polys) in loops {
+                let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                for (k, h) in hes.into_iter().enumerate() {
+                    let Some(g) = polys.get(k).copied().flatten() else {
+                        continue;
+                    };
+                    let e = obj.half_edges[h].edge;
+                    if let Some(existing) = obj.edges[e].polygon {
+                        let agree = existing.center.approx_eq(g.center, crate::tol::POINT_MERGE)
+                            && (existing.radius - g.radius).abs() <= crate::tol::POINT_MERGE;
+                        if !agree {
+                            return Err(DecodeError::Corrupt {
+                                offset: r.pos,
+                                what: "shared edge has disagreeing polygon claims",
+                            });
+                        }
+                    }
+                    obj.edges[e].polygon = Some(g);
                 }
             }
         }
@@ -1971,6 +2111,14 @@ pub(crate) struct SketchDto {
     /// def-owned sketch still writes byte-identical output to v12.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// The OBJECT owner (manifest v17+, unified drafting): the dense
+    /// `objects[]` id of the Object whose faces this sketch's edges lie
+    /// over; the sketch rides with it and lives exactly while it does. A
+    /// sketch owned by a definition member also carries that definition in
+    /// `owner` (the sketch is in the member's frame). Absent means not
+    /// object-owned — every sketch before v17.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_object: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2153,6 +2301,9 @@ pub(crate) struct DocSaveData {
     /// from this map is world-owned. Keyed the same way as `obj_names`/
     /// `obj_tags`.
     pub sketch_owner: std::collections::BTreeMap<SketchId, ComponentId>,
+    /// The OBJECT owner of each object-owned sketch in `sketches` (manifest
+    /// v17+). Every owner is a saved (live) object.
+    pub sketch_owner_object: std::collections::BTreeMap<SketchId, ObjectId>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
@@ -2404,6 +2555,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             dto.sid = sid_for(crate::document::EntityRef::Sketch(*sk_id));
             dto.attrs = attrs_for(crate::document::EntityRef::Sketch(*sk_id));
             dto.owner = data.sketch_owner.get(sk_id).map(|cid| comp_to_dense[cid]);
+            dto.owner_object = data
+                .sketch_owner_object
+                .get(sk_id)
+                .map(|oid| obj_to_dense[oid]);
             dto
         })
         .collect();
@@ -2647,7 +2802,8 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         edges: edge_dtos,
         regions: region_dtos,
         curves: curve_dtos,
-        owner: None, // patched by the caller (`encode_document`), like `id`
+        owner: None,
+        owner_object: None, // patched by the caller (`encode_document`), like `id`
     }
 }
 
@@ -2808,6 +2964,9 @@ pub(crate) struct DocLoadRaw {
     /// belongs to, or `None` for world-owned — parallel to `sketches`, in the
     /// same dense sketch-id order. All `None` for pre-v13 files.
     pub sketch_owner: Vec<Option<u32>>,
+    /// Each sketch's object owner (manifest v17+): the dense object id, or
+    /// `None` — parallel to `sketches`. All `None` for pre-v17 files.
+    pub sketch_owner_object: Vec<Option<u32>>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
@@ -2948,6 +3107,9 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     }
     // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
     let sketch_owner: Vec<Option<u32>> = manifest.sketches.iter().map(|s| s.owner).collect();
+    // Object owner (manifest v17+; absent/`None` in older files).
+    let sketch_owner_object: Vec<Option<u32>> =
+        manifest.sketches.iter().map(|s| s.owner_object).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
@@ -3234,6 +3396,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         instance_owners: manifest.instances.iter().map(|i| i.owner).collect(),
         sketches,
         sketch_owner,
+        sketch_owner_object,
         guides,
         annotations,
         consumed: manifest.consumed.clone(),
@@ -3393,6 +3556,21 @@ fn validate_manifest_references(
         {
             return Err(LoadError::DanglingReference {
                 what: format!("sketch {} owner component id {} out of range", sk.id, owner),
+            });
+        }
+        if sk.owner_object.is_some() && manifest.format_version < OBJECT_SKETCH_OWNER_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} carries an owner_object in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, OBJECT_SKETCH_OWNER_MIN_VERSION
+                ),
+            });
+        }
+        if let Some(owner) = sk.owner_object
+            && owner as usize >= manifest.objects.len()
+        {
+            return Err(LoadError::DanglingReference {
+                what: format!("sketch {} owner object id {} out of range", sk.id, owner),
             });
         }
     }
@@ -4508,7 +4686,7 @@ fn read_item_summary_impl<R: Read + Seek>(
         world_sketches: manifest
             .sketches
             .iter()
-            .filter(|s| s.owner.is_none())
+            .filter(|s| s.owner.is_none() && s.owner_object.is_none())
             .count(),
         annotations: manifest.annotations.len(),
         guides: manifest.guides.len(),
@@ -4621,4 +4799,74 @@ mod planarity_flag_tests {
         let nd = Object::decode(&nb, &|_| None).unwrap();
         assert_eq!(nd.planarity_tol, tol::PLANE_DIST);
     }
+}
+
+/// One face's per-edge claims: the outer loop's, then each hole's.
+type ClaimLists = (
+    Vec<Option<crate::sketch::CurveGeom>>,
+    Vec<Vec<Option<crate::sketch::CurveGeom>>>,
+);
+
+/// Reads one per-face claim block (the v5 edge-curve shape: a `u8` "any"
+/// flag; when 1, a `u8` flag + optional 4×f64 entry per outer edge then per
+/// hole edge). `what` names the claim in error messages.
+fn read_claim_block(
+    r: &mut ByteReader<'_>,
+    outer_len: usize,
+    holes: &[Vec<usize>],
+    what: &'static str,
+) -> Result<ClaimLists, DecodeError> {
+    let any = r.read_u8()?;
+    if any == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    if any != 1 {
+        return Err(DecodeError::Corrupt {
+            offset: r.pos - 1,
+            what: if what == "polygon" {
+                "polygon-claims flag must be 0 or 1"
+            } else {
+                "claims flag must be 0 or 1"
+            },
+        });
+    }
+    let read_edge =
+        |r: &mut ByteReader<'_>| -> Result<Option<crate::sketch::CurveGeom>, DecodeError> {
+            match r.read_u8()? {
+                0 => Ok(None),
+                1 => {
+                    let cx = r.read_f64()?;
+                    let cy = r.read_f64()?;
+                    let cz = r.read_f64()?;
+                    let radius = r.read_f64()?;
+                    if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 8,
+                            what: "claim radius must be finite and positive",
+                        });
+                    }
+                    Ok(Some(crate::sketch::CurveGeom {
+                        center: Point3::new(cx, cy, cz),
+                        radius,
+                    }))
+                }
+                _ => Err(DecodeError::Corrupt {
+                    offset: r.pos - 1,
+                    what: "claim flag must be 0 or 1",
+                }),
+            }
+        };
+    let mut oc = Vec::with_capacity(outer_len);
+    for _ in 0..outer_len {
+        oc.push(read_edge(r)?);
+    }
+    let mut hc = Vec::with_capacity(holes.len());
+    for hole in holes {
+        let mut this = Vec::with_capacity(hole.len());
+        for _ in 0..hole.len() {
+            this.push(read_edge(r)?);
+        }
+        hc.push(this);
+    }
+    Ok((oc, hc))
 }

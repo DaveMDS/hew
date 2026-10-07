@@ -29,59 +29,70 @@ import {
   type NodeRef,
 } from './treeModel'
 
-describe('nodeEq / nodeKey — sketch-edge scoping', () => {
-  it('two edges with the same id in DIFFERENT sketches are distinct', () => {
-    const a: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
-    const b: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 2n }
+// Draft refs (the drawing on a plane) carry the plane's canonical context
+// string and the kernel's 16-hex unit/edge/curve/region key.
+const CTX1 = '{"plane":[0,0,0,0,0,1]}'
+const CTX2 = '{"plane":[0,0,2,0,0,1]}'
+const hex = (n: number): string => n.toString(16).padStart(16, '0')
+const dr = (kind: NodeRef['kind'], ctx: string, n: number): NodeRef => ({ kind, id: BigInt(n), ctx, key: hex(n) })
+
+describe('nodeEq / nodeKey — draft-edge plane scoping', () => {
+  it('two edges with the same key on DIFFERENT planes are distinct', () => {
+    const a = dr('draft-edge', CTX1, 5)
+    const b = dr('draft-edge', CTX2, 5)
     expect(nodeEq(a, b)).toBe(false)
     expect(nodeKey(a)).not.toBe(nodeKey(b))
   })
 
   it('the same edge equals itself and keys stably', () => {
-    const a: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
-    const b: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
+    const a = dr('draft-edge', CTX1, 5)
+    const b = dr('draft-edge', CTX1, 5)
     expect(nodeEq(a, b)).toBe(true)
     expect(nodeKey(a)).toBe(nodeKey(b))
   })
 
-  it('an edge never equals its owning sketch or an object with the same id', () => {
-    const edge: NodeRef = { kind: 'sketch-edge', id: 5n, sketch: 1n }
-    expect(nodeEq(edge, { kind: 'sketch', id: 1n })).toBe(false)
+  it('an edge never equals a sketch or an object with the same id', () => {
+    const edge = dr('draft-edge', CTX1, 5)
+    expect(nodeEq(edge, { kind: 'sketch', id: 5n })).toBe(false)
     expect(nodeEq(edge, { kind: 'object', id: 5n })).toBe(false)
-    expect(nodeKey(edge)).not.toBe(nodeKey({ kind: 'sketch', id: 1n }))
+    expect(nodeKey(edge)).not.toBe(nodeKey({ kind: 'sketch', id: 5n }))
   })
 
-  it('plain node keys are unchanged by the optional sketch field being absent', () => {
+  it('a draft key is kind, plane and kernel key', () => {
+    expect(nodeKey(dr('draft-edge', CTX1, 5))).toBe(`draft-edge:${CTX1}:${hex(5)}`)
+  })
+
+  it('plain node keys are unchanged by the optional ctx field being absent', () => {
     expect(nodeKey({ kind: 'object', id: 3n })).toBe('object:3')
   })
 })
 
-describe('nodeEq / nodeKey — imprint object scoping', () => {
-  it('two imprints with the same face id on DIFFERENT objects are distinct', () => {
-    const a: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
-    const b: NodeRef = { kind: 'imprint', id: 10n, object: 2n }
+describe('nodeEq / nodeKey — draft-island plane scoping', () => {
+  it('two islands with the same unit key on DIFFERENT planes are distinct', () => {
+    const a = dr('draft-island', CTX1, 10)
+    const b = dr('draft-island', CTX2, 10)
     expect(nodeEq(a, b)).toBe(false)
     expect(nodeKey(a)).not.toBe(nodeKey(b))
   })
 
-  it('the same imprint equals itself and keys stably', () => {
-    const a: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
-    const b: NodeRef = { kind: 'imprint', id: 10n, object: 1n }
+  it('the same island equals itself and keys stably', () => {
+    const a = dr('draft-island', CTX1, 10)
+    const b = dr('draft-island', CTX1, 10)
     expect(nodeEq(a, b)).toBe(true)
     expect(nodeKey(a)).toBe(nodeKey(b))
   })
 
-  it('an imprint-chord never equals an imprint with the same id/object (kind differs)', () => {
-    const subFace: NodeRef = { kind: 'imprint', id: 5n, object: 1n }
-    const chord: NodeRef = { kind: 'imprint-chord', id: 5n, object: 1n }
-    expect(nodeEq(subFace, chord)).toBe(false)
-    expect(nodeKey(subFace)).not.toBe(nodeKey(chord))
+  it('a draft-curve never equals a draft-island with the same key/plane (kind differs)', () => {
+    const island = dr('draft-island', CTX1, 5)
+    const curve = dr('draft-curve', CTX1, 5)
+    expect(nodeEq(island, curve)).toBe(false)
+    expect(nodeKey(island)).not.toBe(nodeKey(curve))
   })
 
-  it('an imprint never equals a plain object with the same id (object-scoped vs unscoped keys differ)', () => {
-    const imprint: NodeRef = { kind: 'imprint', id: 5n, object: 1n }
-    expect(nodeEq(imprint, { kind: 'object', id: 5n })).toBe(false)
-    expect(nodeKey(imprint)).not.toBe(nodeKey({ kind: 'object', id: 5n }))
+  it('an island never equals a plain object with the same id (plane-scoped vs unscoped keys differ)', () => {
+    const island = dr('draft-island', CTX1, 5)
+    expect(nodeEq(island, { kind: 'object', id: 5n })).toBe(false)
+    expect(nodeKey(island)).not.toBe(nodeKey({ kind: 'object', id: 5n }))
   })
 })
 
@@ -218,8 +229,8 @@ describe('canMakeComponent', () => {
   // slotmaps' reused bit patterns can silently alias an unrelated live node.
   it('false for any sketch-kind selection (no kernel NodeId — id-space guard)', () => {
     const sk: NodeRef = { kind: 'sketch', id: 5n }
-    const island: NodeRef = { kind: 'sketch-island', id: 6n, sketch: 5n }
-    const edge: NodeRef = { kind: 'sketch-edge', id: 7n, sketch: 5n }
+    const island = dr('draft-island', CTX1, 6)
+    const edge = dr('draft-edge', CTX1, 7)
     expect(canMakeComponent([sk], noParent)).toBe(false)
     expect(canMakeComponent([island], noParent)).toBe(false)
     expect(canMakeComponent([a, sk], noParent)).toBe(false)
@@ -234,7 +245,7 @@ describe('canGroup — sketch-kind guard', () => {
 
   it('false when any sketch-kind node is in the selection', () => {
     const sk: NodeRef = { kind: 'sketch', id: 5n }
-    const curve: NodeRef = { kind: 'sketch-curve', id: 6n, sketch: 5n }
+    const curve = dr('draft-curve', CTX1, 6)
     expect(canGroup([a, sk], noParent)).toBe(false)
     expect(canGroup([a, b, curve], noParent)).toBe(false)
   })
@@ -256,13 +267,16 @@ describe('structuralSelection — the node-id-space boundary', () => {
     expect(structuralSelection([{ kind: 'sketch', id: 5n }])).toBeNull()
     expect(structuralSelection([
       { kind: 'object', id: 1n },
-      { kind: 'sketch-island', id: 6n, sketch: 5n },
+      dr('draft-island', CTX1, 6),
     ])).toBeNull()
     expect(structuralSelection([
-      { kind: 'sketch-edge', id: 7n, sketch: 5n },
+      dr('draft-edge', CTX1, 7),
     ])).toBeNull()
     expect(structuralSelection([
-      { kind: 'sketch-curve', id: 8n, sketch: 5n },
+      dr('draft-curve', CTX1, 8),
+    ])).toBeNull()
+    expect(structuralSelection([
+      dr('draft-region', CTX1, 9),
     ])).toBeNull()
   })
 
@@ -631,7 +645,7 @@ describe('mergeSelection (marquee / Select All / Invert)', () => {
   const a: NodeRef = { kind: 'object', id: 10n }
   const b: NodeRef = { kind: 'object', id: 20n }
   const c: NodeRef = { kind: 'group', id: 30n }
-  const e: NodeRef = { kind: 'sketch-edge', id: 4n, sketch: 9n }
+  const e = dr('draft-edge', CTX1, 4)
 
   it('replace hands back the picked nodes (an empty pick clears)', () => {
     expect(mergeSelection([a], [b, c], 'replace')).toEqual([b, c])
@@ -662,8 +676,8 @@ describe('mergeSelection (marquee / Select All / Invert)', () => {
     expect(mergeSelection(cur, [], 'toggle')).toBe(cur)
   })
 
-  it('keys sketch sub-entities by owning sketch too', () => {
-    const eOther: NodeRef = { kind: 'sketch-edge', id: 4n, sketch: 8n }
+  it('keys drawn sub-entities by their plane too', () => {
+    const eOther = dr('draft-edge', CTX2, 4)
     expect(mergeSelection([e], [eOther], 'add')).toEqual([e, eOther])
     expect(mergeSelection([e], [eOther], 'subtract')).toEqual([e])
   })
@@ -786,38 +800,49 @@ describe('filterTreeKeys', () => {
 })
 
 describe('pruneDeadSelection — drop handles the document no longer holds', () => {
-  /** Minimal liveness view over plain arrays; sketch sub-entity queries
-   * throw on a dead sketch like the kernel's typed errors do. */
+  /** Minimal liveness view over plain arrays. A drawn thing is alive while
+   * its plane's `plane_units_json` listing holds it; a plane the kernel no
+   * longer has throws, like its typed errors do. A drawn curve is a RUN in
+   * its unit's `curves` list (the facets carrying a `curve`), keyed 0xc0. */
   function view(opts: {
     objects?: bigint[]
     groups?: bigint[]
     instances?: bigint[]
     sketches?: bigint[]
-    edges?: Record<string, bigint[]>       // sketch id -> live edge ids
-    islands?: Record<string, bigint[]>     // sketch id -> live island ids
+    /** ctx -> listing JSON; a ctx not in the map throws. */
+    planes?: Record<string, string>
   }) {
-    const sketches = opts.sketches ?? []
     return {
       object_ids: () => opts.objects ?? [],
       group_ids: () => opts.groups ?? [],
       instance_ids: () => opts.instances ?? [],
-      sketch_ids: () => sketches,
-      sketch_edge_island: (s: bigint, e: bigint) =>
-        (opts.edges?.[s.toString()] ?? []).includes(e) ? 1n : undefined,
-      sketch_curve_chain: (s: bigint, e: bigint) => {
-        if (!sketches.includes(s)) throw new Error('UnknownSketch')
-        const live = opts.edges?.[s.toString()] ?? []
-        if (!live.includes(e)) throw new Error('UnknownEdge')
-        return BigUint64Array.from([e])
-      },
-      sketch_island_edges: (s: bigint, i: bigint) => {
-        if (!sketches.includes(s)) throw new Error('UnknownSketch')
-        const live = opts.islands?.[s.toString()] ?? []
-        if (!live.includes(i)) throw new Error('UnknownIsland')
-        return BigUint64Array.from([1n])
+      sketch_ids: () => opts.sketches ?? [],
+      plane_units_json: (ctx: string) => {
+        const l = opts.planes?.[ctx]
+        if (l === undefined) throw new Error('StalePlane')
+        return l
       },
     }
   }
+
+  const topo = { kind: 'topology', object: 1 }
+  const free = { kind: 'free', sketch: 4 }
+  const line = (key: number, x: number, store: object = free) => ({ key: hex(key), a: [x, 0, 0], b: [x + 1, 0, 0], store, curve: null })
+  const arc = (key: number, x: number) => ({ key: hex(key), a: [x, 0, 0], b: [x + 1, 0, 0], store: free, curve: { center: [0, 0, 0], radius: 1 } })
+  const listing = (units: { key: number; edges: object[] }[]) =>
+    JSON.stringify({
+      units: units.map((u) => {
+        const arcs = (u.edges as { key: string; curve: unknown }[]).filter((e) => e.curve)
+        return {
+          key: hex(u.key),
+          edges: u.edges,
+          curves: arcs.length === 0
+            ? []
+            : [{ key: hex(0xc0), curve_key: hex(0xcc), kind: 'circle', center: [0, 0, 0], radius: 1, edges: arcs.map((e) => e.key) }],
+        }
+      }),
+      regions: [{ key: hex(30), outer: [], holes: [] }],
+    })
 
   const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
   const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
@@ -837,102 +862,99 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
   })
 
   it('keeps live component-definition objects and sketches supplied by the active scope', () => {
-    const v = view({ edges: { '12': [13n] } })
+    const v = view({ planes: { [CTX1]: listing([{ key: 20, edges: [line(13, 0)] }]) } })
     const sel: NodeRef[] = [
       obj(11n),
       sk(12n),
-      { kind: 'sketch-edge', id: 13n, sketch: 12n },
+      dr('draft-edge', CTX1, 13),
     ]
     expect(pruneDeadSelection(v, sel, [11n], [12n])).toBe(sel)
-    expect(pruneDeadSelection(v, sel)).toEqual([])
+    // Without the scope the scoped object and sketch are dead; a drawn edge
+    // lives by its plane's listing, not by sketch scope, so it stays.
+    expect(pruneDeadSelection(v, sel)).toEqual([dr('draft-edge', CTX1, 13)])
   })
 
-  it('prunes sketch-scoped kinds: dead edges, curves, and islands go; live ones stay', () => {
-    const v = view({ sketches: [4n], edges: { '4': [10n] }, islands: { '4': [20n] } })
+  it('prunes drawn kinds: dead edges, curves, islands, and regions go; live ones stay', () => {
+    const v = view({
+      planes: {
+        [CTX1]: listing([
+          { key: 20, edges: [line(10, 0), arc(14, 5), arc(15, 6)] },
+        ]),
+      },
+    })
     const sel: NodeRef[] = [
-      { kind: 'sketch-edge', id: 10n, sketch: 4n },
-      { kind: 'sketch-edge', id: 11n, sketch: 4n },   // dead edge
-      { kind: 'sketch-edge', id: 10n, sketch: 5n },   // dead sketch
-      { kind: 'sketch-curve', id: 10n, sketch: 4n },
-      { kind: 'sketch-curve', id: 12n, sketch: 4n },  // dead (throws)
-      { kind: 'sketch-island', id: 20n, sketch: 4n },
-      { kind: 'sketch-island', id: 21n, sketch: 4n }, // dead (throws)
+      dr('draft-edge', CTX1, 10),
+      dr('draft-edge', CTX1, 11),     // dead edge
+      dr('draft-edge', CTX2, 10),     // dead plane (listing throws)
+      { kind: 'draft-curve', id: BigInt(0xc0), ctx: CTX1, key: hex(0xc0) },
+      { kind: 'draft-curve', id: 12n, ctx: CTX1, key: hex(12) },  // dead curve (no facet carries it)
+      dr('draft-island', CTX1, 20),
+      dr('draft-island', CTX1, 21),   // dead island
+      dr('draft-region', CTX1, 30),
+      dr('draft-region', CTX1, 31),   // dead region
     ]
     expect(pruneDeadSelection(v, sel)).toEqual([
-      { kind: 'sketch-edge', id: 10n, sketch: 4n },
-      { kind: 'sketch-curve', id: 10n, sketch: 4n },
-      { kind: 'sketch-island', id: 20n, sketch: 4n },
+      dr('draft-edge', CTX1, 10),
+      { kind: 'draft-curve', id: BigInt(0xc0), ctx: CTX1, key: hex(0xc0) },
+      dr('draft-island', CTX1, 20),
+      dr('draft-region', CTX1, 30),
     ])
+  })
+
+  it('a draft-curve keyed by the circle\'s curve key (a double-click widening) lives while any of its runs does', () => {
+    const v = view({ planes: { [CTX1]: listing([{ key: 20, edges: [line(10, 0), arc(14, 5), arc(15, 6)] }]) } })
+    const whole: NodeRef = { kind: 'draft-curve', id: BigInt(0xcc), ctx: CTX1, key: hex(0xcc) }
+    const sel: NodeRef[] = [whole]
+    expect(pruneDeadSelection(v, sel)).toBe(sel)
+    const gone = view({ planes: { [CTX1]: listing([{ key: 20, edges: [line(10, 0)] }]) } })
+    expect(pruneDeadSelection(gone, sel)).toEqual([])
   })
 
   it('an empty selection passes through untouched', () => {
     const sel: NodeRef[] = []
     expect(pruneDeadSelection(view({}), sel)).toBe(sel)
   })
-})
 
-describe('pruneDeadSelection — imprint liveness', () => {
-  /** A liveness view carrying live objects plus each one's `face_features`
-   *  JSON (imprints.ts), mirroring the kernel's own contract: an imprint is
-   *  alive exactly while its object still lists its handle. */
-  function view(objects: bigint[], faceFeatures: Record<string, string> = {}) {
-    return {
-      object_ids: () => objects,
-      group_ids: () => [],
-      instance_ids: () => [],
-      sketch_ids: () => [],
-      sketch_edge_island: () => undefined,
-      sketch_curve_chain: () => [],
-      sketch_island_edges: () => [],
-      face_features: (object: bigint) => faceFeatures[object.toString()] ?? '[]',
-    }
-  }
+  describe('draft liveness (was imprint liveness)', () => {
+    // A drawn thing is alive exactly while its plane still lists its key,
+    // whichever store (topology, owned, free) its edges live in.
+    const onFace = listing([{ key: 10, edges: [line(1, 0, topo), line(2, 1, topo)] }])
 
-  const subFaceFeature = (face: number) =>
-    JSON.stringify([{ kind: 'sub_face', face, parent: 1, loop: [0, 0, 0, 1, 0, 0, 1, 1, 0], curve: null, nested: [] }])
-  const chordFeature = (edge: number) =>
-    JSON.stringify([{ kind: 'chord', edge, faces: [1, 2], path: [0, 0, 0, 1, 0, 0] }])
+    it('keeps a live island whose unit key is still listed', () => {
+      const v = view({ objects: [1n], planes: { [CTX1]: onFace } })
+      const sel: NodeRef[] = [dr('draft-island', CTX1, 10)]
+      expect(pruneDeadSelection(v, sel)).toBe(sel)
+    })
 
-  it('keeps a live sub_face imprint whose face handle is still listed', () => {
-    const v = view([1n], { '1': subFaceFeature(10) })
-    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
-    expect(pruneDeadSelection(v, sel)).toBe(sel)
-  })
+    it('keeps a live line (a chord) whose edge key is still listed', () => {
+      const v = view({ objects: [1n], planes: { [CTX1]: onFace } })
+      const sel: NodeRef[] = [dr('draft-edge', CTX1, 2)]
+      expect(pruneDeadSelection(v, sel)).toBe(sel)
+    })
 
-  it('keeps a live chord imprint whose first-edge handle is still listed', () => {
-    const v = view([1n], { '1': chordFeature(5) })
-    const sel: NodeRef[] = [{ kind: 'imprint-chord', id: 5n, object: 1n }]
-    expect(pruneDeadSelection(v, sel)).toBe(sel)
-  })
+    it('drops a ref whose key is no longer listed (pushed into a boss, or a chord re-cut)', () => {
+      const v = view({ objects: [1n], planes: { [CTX1]: onFace } })
+      const sel: NodeRef[] = [dr('draft-island', CTX1, 10), dr('draft-island', CTX1, 999)]
+      expect(pruneDeadSelection(v, sel)).toEqual([dr('draft-island', CTX1, 10)])
+    })
 
-  it('drops an imprint whose handle is no longer in face_features (pushed into a boss, or a chord re-cut)', () => {
-    const v = view([1n], { '1': subFaceFeature(10) })
-    const sel: NodeRef[] = [
-      { kind: 'imprint', id: 10n, object: 1n },
-      { kind: 'imprint', id: 999n, object: 1n }, // no longer listed
-    ]
-    expect(pruneDeadSelection(v, sel)).toEqual([{ kind: 'imprint', id: 10n, object: 1n }])
-  })
+    it('drops a ref whose plane is gone', () => {
+      const v = view({ objects: [], planes: {} })
+      const sel: NodeRef[] = [dr('draft-island', CTX1, 10)]
+      expect(pruneDeadSelection(v, sel)).toEqual([])
+    })
 
-  it('drops an imprint whose owning object is gone', () => {
-    const v = view([], { '1': subFaceFeature(10) })
-    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
-    expect(pruneDeadSelection(v, sel)).toEqual([])
-  })
-
-  it('drops every imprint when the scene double lacks face_features entirely', () => {
-    const bare = {
-      object_ids: () => [1n],
-      group_ids: () => [],
-      instance_ids: () => [],
-      sketch_ids: () => [],
-      sketch_edge_island: () => undefined,
-      sketch_curve_chain: () => [],
-      sketch_island_edges: () => [],
-      // face_features intentionally omitted.
-    }
-    const sel: NodeRef[] = [{ kind: 'imprint', id: 10n, object: 1n }]
-    expect(pruneDeadSelection(bare, sel)).toEqual([])
+    it('drops every draft ref when the scene double lacks plane_units_json entirely', () => {
+      const bare = {
+        object_ids: () => [1n],
+        group_ids: () => [],
+        instance_ids: () => [],
+        sketch_ids: () => [],
+        // plane_units_json intentionally omitted.
+      }
+      const sel: NodeRef[] = [dr('draft-island', CTX1, 10)]
+      expect(pruneDeadSelection(bare, sel)).toEqual([])
+    })
   })
 })
 
@@ -944,7 +966,7 @@ describe('dropTargetFor', () => {
   const g: NodeRef = { kind: 'group', id: 10n }
   const h: NodeRef = { kind: 'group', id: 11n }
   const inst: NodeRef = { kind: 'instance', id: 20n }
-  const sk: NodeRef = { kind: 'sketch-island', id: 30n, sketch: 5n }
+  const sk = dr('draft-island', CTX1, 30)
 
   const members: Record<string, NodeRef[]> = {
     '10': [b, h],

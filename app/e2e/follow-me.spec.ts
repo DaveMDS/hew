@@ -173,7 +173,7 @@ test('Follow Me: one click on one Line-tool segment sweeps THAT segment only (pr
   await clickWorld(page, ctx, 0, 1, 0) // midpoint of the first leg
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
 
   // …then Follow Me (no shortcut — the tool rail), then the profile.

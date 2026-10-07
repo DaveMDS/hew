@@ -18,33 +18,32 @@
 //! own frame, never remapped through an instance's pose).
 //!
 //! **Editable imprints** (`imprints`, `move_imprint`, `rotate_imprint`,
-//! `scale_imprint`, `delete_imprint`): a drawn-but-not-yet-pushed shape
-//! ([`kernel::FaceFeature`], recovered structurally, never stored) can be
-//! listed, moved, turned, scaled, or deleted before it is ever pushed —
-//! the API surface over [`kernel::Document::face_features`],
-//! `transform_imprint`, `transform_chord`, and `dissolve_imprint`.
-//! `imprints` is `ReadOnly` (a pure query, like `hew.query.faces`); the
-//! other four are `ModelMutating`, one undo entry each. All four transform
-//! commands share one **imprint locator**: a face locator (§5.2 —
-//! `{object, at}` / `{object, ray}` / `{"$face": …}`) for a sub-face
-//! imprint, OR a point on one of a chord's lines for a chord — see
-//! [`resolve_imprint`], which tries the face reading first (as a
-//! sub-face) and falls back to an edge reading (as a chord) exactly the
-//! way a person's click is ambiguous between "the face I landed on" and
-//! "the line I landed on" until the kernel says which imprint is there.
-//! No face tokens are minted by `imprints`: unlike `extrude`/`push_pull`,
-//! it neither creates nor reshapes a face (§5.4's contract for minting),
-//! and every one of its listed features is already reachable by a plain
-//! point locator — a token would be redundant ergonomics, not a new
-//! capability.
+//! `scale_imprint`, `delete_imprint`): kept for compatibility, implemented
+//! over the drafting engine's plane units — `hew.sketch.units`/`move`/
+//! `rotate`/`scale`/`delete` are the general form. An imprint is a drawn
+//! unit on one of the object's drawing planes
+//! ([`kernel::Document::object_drawing_planes`]): a *sub-face* is a region
+//! over the object whose outer ring is wholly drawing edges and is a
+//! closed loop nothing else meets or touches (a shape other drawing cuts is
+//! listed as chords), a *chord* a
+//! connected run of drawing edges anchored at both ends on the face's
+//! boundary or on other drawing. Moving, turning, scaling, or deleting
+//! either is one [`kernel::Document::draft`] over the unit's island (one
+//! undo entry). `imprints` is `ReadOnly`; the other four are
+//! `ModelMutating`. All four share one **imprint locator**: `{object, at}`
+//! picks, on each drawing plane the point lies on, the chord whose line it
+//! touches, else the sub-face containing it; `{object, ray}` and
+//! `{"$face": …}` name a face and pick the sub-face over it. No face
+//! tokens are minted by `imprints`.
 
+use super::draft;
 use super::{CmdError, Ctx, Handler};
 use crate::geom;
 use crate::locate;
 use crate::refusal::Refusal;
 use kernel::{
-    DocumentError, EdgeId, EntityRef, FaceFeature, FaceId, FollowMePath, KernelOp, NodeId,
-    ObjectId, Point3, Transform, Vec3,
+    DocumentError, DraftEdge, DraftStore, EntityRef, FollowMePath, KernelOp, NodeId, ObjectId,
+    Plane, PlaneUnits, Point3, Transform, Vec3,
 };
 use serde_json::{Value, json};
 
@@ -132,20 +131,73 @@ pub(super) fn extrude(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> 
     struct P {
         region: String,
         distance: f64,
+        #[serde(default)]
+        plane: Option<Value>,
     }
     let p: P = parse_params(params)?;
+    if let Some(plane) = &p.plane {
+        return extrude_plane_region(ctx, plane, &p.region, p.distance);
+    }
     let (sketch, region) = ctx
         .resolver()
         .resolve_region(&p.region)
         .ok_or_else(|| unknown_entity(&p.region))?;
+    extrude_sketch_region(ctx, sketch, region, p.distance)
+}
+
+/// `hew.solid.extrude { plane, region: "rgn_<hex16>", distance }`: the
+/// region is one of the drafting plane's units (`hew.sketch.units`). A
+/// region over the void extrudes as a new Object; a region that IS a face
+/// of a solid push/pulls that face; a region over a face that cannot hold
+/// it (a pinch or sliver kept as drawing) refuses `region_not_pushable`.
+fn extrude_plane_region(
+    ctx: &mut Ctx,
+    plane_spec: &Value,
+    region: &str,
+    distance: f64,
+) -> Result<Value, CmdError> {
+    let (kind, key) = draft::parse_unit_key(region)?;
+    if kind != draft::UnitKind::Region {
+        return Err(draft::unknown_unit(region));
+    }
+    let dc = draft::resolve_context(ctx, plane_spec)?;
+    let pu = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let r = pu
+        .regions
+        .iter()
+        .find(|r| r.key == key)
+        .ok_or_else(|| draft::unknown_unit(region))?;
+    match (&r.extrude, &r.over) {
+        (Some((sketch, region)), _) => extrude_sketch_region(ctx, *sketch, *region, distance),
+        (None, Some((object, Some(face)))) => push_pull_face(
+            ctx,
+            locate::FaceRef {
+                object: *object,
+                face: *face,
+            },
+            distance,
+        ),
+        (None, Some((_, None))) => Err(draft::region_not_pushable()),
+        (None, None) => Err(CmdError::Internal(
+            "a plane region has neither a face nor a free sketch to extrude".into(),
+        )),
+    }
+}
+
+fn extrude_sketch_region(
+    ctx: &mut Ctx,
+    sketch: kernel::SketchId,
+    region: kernel::SketchRegionId,
+    distance: f64,
+) -> Result<Value, CmdError> {
     let sketch_normal = ctx
         .doc
         .sketch(sketch)
-        .ok_or_else(|| unknown_entity(&p.region))?
+        .ok_or_else(|| unknown_entity("region"))?
         .plane()
         .normal();
 
-    let (object, _change) = ctx.doc.extrude_region(sketch, region, p.distance)?;
+    let (object, _change) = ctx.doc.extrude_region(sketch, region, distance)?;
 
     // Face tokens (docs/agents/HEW_API.md §5.4, normative here): the cap facing
     // the sketch's own normal is "top", the opposite cap "base", the
@@ -193,7 +245,14 @@ pub(super) fn push_pull(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     }
     let p: P = parse_params(params)?;
     let face_ref = locate::resolve_face(ctx, &p.face)?;
+    push_pull_face(ctx, face_ref, p.distance)
+}
 
+fn push_pull_face(
+    ctx: &mut Ctx,
+    face_ref: locate::FaceRef,
+    distance: f64,
+) -> Result<Value, CmdError> {
     // A face resolving to a component-DEFINITION member routes through
     // the def-scoped kernel methods below instead of the plain world
     // ones — same three-way branch, shared-geometry edit, so every
@@ -204,16 +263,16 @@ pub(super) fn push_pull(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let overshoots = ctx
         .doc
         .object(face_ref.object)
-        .is_some_and(|o| o.push_pull_overshoots(face_ref.face, p.distance));
+        .is_some_and(|o| o.push_pull_overshoots(face_ref.face, distance));
     if overshoots {
         let (objects, _change) = match component {
             Some(c) => ctx
                 .doc
-                .push_pull_through_in_component(c, face_ref.object, face_ref.face, p.distance)
+                .push_pull_through_in_component(c, face_ref.object, face_ref.face, distance)
                 .map_err(push_pull_refusal)?,
             None => ctx
                 .doc
-                .push_pull_through(face_ref.object, face_ref.face, p.distance)
+                .push_pull_through(face_ref.object, face_ref.face, distance)
                 .map_err(push_pull_refusal)?,
         };
         let object_ids: Vec<String> = objects
@@ -230,12 +289,12 @@ pub(super) fn push_pull(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let op = if is_sub {
         KernelOp::ExtrudeSubFace {
             sub_face: face_ref.face,
-            distance: p.distance,
+            distance,
         }
     } else {
         KernelOp::PushPull {
             face: face_ref.face,
-            distance: p.distance,
+            distance,
         }
     };
     let (_report, _change) = match component {
@@ -417,10 +476,6 @@ fn point_json(p: Point3) -> Value {
     json!([p.x, p.y, p.z])
 }
 
-fn midpoint(a: Point3, b: Point3) -> Point3 {
-    Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5)
-}
-
 fn finite_vec3(v: [f64; 3]) -> Result<Vec3, CmdError> {
     if v.iter().any(|c| !c.is_finite()) {
         return Err(CmdError::Params("offset components must be finite".into()));
@@ -431,109 +486,408 @@ fn finite_vec3(v: [f64; 3]) -> Result<Vec3, CmdError> {
 fn not_an_imprint() -> CmdError {
     CmdError::Refusal(Refusal::api(
         "not_an_imprint",
-        "That locator names neither an imprinted sub-face (a shape drawn inside a face, not yet \
-         pushed or pulled) nor a chord (a shape drawn up to a face's edge). Only a \
-         drawn-but-unpushed imprint can be moved, turned, scaled, or deleted this way.",
+        "That locator names neither a drawn shape (a region bounded entirely by lines drawn on a \
+         face) nor a drawn line run (lines drawn up to a face's edge or to other drawing). Only \
+         drawing can be moved, turned, scaled, or deleted this way.",
     ))
 }
 
-/// The face-plane normal of a live face — a sub-face's own plane, or (for
-/// a chord) either of its two faces, which [`kernel::FaceFeature::Chord`]
-/// guarantees are coplanar. `None` only for a face that vanished between
-/// resolution and use (a caller bug this module never triggers itself).
-fn face_normal(ctx: &Ctx, object: ObjectId, face: FaceId) -> Option<Vec3> {
-    Some(ctx.doc.object(object)?.faces().get(face)?.plane.normal())
+fn midpoint(a: Point3, b: Point3) -> Point3 {
+    Point3::new((a.x + b.x) * 0.5, (a.y + b.y) * 0.5, (a.z + b.z) * 0.5)
 }
 
-/// What an imprint locator (module doc comment) resolved to.
-#[derive(Clone, Copy)]
-enum ImprintKind {
-    SubFace(FaceId),
-    Chord(EdgeId),
+fn key_hex(prefix: &str, key: u64) -> String {
+    format!("{prefix}_{key:016x}")
 }
 
-#[derive(Clone, Copy)]
-struct ImprintTarget {
-    object: ObjectId,
-    /// Precomputed at resolution time (via [`face_normal`]) so
-    /// `rotate_imprint`/`scale_imprint` need not re-walk `face_features`
-    /// for it.
-    normal: Vec3,
-    kind: ImprintKind,
+/// An edge's geometry key on `plane` (the same key `hew.sketch.units` reports).
+fn ekey(plane: &Plane, a: Point3, b: Point3) -> u64 {
+    kernel::edge_key(plane, a, b)
 }
 
-/// Whether `path` (a [`kernel::FaceFeature::Chord`]'s run, first vertex to
-/// last) contains the segment `(a, b)` as one of its consecutive pairs, in
-/// either direction — how [`resolve_imprint`] matches a resolved solid
-/// edge back to the chord run it belongs to. `a`/`b` come from the same
-/// live document read as `path` (no JSON round-trip in between), so a
-/// tight tolerance is appropriate.
-fn chord_path_contains_edge(path: &[Point3], a: Point3, b: Point3) -> bool {
-    path.windows(2).any(|w| {
-        (points_close(w[0], a) && points_close(w[1], b))
-            || (points_close(w[0], b) && points_close(w[1], a))
-    })
+/// Total order on points, so a run reads the same way every time.
+fn point_cmp(a: Point3, b: Point3) -> std::cmp::Ordering {
+    a.x.total_cmp(&b.x)
+        .then(a.y.total_cmp(&b.y))
+        .then(a.z.total_cmp(&b.z))
 }
 
-fn points_close(p: Point3, q: Point3) -> bool {
-    (p - q).length() <= geom::API_SURFACE_TOL
+fn same_point(a: Point3, b: Point3) -> bool {
+    (a - b).length() <= geom::API_SURFACE_TOL
 }
 
-/// Resolves an **imprint locator** (module doc comment): a face locator
-/// (§5.2) naming a sub-face imprint directly, or — for a chord, which has
-/// no face id of its own — the same locator shape read instead as a point
-/// on one of the chord's lines. Tries the face reading first; ANY failure
-/// or non-imprint success of it falls through to the edge reading, not
-/// only the "resolved but not a sub-face" case, because a chord's shared
-/// edge sits exactly on the boundary between its two coplanar faces,
-/// where `locate::resolve_face`'s strict inside/outside test is
-/// inherently a coin flip (a clean miss, an accidental hit on either
-/// side, or even an ambiguous tie) — robust to whichever way that lands.
-/// A genuine parameter defect from the face reading (an unknown object
-/// id) still surfaces as itself rather than the generic `not_an_imprint`,
-/// since that is real, actionable signal the fallback would otherwise
-/// bury; a locator that merely missed or tied on the face reading, and
-/// then finds no chord either, collapses to the one clear refusal.
-fn resolve_imprint(ctx: &Ctx, locator: &Value) -> Result<ImprintTarget, CmdError> {
-    let face_result = locate::resolve_face(ctx, locator);
-    if let Ok(face_ref) = &face_result {
-        let features = ctx.doc.face_features(face_ref.object).unwrap_or_default();
-        let sub_face = features
+/// Orders the segments of one connected run (a simple path or a closed
+/// loop) into a polyline. A path starts at its lexicographically smaller
+/// end; a closed loop at its smallest vertex, toward its smaller neighbour.
+/// Deterministic, so a chord and a curve run over the same edges agree.
+fn order_chain(segs: &[(Point3, Point3)]) -> Vec<Point3> {
+    let mut verts: Vec<Point3> = Vec::new();
+    let mut deg: Vec<usize> = Vec::new();
+    let idx = |p: Point3, verts: &mut Vec<Point3>, deg: &mut Vec<usize>| {
+        let i = verts
             .iter()
-            .any(|f| matches!(f, FaceFeature::SubFace { face, .. } if *face == face_ref.face));
-        if sub_face && let Some(normal) = face_normal(ctx, face_ref.object, face_ref.face) {
-            return Ok(ImprintTarget {
-                object: face_ref.object,
-                normal,
-                kind: ImprintKind::SubFace(face_ref.face),
+            .position(|&q| same_point(p, q))
+            .unwrap_or_else(|| {
+                verts.push(p);
+                deg.push(0);
+                verts.len() - 1
             });
+        deg[i] += 1;
+        i
+    };
+    let edges: Vec<(usize, usize)> = segs
+        .iter()
+        .map(|&(a, b)| (idx(a, &mut verts, &mut deg), idx(b, &mut verts, &mut deg)))
+        .collect();
+    let ends: Vec<usize> = (0..verts.len()).filter(|&i| deg[i] == 1).collect();
+    let start = ends
+        .iter()
+        .copied()
+        .min_by(|&i, &j| point_cmp(verts[i], verts[j]))
+        .or_else(|| (0..verts.len()).min_by(|&i, &j| point_cmp(verts[i], verts[j])));
+    let Some(mut cur) = start else {
+        return Vec::new();
+    };
+    let mut used = vec![false; edges.len()];
+    let mut out = vec![verts[cur]];
+    loop {
+        let next = edges
+            .iter()
+            .enumerate()
+            .filter(|&(k, &(a, b))| !used[k] && (a == cur || b == cur))
+            .map(|(k, &(a, b))| (k, if a == cur { b } else { a }))
+            .min_by(|x, y| point_cmp(verts[x.1], verts[y.1]));
+        let Some((k, to)) = next else { break };
+        used[k] = true;
+        cur = to;
+        out.push(verts[cur]);
+    }
+    out
+}
+
+fn run_at(path: &[Point3]) -> Point3 {
+    match path {
+        [a, b, ..] => midpoint(*a, *b),
+        [a] => *a,
+        [] => Point3::new(0.0, 0.0, 0.0),
+    }
+}
+
+/// A region over the object whose outer ring is wholly drawing edges.
+struct SubFaceImprint {
+    region: kernel::DraftRegion,
+    /// The island's index in the plane's units.
+    unit: usize,
+    /// Per outer-ring edge: the circle it is a facet of, if any.
+    claims: Vec<Option<kernel::CurveGeom>>,
+    face: Option<kernel::FaceId>,
+}
+
+/// A connected run of drawing edges anchored at both ends.
+struct ChordImprint {
+    path: Vec<Point3>,
+    edges: Vec<u64>,
+    unit: usize,
+    claims: Vec<Option<kernel::CurveGeom>>,
+}
+
+/// One drawing plane of an object, analysed into its imprints.
+struct PlaneImprints {
+    plane: Plane,
+    frame: Option<kernel::ComponentId>,
+    objects: Vec<ObjectId>,
+    pu: PlaneUnits,
+    /// The unit indices (into `pu.units`) that hold this object's drawing.
+    own_units: Vec<usize>,
+    sub_faces: Vec<SubFaceImprint>,
+    chords: Vec<ChordImprint>,
+}
+
+impl PlaneImprints {
+    fn unit_keys(&self, unit: usize) -> Vec<u64> {
+        self.pu.units[unit].edges.iter().map(|e| e.key).collect()
+    }
+}
+
+fn owns(store: &DraftStore, object: ObjectId) -> bool {
+    match *store {
+        DraftStore::Topology(o) | DraftStore::Owned(o, _) => o == object,
+        DraftStore::Free(_) => false,
+    }
+}
+
+fn ring_pairs(ring: &[Point3]) -> Vec<(Point3, Point3)> {
+    (0..ring.len())
+        .map(|i| (ring[i], ring[(i + 1) % ring.len()]))
+        .collect()
+}
+
+fn analyze_plane(ctx: &Ctx, object: ObjectId, plane: Plane) -> Result<PlaneImprints, CmdError> {
+    let frame = ctx.doc.object_owner_component(object);
+    let dc = draft::context_of(ctx, plane, frame, Some(object));
+    let pu = ctx.doc.plane_units(plane, frame, &dc.objects)?;
+
+    let own_units: Vec<usize> = pu
+        .units
+        .iter()
+        .enumerate()
+        .filter(|(_, u)| u.edges.iter().any(|e| owns(&e.store, object)))
+        .map(|(i, _)| i)
+        .collect();
+
+    // key -> (unit, curve)
+    let mut drawing: std::collections::BTreeMap<u64, (usize, Option<kernel::CurveGeom>)> =
+        std::collections::BTreeMap::new();
+    for &ui in &own_units {
+        for e in &pu.units[ui].edges {
+            drawing.insert(e.key, (ui, e.curve));
         }
     }
 
-    if let Ok(edge_ref) = locate::resolve_edge(ctx, locator) {
-        let features = ctx.doc.face_features(edge_ref.object).unwrap_or_default();
-        let (a, b) = edge_ref.endpoints;
-        for f in features {
-            if let FaceFeature::Chord {
-                edge, faces, path, ..
-            } = f
-                && chord_path_contains_edge(&path, a, b)
-                && let Some(normal) = face_normal(ctx, edge_ref.object, faces[0])
-            {
-                return Ok(ImprintTarget {
-                    object: edge_ref.object,
-                    normal,
-                    kind: ImprintKind::Chord(edge),
+    // Solid boundary segments: ring edges of any region that are not drawing.
+    let mut solid: Vec<(Point3, Point3)> = Vec::new();
+    for r in &pu.regions {
+        for ring in std::iter::once(&r.outer).chain(r.holes.iter()) {
+            for (a, b) in ring_pairs(ring) {
+                if !drawing.contains_key(&ekey(&plane, a, b)) {
+                    solid.push((a, b));
+                }
+            }
+        }
+    }
+    let on_solid = |p: Point3| {
+        solid
+            .iter()
+            .any(|&(a, b)| geom::point_segment_distance(p, a, b).0 <= geom::API_SURFACE_TOL)
+    };
+
+    let degree_at = |p: Point3| {
+        pu.units
+            .iter()
+            .flat_map(|u| u.edges.iter())
+            .filter(|e| owns(&e.store, object))
+            .map(|e| usize::from(same_point(e.a, p)) + usize::from(same_point(e.b, p)))
+            .sum::<usize>()
+    };
+    let is_junction = |p: Point3| degree_at(p) >= 3 || on_solid(p);
+
+    // Sub-faces: regions over the object bounded wholly by drawing.
+    let mut sub_faces = Vec::new();
+    for r in &pu.regions {
+        let Some((o, face)) = r.over else { continue };
+        if o != object || r.outer.len() < 3 {
+            continue;
+        }
+        // A ring another line meets or the solid's boundary touches is cut
+        // into runs (chords), not one shape.
+        if r.outer.iter().any(|&q| is_junction(q)) {
+            continue;
+        }
+        let pairs = ring_pairs(&r.outer);
+        let found: Vec<Option<&(usize, Option<kernel::CurveGeom>)>> = pairs
+            .iter()
+            .map(|&(a, b)| drawing.get(&ekey(&plane, a, b)))
+            .collect();
+        if found.iter().any(Option::is_none) {
+            continue;
+        }
+        let unit = found[0].map(|f| f.0).unwrap_or(0);
+        sub_faces.push(SubFaceImprint {
+            region: r.clone(),
+            unit,
+            claims: found.iter().map(|f| f.and_then(|f| f.1)).collect(),
+            face,
+        });
+    }
+
+    // Chords: maximal runs between nodes (a junction, an end, or a touch of
+    // the solid's boundary), anchored at both ends.
+    let mut chords = Vec::new();
+    for &ui in &own_units {
+        let edges: Vec<&DraftEdge> = pu.units[ui]
+            .edges
+            .iter()
+            .filter(|e| owns(&e.store, object))
+            .collect();
+        let mut verts: Vec<Point3> = Vec::new();
+        let mut inc: Vec<Vec<usize>> = Vec::new();
+        let mut ends: Vec<(usize, usize)> = Vec::new();
+        for (k, e) in edges.iter().enumerate() {
+            let vi = |p: Point3, verts: &mut Vec<Point3>, inc: &mut Vec<Vec<usize>>| {
+                let i = verts
+                    .iter()
+                    .position(|&q| same_point(p, q))
+                    .unwrap_or_else(|| {
+                        verts.push(p);
+                        inc.push(Vec::new());
+                        verts.len() - 1
+                    });
+                inc[i].push(k);
+                i
+            };
+            let a = vi(e.a, &mut verts, &mut inc);
+            let b = vi(e.b, &mut verts, &mut inc);
+            ends.push((a, b));
+        }
+        let anchored: Vec<bool> = (0..verts.len())
+            .map(|i| inc[i].len() >= 3 || on_solid(verts[i]))
+            .collect();
+        let node: Vec<bool> = (0..verts.len())
+            .map(|i| inc[i].len() != 2 || anchored[i])
+            .collect();
+        let mut visited = vec![false; edges.len()];
+        for start in 0..verts.len() {
+            if !node[start] {
+                continue;
+            }
+            for &first in &inc[start] {
+                if visited[first] {
+                    continue;
+                }
+                let mut run: Vec<usize> = Vec::new();
+                let mut cur = start;
+                let mut k = first;
+                let end = loop {
+                    visited[k] = true;
+                    run.push(k);
+                    let (a, b) = ends[k];
+                    cur = if a == cur { b } else { a };
+                    if node[cur] {
+                        break cur;
+                    }
+                    match inc[cur].iter().copied().find(|&n| !visited[n]) {
+                        Some(n) => k = n,
+                        None => break cur,
+                    }
+                };
+                if !(anchored[start] && anchored[end]) {
+                    continue;
+                }
+                let segs: Vec<(Point3, Point3)> =
+                    run.iter().map(|&k| (edges[k].a, edges[k].b)).collect();
+                let path = order_chain(&segs);
+                // Per segment of `path`, its edge's circle claim.
+                let claims = path
+                    .windows(2)
+                    .map(|w| {
+                        let key = ekey(&plane, w[0], w[1]);
+                        edges.iter().find(|e| e.key == key).and_then(|e| e.curve)
+                    })
+                    .collect();
+                chords.push(ChordImprint {
+                    path,
+                    edges: run.iter().map(|&k| edges[k].key).collect(),
+                    unit: ui,
+                    claims,
                 });
             }
         }
     }
 
-    match face_result {
-        // A genuine identity failure surfaces as itself; only the two
-        // geometry-miss outcomes of a face reading collapse to "not an
-        // imprint" (a chord's shared edge sits ON the boundary between its
-        // two faces, so a face reading there is an honest coin-flip).
+    Ok(PlaneImprints {
+        plane,
+        frame,
+        objects: dc.objects,
+        pu,
+        own_units,
+        sub_faces,
+        chords,
+    })
+}
+
+/// Every analysed drawing plane of `object`.
+fn analyze_object(ctx: &Ctx, object: ObjectId) -> Result<Vec<PlaneImprints>, CmdError> {
+    ctx.doc
+        .object_drawing_planes(object)
+        .into_iter()
+        .map(|p| analyze_plane(ctx, object, p))
+        .collect()
+}
+
+/// A resolved imprint: the drafting context and the drawing edges of its
+/// island.
+struct ImprintTarget {
+    object: ObjectId,
+    plane: Plane,
+    frame: Option<kernel::ComponentId>,
+    objects: Vec<ObjectId>,
+    keys: Vec<u64>,
+}
+
+fn target_of(object: ObjectId, pi: &PlaneImprints, unit: usize) -> ImprintTarget {
+    ImprintTarget {
+        object,
+        plane: pi.plane,
+        frame: pi.frame,
+        objects: pi.objects.clone(),
+        keys: pi.unit_keys(unit),
+    }
+}
+
+/// Resolves an **imprint locator** (module doc comment) through plane
+/// units. `{object, at}`: the point picks, on each of the object's drawing
+/// planes it lies on, the chord whose line it touches, else the sub-face
+/// that contains it. `{object, ray}` / `{"$face": …}` name a face; the
+/// sub-face over it is the imprint. A genuine identity failure (an unknown
+/// object or face token) or a malformed locator surfaces as itself; a
+/// locator that finds no drawing collapses to `not_an_imprint`.
+fn resolve_imprint(ctx: &Ctx, locator: &Value) -> Result<ImprintTarget, CmdError> {
+    let obj = locator
+        .as_object()
+        .ok_or_else(|| CmdError::Params("expected an imprint locator object".into()))?;
+    if !obj.contains_key("$face")
+        && let Some(at) = obj.get("at")
+    {
+        let public = obj
+            .get("object")
+            .and_then(Value::as_str)
+            .ok_or_else(|| CmdError::Params("imprint locator needs \"object\"".into()))?;
+        let Some(EntityRef::Object(object)) = ctx.resolver().resolve(public) else {
+            return Err(unknown_entity(public));
+        };
+        if ctx.doc.object(object).is_none() {
+            return Err(unknown_entity(public));
+        }
+        let p = locate::parse_xyz(at)?;
+        for plane in ctx.doc.object_drawing_planes(object) {
+            if plane.signed_distance(p).abs() > geom::API_SURFACE_TOL {
+                continue;
+            }
+            let pi = analyze_plane(ctx, object, plane)?;
+            let mut best: Option<(f64, usize)> = None;
+            for (ci, c) in pi.chords.iter().enumerate() {
+                for w in c.path.windows(2) {
+                    let d = geom::point_segment_distance(p, w[0], w[1]).0;
+                    if d <= geom::API_SURFACE_TOL && best.is_none_or(|(bd, _)| d < bd) {
+                        best = Some((d, ci));
+                    }
+                }
+            }
+            if let Some((_, ci)) = best {
+                return Ok(target_of(object, &pi, pi.chords[ci].unit));
+            }
+            let normal = plane.normal();
+            if let Some(s) = pi
+                .sub_faces
+                .iter()
+                .find(|s| geom::face_contains(&s.region.outer, &s.region.holes, normal, p))
+            {
+                return Ok(target_of(object, &pi, s.unit));
+            }
+        }
+        return Err(not_an_imprint());
+    }
+
+    match locate::resolve_face(ctx, locator) {
+        Ok(face_ref) => {
+            let plane = draft::face_plane(ctx, face_ref)?;
+            let pi = analyze_plane(ctx, face_ref.object, plane)?;
+            pi.sub_faces
+                .iter()
+                .find(|s| s.face == Some(face_ref.face))
+                .map(|s| target_of(face_ref.object, &pi, s.unit))
+                .ok_or_else(not_an_imprint)
+        }
         Err(CmdError::Refusal(r))
             if matches!(
                 r.name.as_str(),
@@ -544,103 +898,72 @@ fn resolve_imprint(ctx: &Ctx, locator: &Value) -> Result<ImprintTarget, CmdError
         }
         Err(CmdError::Params(msg)) => Err(CmdError::Params(msg)),
         Err(CmdError::Internal(msg)) => Err(CmdError::Internal(msg)),
-        _ => Err(not_an_imprint()),
+        Err(_) => Err(not_an_imprint()),
     }
 }
 
-/// Applies `xf` to a resolved imprint (module doc comment) — the shared
-/// tail of `move_imprint`/`rotate_imprint`/`scale_imprint` — routing
-/// through the def-scoped kernel methods when the imprint's object is a
-/// component-definition member, exactly like `push_pull`/the face-imprint
-/// drawing path above.
-fn apply_imprint_op(
+/// Runs `edit` over the target's island edges as one drafting gesture (one
+/// undo step) and answers `{object_id}`.
+fn edit_imprint(
     ctx: &mut Ctx,
     target: ImprintTarget,
-    xf: Transform,
+    label: &str,
+    edit: impl FnOnce(&mut kernel::Sketch, &[kernel::SketchEdgeId]) -> Result<(), kernel::SketchError>,
 ) -> Result<Value, CmdError> {
-    let scope = ctx.doc.object_owner_component(target.object);
-    match target.kind {
-        ImprintKind::SubFace(face) => {
-            ctx.doc.transform_imprint(scope, target.object, face, xf)?;
+    let keys = target.keys;
+    let plane = target.plane;
+    let drafted = ctx
+        .doc
+        .draft(plane, target.frame, &target.objects, label, |w| {
+            let ids: Vec<kernel::SketchEdgeId> = w
+                .edges()
+                .iter()
+                .filter(|(_, e)| {
+                    let a = w.vertices()[e.from].position;
+                    let b = w.vertices()[e.to].position;
+                    keys.contains(&ekey(&plane, a, b))
+                })
+                .map(|(id, _)| id)
+                .collect();
+            if ids.len() < keys.len() {
+                return Err(kernel::SketchError::UnknownEdge);
+            }
+            edit(w, &ids)
+        });
+    match drafted {
+        // The old imprint refusal name for a landing off the plane.
+        Err(DocumentError::Sketch(kernel::SketchError::PointOffPlane { .. })) => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "not_in_plane",
+                "That change would take the drawing off the plane it lies on. Move, turn, and \
+                 scale it within that plane (rotate about the plane's normal; scale about a \
+                 point on the plane).",
+            )));
         }
-        ImprintKind::Chord(edge) => {
-            ctx.doc.transform_chord(scope, target.object, edge, xf)?;
+        other => {
+            other?;
         }
     }
     Ok(json!({ "object_id": public_id_of(ctx, EntityRef::Object(target.object)) }))
 }
 
-pub(super) fn imprints(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct P {
-        object: String,
-    }
-    let p: P = parse_params(params)?;
-    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(&p.object) else {
-        return Err(unknown_entity(&p.object));
-    };
-    let features = ctx
-        .doc
-        .face_features(object_id)
-        .ok_or_else(|| unknown_entity(&p.object))?;
+/// `translation(-c) · M · translation(c)`: `m` applied about `c`.
+fn about_point(c: Point3, m: &Transform) -> Transform {
+    let v = c.to_vec();
+    Transform::translation(-v)
+        .then(m)
+        .then(&Transform::translation(v))
+}
 
-    let mut list = Vec::with_capacity(features.len());
-    for f in &features {
-        match f {
-            FaceFeature::SubFace {
-                face,
-                loop_path,
-                curve,
-                curves,
-                nested,
-                holes,
-                ..
-            } => {
-                let normal =
-                    face_normal(ctx, object_id, *face).unwrap_or_else(|| Vec3::new(0.0, 0.0, 1.0));
-                // `at`: a point strictly inside the loop, clear of every hole
-                // it holds — a nested imprint, or a boss, recess, or hole the
-                // shape was drawn around (documented choice — module doc comment /
-                // HEW_API.md's imprints semantics note): an interior-point
-                // scanline (`geom::interior_point_of_loops`), not a plain
-                // vertex or area centroid, so the point still names THIS
-                // face — never a nested one — when a centroid would
-                // otherwise land in a hole. Falls back to the outer area
-                // centroid only for a degenerate loop (fewer than 3
-                // points), which cannot arise from live kernel geometry.
-                let at = geom::interior_point_of_loops(loop_path, holes, normal)
-                    .unwrap_or_else(|| geom::face_centroid(loop_path, &[]));
-                list.push(json!({
-                    "kind": "sub_face",
-                    "at": point_json(at),
-                    "loop": loop_path.iter().map(|&p| point_json(p)).collect::<Vec<_>>(),
-                    "curve": curve.map(|c| json!({ "center": point_json(c.center), "radius": c.radius })),
-                    "curves": claims_json(curves),
-                    "nested": nested.len(),
-                }));
-            }
-            FaceFeature::Chord { path, curves, .. } => {
-                // `at`: the midpoint of the run's FIRST segment
-                // (documented choice — module doc comment / HEW_API.md):
-                // always exactly on the chord's own line, and — unlike
-                // the run's own midpoint for a multi-edge run — never
-                // needs arc-length walking to compute.
-                let at = match path.as_slice() {
-                    [a, b, ..] => midpoint(*a, *b),
-                    [a] => *a,
-                    [] => Point3::new(0.0, 0.0, 0.0),
-                };
-                list.push(json!({
-                    "kind": "chord",
-                    "at": point_json(at),
-                    "path": path.iter().map(|&p| point_json(p)).collect::<Vec<_>>(),
-                    "curves": claims_json(curves),
-                }));
-            }
-        }
-    }
-    Ok(json!({ "imprints": list }))
+fn apply_transform(
+    ctx: &mut Ctx,
+    target: ImprintTarget,
+    label: &str,
+    xf: Transform,
+) -> Result<Value, CmdError> {
+    edit_imprint(ctx, target, label, move |w, ids| {
+        w.apply_transform_edges(ids, &xf)
+    })
 }
 
 /// Per-edge circle claims of an imprint's loop or run, in edge order:
@@ -656,6 +979,159 @@ fn claims_json(curves: &[Option<kernel::CurveGeom>]) -> Vec<Value> {
         .collect()
 }
 
+fn same_circle(a: kernel::CurveGeom, b: kernel::CurveGeom) -> bool {
+    same_point(a.center, b.center) && (a.radius - b.radius).abs() <= geom::API_SURFACE_TOL
+}
+
+pub(super) fn imprints(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        object: String,
+    }
+    let p: P = parse_params(params)?;
+    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(&p.object) else {
+        return Err(unknown_entity(&p.object));
+    };
+    if ctx.doc.object(object_id).is_none() {
+        return Err(unknown_entity(&p.object));
+    }
+    let planes = analyze_object(ctx, object_id)?;
+
+    let mut list = Vec::new();
+    let mut curve_units = Vec::new();
+    for pi in &planes {
+        let normal = pi.plane.normal();
+        let normal_json = point_json(Point3::new(normal.x, normal.y, normal.z));
+        for s in &pi.sub_faces {
+            let r = &s.region;
+            // `at`: a point strictly inside the loop, clear of every hole,
+            // so it names THIS region and never one nested in it.
+            let at = geom::interior_point_of_loops(&r.outer, &r.holes, normal)
+                .unwrap_or_else(|| geom::face_centroid(&r.outer, &[]));
+            let curve = match s.claims.first().copied().flatten() {
+                Some(g)
+                    if s.claims
+                        .iter()
+                        .all(|c| c.is_some_and(|c| same_circle(c, g))) =>
+                {
+                    Some(g)
+                }
+                _ => None,
+            };
+            let nested = pi
+                .sub_faces
+                .iter()
+                .filter(|o| {
+                    o.region.key != r.key
+                        && o.region.outer.iter().all(|&q| {
+                            geom::face_contains(&r.outer, &[], normal, q)
+                                || ring_pairs(&r.outer).iter().any(|&(a, b)| {
+                                    geom::point_segment_distance(q, a, b).0 <= geom::API_SURFACE_TOL
+                                })
+                        })
+                })
+                .count();
+            list.push(json!({
+                "kind": "sub_face",
+                "at": point_json(at),
+                "loop": r.outer.iter().map(|&q| point_json(q)).collect::<Vec<_>>(),
+                "holes": r.holes.iter().map(|h| h.iter().map(|&q| point_json(q)).collect::<Vec<_>>()).collect::<Vec<_>>(),
+                "curve": curve.map(|c| json!({ "center": point_json(c.center), "radius": c.radius })),
+                "curves": claims_json(&s.claims),
+                "nested": nested,
+                "normal": normal_json,
+                "region": key_hex("rgn", r.key),
+                "unit": key_hex("isl", pi.pu.units[s.unit].key),
+            }));
+        }
+        for c in &pi.chords {
+            list.push(json!({
+                "kind": "chord",
+                "at": point_json(run_at(&c.path)),
+                "path": c.path.iter().map(|&q| point_json(q)).collect::<Vec<_>>(),
+                "curves": claims_json(&c.claims),
+                "normal": normal_json,
+                "unit": key_hex("isl", pi.pu.units[c.unit].key),
+            }));
+        }
+
+        // Circles and arcs: every run of one curve (a circle other drawing
+        // cuts apart is several) as one curve unit.
+        let mut groups: Vec<(u64, Vec<&kernel::DraftCurveRun>, usize)> = Vec::new();
+        for &ui in &pi.own_units {
+            for run in &pi.pu.units[ui].curves {
+                if run.kind != kernel::SketchCurveKind::Circle {
+                    continue;
+                }
+                match groups.iter_mut().find(|g| g.0 == run.curve_key) {
+                    Some(g) => g.1.push(run),
+                    None => groups.push((run.curve_key, vec![run], ui)),
+                }
+            }
+        }
+        for (_, runs, ui) in groups {
+            let unit = &pi.pu.units[ui];
+            let seg_of = |key: u64| unit.edges.iter().find(|e| e.key == key).map(|e| (e.a, e.b));
+            let mut degree: Vec<(Point3, usize)> = Vec::new();
+            let mut run_json = Vec::new();
+            for run in &runs {
+                let segs: Vec<(Point3, Point3)> =
+                    run.edges.iter().filter_map(|&k| seg_of(k)).collect();
+                for &(a, b) in &segs {
+                    for q in [a, b] {
+                        match degree.iter_mut().find(|d| same_point(d.0, q)) {
+                            Some(d) => d.1 += 1,
+                            None => degree.push((q, 1)),
+                        }
+                    }
+                }
+                let path = order_chain(&segs);
+                // The chord entry over these edges carries the locator; a run
+                // that is a whole sub-face's outline (a circle no other line
+                // cuts) is located inside that sub-face, as its entry is.
+                let chord_at = pi
+                    .chords
+                    .iter()
+                    .find(|c| run.edges.iter().all(|k| c.edges.contains(k)))
+                    .map(|c| run_at(&c.path));
+                let sub_face_at = || {
+                    pi.sub_faces
+                        .iter()
+                        .find(|sf| {
+                            let o = &sf.region.outer;
+                            let ring: Vec<u64> = (0..o.len())
+                                .map(|i| kernel::edge_key(&pi.plane, o[i], o[(i + 1) % o.len()]))
+                                .collect();
+                            run.edges.iter().all(|k| ring.contains(k))
+                        })
+                        .and_then(|sf| {
+                            geom::interior_point_of_loops(
+                                &sf.region.outer,
+                                &sf.region.holes,
+                                normal,
+                            )
+                        })
+                };
+                let at = chord_at
+                    .or_else(sub_face_at)
+                    .unwrap_or_else(|| run_at(&path));
+                run_json.push(json!({
+                    "at": point_json(at),
+                    "path": path.iter().map(|&q| point_json(q)).collect::<Vec<_>>(),
+                }));
+            }
+            let g = runs[0].geom;
+            curve_units.push(json!({
+                "closed": degree.iter().all(|d| d.1 == 2),
+                "curve": { "center": point_json(g.center), "radius": g.radius },
+                "runs": run_json,
+            }));
+        }
+    }
+    Ok(json!({ "imprints": list, "curve_units": curve_units }))
+}
+
 pub(super) fn move_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
@@ -666,7 +1142,7 @@ pub(super) fn move_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     let p: P = parse_params(params)?;
     let offset = finite_vec3(p.offset)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
-    apply_imprint_op(ctx, target, Transform::translation(offset))
+    apply_transform(ctx, target, "Move", Transform::translation(offset))
 }
 
 pub(super) fn rotate_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -686,20 +1162,11 @@ pub(super) fn rotate_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, Cmd
     // masked by an unrelated imprint-resolution refusal.
     let about = locate::resolve_point(ctx, &p.about)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
-    // The axis is the imprint's own face normal through `about` — this
-    // preserves the imprint's plane for ANY `about` (on-plane or not):
-    // rotation about an axis leaves the component along the axis
-    // unchanged and never mixes it into the perpendicular ones, so the
-    // plane equation `normal·p = d` holds for the rotated points exactly
-    // as it did before, regardless of where along that normal line
-    // `about` sits.
-    let r = Transform::rotation(target.normal, p.angle)
-        .map_err(|_| CmdError::Internal("imprint face normal is degenerate".into()))?;
-    let about_v = about.to_vec();
-    let xf = Transform::translation(-about_v)
-        .then(&r)
-        .then(&Transform::translation(about_v));
-    apply_imprint_op(ctx, target, xf)
+    // The axis is the drawing plane's normal through `about`, which keeps
+    // the drawing in its plane for any `about`.
+    let r = Transform::rotation(target.plane.normal(), p.angle)
+        .map_err(|_| CmdError::Internal("imprint plane normal is degenerate".into()))?;
+    apply_transform(ctx, target, "Rotate", about_point(about, &r))
 }
 
 pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -718,16 +1185,10 @@ pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdE
     }
     let about = locate::resolve_point(ctx, &p.about)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
-    // Uniform scale about `about`; the kernel refuses `not_in_plane` when
-    // `about` is off the imprint's plane (a non-uniform-looking result on
-    // that plane — see `kernel::Object::transform_sub_face`'s doc
-    // comment), so no plane check is duplicated here.
-    let about_v = about.to_vec();
+    // Uniform scale about `about`; the draft refuses `not_in_plane` when
+    // `about` is off the drawing plane (the result would leave it).
     let s = Transform::scale(Vec3::new(p.factor, p.factor, p.factor));
-    let xf = Transform::translation(-about_v)
-        .then(&s)
-        .then(&Transform::translation(about_v));
-    apply_imprint_op(ctx, target, xf)
+    apply_transform(ctx, target, "Scale", about_point(about, &s))
 }
 
 pub(super) fn delete_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -738,22 +1199,12 @@ pub(super) fn delete_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, Cmd
     }
     let p: P = parse_params(params)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
-    let object = target.object;
-    let scope = ctx.doc.object_owner_component(object);
-    match target.kind {
-        ImprintKind::SubFace(face) => {
-            ctx.doc.dissolve_imprint(scope, object, face)?;
+    edit_imprint(ctx, target, "Delete", |w, ids| {
+        for &e in ids {
+            if w.edges().contains_key(e) {
+                w.remove_edge(e)?;
+            }
         }
-        ImprintKind::Chord(edge) => match scope {
-            Some(component) => {
-                ctx.doc
-                    .apply_def_op(component, object, KernelOp::MergeFaces { edge })?;
-            }
-            None => {
-                ctx.doc
-                    .apply_object_op(object, KernelOp::MergeFaces { edge })?;
-            }
-        },
-    }
-    Ok(json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
+        Ok(())
+    })
 }

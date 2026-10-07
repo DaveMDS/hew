@@ -20,7 +20,8 @@
 //!   here, and its firing is treated as a genuine defect rather than
 //!   silently swallowed;
 //! - `save()` is deterministic, `load(save())` reproduces the same
-//!   `state_hash`, at the post-sequence and maximal states;
+//!   `state_hash`, after every op and at the post-sequence and maximal
+//!   states;
 //! - fully unwinding the document log and replaying it twice reproduces the
 //!   same states up to tolerance-aware equivalence (canonical fingerprints).
 //!   The canonical geometry writer makes save bytes independent of slot
@@ -36,6 +37,9 @@ use kernel::{
     Vec3,
 };
 use proptest::prelude::*;
+
+mod face_arrangement_support;
+use face_arrangement_support::{draw_loop, face_plane, group_faces, no_pinch};
 
 /// Abstract document op; selectors resolve against live ids at apply time.
 #[derive(Debug, Clone)]
@@ -64,6 +68,85 @@ enum DocOp {
         shrink: f64,
         staple: bool,
     },
+    /// Draw a triangle on a face of a visible object through the document's
+    /// face-draw entry point, its corners snapped onto three distinct edges
+    /// of the face's outer loop (or, `pull_in`, the third corner pulled
+    /// toward the face's center so only two touch): the face-arrangement
+    /// planner's touching-loop route.
+    ImprintTouchingLoop {
+        obj_sel: usize,
+        face_sel: usize,
+        edges: [usize; 3],
+        ts: [f64; 3],
+        pull_in: bool,
+    },
+    /// A cut around the outside of an imprint, from one of its hole edges
+    /// back to the same edge (a hole-anchored `split_face`), on a face of a
+    /// visible object; a hole-free rectangular face first gets a centered
+    /// half-size imprint, which makes the cut's acceptance deterministic.
+    /// `merge_back` then deletes one of the cut's edges again — a merge
+    /// across the hole boundary, which must restore the face (rule 3).
+    HoleChord {
+        obj_sel: usize,
+        face_sel: usize,
+        side: usize,
+        ts: (f64, f64),
+        frac: f64,
+        merge_back: bool,
+    },
+    /// Draw a loop ACROSS one side of an imprint through the document's
+    /// face-draw entry point — a quad, or (`circle`) a 24-gon turned so no
+    /// vertex sits on the side, straddling it — so one piece cuts the
+    /// imprint and the other cuts the face around it from the imprint's
+    /// hole back to it (the planner's crossing route). A hole-free
+    /// rectangular face first gets a centered half-size imprint, which
+    /// makes acceptance deterministic; `from_inside` draws from the
+    /// imprint rather than the face holding it.
+    CrossingLoop {
+        obj_sel: usize,
+        face_sel: usize,
+        side: usize,
+        ts: (f64, f64),
+        frac: f64,
+        circle: bool,
+        from_inside: bool,
+    },
+    /// On a hole-free rectangular face, two side-by-side imprints (which
+    /// makes acceptance deterministic), then a loop drawn across both — a
+    /// rectangle from inside one to inside the other, or (`circle`) a
+    /// 24-gon centered in the gap reaching into both: its pieces between
+    /// the imprints join their two holes (bridges), so the face is
+    /// re-traced (stage 4). Must be accepted as four pieces.
+    BridgeLoop {
+        obj_sel: usize,
+        face_sel: usize,
+        ts: (f64, f64),
+        frac: f64,
+        circle: bool,
+    },
+    /// On a hole-free rectangular face, two side-by-side imprints and a
+    /// rectangle flush between them (its pieces bridge the two holes, which
+    /// merge into one), then Delete on the strip's top or bottom line: a
+    /// merge across two separate runs, which splits the hole in two again.
+    /// Both steps must be accepted.
+    MultiRunMerge {
+        obj_sel: usize,
+        face_sel: usize,
+        ts: (f64, f64),
+        top: bool,
+    },
+    /// Delete (merge) an edge between two coplanar faces of a visible
+    /// object — two outer loops, or an outer loop and a hole loop (a
+    /// leftover's run along an imprint, or an imprint's own edge, refused as
+    /// a whole-imprint dissolve). `from_features` picks a run the object's
+    /// topology drawing unit of one of the object's drawing planes instead
+    /// (`plane_units`), which a draft must erase whole. A merge or erase
+    /// that commits must never leave a loop visiting a vertex twice.
+    MergeCoplanar {
+        obj_sel: usize,
+        edge_sel: usize,
+        from_features: bool,
+    },
     /// Boolean between two distinct visible objects.
     Boolean {
         kind: u8,
@@ -90,6 +173,19 @@ enum DocOp {
     NonUniformScale {
         obj_sel: usize,
         factors: (f64, f64, f64),
+    },
+    /// Draw a small triangle on the plane of the `face_sel`-th face of the
+    /// `obj_sel`-th visible object — a loose drawing strictly inside the
+    /// face, around its interior point — and own it by that object
+    /// (`set_sketch_object_owner`), so every later op (transforms,
+    /// booleans, slices, push/pull, duplicates, deletes, sessions,
+    /// undo/redo) runs against documents holding object-owned sketches.
+    /// A face too small or too awkward for a clear interior point is an
+    /// accepted no-op.
+    OwnSketch {
+        obj_sel: usize,
+        face_sel: usize,
+        turn: f64,
     },
     /// Delete the `node_sel`-th top-level node.
     Delete {
@@ -376,6 +472,93 @@ enum DocOp {
         group_sel: usize,
         to_top: bool,
     },
+    /// Draw an axis-aligned lattice rectangle (0.5 m grid) on the ground
+    /// sketch (the first world ground sketch, or a fresh one) inside one
+    /// sketch gesture, so rectangles overlap and abut freely and the sticky
+    /// rules arrange them.
+    DrawRectOnGround {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+    },
+    /// Draw a faceted circle (a `begin_curve_with` chain carrying its exact
+    /// circle) on the ground sketch inside one sketch gesture.
+    DrawCircleOnGround {
+        cx: i32,
+        cy: i32,
+        r: i32,
+        segments: usize,
+    },
+    /// Translate one island of a world sketch by a lattice offset
+    /// (`Document::transform_sketch_island`); small offsets on a coarse
+    /// lattice, so it often lands on other geometry.
+    MoveIsland {
+        sk_sel: usize,
+        isl_sel: usize,
+        dx: i32,
+        dy: i32,
+    },
+    /// Translate two islands of one world sketch together.
+    MoveIslands {
+        sk_sel: usize,
+        a_sel: usize,
+        b_sel: usize,
+        dx: i32,
+        dy: i32,
+    },
+    /// Erase one edge of a world sketch inside a sketch gesture.
+    RemoveSketchEdge {
+        sk_sel: usize,
+        edge_sel: usize,
+    },
+    /// Drag a world-sketch vertex through `Document::move_sketch_vertex`;
+    /// `mode` biases the target: 0 = onto another vertex, 1 = onto an
+    /// edge's midpoint, 2 = a lattice offset from where it is.
+    MoveSketchVertex {
+        sk_sel: usize,
+        v_sel: usize,
+        mode: u8,
+        target_sel: usize,
+        dx: i32,
+        dy: i32,
+    },
+    /// Offset one region of a world sketch inside a sketch gesture.
+    OffsetRegion {
+        sk_sel: usize,
+        reg_sel: usize,
+        dist_sel: usize,
+    },
+    /// Re-facet one analytic circle chain of a world sketch inside a sketch
+    /// gesture.
+    RefacetCurve {
+        sk_sel: usize,
+        curve_sel: usize,
+        segments: usize,
+    },
+    /// Draft on the plane of the `face_sel`-th face of the `obj_sel`-th
+    /// visible object (or the ground, when `ground` or nothing is visible)
+    /// through the drafting engine (`Document::draft`, unified drafting §4),
+    /// over every visible object with a face on that plane. The lattice
+    /// (0.5 m) is anchored at the face's first outer vertex along its first
+    /// edge, so shapes land on, across, and past the face's boundary,
+    /// across imprints, and onto earlier drawing. `shape`: 0 rectangle,
+    /// 1 faceted circle, 2 loose segment, 3 erase the `sel`-th non-boundary
+    /// edge of the working sketch, 4 move the `sel`-th drawing unit of the
+    /// plane (`plane_units`) by `a` lattice steps, 5 erase that unit whole.
+    /// Only `DraftBoundaryEdgeTouched` is an
+    /// accepted refusal (and then the document must be byte-identical);
+    /// every other error fails the case.
+    Draft {
+        obj_sel: usize,
+        face_sel: usize,
+        ground: bool,
+        shape: u8,
+        a: (i32, i32),
+        b: (i32, i32),
+        sel: usize,
+        segments: usize,
+    },
     Undo,
     Redo,
 }
@@ -405,6 +588,130 @@ fn arb_scale() -> impl Strategy<Value = Vec3> {
     ]
 }
 
+/// Whether free drawing (a live sketch no object owns) lies on `plane`,
+/// facing either way: a draft on the plane arranges with it, so ops that pin
+/// exact counts or edges hold them only without it.
+fn free_drawing_on(doc: &Document, plane: Plane) -> bool {
+    let anchor = Point3::new(0.0, 0.0, 0.0)
+        + plane.normal() * (-plane.signed_distance(Point3::new(0.0, 0.0, 0.0)));
+    doc.sketch_ids().into_iter().any(|s| {
+        doc.sketch_owner_object(s).is_none()
+            && doc.sketch(s).is_some_and(|sk| {
+                let q = sk.plane();
+                !sk.edges().is_empty()
+                    && q.normal().dot(plane.normal()).abs() > 1.0 - 1e-9
+                    && q.signed_distance(anchor).abs() <= 1e-6
+            })
+    })
+}
+
+/// A hole-free rectangular face of the `obj_sel`-th visible object (the
+/// `face_sel`-th face), given two side-by-side imprints at x ∈ [0.15, 0.4]
+/// and [0.6, 0.85], y ∈ [0.25, 0.75] of its frame — returned as
+/// `(origin corner, full u extent, full v extent)`, counter-clockwise seen
+/// from the face. `None` (nothing changed) when the face is not a hole-free
+/// rectangle.
+fn two_imprints(
+    doc: &mut Document,
+    obj_sel: usize,
+    face_sel: usize,
+    step: usize,
+) -> Option<(ObjectId, (Point3, Vec3, Vec3))> {
+    let oid = nth(&doc.visible_object_ids(), obj_sel)?;
+    let obj = doc.object(oid).expect("visible id resolves");
+    let face = obj.faces().keys().nth(face_sel % obj.faces().len())?;
+    if !obj.faces()[face].inner_loops.is_empty() {
+        return None;
+    }
+    let ring: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
+    let rectangle = ring.len() == 4
+        && (0..4).all(|i| {
+            let e0 = ring[(i + 1) % 4] - ring[i];
+            let e1 = ring[(i + 2) % 4] - ring[(i + 1) % 4];
+            e0.length() >= 1e-3 && e0.dot(e1).abs() <= 1e-9 * e0.length() * e1.length()
+        });
+    if !rectangle {
+        return None;
+    }
+    let frame = (ring[0], ring[1] - ring[0], ring[3] - ring[0]);
+    let at = |x: f64, y: f64| frame.0 + frame.1 * x + frame.2 * y;
+    for (x0, x1) in [(0.15, 0.4), (0.6, 0.85)] {
+        let obj = doc.object(oid).expect("visible id resolves");
+        let holder = obj
+            .faces()
+            .keys()
+            .find(|&f| obj.face_contains_point(f, at(0.05, 0.05)))
+            .expect("the rectangle again");
+        let imprinted = doc.apply_object_op(
+            oid,
+            KernelOp::SplitFaceInner {
+                face: holder,
+                loop_path: vec![at(x0, 0.25), at(x1, 0.25), at(x1, 0.75), at(x0, 0.75)],
+                restore: None,
+                curves: Vec::new(),
+            },
+        );
+        assert!(
+            imprinted.is_ok(),
+            "step {step}: an imprint on a fresh rectangle was refused: {:?}",
+            imprinted.err()
+        );
+    }
+    Some((oid, frame))
+}
+
+/// The world-sketch edit ops (ground drawing, island/vertex moves, erase,
+/// offset, re-facet), weighted among themselves.
+fn arb_sketch_edit() -> impl Strategy<Value = DocOp> {
+    prop_oneof![
+        3 => (0..16i32, 0..16i32, 1..8i32, 1..8i32)
+            .prop_map(|(x, y, w, h)| DocOp::DrawRectOnGround { x, y, w, h }),
+        1 => (0..16i32, 0..16i32, 1..8i32, 24..40usize)
+            .prop_map(|(cx, cy, r, segments)| DocOp::DrawCircleOnGround { cx, cy, r, segments }),
+        3 => (any::<usize>(), any::<usize>(), -6..=6i32, -6..=6i32)
+            .prop_map(|(sk_sel, isl_sel, dx, dy)| DocOp::MoveIsland { sk_sel, isl_sel, dx, dy }),
+        2 => (any::<usize>(), any::<usize>(), any::<usize>(), -6..=6i32, -6..=6i32)
+            .prop_map(|(sk_sel, a_sel, b_sel, dx, dy)| DocOp::MoveIslands {
+                sk_sel, a_sel, b_sel, dx, dy,
+            }),
+        1 => (any::<usize>(), any::<usize>())
+            .prop_map(|(sk_sel, edge_sel)| DocOp::RemoveSketchEdge { sk_sel, edge_sel }),
+        3 => (any::<usize>(), any::<usize>(), 0..3u8, any::<usize>(), -6..=6i32, -6..=6i32)
+            .prop_map(|(sk_sel, v_sel, mode, target_sel, dx, dy)| DocOp::MoveSketchVertex {
+                sk_sel, v_sel, mode, target_sel, dx, dy,
+            }),
+        1 => (any::<usize>(), any::<usize>(), any::<usize>())
+            .prop_map(|(sk_sel, reg_sel, dist_sel)| DocOp::OffsetRegion { sk_sel, reg_sel, dist_sel }),
+        1 => (any::<usize>(), any::<usize>(), 24..64usize)
+            .prop_map(|(sk_sel, curve_sel, segments)| DocOp::RefacetCurve {
+                sk_sel, curve_sel, segments,
+            }),
+        6 => (
+            any::<usize>(),
+            any::<usize>(),
+            proptest::bool::weighted(0.15),
+            0..6u8,
+            (-2..14i32, -2..14i32),
+            (1..9i32, 1..9i32),
+            any::<usize>(),
+            24..40usize,
+        )
+            .prop_map(|(obj_sel, face_sel, ground, shape, a, b, sel, segments)| {
+                DocOp::Draft { obj_sel, face_sel, ground, shape, a, b, sel, segments }
+            }),
+    ]
+}
+
+/// World-sketch edits with undo/redo interleaved, for the sketch-focused
+/// property.
+fn arb_world_sketch_op() -> impl Strategy<Value = DocOp> {
+    prop_oneof![
+        12 => arb_sketch_edit(),
+        3 => Just(DocOp::Undo),
+        2 => Just(DocOp::Redo),
+    ]
+}
+
 fn arb_doc_op() -> impl Strategy<Value = DocOp> {
     let distance = || (-4.0..4.0f64).prop_filter("degenerate distance", |d| d.abs() >= 0.05);
     prop_oneof![
@@ -420,6 +727,58 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
                 DocOp::SplitFaceInner { obj_sel, face_sel, shrink, staple }
             }
         ),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            [any::<usize>(), any::<usize>(), any::<usize>()],
+            [0.2..0.8f64, 0.2..0.8f64, 0.2..0.8f64],
+            proptest::bool::ANY,
+        )
+            .prop_map(|(obj_sel, face_sel, edges, ts, pull_in)| DocOp::ImprintTouchingLoop {
+                obj_sel, face_sel, edges, ts, pull_in,
+            }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            any::<usize>(),
+            (0.0..1.0f64, 0.0..1.0f64),
+            0.1..1.0f64,
+            proptest::bool::ANY,
+        )
+            .prop_map(|(obj_sel, face_sel, side, ts, frac, merge_back)| DocOp::HoleChord {
+                obj_sel, face_sel, side, ts, frac, merge_back,
+            }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            any::<usize>(),
+            (0.0..1.0f64, 0.0..1.0f64),
+            0.1..1.0f64,
+            proptest::bool::ANY,
+            proptest::bool::ANY,
+        )
+            .prop_map(|(obj_sel, face_sel, side, ts, frac, circle, from_inside)| {
+                DocOp::CrossingLoop { obj_sel, face_sel, side, ts, frac, circle, from_inside }
+            }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            (0.0..1.0f64, 0.0..1.0f64),
+            0.0..1.0f64,
+            proptest::bool::ANY,
+        )
+            .prop_map(|(obj_sel, face_sel, ts, frac, circle)| DocOp::BridgeLoop {
+                obj_sel, face_sel, ts, frac, circle,
+            }),
+        2 => (any::<usize>(), any::<usize>(), (0.0..1.0f64, 0.0..1.0f64), proptest::bool::ANY)
+            .prop_map(|(obj_sel, face_sel, ts, top)| DocOp::MultiRunMerge {
+                obj_sel, face_sel, ts, top,
+            }),
+        2 => (any::<usize>(), any::<usize>(), proptest::bool::ANY).prop_map(
+            |(obj_sel, edge_sel, from_features)| DocOp::MergeCoplanar {
+                obj_sel, edge_sel, from_features,
+            }
+        ),
         3 => (0u8..3, any::<usize>(), any::<usize>()).prop_map(|(kind, a_sel, b_sel)| {
             DocOp::Boolean { kind, a_sel, b_sel }
         }),
@@ -431,6 +790,9 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         }),
         2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
             |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
+        4 => (any::<usize>(), any::<usize>(), 0.0..std::f64::consts::TAU).prop_map(
+            |(obj_sel, face_sel, turn)| DocOp::OwnSketch { obj_sel, face_sel, turn }
         ),
         1 => any::<usize>().prop_map(|node_sel| DocOp::Delete { node_sel }),
         1 => (2usize..4).prop_map(|count| DocOp::Group { count }),
@@ -519,6 +881,7 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (any::<usize>(), any::<usize>(), proptest::bool::ANY).prop_map(
             |(node_sel, group_sel, to_top)| DocOp::Reparent { node_sel, group_sel, to_top }
         ),
+        14 => arb_sketch_edit(),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
     ]
@@ -821,6 +1184,7 @@ fn check_doc(doc: &Document, step: usize, what: &str) -> Result<(), TestCaseErro
             );
         }
     }
+    check_sketch_regions(doc, step, what)?;
     Ok(())
 }
 
@@ -840,6 +1204,12 @@ fn check_persistence(doc: &Document, what: &str) -> Result<(), TestCaseError> {
         reloaded.state_hash(),
         doc.state_hash(),
         "{}: state hash changed across save/load",
+        what
+    );
+    prop_assert_eq!(
+        &reloaded.save(),
+        &bytes,
+        "{}: save -> load -> save is not byte-identical",
         what
     );
     Ok(())
@@ -876,7 +1246,7 @@ fn check_persistence(doc: &Document, what: &str) -> Result<(), TestCaseError> {
 /// Phase 1's scope.
 fn doc_fingerprint(doc: &Document) -> String {
     let q = |c: f64| (c * 1e7).round() as i64;
-    let object_print = |oid| {
+    let object_print = |oid: ObjectId| {
         let obj = doc.object(oid).expect("live id resolves");
         let (pts, faces) = obj.to_polygons();
         let mut vs: Vec<(i64, i64, i64)> = pts.iter().map(|p| (q(p.x), q(p.y), q(p.z))).collect();
@@ -935,7 +1305,7 @@ fn doc_fingerprint(doc: &Document) -> String {
     let mut world_sketches: Vec<String> = doc
         .sketch_ids()
         .into_iter()
-        .map(|sid| sketch_print(doc.sketch(sid).expect("live id resolves")))
+        .map(|sid| owned_sketch_print(doc, sid, &object_print))
         .collect();
     world_sketches.sort_unstable();
     let mut def_sketches: Vec<String> = doc
@@ -946,7 +1316,8 @@ fn doc_fingerprint(doc: &Document) -> String {
                 .def_member_sketches(cid)
                 .expect("live component resolves")
                 .into_iter()
-                .filter_map(|sid| doc.sketch(sid).map(sketch_print))
+                .filter(|&sid| doc.sketch(sid).is_some())
+                .map(|sid| owned_sketch_print(doc, sid, &object_print))
                 .collect();
             owned.sort_unstable();
             format!("{owned:?}")
@@ -1019,6 +1390,21 @@ fn sketch_print(s: &kernel::Sketch) -> String {
     format!("{edges:?}|regions={}", s.regions().len())
 }
 
+/// [`sketch_print`] plus, for an object-owned sketch, the owner's geometry
+/// fingerprint — so a replay that drops, re-points, or mis-moves an owner
+/// link (the `object_sketches` table) compares unequal.
+fn owned_sketch_print(
+    doc: &Document,
+    sid: kernel::SketchId,
+    object_print: &dyn Fn(ObjectId) -> String,
+) -> String {
+    let base = sketch_print(doc.sketch(sid).expect("live id resolves"));
+    match doc.sketch_owner_object(sid) {
+        Some(owner) => format!("{base}@{}", object_print(owner)),
+        None => base,
+    }
+}
+
 /// Quantized, id-independent fingerprint of one annotation — see
 /// `doc_fingerprint`'s doc comment for why quantization is needed here too.
 fn annotation_print(a: &Annotation, detached: bool, q: impl Fn(f64) -> i64) -> String {
@@ -1075,6 +1461,154 @@ fn annotation_print(a: &Annotation, detached: bool, q: impl Fn(f64) -> i64) -> S
             qv(*offset),
         ),
     }
+}
+
+/// The live world sketches the free-sketch ops (draw, move, drag, remove)
+/// pick from: not object-owned, and on a horizontal plane. Those ops assume
+/// a ground-style sketch (their lattice moves are XY translations, which
+/// keep a horizontal sketch in plane), which an object-owned sketch on an
+/// arbitrary face plane is not — nor is a sketch that was owned and then
+/// freed again by an undo. An owned sketch is exercised through the ops
+/// that carry it (transforms, push/pull, booleans, slices, duplicates,
+/// sessions, undo/redo) and [`DocOp::OwnSketch`] itself.
+fn free_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
+    doc.sketch_ids()
+        .into_iter()
+        .filter(|&s| doc.sketch_owner_object(s).is_none())
+        .filter(|&s| {
+            let n = doc.sketch(s).expect("live id").plane().normal();
+            n.x == 0.0 && n.y == 0.0
+        })
+        .collect()
+}
+
+/// The ground sketch the world-sketch ops draw on: the first live world
+/// sketch lying on the z = 0 plane facing +z, or a fresh one.
+fn ground_sketch(doc: &mut Document) -> kernel::SketchId {
+    let found = free_sketch_ids(doc).into_iter().find(|&sid| {
+        let plane = doc.sketch(sid).expect("live id").plane();
+        let n = plane.normal();
+        n.x == 0.0 && n.y == 0.0 && n.z == 1.0 && plane.point().z == 0.0
+    });
+    found.unwrap_or_else(|| {
+        let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .expect("unit normal");
+        doc.add_sketch(plane)
+    })
+}
+
+fn lattice_translation(dx: i32, dy: i32) -> Transform {
+    Transform::translation(Vec3::new(f64::from(dx) * 0.5, f64::from(dy) * 0.5, 0.0))
+}
+
+/// Every world and definition-owned sketch handle.
+fn all_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
+    let mut ids = doc.sketch_ids();
+    for cid in doc.component_ids() {
+        if let Some(owned) = doc.def_member_sketches(cid) {
+            ids.extend(owned);
+        }
+    }
+    ids
+}
+
+/// Every region of every live sketch yields a valid `Profile`, or is a pinch
+/// (a ring visiting a vertex twice — a region the arrangement may report but
+/// no solid can be built from).
+fn check_sketch_regions(doc: &Document, step: usize, what: &str) -> Result<(), TestCaseError> {
+    for sid in all_sketch_ids(doc) {
+        let Some(sk) = doc.sketch(sid) else { continue };
+        for (rid, r) in sk.regions() {
+            let visits_twice = |ring: &[kernel::SketchVertexId]| {
+                let mut seen = std::collections::BTreeSet::new();
+                !ring.iter().all(|v| seen.insert(*v))
+            };
+            let pinch = visits_twice(&r.outer) || r.holes.iter().any(|h| visits_twice(h));
+            if !pinch && let Err(e) = sk.profile(rid) {
+                return Err(TestCaseError::fail(format!(
+                    "step {step} ({what}): sketch {sid:?} region {rid:?} has no profile: {e:?}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A small triangle strictly inside the `face_sel`-th face of `obj`, on the
+/// face's own plane: the three corners, the face's interior point, and the
+/// face normal. `None` when the face is too small or has no clear interior
+/// point (the loop centroid must lie inside the outer loop and outside
+/// every hole, with clearance from every boundary edge).
+fn interior_triangle(
+    obj: &kernel::Object,
+    face_sel: usize,
+    turn: f64,
+) -> Option<([Point3; 3], Point3, Vec3)> {
+    let faces = obj.faces();
+    let fid = faces.keys().nth(face_sel % faces.len())?;
+    let face = &faces[fid];
+    let n = face.plane.normal();
+    let outer: Vec<Point3> = obj.loop_positions(face.outer_loop).collect();
+    let holes: Vec<Vec<Point3>> = face
+        .inner_loops
+        .iter()
+        .map(|&l| obj.loop_positions(l).collect())
+        .collect();
+    // In-plane basis.
+    let helper = if n.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let u = n.cross(helper).normalized().ok()?;
+    let v = n.cross(u);
+    let k = 1.0 / outer.len() as f64;
+    let c = outer
+        .iter()
+        .fold(Point3::ORIGIN, |acc, &q| acc + q.to_vec() * k);
+    let to2 = |q: Point3| ((q - c).dot(u), (q - c).dot(v));
+    let inside = |poly: &[Point3]| {
+        let pts: Vec<(f64, f64)> = poly.iter().map(|&q| to2(q)).collect();
+        let mut hit = false;
+        let mut j = pts.len() - 1;
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i], pts[j]);
+            if (a.1 > 0.0) != (b.1 > 0.0) && 0.0 < (b.0 - a.0) * (0.0 - a.1) / (b.1 - a.1) + a.0 {
+                hit = !hit;
+            }
+            j = i;
+        }
+        hit
+    };
+    if !inside(&outer) || holes.iter().any(|h| inside(h)) {
+        return None;
+    }
+    // Clearance: distance from the centroid to every boundary edge.
+    let mut dmin = f64::MAX;
+    for poly in std::iter::once(&outer).chain(holes.iter()) {
+        for i in 0..poly.len() {
+            let (a, b) = (to2(poly[i]), to2(poly[(i + 1) % poly.len()]));
+            let ab = (b.0 - a.0, b.1 - a.1);
+            let len2 = ab.0 * ab.0 + ab.1 * ab.1;
+            if len2 < 1e-18 {
+                continue;
+            }
+            let t = (-(a.0 * ab.0 + a.1 * ab.1) / len2).clamp(0.0, 1.0);
+            let d = ((a.0 + t * ab.0).powi(2) + (a.1 + t * ab.1).powi(2)).sqrt();
+            dmin = dmin.min(d);
+        }
+    }
+    let r = 0.4 * dmin;
+    if r.is_nan() || r <= 0.02 {
+        return None;
+    }
+    let corner = |ang: f64| c + u * (r * ang.cos()) + v * (r * ang.sin());
+    let tri = [
+        corner(turn),
+        corner(turn + 2.094_395_1),
+        corner(turn + 4.188_790_2),
+    ];
+    Some((tri, c, n))
 }
 
 fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
@@ -1141,6 +1675,217 @@ fn place_glyph(doc: &mut Document, x: f64, y: f64, depth: f64) -> Option<()> {
 /// Applies one abstract op. `materials` is the fixed palette `seed_materials`
 /// built up front (paint ops resolve their `mat_sel`/`from_sel`/`to_sel`
 /// against it).
+/// Whether face `f` of `obj` lies on `plane` (same facing, every outer
+/// vertex within a nanometre) — the drafting engine's own criterion.
+fn fuzz_face_on_plane(obj: &kernel::Object, f: FaceId, plane: &Plane) -> bool {
+    let face = &obj.faces()[f];
+    (face.plane.normal() - plane.normal()).length() < 1e-9
+        && obj
+            .loop_positions(face.outer_loop)
+            .all(|p| plane.signed_distance(p).abs() < 1e-9)
+}
+
+/// The solids' own edges on `plane`: edges of a face on the plane whose
+/// other side is not (the drafting engine never moves or removes these).
+fn fixed_segments(doc: &Document, objs: &[ObjectId], plane: &Plane) -> Vec<(Point3, Point3)> {
+    let mut out = Vec::new();
+    for &o in objs {
+        let obj = doc.object(o).expect("visible");
+        let face_of = |h| obj.loops()[obj.half_edges()[h].loop_id].face;
+        for (e, ed) in obj.edges().iter() {
+            let fa = face_of(ed.half_edge);
+            let on_a = fuzz_face_on_plane(obj, fa, plane);
+            let on_b = ed
+                .twin_half_edge
+                .is_some_and(|t| fuzz_face_on_plane(obj, face_of(t), plane));
+            if on_a != on_b || (on_a && ed.twin_half_edge.is_none()) {
+                out.push(obj.edge_endpoints(e).expect("live edge"));
+            }
+        }
+    }
+    out
+}
+
+/// One [`DocOp::Draft`].
+#[allow(clippy::too_many_arguments)]
+fn apply_draft(
+    doc: &mut Document,
+    step: usize,
+    obj_sel: usize,
+    face_sel: usize,
+    ground: bool,
+    shape: u8,
+    a: (i32, i32),
+    b: (i32, i32),
+    sel: usize,
+    segments: usize,
+) -> Result<(), TestCaseError> {
+    let visible = doc.visible_object_ids();
+    // The plane and a lattice frame on it.
+    let (plane, origin, u) = match nth(&visible, obj_sel).filter(|_| !ground) {
+        None => (
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                .expect("unit normal"),
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ),
+        Some(oid) => {
+            let obj = doc.object(oid).expect("visible");
+            let Some(f) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(());
+            };
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            let plane = obj.faces()[f].plane;
+            let Ok(u) = (ring[1] - ring[0]).normalized() else {
+                return Ok(());
+            };
+            (plane, ring[0], u)
+        }
+    };
+    let n = plane.normal();
+    let v = n.cross(u);
+    let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
+    let objs: Vec<ObjectId> = visible
+        .iter()
+        .copied()
+        .filter(|&o| {
+            let obj = doc.object(o).expect("visible");
+            obj.faces()
+                .keys()
+                .any(|f| fuzz_face_on_plane(obj, f, &plane))
+        })
+        .collect();
+    let fixed = fixed_segments(doc, &objs, &plane);
+    let before = doc.save();
+    let depth0 = doc.undo_depth();
+    let erase = shape >= 3;
+    // Shapes 4 and 5 act on a drawing unit of the plane, picked from the
+    // lift before the draft opens.
+    let unit = if shape >= 4 {
+        let Ok(pu) = doc.plane_units(plane, None, &objs) else {
+            return Ok(());
+        };
+        if pu.units.is_empty() {
+            return Ok(());
+        }
+        Some(pu.units[sel % pu.units.len()].clone())
+    } else {
+        None
+    };
+    let result = doc.draft(plane, None, &objs, "Fuzz draft", |sk| {
+        match shape {
+            0 => {
+                let (x0, y0) = a;
+                let (x1, y1) = (a.0 + b.0, a.1 + b.1);
+                let c = [at(x0, y0), at(x1, y0), at(x1, y1), at(x0, y1)];
+                for k in 0..4 {
+                    sk.add_segment(c[k], c[(k + 1) % 4])?;
+                }
+            }
+            1 => {
+                let center = at(a.0, a.1);
+                let radius = f64::from(b.0) * 0.5;
+                let ring: Vec<Point3> = (0..segments)
+                    .map(|i| {
+                        let t = std::f64::consts::TAU * i as f64 / segments as f64;
+                        center + u * (radius * t.cos()) + v * (radius * t.sin())
+                    })
+                    .collect();
+                sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
+                for i in 0..segments {
+                    sk.add_segment(ring[i], ring[(i + 1) % segments])?;
+                }
+                sk.end_curve();
+            }
+            2 => {
+                let (p0, p1) = (at(a.0, a.1), at(a.0 + b.0, a.1 + b.1 - 1));
+                if (p1 - p0).length() > 1e-6 {
+                    sk.add_segment(p0, p1)?;
+                }
+            }
+            4 | 5 => {
+                let unit = unit.as_ref().expect("a unit was picked");
+                let es: Vec<_> = unit
+                    .edges
+                    .iter()
+                    .map(|e| {
+                        sk.edge_at_positions(e.a, e.b)
+                            .expect("a unit edge in the lift")
+                    })
+                    .collect();
+                if shape == 4 {
+                    let d = u * (f64::from(a.0 - 6) * 0.5) + v * (f64::from(a.1 - 6) * 0.5);
+                    sk.apply_transform_edges(&es, &Transform::translation(d))?;
+                } else {
+                    for e in es {
+                        sk.remove_edge(e)?;
+                    }
+                }
+            }
+            _ => {
+                // Erase an edge that is not one of a solid's own.
+                let safe: Vec<_> = sk
+                    .edges()
+                    .iter()
+                    .filter(|(_, e)| {
+                        let (p0, p1) =
+                            (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+                        let mid = Point3::new(
+                            (p0.x + p1.x) / 2.0,
+                            (p0.y + p1.y) / 2.0,
+                            (p0.z + p1.z) / 2.0,
+                        );
+                        !fixed.iter().any(|&(c, d)| {
+                            let dir = d - c;
+                            let t = ((mid - c).dot(dir) / dir.length_squared()).clamp(0.0, 1.0);
+                            (c + dir * t - mid).length() < 1e-7
+                        })
+                    })
+                    .map(|(id, _)| id)
+                    .collect();
+                if let Some(e) = nth(&safe, sel) {
+                    sk.remove_edge(e)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok(_) => {
+            if doc.draft_sketch().is_some() {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a committed draft is still open"
+                )));
+            }
+            let committed = doc.undo_depth();
+            if committed != depth0 && committed != depth0 + 1 {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a draft recorded {} undo steps",
+                    committed.saturating_sub(depth0)
+                )));
+            }
+            if committed == depth0 && doc.save() != before {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: an unrecorded draft changed the document"
+                )));
+            }
+            Ok(())
+        }
+        Err(DocumentError::DraftBoundaryEdgeTouched) if erase => {
+            if doc.save() != before || doc.draft_sketch().is_some() {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a refused draft left a trace"
+                )));
+            }
+            Ok(())
+        }
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step}: a draft was refused: {e:?} (shape {shape}, plane {plane:?}, {} objects)",
+            objs.len()
+        ))),
+    }
+}
+
 fn apply_doc_op(
     doc: &mut Document,
     step: usize,
@@ -1260,11 +2005,591 @@ fn apply_doc_op(
                 },
             );
         }
-        DocOp::Boolean { kind, a_sel, b_sel } => {
-            let ids = doc.visible_object_ids();
-            let (Some(a), Some(b)) = (nth(&ids, *a_sel), nth(&ids, *b_sel)) else {
+        DocOp::ImprintTouchingLoop {
+            obj_sel,
+            face_sel,
+            edges,
+            ts,
+            pull_in,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
                 return Ok(true);
             };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
+            let sides = boundary.len();
+            if sides < 3 {
+                return Ok(true);
+            }
+            let mut picked: Vec<usize> = edges.iter().map(|e| e % sides).collect();
+            picked.sort_unstable();
+            picked.dedup();
+            if picked.len() != 3 {
+                return Ok(true);
+            }
+            let point_on = |i: usize, t: f64| {
+                let p = boundary[i];
+                let q = boundary[(i + 1) % sides];
+                p + (q - p) * t
+            };
+            let mut loop_path: Vec<Point3> = (0..3).map(|k| point_on(picked[k], ts[k])).collect();
+            if *pull_in {
+                let inv = 1.0 / sides as f64;
+                let c = boundary.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                    Point3::new(acc.x + p.x * inv, acc.y + p.y * inv, acc.z + p.z * inv)
+                });
+                loop_path[2] = loop_path[2] + (c - loop_path[2]) * 0.5;
+            }
+            // On a face that is hole-free and strictly convex with every
+            // side at least 0.1 mm and every corner turning by more than
+            // 0.06° (sin > 1e-3), the triangle's sides cross the face's
+            // open interior, more than POINT_MERGE from every boundary
+            // vertex and edge but at its own two or three corners, so the
+            // planner must accept it. Elsewhere (a concave face the
+            // triangle can leave, a hole it can cross, sides short or
+            // nearly collinear enough to put a corner within POINT_MERGE
+            // of a side) a typed refusal is a correct answer.
+            let normal = obj.faces()[face].plane.normal();
+            let must_accept = obj.faces()[face].inner_loops.is_empty()
+                && (0..sides).all(|i| {
+                    let a = boundary[i];
+                    let b = boundary[(i + 1) % sides];
+                    let c = boundary[(i + 2) % sides];
+                    let (e0, e1) = (b - a, c - b);
+                    e0.length() >= 1e-4
+                        && e0.cross(e1).dot(normal) > 1e-3 * e0.length() * e1.length()
+                })
+                && {
+                    let (a, b, c) = (loop_path[0], loop_path[1], loop_path[2]);
+                    (b - a).cross(c - a).length() > 1e-3 * (b - a).length() * (c - a).length()
+                };
+            let plane = face_plane(doc, oid, face);
+            let clean = doc.object_owned_sketches(oid).is_empty()
+                && doc
+                    .drawable_objects_on_plane(plane, None)
+                    .iter()
+                    .all(|&o| o == oid)
+                && !free_drawing_on(doc, plane);
+            let result = draw_loop(doc, None, oid, face, &loop_path, None);
+            assert!(
+                !must_accept || result.is_ok(),
+                "step {step}: a touching triangle on a convex face was refused: {:?}",
+                result.as_ref().err()
+            );
+            if must_accept
+                && clean
+                && let Ok((report, _)) = &result
+            {
+                assert!(
+                    report.kept_as_sketch.is_empty(),
+                    "step {step}: a touching triangle on a convex face must land as face \
+                     topology, not sketch drawing: {report:?}"
+                );
+            }
+        }
+        DocOp::HoleChord {
+            obj_sel,
+            face_sel,
+            side,
+            ts,
+            frac,
+            merge_back,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let normal = obj.faces()[face].plane.normal();
+            let mut must_accept = false;
+            if obj.faces()[face].inner_loops.is_empty() {
+                // Only a hole-free rectangle gets the imprint: its centered
+                // half-size copy leaves a gap of a quarter of the face's
+                // extent on every side, which the cut below stays within.
+                let ring: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
+                let rectangle = ring.len() == 4
+                    && (0..4).all(|i| {
+                        let e0 = ring[(i + 1) % 4] - ring[i];
+                        let e1 = ring[(i + 2) % 4] - ring[(i + 1) % 4];
+                        e0.length() >= 1e-3 && e0.dot(e1).abs() <= 1e-9 * e0.length() * e1.length()
+                    });
+                if !rectangle {
+                    return Ok(true);
+                }
+                let c = ring.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                    Point3::new(acc.x + p.x / 4.0, acc.y + p.y / 4.0, acc.z + p.z / 4.0)
+                });
+                let loop_path: Vec<Point3> = ring.iter().map(|&p| c + (p - c) * 0.5).collect();
+                let imprinted = doc.apply_object_op(
+                    oid,
+                    KernelOp::SplitFaceInner {
+                        face,
+                        loop_path,
+                        restore: None,
+                        curves: Vec::new(),
+                    },
+                );
+                assert!(
+                    imprinted.is_ok(),
+                    "step {step}: a centered half-size imprint on a rectangle was refused: {:?}",
+                    imprinted.err()
+                );
+                must_accept = true;
+            }
+            let obj = doc.object(oid).expect("visible id resolves");
+            let hole = obj.faces()[face].inner_loops[0];
+            let ring: Vec<Point3> = obj.loop_positions(hole).collect();
+            let n = ring.len();
+            let k = side % n;
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            let shortest = (0..n)
+                .map(|i| (ring[(i + 1) % n] - ring[i]).length())
+                .fold(f64::INFINITY, f64::min);
+            // Hole half-edges carry the face on their left.
+            let Ok(out) = normal.cross(b - a).normalized() else {
+                return Ok(true);
+            };
+            let d = frac * 0.2 * shortest;
+            let (t0, t1) = (ts.0.min(ts.1), ts.0.max(ts.1));
+            if t1 - t0 < 0.1 {
+                return Ok(true);
+            }
+            let (pa, pb) = (a + (b - a) * t0, a + (b - a) * t1);
+            let path = vec![pa, pa + out * d, pb + out * d, pb];
+            let split = doc.apply_object_op(
+                oid,
+                KernelOp::SplitFace {
+                    face,
+                    path,
+                    restore: None,
+                    curves: Vec::new(),
+                },
+            );
+            assert!(
+                !must_accept || split.is_ok(),
+                "step {step}: a cut around a fresh imprint's edge was refused: {:?}",
+                split.as_ref().err()
+            );
+            if let (Ok((kernel::KernelOpReport::FaceSplit(r), _)), true) = (&split, *merge_back) {
+                let faces = doc.object(oid).expect("object").faces().len();
+                let merged = doc.apply_object_op(
+                    oid,
+                    KernelOp::MergeFaces {
+                        edge: r.new_edges[0],
+                    },
+                );
+                assert!(
+                    merged.is_ok(),
+                    "step {step}: merging a hole-anchored cut back was refused: {:?}",
+                    merged.err()
+                );
+                assert_eq!(
+                    doc.object(oid).expect("object").faces().len(),
+                    faces - 1,
+                    "step {step}: the merge restores the face count"
+                );
+            }
+        }
+        DocOp::BridgeLoop {
+            obj_sel,
+            face_sel,
+            ts,
+            frac,
+            circle,
+        } => {
+            let Some((oid, frame)) = two_imprints(doc, *obj_sel, *face_sel, step) else {
+                return Ok(true);
+            };
+            let at = |x: f64, y: f64| frame.0 + frame.1 * x + frame.2 * y;
+            let (lu, lv) = (frame.1.length(), frame.2.length());
+            let (loop_path, curve) = if *circle {
+                // Reaching 0.1–0.2 of the width past the gap's edges, no
+                // farther than a quarter of the height up or down.
+                let r = ((0.1 + 0.1 * (0.2 + 0.8 * frac)) * lu).min(0.24 * lv);
+                if r <= 0.11 * lu {
+                    return Ok(true);
+                }
+                let m = at(0.5, 0.5);
+                let (eu, ev) = (frame.1 / lu, frame.2 / lv);
+                let ring: Vec<Point3> = (0..24)
+                    .map(|i| {
+                        let t = std::f64::consts::PI / 24.0
+                            + std::f64::consts::TAU * f64::from(i) / 24.0;
+                        m + eu * (r * t.cos()) + ev * (r * t.sin())
+                    })
+                    .collect();
+                (
+                    ring,
+                    Some(kernel::CurveGeom {
+                        center: m,
+                        radius: r,
+                    }),
+                )
+            } else {
+                let (y0, y1) = (0.3 + 0.15 * ts.0, 0.55 + 0.15 * ts.1);
+                (
+                    vec![at(0.3, y0), at(0.7, y0), at(0.7, y1), at(0.3, y1)],
+                    None,
+                )
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let seed = obj
+                .faces()
+                .keys()
+                .find(|&f| obj.face_contains_point(f, at(0.05, 0.05)))
+                .expect("the face around the imprints");
+            let plane = face_plane(doc, oid, seed);
+            let faces_before = group_faces(doc.object(oid).expect("object"), &plane).len();
+            // Earlier owned drawing the loop crosses joins the arrangement
+            // (more faces), and a coincident duplicate of the object holding
+            // the same imprints may take the new lines instead (either holds
+            // them; `coincident_objects_keep_their_own_imprints` pins the
+            // single-owner case), so the exact count is pinned only without
+            // them.
+            let clean = doc.object_owned_sketches(oid).is_empty()
+                && doc
+                    .drawable_objects_on_plane(plane, None)
+                    .iter()
+                    .all(|&o| o == oid)
+                && !free_drawing_on(doc, plane);
+            let result = draw_loop(doc, None, oid, seed, &loop_path, curve);
+            match &result {
+                Ok((report, _)) => {
+                    assert!(
+                        !clean || report.kept_as_sketch.is_empty(),
+                        "step {step}: the bridging loop must land as topology: {report:?}"
+                    );
+                    // A cut in each imprint and two bridges: the face around
+                    // the imprints and the two imprints become six faces.
+                    let faces = group_faces(doc.object(oid).expect("object"), &plane).len();
+                    if clean {
+                        assert_eq!(
+                            faces,
+                            faces_before + 3,
+                            "step {step}: a cut in each imprint and two bridges"
+                        );
+                    }
+                }
+                Err(e) => {
+                    panic!("step {step}: a loop across two fresh imprints was refused: {e:?}")
+                }
+            }
+        }
+        DocOp::MultiRunMerge {
+            obj_sel,
+            face_sel,
+            ts,
+            top,
+        } => {
+            let Some((oid, frame)) = two_imprints(doc, *obj_sel, *face_sel, step) else {
+                return Ok(true);
+            };
+            let at = |x: f64, y: f64| frame.0 + frame.1 * x + frame.2 * y;
+            let (y0, y1) = (0.3 + 0.15 * ts.0, 0.55 + 0.15 * ts.1);
+            let strip = vec![at(0.4, y0), at(0.6, y0), at(0.6, y1), at(0.4, y1)];
+            let obj = doc.object(oid).expect("visible id resolves");
+            let seed = obj
+                .faces()
+                .keys()
+                .find(|&f| obj.face_contains_point(f, at(0.05, 0.05)))
+                .expect("the face around the imprints");
+            // Owned drawing the strip crosses, or a coincident duplicate of
+            // the object holding the same imprints, changes where the strip's
+            // lines land; the merge below is pinned only for the clean case.
+            let plane = face_plane(doc, oid, seed);
+            let clean = doc.object_owned_sketches(oid).is_empty()
+                && doc
+                    .drawable_objects_on_plane(plane, None)
+                    .iter()
+                    .all(|&o| o == oid)
+                && !free_drawing_on(doc, plane);
+            let drawn = draw_loop(doc, None, oid, seed, &strip, None);
+            assert!(
+                drawn.is_ok(),
+                "step {step}: a strip flush between two fresh imprints was refused: {:?}",
+                drawn.err()
+            );
+            if !clean {
+                return Ok(true);
+            }
+            let y = if *top { y1 } else { y0 };
+            let (p, q) = (at(0.4, y), at(0.6, y));
+            let obj = doc.object(oid).expect("visible id resolves");
+            let edge = obj
+                .edges()
+                .keys()
+                .find(|&e| {
+                    obj.edge_endpoints(e).is_some_and(|(a, b)| {
+                        (a.approx_eq(p, 1e-9) && b.approx_eq(q, 1e-9))
+                            || (a.approx_eq(q, 1e-9) && b.approx_eq(p, 1e-9))
+                    })
+                })
+                .expect("the strip's line");
+            let merged = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            assert!(
+                merged.is_ok(),
+                "step {step}: deleting the strip's line (two runs) was refused: {:?}",
+                merged.err()
+            );
+            let obj = doc.object(oid).expect("visible id resolves");
+            let around = obj
+                .faces()
+                .keys()
+                .find(|&f| obj.face_contains_point(f, at(0.05, 0.05)))
+                .expect("the face around the imprints");
+            assert_eq!(
+                obj.faces()[around].inner_loops.len(),
+                2,
+                "step {step}: the hole split back in two"
+            );
+        }
+        DocOp::CrossingLoop {
+            obj_sel,
+            face_sel,
+            side,
+            ts,
+            frac,
+            circle,
+            from_inside,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let normal = obj.faces()[face].plane.normal();
+            let mut must_accept = false;
+            if obj.faces()[face].inner_loops.is_empty() {
+                // Only a hole-free rectangle gets the imprint (see
+                // `HoleChord`): the loop below stays within a fifth of the
+                // imprint's shortest side of the side it crosses, inside
+                // both the imprint and the quarter-extent gap around it.
+                let ring: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
+                let rectangle = ring.len() == 4
+                    && (0..4).all(|i| {
+                        let e0 = ring[(i + 1) % 4] - ring[i];
+                        let e1 = ring[(i + 2) % 4] - ring[(i + 1) % 4];
+                        e0.length() >= 1e-3 && e0.dot(e1).abs() <= 1e-9 * e0.length() * e1.length()
+                    });
+                if !rectangle {
+                    return Ok(true);
+                }
+                let c = ring.iter().fold(Point3::new(0.0, 0.0, 0.0), |acc, p| {
+                    Point3::new(acc.x + p.x / 4.0, acc.y + p.y / 4.0, acc.z + p.z / 4.0)
+                });
+                let loop_path: Vec<Point3> = ring.iter().map(|&p| c + (p - c) * 0.5).collect();
+                let imprinted = doc.apply_object_op(
+                    oid,
+                    KernelOp::SplitFaceInner {
+                        face,
+                        loop_path,
+                        restore: None,
+                        curves: Vec::new(),
+                    },
+                );
+                assert!(
+                    imprinted.is_ok(),
+                    "step {step}: a centered half-size imprint on a rectangle was refused: {:?}",
+                    imprinted.err()
+                );
+                must_accept = true;
+            }
+            let obj = doc.object(oid).expect("visible id resolves");
+            let hole = obj.faces()[face].inner_loops[0];
+            let hole_hes: Vec<_> = obj.loop_half_edges(hole).collect();
+            let ring: Vec<Point3> = obj.loop_positions(hole).collect();
+            let n = ring.len();
+            let k = side % n;
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            let shortest = (0..n)
+                .map(|i| (ring[(i + 1) % n] - ring[i]).length())
+                .fold(f64::INFINITY, f64::min);
+            // Hole half-edges carry the face on their left.
+            let (Ok(out), Ok(along)) = (normal.cross(b - a).normalized(), (b - a).normalized())
+            else {
+                return Ok(true);
+            };
+            let (t0, t1) = (0.1 + 0.8 * ts.0.min(ts.1), 0.1 + 0.8 * ts.0.max(ts.1));
+            if t1 - t0 < 0.1 {
+                return Ok(true);
+            }
+            let d = frac * 0.2 * shortest;
+            let (loop_path, curve) = if *circle {
+                let tm = (t0 + t1) / 2.0;
+                let r = d.min(0.9 * tm.min(1.0 - tm) * (b - a).length());
+                let m = a + (b - a) * tm;
+                let ring: Vec<Point3> = (0..24)
+                    .map(|i| {
+                        let t = std::f64::consts::PI / 24.0
+                            + std::f64::consts::TAU * f64::from(i) / 24.0;
+                        m + along * (r * t.cos()) + out * (r * t.sin())
+                    })
+                    .collect();
+                (
+                    ring,
+                    Some(kernel::CurveGeom {
+                        center: m,
+                        radius: r,
+                    }),
+                )
+            } else {
+                let (pa, pb) = (a + (b - a) * t0, a + (b - a) * t1);
+                (
+                    vec![pa - out * d, pb - out * d, pb + out * d, pa + out * d],
+                    None,
+                )
+            };
+            let seed = if *from_inside {
+                // The imprint: the face across the hole's first edge.
+                let Some(t) = obj.half_edges()[hole_hes[0]].twin else {
+                    return Ok(true);
+                };
+                obj.loops()[obj.half_edges()[t].loop_id].face
+            } else {
+                face
+            };
+            let plane = face_plane(doc, oid, seed);
+            let faces_before = group_faces(doc.object(oid).expect("object"), &plane).len();
+            let clean = doc.object_owned_sketches(oid).is_empty()
+                && doc
+                    .drawable_objects_on_plane(plane, None)
+                    .iter()
+                    .all(|&o| o == oid)
+                && !free_drawing_on(doc, plane);
+            let result = draw_loop(doc, None, oid, seed, &loop_path, curve);
+            assert!(
+                !must_accept || result.is_ok(),
+                "step {step}: a loop across a fresh imprint's side was refused: {:?}",
+                result.as_ref().err()
+            );
+            if must_accept && let Ok((report, _)) = &result {
+                assert!(
+                    !clean || report.kept_as_sketch.is_empty(),
+                    "step {step}: the crossing loop must land as topology: {report:?}"
+                );
+                // One cut on each side of the imprint's side: two new faces.
+                let faces = group_faces(doc.object(oid).expect("object"), &plane).len();
+                if clean {
+                    assert_eq!(
+                        faces,
+                        faces_before + 2,
+                        "step {step}: one cut on each side of the imprint's side"
+                    );
+                }
+            }
+        }
+        DocOp::MergeCoplanar {
+            obj_sel,
+            edge_sel,
+            from_features,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            if *from_features {
+                // Every drawing unit made only of this object's face
+                // topology, over every plane it carries drawing on.
+                let mut candidates = Vec::new();
+                for plane in doc.object_drawing_planes(oid) {
+                    let objs = {
+                        let mut v = doc.drawable_objects_on_plane(plane, None);
+                        if !v.contains(&oid) {
+                            v.push(oid);
+                        }
+                        v
+                    };
+                    let Ok(pu) = doc.plane_units(plane, None, &objs) else {
+                        continue;
+                    };
+                    for u in pu.units {
+                        if u.edges
+                            .iter()
+                            .all(|e| e.store == kernel::DraftStore::Topology(oid))
+                        {
+                            candidates.push((plane, objs.clone(), u));
+                        }
+                    }
+                }
+                if candidates.is_empty() {
+                    return Ok(true);
+                }
+                let (plane, objs, unit) = candidates[*edge_sel % candidates.len()].clone();
+                let result = doc.draft(plane, None, &objs, "Fuzz erase unit", |sk| {
+                    for e in &unit.edges {
+                        let id = sk
+                            .edge_at_positions(e.a, e.b)
+                            .expect("a unit edge in the lift");
+                        sk.remove_edge(id)?;
+                    }
+                    Ok(())
+                });
+                assert!(
+                    result.is_ok(),
+                    "step {step}: a topology drawing unit did not erase: {:?}",
+                    result.as_ref().err()
+                );
+                let obj = doc.object(oid).expect("object");
+                assert!(
+                    no_pinch(obj, &plane),
+                    "step {step}: an erase committed a loop visiting a vertex twice"
+                );
+                return Ok(true);
+            }
+            let obj = doc.object(oid).expect("visible id resolves");
+            let candidates: Vec<kernel::EdgeId> = {
+                obj.edges()
+                    .iter()
+                    .filter_map(|(eid, e)| {
+                        let t = e.twin_half_edge?;
+                        let la = obj.half_edges()[e.half_edge].loop_id;
+                        let lb = obj.half_edges()[t].loop_id;
+                        let (fa, fb) = (obj.loops()[la].face, obj.loops()[lb].face);
+                        let coplanar = obj.faces()[fa]
+                            .plane
+                            .normal()
+                            .dot(obj.faces()[fb].plane.normal())
+                            > 0.999;
+                        (fa != fb && coplanar).then_some(eid)
+                    })
+                    .collect()
+            };
+            let Some(edge) = nth(&candidates, *edge_sel) else {
+                return Ok(true);
+            };
+            let result = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            // Refusals (an imprint's whole outline, faces that would pinch)
+            // are typed answers. A committed merge never pinches its face.
+            if let Ok((kernel::KernelOpReport::FaceMerge(r), _)) = &result {
+                let obj = doc.object(oid).expect("object");
+                let face = &obj.faces()[r.merged_face];
+                for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                    let vs: Vec<_> = obj
+                        .loop_half_edges(l)
+                        .map(|h| obj.half_edges()[h].origin)
+                        .collect();
+                    assert!(
+                        (0..vs.len()).all(|i| !vs[i + 1..].contains(&vs[i])),
+                        "step {step}: a merge committed a loop visiting a vertex twice"
+                    );
+                }
+            }
+        }
+        DocOp::Boolean { kind, a_sel, b_sel } => {
+            let ids = doc.visible_object_ids();
+            if ids.len() < 2 {
+                return Ok(true);
+            }
+            // Two DISTINCT islands: b is a nonzero cyclic step from a.
+            let ia = a_sel % ids.len();
+            let ib = (ia + 1 + b_sel % (ids.len() - 1)) % ids.len();
+            let (a, b) = (ids[ia], ids[ib]);
             let op = match kind {
                 0 => BooleanOp::Union,
                 1 => BooleanOp::Subtract,
@@ -1285,6 +2610,42 @@ fn apply_doc_op(
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
             let _ = doc.duplicate_node(NodeId::Object(oid), &t);
+        }
+        DocOp::OwnSketch {
+            obj_sel,
+            face_sel,
+            turn,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let Some(tri) = interior_triangle(doc.object(oid).expect("visible"), *face_sel, *turn)
+            else {
+                return Ok(true);
+            };
+            let Ok(plane) = Plane::from_point_normal(tri.1, tri.2) else {
+                return Ok(true);
+            };
+            let sid = doc.add_sketch(plane);
+            if doc.begin_sketch_gesture(sid).is_err() {
+                return Ok(true);
+            }
+            let mut ok = true;
+            {
+                let sk = doc.sketch_mut(sid).expect("just created");
+                for k in 0..3 {
+                    if sk.add_segment(tri.0[k], tri.0[(k + 1) % 3]).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                let _ = doc.end_sketch_gesture(sid);
+                let _ = doc.set_sketch_object_owner(sid, Some(oid));
+            } else {
+                doc.cancel_sketch_gesture();
+            }
         }
         DocOp::NonUniformScale { obj_sel, factors } => {
             let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
@@ -1918,6 +3279,267 @@ fn apply_doc_op(
             };
             let _ = doc.reparent_nodes(&[node], parent);
         }
+        DocOp::DrawRectOnGround { x, y, w, h } => {
+            let (x0, y0) = (f64::from(*x) * 0.5, f64::from(*y) * 0.5);
+            let (x1, y1) = (x0 + f64::from(*w) * 0.5, y0 + f64::from(*h) * 0.5);
+            let c = [
+                Point3::new(x0, y0, 0.0),
+                Point3::new(x1, y0, 0.0),
+                Point3::new(x1, y1, 0.0),
+                Point3::new(x0, y1, 0.0),
+            ];
+            let sid = ground_sketch(doc);
+            doc.begin_sketch_gesture(sid).expect("gesture opens");
+            for k in 0..4 {
+                if let Err(e) = doc
+                    .sketch_mut(sid)
+                    .expect("ground sketch is live")
+                    .add_segment(c[k], c[(k + 1) % 4])
+                {
+                    doc.cancel_sketch_gesture();
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: a lattice rectangle edge was refused: {e:?}"
+                    )));
+                }
+            }
+            if let Err(e) = doc.end_sketch_gesture(sid) {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: closing a rectangle gesture failed: {e:?}"
+                )));
+            }
+        }
+        DocOp::DrawCircleOnGround {
+            cx,
+            cy,
+            r,
+            segments,
+        } => {
+            let center = Point3::new(f64::from(*cx) * 0.5, f64::from(*cy) * 0.5, 0.0);
+            let radius = f64::from(*r) * 0.5;
+            let at = |i: usize| {
+                let a = std::f64::consts::TAU * (i as f64) / (*segments as f64);
+                Point3::new(
+                    center.x + radius * a.cos(),
+                    center.y + radius * a.sin(),
+                    0.0,
+                )
+            };
+            let sid = ground_sketch(doc);
+            doc.begin_sketch_gesture(sid).expect("gesture opens");
+            let mut failure = None;
+            {
+                let sk = doc.sketch_mut(sid).expect("ground sketch is live");
+                match sk.begin_curve_with(kernel::CurveGeom { center, radius }) {
+                    Err(e) => failure = Some(e),
+                    Ok(_) => {
+                        for i in 0..*segments {
+                            if let Err(e) = sk.add_segment(at(i), at(i + 1)) {
+                                failure = Some(e);
+                                break;
+                            }
+                        }
+                        sk.end_curve();
+                    }
+                }
+            }
+            if let Some(e) = failure {
+                doc.cancel_sketch_gesture();
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a circle facet was refused: {e:?}"
+                )));
+            }
+            if let Err(e) = doc.end_sketch_gesture(sid) {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: closing a circle gesture failed: {e:?}"
+                )));
+            }
+        }
+        DocOp::Draft {
+            obj_sel,
+            face_sel,
+            ground,
+            shape,
+            a,
+            b,
+            sel,
+            segments,
+        } => {
+            return apply_draft(
+                doc, step, *obj_sel, *face_sel, *ground, *shape, *a, *b, *sel, *segments,
+            )
+            .map(|()| true);
+        }
+        DocOp::MoveIsland {
+            sk_sel,
+            isl_sel,
+            dx,
+            dy,
+        } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let ids: Vec<_> = doc.sketch(sid).expect("live").islands().keys().collect();
+            let Some(island) = nth(&ids, *isl_sel) else {
+                return Ok(true);
+            };
+            // An in-plane move never refuses on contact: it arranges like a
+            // draw (unified-drafting decision 4). Any refusal is a bug.
+            if let Err(e) = doc.transform_sketch_island(sid, island, &lattice_translation(*dx, *dy))
+            {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: an in-plane island move was refused: {e:?}"
+                )));
+            }
+        }
+        DocOp::MoveIslands {
+            sk_sel,
+            a_sel,
+            b_sel,
+            dx,
+            dy,
+        } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let ids: Vec<_> = doc.sketch(sid).expect("live").islands().keys().collect();
+            if ids.len() < 2 {
+                return Ok(true);
+            }
+            // Two DISTINCT islands: b is a nonzero cyclic step from a.
+            let ia = a_sel % ids.len();
+            let ib = (ia + 1 + b_sel % (ids.len() - 1)) % ids.len();
+            let (a, b) = (ids[ia], ids[ib]);
+            if let Err(e) =
+                doc.transform_sketch_islands(sid, &[a, b], &lattice_translation(*dx, *dy))
+            {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: an in-plane two-island move was refused: {e:?}"
+                )));
+            }
+        }
+        DocOp::RemoveSketchEdge { sk_sel, edge_sel } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let ids: Vec<_> = doc.sketch(sid).expect("live").edges().keys().collect();
+            let Some(edge) = nth(&ids, *edge_sel) else {
+                return Ok(true);
+            };
+            doc.begin_sketch_gesture(sid).expect("gesture opens");
+            let ok = doc.sketch_mut(sid).expect("live").remove_edge(edge).is_ok();
+            if ok {
+                let _ = doc.end_sketch_gesture(sid);
+            } else {
+                doc.cancel_sketch_gesture();
+            }
+        }
+        DocOp::MoveSketchVertex {
+            sk_sel,
+            v_sel,
+            mode,
+            target_sel,
+            dx,
+            dy,
+        } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let sk = doc.sketch(sid).expect("live");
+            let verts: Vec<_> = sk.vertices().keys().collect();
+            let Some(v) = nth(&verts, *v_sel) else {
+                return Ok(true);
+            };
+            let here = sk.vertices()[v].position;
+            let target = match mode {
+                0 => nth(&verts, *target_sel)
+                    .map(|t| sk.vertices()[t].position)
+                    .unwrap_or(here),
+                1 => {
+                    let edges: Vec<_> = sk.edges().values().copied().collect();
+                    nth(&edges, *target_sel)
+                        .map(|e| {
+                            let (a, b) =
+                                (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+                            Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0)
+                        })
+                        .unwrap_or(here)
+                }
+                _ => Point3::new(
+                    here.x + f64::from(*dx) * 0.5,
+                    here.y + f64::from(*dy) * 0.5,
+                    here.z,
+                ),
+            };
+            // A drag arranges like a draw; it refuses only structurally: an
+            // incident edge collapsing onto its other end, or a region the
+            // in-place drag would leave unprofileable (a pinch).
+            match doc.move_sketch_vertex(sid, v, target) {
+                Ok(_)
+                | Err(DocumentError::Sketch(
+                    SketchError::DegenerateSegment | SketchError::MalformedRegion,
+                )) => {}
+                Err(e) => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: a vertex drag was refused: {e:?}"
+                    )));
+                }
+            }
+        }
+        DocOp::OffsetRegion {
+            sk_sel,
+            reg_sel,
+            dist_sel,
+        } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let ids: Vec<_> = doc.sketch(sid).expect("live").regions().keys().collect();
+            let Some(region) = nth(&ids, *reg_sel) else {
+                return Ok(true);
+            };
+            const DISTANCES: [f64; 6] = [0.25, -0.25, 0.5, -0.1, 0.1, -0.5];
+            let d = DISTANCES[dist_sel % DISTANCES.len()];
+            doc.begin_sketch_gesture(sid).expect("gesture opens");
+            let ok = doc
+                .sketch_mut(sid)
+                .expect("live")
+                .offset_region(region, d)
+                .is_ok();
+            if ok {
+                let _ = doc.end_sketch_gesture(sid);
+            } else {
+                doc.cancel_sketch_gesture();
+            }
+        }
+        DocOp::RefacetCurve {
+            sk_sel,
+            curve_sel,
+            segments,
+        } => {
+            let Some(sid) = nth(&free_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let sk = doc.sketch(sid).expect("live");
+            let mut curves: Vec<kernel::SketchCurveId> =
+                sk.edges().values().filter_map(|e| e.curve).collect();
+            curves.sort_unstable();
+            curves.dedup();
+            curves.retain(|c| sk.curve_geom(*c).is_some());
+            let Some(curve) = nth(&curves, *curve_sel) else {
+                return Ok(true);
+            };
+            doc.begin_sketch_gesture(sid).expect("gesture opens");
+            let ok = doc
+                .sketch_mut(sid)
+                .expect("live")
+                .refacet_curve(curve, *segments)
+                .is_ok();
+            if ok {
+                let _ = doc.end_sketch_gesture(sid);
+            } else {
+                doc.cancel_sketch_gesture();
+            }
+        }
         DocOp::Undo => {
             if doc.can_undo()
                 && let Err(e) = doc.undo()
@@ -1949,6 +3571,107 @@ fn apply_doc_op(
     Ok(true)
 }
 
+/// A seed box: lower corner, footprint size, height.
+type BoxSeed = ((f64, f64), (f64, f64), f64);
+
+/// One fuzz case: seed boxes, apply `ops` checking every invariant after
+/// each, then unwind/replay the whole log twice (see the module docs).
+fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseError> {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    for ((x, y), (dx, dy), h) in seeds {
+        add_box(&mut doc, x, y, dx, dy, h);
+    }
+    let materials = seed_materials(&mut doc);
+    check_doc(&doc, 0, "seed")?;
+
+    if std::env::var("FUZZ_TRACE").is_ok() {
+        eprintln!("DOC CASE ops={ops:?}");
+    }
+
+    for (step, op) in ops.iter().enumerate() {
+        if !apply_doc_op(&mut doc, step, op, &materials)? {
+            return Ok(());
+        }
+        check_doc(&doc, step, "apply")?;
+        // Every committed state reopens: an op that left a face the
+        // loader rejects would lose the user's file on the next save.
+        check_persistence(&doc, &format!("step {step}"))?;
+    }
+
+    check_persistence(&doc, "post-sequence")?;
+
+    // Unwind the whole document log, replay it, and do both again; both
+    // ends must reproduce the same canonical fingerprint, and every
+    // undo/redo must succeed (rule 9), with the single tolerated
+    // exception of the `UnbuildPushPull` gap — `Ok(false)` means it fired
+    // and the round-trip is abandoned for this case (the document stays
+    // valid, but the log can no longer unwind past the refused inverse).
+    // Fingerprints, not save bytes: baked-transform and sweep round-trips
+    // carry ulp noise, which the fingerprint's quantization absorbs and
+    // byte comparison would not.
+    let unwind = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
+        let mut n = 0usize;
+        while doc.can_undo() {
+            match doc.undo() {
+                Ok(_) => {}
+                Err(e) if is_known_inverse_guard_gap(doc, &e, false) => return Ok(false),
+                Err(e) => {
+                    return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
+                }
+            }
+            check_doc(doc, n, label)?;
+            n += 1;
+        }
+        Ok(true)
+    };
+    let replay = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
+        let mut n = 0usize;
+        while doc.can_redo() {
+            match doc.redo() {
+                Ok(_) => {}
+                Err(e) if is_known_inverse_guard_gap(doc, &e, true) => return Ok(false),
+                Err(e) => {
+                    return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
+                }
+            }
+            check_doc(doc, n, label)?;
+            n += 1;
+        }
+        Ok(true)
+    };
+
+    if !unwind(&mut doc, "first unwind")? {
+        return Ok(());
+    }
+    let empty_print = doc_fingerprint(&doc);
+
+    if !replay(&mut doc, "first replay")? {
+        return Ok(());
+    }
+    let maximal_print = doc_fingerprint(&doc);
+    check_persistence(&doc, "maximal")?;
+
+    if !unwind(&mut doc, "second unwind")? {
+        return Ok(());
+    }
+    prop_assert_eq!(
+        doc_fingerprint(&doc),
+        empty_print,
+        "second full undo did not reproduce the fully-unwound state"
+    );
+
+    if !replay(&mut doc, "second replay")? {
+        return Ok(());
+    }
+    prop_assert_eq!(
+        doc_fingerprint(&doc),
+        maximal_print,
+        "second full redo did not reproduce the maximal state"
+    );
+    Ok(())
+}
+
 proptest! {
     /// Random document-op sequences keep every visible object valid, survive
     /// save/load, and the document log unwinds and replays reproducibly.
@@ -1960,94 +3683,23 @@ proptest! {
         ),
         ops in proptest::collection::vec(arb_doc_op(), 1..14),
     ) {
-        let mut doc = Document::new();
-        doc.set_torture_mode(true);
-        for ((x, y), (dx, dy), h) in seeds {
-            add_box(&mut doc, x, y, dx, dy, h);
-        }
-        let materials = seed_materials(&mut doc);
-        check_doc(&doc, 0, "seed")?;
+        run_doc_case(seeds, ops)?;
+    }
 
-        if std::env::var("FUZZ_TRACE").is_ok() {
-            eprintln!("DOC CASE ops={ops:?}");
-        }
-
-        for (step, op) in ops.iter().enumerate() {
-            if !apply_doc_op(&mut doc, step, op, &materials)? {
-                return Ok(());
-            }
-            check_doc(&doc, step, "apply")?;
-        }
-
-        check_persistence(&doc, "post-sequence")?;
-
-        // Unwind the whole document log, replay it, and do both again; both
-        // ends must reproduce the same canonical fingerprint, and every
-        // undo/redo must succeed (rule 9), with the single tolerated
-        // exception of the `UnbuildPushPull` gap — `Ok(false)` means it fired
-        // and the round-trip is abandoned for this case (the document stays
-        // valid, but the log can no longer unwind past the refused inverse).
-        // Fingerprints, not save bytes: baked-transform and sweep round-trips
-        // carry ulp noise, which the fingerprint's quantization absorbs and
-        // byte comparison would not.
-        let unwind = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
-            let mut n = 0usize;
-            while doc.can_undo() {
-                match doc.undo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, false) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, undo #{n}: {e}")));
-                    }
-                }
-                check_doc(doc, n, label)?;
-                n += 1;
-            }
-            Ok(true)
-        };
-        let replay = |doc: &mut Document, label: &str| -> Result<bool, TestCaseError> {
-            let mut n = 0usize;
-            while doc.can_redo() {
-                match doc.redo() {
-                    Ok(_) => {}
-                    Err(e) if is_known_inverse_guard_gap(doc, &e, true) => return Ok(false),
-                    Err(e) => {
-                        return Err(TestCaseError::fail(format!("{label}, redo #{n}: {e}")));
-                    }
-                }
-                check_doc(doc, n, label)?;
-                n += 1;
-            }
-            Ok(true)
-        };
-
-        if !unwind(&mut doc, "first unwind")? {
-            return Ok(());
-        }
-        let empty_print = doc_fingerprint(&doc);
-
-        if !replay(&mut doc, "first replay")? {
-            return Ok(());
-        }
-        let maximal_print = doc_fingerprint(&doc);
-        check_persistence(&doc, "maximal")?;
-
-        if !unwind(&mut doc, "second unwind")? {
-            return Ok(());
-        }
-        prop_assert_eq!(
-            doc_fingerprint(&doc),
-            empty_print,
-            "second full undo did not reproduce the fully-unwound state"
-        );
-
-        if !replay(&mut doc, "second replay")? {
-            return Ok(());
-        }
-        prop_assert_eq!(
-            doc_fingerprint(&doc),
-            maximal_print,
-            "second full redo did not reproduce the maximal state"
-        );
+    /// World-sketch-focused sequences: longer runs of ground drawing, island
+    /// and vertex moves, erasing, offsetting, and re-faceting, interleaved
+    /// with undo/redo, over a document that starts with sketch-extruded
+    /// boxes. Every invariant of the general harness applies, plus: every
+    /// sketch region profiles (or is a pinch) and every save/load/save is
+    /// byte-identical.
+    #[test]
+    fn world_sketch_sequences_preserve_invariants_and_roundtrip(
+        seeds in proptest::collection::vec(
+            ((-6.0..6.0f64, -6.0..6.0f64), (1.0..6.0f64, 1.0..6.0f64), 0.5..5.0f64),
+            0..2,
+        ),
+        ops in proptest::collection::vec(arb_world_sketch_op(), 2..24),
+    ) {
+        run_doc_case(seeds, ops)?;
     }
 }

@@ -12,6 +12,9 @@
 
 use kernel::{Document, KernelOp, LoopImprintPlan, Object, Plane, Point3, Vec3};
 
+mod face_arrangement_support;
+use face_arrangement_support::{draw_loop, face_plane, group_faces, region_face_in};
+
 fn ground() -> Plane {
     Plane::from_polygon(&[
         Point3::new(0.0, 0.0, 0.0),
@@ -614,7 +617,7 @@ fn loops_clear_of_the_boundary_stay_inner_and_a_spanning_rectangle_plans_two_cho
 // ------------------------------------------------- orchestrated imprint
 
 #[test]
-fn imprint_loop_on_face_routes_an_edge_hugging_rectangle_to_a_chord_and_the_region_pushes() {
+fn drawing_routes_an_edge_hugging_rectangle_to_a_chord_and_the_region_pushes() {
     let mut doc = Document::new();
     let id = p_slab(&mut doc);
     let top = face_at(
@@ -631,20 +634,27 @@ fn imprint_loop_on_face_routes_an_edge_hugging_rectangle_to_a_chord_and_the_regi
         Point3::new(0.0, NY, H),
     ];
     let depth = doc.undo_depth();
-    let (report, _) = doc
-        .imprint_loop_on_face(None, id, top, rect, None)
-        .expect("edge-hugging rectangle imprints");
-    assert_eq!(report.route, kernel::LoopImprintRoute::Chords(1));
+    let plane = face_plane(&doc, id, top);
+    draw_loop(&mut doc, None, id, top, &rect, None).expect("edge-hugging rectangle draws");
     assert_eq!(doc.undo_depth(), depth + 1);
+    let region = region_face_in(&doc, None, id, plane, &rect).expect("the drawn region");
     let obj = doc.object(id).unwrap();
     let centroid = Point3::new(north_mid.x / 2.0, (west_mid.y + NY) / 2.0, H);
-    assert!(obj.face_contains_point(report.region, centroid));
-    assert!(!obj.face_contains_point(report.other, centroid));
+    assert!(obj.face_contains_point(region, centroid));
+    let report_region = region;
+    // The drawing is topology: the top is now two faces, the cut running
+    // along the rectangle's two free sides.
+    assert_eq!(
+        group_faces(obj, &plane).len(),
+        2,
+        "the top splits into the rectangle and the rest"
+    );
+    assert!(doc.object_owned_sketches(id).is_empty());
     // The region is a real face: pull it up 5 mm and the solid stays solid.
     doc.apply_object_op(
         id,
         KernelOp::PushPull {
-            face: report.region,
+            face: report_region,
             distance: 0.005,
         },
     )
@@ -698,21 +708,25 @@ fn a_concave_loop_hugging_one_edge_still_names_its_own_region() {
             && (vertex_average.y - in_notch.y).abs() < 1e-9
     );
 
-    let (report, _) = doc
-        .imprint_loop_on_face(None, id, top, c_loop, None)
-        .expect("edge-hugging C imprints");
-    assert_eq!(report.route, kernel::LoopImprintRoute::Chords(1));
+    let plane = face_plane(&doc, id, top);
+    draw_loop(&mut doc, None, id, top, &c_loop, None).expect("edge-hugging C draws");
+    let region = region_face_in(&doc, None, id, plane, &c_loop).expect("the drawn region");
     let obj = doc.object(id).unwrap();
     assert!(obj.validate().is_ok());
-    assert!(obj.face_contains_point(report.region, in_back));
-    assert!(obj.face_contains_point(report.region, in_arm));
-    assert!(!obj.face_contains_point(report.region, in_notch));
-    assert!(obj.face_contains_point(report.other, in_notch));
-    assert!(!obj.face_contains_point(report.other, in_back));
+    assert_eq!(group_faces(obj, &plane).len(), 2, "the C and the rest");
+    assert!(obj.face_contains_point(region, in_back));
+    assert!(obj.face_contains_point(region, in_arm));
+    assert!(!obj.face_contains_point(region, in_notch));
+    let other = group_faces(obj, &plane)
+        .into_iter()
+        .find(|&f| f != region)
+        .expect("the other face");
+    assert!(obj.face_contains_point(other, in_notch));
+    assert!(!obj.face_contains_point(other, in_back));
 }
 
 #[test]
-fn imprint_loop_on_face_bundles_two_chords_into_one_undo_entry() {
+fn drawing_bundles_two_chords_into_one_undo_entry() {
     let mut doc = Document::new();
     let id = p_slab(&mut doc);
     let top = face_at(
@@ -727,14 +741,13 @@ fn imprint_loop_on_face_bundles_two_chords_into_one_undo_entry() {
         Point3::new(0.0, 0.03, H),
     ];
     let depth = doc.undo_depth();
-    let (report, _) = doc
-        .imprint_loop_on_face(None, id, top, spanning, None)
-        .expect("spanning rectangle imprints");
-    assert_eq!(report.route, kernel::LoopImprintRoute::Chords(2));
+    let plane = face_plane(&doc, id, top);
+    draw_loop(&mut doc, None, id, top, &spanning, None).expect("spanning rectangle draws");
     assert_eq!(doc.undo_depth(), depth + 1, "two chords, one entry");
+    let region = region_face_in(&doc, None, id, plane, &spanning).expect("the drawn region");
     let obj = doc.object(id).unwrap();
     assert_eq!(obj.faces().len(), 10);
-    assert!(obj.face_contains_point(report.region, Point3::new(0.01, 0.02, H)));
+    assert!(obj.face_contains_point(region, Point3::new(0.01, 0.02, H)));
     doc.undo().expect("undo");
     assert_eq!(doc.object(id).unwrap().faces().len(), 8);
 }

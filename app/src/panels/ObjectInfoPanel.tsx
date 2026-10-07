@@ -40,8 +40,18 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, type NodeRef } from './treeModel'
-import { findImprint, imprintName, isImprintRef } from '../tools/imprints'
+import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import {
+  runsOfCurve,
+  draftKindLabel,
+  draftRef,
+  keyToId,
+  planeOfCtx,
+  readPlaneUnits,
+  resolveDraft,
+  type PlaneUnitsScene,
+} from '../tools/planeUnits'
+import { runDraft } from '../tools/draftCommit'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -100,10 +110,8 @@ interface Props {
 function kindLabel(kind: NodeRef['kind']): string {
   if (kind === 'object') return 'Object'
   if (kind === 'group') return 'Group'
-  if (kind === 'sketch' || kind === 'sketch-island') return 'Sketch'
-  if (kind === 'sketch-curve') return 'Curve'
-  if (kind === 'sketch-edge') return 'Sketch Line'
-  if (kind === 'imprint' || kind === 'imprint-chord') return 'Shape on face'
+  if (kind === 'sketch') return 'Sketch'
+  if (isDraftKind(kind)) return draftKindLabel(kind)
   return 'Component'
 }
 
@@ -167,111 +175,116 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     const kind = node.kind
     const id = node.id
 
-    // An imprint (a drawn-but-not-yet-pushed shape on a solid's face —
-    // imprints.ts) has no kernel NodeId, name, tags, or solid state either —
-    // checked BEFORE the sketch-scoped branch below, since a stale imprint
-    // ref still carries `node.sketch === undefined` and would otherwise fall
-    // into that branch's `node.sketch ?? id` and query `sketch_island_ids`
-    // with a FACE handle. Read-only: a plain shape word ("Circle") plus the
-    // owning object's own display name, exactly what the Outliner's child
-    // row and this label agree on. A stale ref (the imprint was pushed into
-    // a boss, dissolved, or a chord was re-cut since selection) shows just
-    // the kind label — the same "minimal entry" the sketch branch below
-    // shows for its own stale cases.
-    if (isImprintRef(node)) {
-      const feature = findImprint(scene, node)
-      const treeIndex = buildTreeIndexMap(
-        scene.top_level_nodes().map(nodeRefFromJs),
-        (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
-      )
-      const objIdx = treeIndex.get(nodeKey({ kind: 'object', id: node.object })) ?? 0
-      const objectLabel = resolveLabel(scene.object_name(node.object), undefined, 'object', objIdx)
-      const label = feature === null ? kindLabel(kind) : `${imprintName(feature)} on ${objectLabel}`
-      const points =
-        feature === null ? null : feature.kind === 'sub_face' ? feature.loop.length : feature.path.length
-      return {
-        sketchId: undefined as bigint | undefined,
-        curveId: null as bigint | null,
-        segments: null as number | null,
-        node,
-        kind,
-        id,
-        kindNum: null as number | null,
-        nameFromScene: undefined as string | undefined,
-        defaultLabel: label,
-        tags: [] as string[][],
-        solid: null as boolean | null,
-        defId: null as bigint | null,
-        defName: undefined as string | undefined,
-        instanceIds: [] as bigint[],
-        points,
-      }
-    }
-
-    // A sketch is a thin selectable (a drawn line) with no kernel NodeId, name,
-    // tags, or solid state — show a minimal read-only entry and never call the
-    // object/group/instance APIs (`nodeKindToNumber` yields the -1 sentinel,
-    // which no node_id-keyed wasm call accepts). Its
-    // "name" is the same positional label the tree/canvas show ("Sketch 2"),
-    // derived from `sketch_ids()` order since sketches can't be renamed yet.
-    if (kind !== 'object' && kind !== 'group' && kind !== 'instance') {
-      const sketchId = node.sketch ?? id
-      // Number by the ISLAND's position in the outliner's flattened
-      // cross-sketch island list, so panel and tree agree ('Sketch 3' here
-      // is 'Sketch 3' there). Resolve the owning island for sub-entities.
-      let islandId: bigint | undefined
-      if (kind === 'sketch-island') {
-        islandId = id
-      } else if (kind === 'sketch') {
-        // Legacy whole-sketch ref: number by its first island's row.
-        const islands = Array.from(scene.sketch_island_ids(sketchId))
-        islandId = islands.length > 0 ? islands[0] : undefined
-      } else if (kind === 'sketch-edge') {
-        islandId = scene.sketch_edge_island(sketchId, id)
-      } else if (kind === 'sketch-curve') {
-        // The ref's id is the chain's representative EDGE.
-        islandId = scene.sketch_edge_island(sketchId, id)
-      }
-      const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
-        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
-      )
-      const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islandId)
-      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
-
-      // Segments — SketchUp's Entity Info "Segments", for a drawn CIRCLE.
-      // Only a chain carrying an analytic circle has one: `sketch_curve_geom`
-      // answers for circles only, so a polygon chain (whose sides are its
-      // real geometry, not facets of anything) and a pre-analytic chain both
-      // fall through to null and the row does not render. The count itself is
-      // just how many facets the chain currently has — nothing stores it.
-      let curveId: bigint | null = null
-      let segments: number | null = null
-      if (kind === 'sketch-curve') {
-        const cid = scene.sketch_edge_curve(sketchId, id)
-        if (cid !== undefined) {
-          curveId = cid
-          if (scene.sketch_curve_geom(sketchId, cid) !== undefined) {
-            segments = scene.sketch_curve_edges(sketchId, cid).length
-          }
+    // A drawn thing — a shape, curve, line, or region on a plane, whichever
+    // store each of its edges lives in (planeUnits.ts) — has no kernel
+    // NodeId, name, tags, or solid state: one kind word ("Shape", "Curve",
+    // "Line", "Region") with a subtitle for where it is drawn ("on Box 3",
+    // "on the ground", "drawing"). A stale ref (erased, re-keyed by an edit)
+    // shows just the kind label — the same "minimal entry" the whole-sketch
+    // branch below shows for its own stale cases.
+    if (isDraftKind(kind)) {
+      const r = resolveDraft(scene as unknown as PlaneUnitsScene, node)
+      let store: string | null = null
+      let points: number | null = null
+      let curveKey: string | null = null
+      let length: number | null = null
+      if (r !== null) {
+        const objects: bigint[] = []
+        let anyFree = false
+        for (const e of r.edges) {
+          if (e.store.kind === 'free') anyFree = true
+          else if (!objects.includes(e.store.object)) objects.push(e.store.object)
         }
+        if (objects.length > 0) {
+          const treeIndex = buildTreeIndexMap(
+            scene.top_level_nodes().map(nodeRefFromJs),
+            (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+          )
+          store = 'on ' + objects.map((o) => {
+            const idx = treeIndex.get(nodeKey({ kind: 'object', id: o })) ?? 0
+            return resolveLabel(scene.object_name(o), undefined, 'object', idx)
+          }).join(', ')
+        } else if (anyFree) {
+          // The ground is the z = 0 plane, whichever way its normal points.
+          const pl = node.ctx !== undefined ? planeOfCtx(node.ctx) : null
+          const onGround = pl !== null && Math.abs(Math.abs(pl.normal[2]) - 1) < 1e-9 && Math.abs(pl.point[2]) < 1e-9 && pl.instance === null
+          store = onGround ? 'on the ground' : 'drawing'
+        }
+        const ends = new Set<string>()
+        const q = (v: number) => (Math.round(v * 1e6) / 1e6).toString()
+        for (const e of r.edges) {
+          ends.add(`${q(e.a[0])},${q(e.a[1])},${q(e.a[2])}`)
+          ends.add(`${q(e.b[0])},${q(e.b[1])},${q(e.b[2])}`)
+        }
+        points = ends.size
+        // Length: one drawn line, or a curve (run or whole) as the sum of
+        // its edges. Shapes and regions show none.
+        if ((kind === 'draft-edge' || kind === 'draft-curve') && r.edges.length > 0) {
+          length = r.edges.reduce((n, e) => n + Math.hypot(e.b[0] - e.a[0], e.b[1] - e.a[1], e.b[2] - e.a[2]), 0)
+        }
+        // Segments: only a drawn CIRCLE has facets to re-count — the
+        // selection is exactly that circle's own run(s), or a shape made of
+        // nothing else.
+        const runKeys = new Set<string>()
+        let covered = r.edges.length > 0
+        for (const e of r.edges) {
+          const run = r.pu.runOfEdge.get(e.key)
+          if (run === undefined || run.kind !== 'circle' || run.radius === null) covered = false
+          else runKeys.add(run.curveKey)
+        }
+        if (covered && runKeys.size === 1) curveKey = [...runKeys][0]
       }
-
+      let segments: number | null = null
+      if (r !== null && curveKey !== null) {
+        segments = runsOfCurve(r.pu, curveKey).reduce((n, run) => n + run.edges.length, 0)
+      }
+      const label = kindLabel(kind)
       return {
-        sketchId,
-        curveId,
+        ctx: node.ctx as string | undefined,
+        curveKey,
         segments,
         node,
         kind,
         id,
         kindNum: null as number | null,
         nameFromScene: undefined as string | undefined,
-        // Sub-entities have no identity of their own — label by the owner.
-        defaultLabel:
-          kind === 'sketch-edge'
-            ? `Line of ${sketchLabel}`
-            : kind === 'sketch-curve'
-              ? `Curve of ${sketchLabel}`
-              : sketchLabel,
+        defaultLabel: store === null ? label : `${label} ${store}`,
+        store,
+        tags: [] as string[][],
+        solid: null as boolean | null,
+        defId: null as bigint | null,
+        defName: undefined as string | undefined,
+        instanceIds: [] as bigint[],
+        points,
+        length,
+      }
+    }
+
+    // A whole sketch is a thin selectable with no kernel NodeId, name, tags,
+    // or solid state — show a minimal read-only entry and never call the
+    // object/group/instance APIs (`nodeKindToNumber` yields the -1 sentinel,
+    // which no node_id-keyed wasm call accepts). Its "name" is the same
+    // positional label the tree/canvas show ("Sketch 2"), derived from
+    // `sketch_ids()` order since sketches can't be renamed yet.
+    if (kind !== 'object' && kind !== 'group' && kind !== 'instance') {
+      const sketchId = id
+      const islands = Array.from(scene.sketch_island_ids(sketchId))
+      const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
+        Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
+      )
+      const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islands[0])
+      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
+      return {
+        ctx: undefined as string | undefined,
+        curveKey: null as string | null,
+        segments: null as number | null,
+        node,
+        kind,
+        id,
+        kindNum: null as number | null,
+        nameFromScene: undefined as string | undefined,
+        defaultLabel: sketchLabel,
+        store: null as string | null,
         tags: [] as string[][],
         solid: null as boolean | null,
         defId: null as bigint | null,
@@ -330,8 +343,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
 
     return {
       // Curve-only fields: an Object/Group/Instance never has a Segments row.
-      sketchId: undefined as bigint | undefined,
-      curveId: null as bigint | null,
+      ctx: undefined as string | undefined,
+      curveKey: null as string | null,
+      store: null as string | null,
       segments: null as number | null,
       node,
       kind,
@@ -447,30 +461,25 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // --------------------------------------------------------------------------
   // Segments (drawn circles only) — SketchUp's Entity Info "Segments".
   //
-  // Editing it RE-FACETS the existing circle: the chain keeps its handle and
-  // its exact centre and radius, and its chords are rebuilt at the new
-  // density. It is not a setting for the next circle drawn.
+  // Editing it RE-FACETS the existing circle: its exact centre and radius are
+  // kept and its chords are rebuilt at the new density, as ONE draft on the
+  // circle's plane — so a circle drawn on a face, over the void, or half and
+  // half re-facets the same way (`draft_refacet_curve`). It is not a setting
+  // for the next circle drawn.
   //
-  // Two things the commit has to get right:
-  //   - It is bracketed as one sketch gesture, so the whole rebuild is a
-  //     single undo step (the gesture snapshots the sketch).
-  //   - It invalidates the selection. A `sketch-curve` selection carries a
-  //     representative EDGE handle, and every one of the chain's edges is
-  //     replaced — so the selection is re-pointed at the rebuilt chain's own
-  //     representative before the panel re-renders, or the panel would go
-  //     blank on a stale handle.
+  // The commit has to get the selection right: the circle's curve key hashes
+  // only its centre and radius, so a selected curve keeps its key through the
+  // rebuild, but a selected SHAPE's key is its smallest edge key and is
+  // replaced with the facets — so the selection is re-pointed at the rebuilt
+  // circle before the panel re-renders, or it would go blank on a stale key.
   // --------------------------------------------------------------------------
   const [localSegments, setLocalSegments] = useState('')
-  // Keyed on SKETCH + curve, not the curve alone. Curve handles are slotmap
-  // keys scoped per sketch, so the first curve drawn on one plane and the
-  // first drawn on another share a handle — keying on it alone would carry
-  // uncommitted text from one circle to another whose facet count happened to
-  // match, and the next blur would commit the first circle's typed value onto
-  // the second. This is the same composite identity `nodeKey` builds for the
-  // Name field above, for the same reason.
+  // Keyed on plane context + curve key: the same circle reached any other
+  // way is the same circle, and a different circle never shares the key, so
+  // uncommitted text cannot carry from one circle to another.
   const segSyncKey =
-    nodeInfo !== null && nodeInfo.curveId !== null
-      ? `${nodeInfo.sketchId}:${nodeInfo.curveId}`
+    nodeInfo !== null && nodeInfo.curveKey !== null
+      ? `${nodeInfo.ctx}:${nodeInfo.curveKey}`
       : null
   const prevSegSyncRef = useRef<{ key: string | null; value: number | null }>({
     key: null,
@@ -488,14 +497,14 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   const commitSegments = useCallback(() => {
     if (
       nodeInfo === null ||
-      nodeInfo.curveId === null ||
-      nodeInfo.sketchId === undefined ||
+      nodeInfo.curveKey === null ||
+      nodeInfo.ctx === undefined ||
       nodeInfo.segments === null
     ) {
       return
     }
-    const sketchId = nodeInfo.sketchId
-    const curveId = nodeInfo.curveId
+    const ctx = nodeInfo.ctx
+    const curveKey = nodeInfo.curveKey
     const parsed = Number.parseInt(localSegments.trim(), 10)
     if (!Number.isFinite(parsed)) {
       setLocalSegments(String(nodeInfo.segments))
@@ -512,24 +521,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       return
     }
 
-    let repointTo: bigint | null = null
     try {
-      scene.sketch_begin_gesture(sketchId)
-      try {
-        const report = scene.sketch_refacet_curve(sketchId, curveId, parsed)
-        try {
-          const edges = report.new_edges()
-          if (edges.length > 0) {
-            // Any member resolves to the chain's canonical representative.
-            const chain = scene.sketch_curve_chain(sketchId, edges[0])
-            repointTo = chain.length > 0 ? chain[0] : edges[0]
-          }
-        } finally {
-          report.free()
-        }
-      } finally {
-        scene.sketch_end_gesture(sketchId)
-      }
+      runDraft(scene, { kind: 'ctx', ctx }, 'Segments', (d) => {
+        scene.draft_refacet_curve(d, keyToId(curveKey), parsed)
+      })
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const raw = err instanceof Error ? err.message : String(err)
@@ -538,9 +533,24 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       return
     }
 
-    if (repointTo !== null) {
-      onSelectMany([{ kind: 'sketch-curve', id: repointTo, sketch: sketchId }])
+    // Re-point the selection at the rebuilt circle. The facets (and so the
+    // run, edge, and shape keys) were replaced; the circle's own curve key
+    // (centre and radius) survives, and names the whole circle.
+    const pu = readPlaneUnits(scene as unknown as PlaneUnitsScene, ctx)
+    let repointTo: NodeRef | null = null
+    if (pu !== null) {
+      if (nodeInfo.kind === 'draft-curve') {
+        repointTo = draftRef('draft-curve', ctx, curveKey)
+      } else {
+        const unit = pu.units.find((u) => u.curves.some((c) => c.curveKey === curveKey))
+        if (unit !== undefined) {
+          repointTo = nodeInfo.kind === 'draft-island'
+            ? draftRef('draft-island', ctx, unit.key)
+            : draftRef('draft-curve', ctx, curveKey)
+        }
+      }
     }
+    if (repointTo !== null) onSelectMany([repointTo])
     onGeometryChanged()
   }, [nodeInfo, localSegments, scene, onGeometryChanged, onSelectMany, onToast])
 
@@ -722,6 +732,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     )
   }
 
+  const drawnLength = (nodeInfo as { length?: number | null }).length ?? null
+
   return (
     <div style={PANEL_STYLE}>
       {/* Name — sketches can't be named yet; show the read-only default label
@@ -796,6 +808,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         <div style={LABEL_STYLE}>Type</div>
         <div style={VALUE_STYLE}>
           <span>{kindLabel(nodeInfo.kind)}</span>
+          {nodeInfo.store !== null && (
+            <div data-testid="object-info-store" style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)' }}>
+              {nodeInfo.store}
+            </div>
+          )}
           {nodeInfo.kind === 'instance' && nodeInfo.instanceIds.length > 0 && (
             <>
               {' '}
@@ -820,9 +837,17 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         </div>
       </div>
 
-      {/* Points — an imprint only (imprints.ts): the loop's (sub-face) or
-       * path's (chord) vertex count. Read-only, unlike Segments below — an
-       * imprint has no facet density to edit, just the shape as drawn. */}
+      {/* Length — a drawn line, or a curve (the sum of its edges). */}
+      {drawnLength !== null && (
+        <div>
+          <div style={LABEL_STYLE}>Length</div>
+          <div style={VALUE_STYLE} data-testid="object-info-length">{formatLength(drawnLength)}</div>
+        </div>
+      )}
+
+      {/* Points — a drawn thing only: how many distinct vertices its line
+       * work has. Read-only, unlike Segments below — only a circle has a
+       * facet density to edit, the rest is the shape as drawn. */}
       {nodeInfo.points !== null && (
         <div>
           <div style={LABEL_STYLE}>Points</div>
@@ -830,9 +855,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         </div>
       )}
 
-      {/* Segments — a drawn circle only. Editing it re-facets that circle in
-       * place (one undo step); the circle itself, its centre and its radius
-       * are unchanged. Commits on Enter or blur, like the name fields. */}
+      {/* Segments — a drawn circle only, on a face or over the void. Editing it
+       * re-facets that circle in place (one undo step); the circle itself,
+       * its centre and its radius are unchanged. Commits on Enter or blur, like the name fields. */}
       {nodeInfo.segments !== null && (
         <div>
           <div style={LABEL_STYLE}>Segments</div>

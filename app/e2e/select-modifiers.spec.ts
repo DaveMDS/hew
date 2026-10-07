@@ -211,20 +211,20 @@ test('triple-click on a polyline segment selects the whole connected island; a s
   const midSegment: [number, number, number] = [2, 1, 0] // midpoint of the middle segment
   const p = await pagePoint(page, midSegment)
 
-  // Single click -> one sketch-edge.
+  // Single click -> one draft-edge.
   await page.mouse.click(p.x, p.y)
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-edge'
+    return sel.length === 1 && sel[0].kind === 'draft-edge'
   })
 
-  // Triple-click at the same point -> one sketch-island. The 2nd press of
+  // Triple-click at the same point -> one draft-island. The 2nd press of
   // the run may be routed as a plain click (a double-click on a bare line
   // does nothing) -- only the FINAL state matters.
   await page.mouse.click(p.x, p.y, { clickCount: 3 })
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
-    return sel.length === 1 && sel[0].kind === 'sketch-island'
+    return sel.length === 1 && sel[0].kind === 'draft-island'
   })
 })
 

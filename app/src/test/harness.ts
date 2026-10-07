@@ -32,7 +32,19 @@ import type { PrintPageModel } from '../print/PrintDocument'
 import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
-import { imprintName, readImprints } from '../tools/imprints'
+import { curveRunsView, imprintView } from './drawingView'
+import {
+  ctxGround,
+  ctxOfFace,
+  ctxOfPlane,
+  ctxOfSketch,
+  keyToId,
+  outlinerDrawing,
+  readPlaneUnits,
+  type PlaneRegion,
+  type PlaneUnitsScene,
+} from '../tools/planeUnits'
+import { addDraftLoop, addDraftSegment, runDraft } from '../tools/draftCommit'
 import * as inputRecorder from '../recording/inputRecorder'
 import { buildSessionRecording } from '../recording/sessionRecording'
 import { arcFromChord, arcPolylineOnPlane } from '../tools/arcMath'
@@ -46,6 +58,25 @@ import {
 } from '../settings/units'
 
 type Vec3 = [number, number, number]
+
+/** Point-in-ring for a planar ring (projected along its dominant normal axis). */
+function ringContains(ring: readonly V3[], p: V3): boolean {
+  let nx = 0, ny = 0, nz = 0
+  for (let i = 0; i < ring.length; i++) {
+    const a = ring[i], b = ring[(i + 1) % ring.length]
+    nx += (a[1] - b[1]) * (a[2] + b[2])
+    ny += (a[2] - b[2]) * (a[0] + b[0])
+    nz += (a[0] - b[0]) * (a[1] + b[1])
+  }
+  const ax = Math.abs(nx) >= Math.abs(ny) && Math.abs(nx) >= Math.abs(nz) ? 0 : Math.abs(ny) >= Math.abs(nz) ? 1 : 2
+  const [u, v] = ax === 0 ? [1, 2] : ax === 1 ? [0, 2] : [0, 1]
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j]
+    if (a[v] > p[v] !== b[v] > p[v] && p[u] < ((b[u] - a[u]) * (p[v] - a[v])) / (b[v] - a[v]) + a[u]) inside = !inside
+  }
+  return inside
+}
 
 export interface CameraPose {
   position: Vec3
@@ -342,18 +373,31 @@ export interface HewTestHarness {
   getStateHash(): string
   getObjectCount(): number
   getObjectIds(): string[]
-  getSelection(): { kind: string; id: string; sketch?: string; object?: string }[]
-  /** The imprints (drawn, unpushed shapes — imprints.ts) an object carries,
-   *  as the parsed `face_features` entries with handles as strings. */
+  getSelection(): { kind: string; id: string; ctx?: string; key?: string }[]
+  /** The drawn, unpushed shapes an object carries on its faces, read from the
+   *  object's drawing planes (`object_drawing_planes` + the object-scoped
+   *  `plane_units_json`): a `sub_face` per region the drawing closes off, a
+   *  `chord` per run of drawing edges that closes nothing. */
   getImprints(object: string): {
     kind: 'sub_face' | 'chord'
     id: string
     loop: [number, number, number][]
     name: string
-    /** Per-edge analytic circle (loop[k]→loop[k+1]/path[k]→path[k+1]),
-     *  or `null` per edge that is a plain line — see imprints.ts. */
-    curves: ({ center: [number, number, number]; radius: number } | null)[]
+    /** Per-edge analytic circle (loop[k]→loop[k+1]), or `null` per edge that
+     *  is a plain line. */
+    curves: ({ center: [number, number, number]; radius: number | null } | null)[]
   }[]
+  /** The drawn circles and arcs other drawing cut into several runs on an
+   *  object's faces, each with its curve key and its runs. */
+  getCurveRuns(object: string): {
+    id: string
+    name: string
+    closed: boolean
+    runs: { key: string; edges: number }[]
+  }[]
+  /** The labels the Outliner lists under an object for its drawn shapes
+   *  (one row per connected shape: "Shape", numbered when several). */
+  getOutlinerShapeLabels(object: string): string[]
   getLastError(): string | null
   /**
    * The document's current movable drawing axes (tool-parity §4): the flat
@@ -451,7 +495,7 @@ export interface HewTestHarness {
    * circle's analytic identity so a later push-through of the imprinted disk
    * shades smooth and offsets its radius (the true-curves design, playtest
    * fix C3). `center` must lie on the face plane; `radius` in meters. Mirrors
-   * CircleTool face mode (`split_face_inner_with_curve`). Returns the new disk
+   * CircleTool face mode (one draft on the face with a circle curve bracket). Returns the new disk
    * sub-face handle — pick nothing, push it straight through with `pushPull`.
    */
   imprintCircleOnFace(
@@ -465,16 +509,17 @@ export interface HewTestHarness {
   /**
    * Offset a sketch region's whole boundary (outer loop and holes) by a
    * signed distance — negative shrinks the material, positive grows it.
-   * The Offset tool's sketch commit: `sketch_offset_region` inside a
-   * gesture bracket (one undo step). Returns the handles of the regions the
+   * The Offset tool's commit: ONE draft on the sketch's plane context
+   * (`draft_offset_region`, one undo step). Returns the handles of the regions the
    * offset created.
    */
   offsetRegion(sketch: string, region: string, distance: number): string[]
 
   /**
    * Offset a solid face's outer boundary by a signed distance (negative =
-   * into the face, the only direction that can land on it) and imprint the
-   * loop — the Offset tool's face commit (`offset_face`). Returns the new
+   * into the face; the sub-face returned is the one inside the loop) and imprint the
+   * loop — the Offset tool's face commit (one draft on the face's plane context,
+   * `draft_offset_region`). Returns the new
    * sub-face handle; push/pull it to boss/recess.
    */
   offsetFace(object: string, face: string, distance: number): string
@@ -493,8 +538,8 @@ export interface HewTestHarness {
    * Cut `face` of `object` along a faceted 2-point arc. `a`/`b` must
    * lie on the face (endpoints on its boundary for a boundary-to-boundary
    * cut); `sagitta` is signed in the face's `facePlaneBasis(normal)` (u, v)
-   * frame. Equivalent to ArcTool's face commit: one `split_face` call with
-   * the arc polyline path.
+   * frame. Equivalent to ArcTool's face commit: one draft on the face with the
+   * arc polyline's segments.
    */
   drawArcOnFace(object: string, face: string, a: Vec3, b: Vec3, sagitta: number): void
 
@@ -778,7 +823,22 @@ export interface HewTestHarness {
   /** Replace the selection with arbitrary nodes (kind + handle string; an
    *  imprint ref carries its owning `object`, a sketch sub-entity its
    *  `sketch`). */
-  selectNodes(nodes: { kind: string; id: string; sketch?: string; object?: string }[]): void
+  selectNodes(nodes: { kind: string; id: string; ctx?: string; key?: string }[]): void
+  /** The drawing on a plane (`plane_units_json`) — units, their edges with
+   *  stores, and regions; keys are 16-hex strings. */
+  getPlaneUnits(ctx: string): {
+    units: {
+      key: string
+      edges: { key: string; a: number[]; b: number[]; store: { kind: string; object?: number; sketch?: number }; curve: { center: number[]; radius: number | null } | null }[]
+      /** Curve runs: the piece of one circle/arc/polygon a click selects. */
+      curves: { key: string; curve_key: string; kind: 'circle' | 'polygon'; center: number[]; radius: number | null; edges: string[] }[]
+    }[]
+    regions: { key: string; outer: number[][]; holes: number[][][]; over: { object: number; face: number | null } | null; extrude: { sketch: number; region: number } | null }[]
+  }
+  /** The canonical plane-context string of a face / plane / the ground. */
+  ctxOfFace(object: string, face: string, instance?: string): string | null
+  ctxOfPlane(point: number[], normal: number[]): string | null
+  ctxGround(): string
   // -------- follow me --------
 
   /**
@@ -793,6 +853,11 @@ export interface HewTestHarness {
   /** Every edge handle of `sketch` (union of its islands' edges), as
    * decimal strings — the raw material for a `followMeAlongEdges` path. */
   getSketchEdgeIds(sketch: string): string[]
+
+  /** Every edge of `sketch` as EXACT (f64) endpoint pairs
+   * `[ax,ay,az, bx,by,bz]` — unlike `getSketchLines`, which is the f32
+   * render buffer. For asserting a committed length to the last digit. */
+  getSketchSegmentsExact(sketch: string): number[][]
 
   /** Every live sketch handle, as decimal strings — lets a spec find the
    * sketch a TOOL created (the tool's cached handle is internal). */
@@ -817,6 +882,10 @@ export interface HewTestHarness {
   /** How many closed regions `sketch` currently holds — for asserting that
    * deleting a shared partition edge merges the two regions it divided. */
   getSketchRegionCount(sketch: string): number
+
+  /** The closed regions `sketch` currently holds, as decimal strings — the
+   * handles `extrudeRegion` takes (a free region left by a draft). */
+  getSketchRegionIds(sketch: string): string[]
 
   /**
    * Follow Me along sketch edges (the follow-me design): sweeps the
@@ -1065,6 +1134,26 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       throw e
     }
   }
+  /** The drawing's smallest region over a face that contains `p` (a point on
+   *  the plane `ctx`), as its listing entry — how the face-drawing helpers
+   *  name the sub-face a draft just made. */
+  function faceRegionAt(s: Scene, ctx: string, p: V3): PlaneRegion | null {
+    const pu = readPlaneUnits(s as unknown as PlaneUnitsScene, ctx)
+    if (pu === null) return null
+    let best: { r: PlaneRegion; area: number } | null = null
+    for (const r of pu.regions) {
+      if (r.over === null || r.over.face === null) continue
+      if (!ringContains(r.outer, p) || r.holes.some((h) => ringContains(h, p))) continue
+      let a2 = 0
+      for (let i = 0; i < r.outer.length; i++) {
+        const u = r.outer[i], v = r.outer[(i + 1) % r.outer.length]
+        a2 += Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+      }
+      if (best === null || a2 < best.area) best = { r, area: a2 }
+    }
+    return best === null ? null : best.r
+  }
+
   function query<T>(fn: (s: Scene) => T): T {
     try {
       return fn(scene())
@@ -1484,19 +1573,25 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       deps.getSelection().map((n) => ({
         kind: n.kind,
         id: n.id.toString(),
-        ...(n.sketch !== undefined ? { sketch: n.sketch.toString() } : {}),
-        ...(n.object !== undefined ? { object: n.object.toString() } : {}),
+        ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
+        ...(n.key !== undefined ? { key: n.key } : {}),
       })),
+    getPlaneUnits: (ctx) => query((s) => JSON.parse(s.plane_units_json(ctx))),
+    ctxOfFace: (object, face, instance) =>
+      query((s) => ctxOfFace(s, BigInt(object), BigInt(face), instance === undefined ? null : BigInt(instance))),
+    ctxOfPlane: (point, normal) => ctxOfPlane(point, normal),
+    ctxGround: () => ctxGround(),
     getImprints: (object) =>
-      query((s) =>
-        readImprints(s, BigInt(object)).map((f) => ({
-          kind: f.kind,
-          id: (f.kind === 'sub_face' ? f.face : f.edge).toString(),
-          loop: f.kind === 'sub_face' ? f.loop : f.path,
-          name: imprintName(f),
-          curves: f.curves,
-        })),
-      ),
+      query((s) => imprintView(s, BigInt(object))),
+    getCurveRuns: (object) =>
+      query((s) => curveRunsView(s, BigInt(object))),
+    getOutlinerShapeLabels: (object) =>
+      query((s) => {
+        const d = outlinerDrawing(s as never, Array.from(s.object_ids()))
+        return (d.byObject.get(BigInt(object).toString()) ?? []).map(
+          (u) => d.labels.get(`${u.ref.kind}:${u.ref.ctx}:${u.ref.key}`) ?? '',
+        )
+      }),
     getLastError: () => lastError,
     getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
@@ -1603,34 +1698,50 @@ export function installTestHarness(deps: HarnessDeps): () => void {
           loop[i * 3 + 1] = center[1] + u[1] * cs + v[1] * sn
           loop[i * 3 + 2] = center[2] + u[2] * cs + v[2] * sn
         }
-        const sub = s.split_face_inner_with_curve(
-          BigInt(object),
-          BigInt(face),
-          loop,
-          new Float64Array([center[0], center[1], center[2]]),
-          radius,
-        )
-        return sub.toString()
+        const verts: V3[] = []
+        for (let i = 0; i < nSegments; i++) verts.push([loop[i * 3], loop[i * 3 + 1], loop[i * 3 + 2]])
+        runDraft(s, { kind: 'face', object: BigInt(object), face: BigInt(face), instance: null }, 'Circle', (d) => {
+          addDraftLoop(s, d, verts, { kind: 'circle', center, radius })
+        })
+        const ctx = ctxOfFace(s, BigInt(object), BigInt(face), null)
+        const disk = ctx === null ? null : faceRegionAt(s, ctx, center)
+        if (disk === null || disk.over === null || disk.over.face === null) throw new Error('imprintCircleOnFace: no disk face formed')
+        return disk.over.face.toString()
       }),
 
     offsetRegion: (sketch, region, distance) =>
       act((s) => {
         const sid = BigInt(sketch)
-        s.sketch_begin_gesture(sid)
-        try {
-          const report = s.sketch_offset_region(sid, BigInt(region), distance)
-          try {
-            return Array.from(report.regions_created(), (r) => r.toString())
-          } finally {
-            report.free()
-          }
-        } finally {
-          s.sketch_end_gesture(sid)
-        }
+        const rid = BigInt(region)
+        const ctx = ctxOfSketch(s, sid, null)
+        if (ctx === null) throw new Error('UnknownSketch: no such sketch')
+        const pu = readPlaneUnits(s as unknown as PlaneUnitsScene, ctx)
+        const entry = pu?.regions.find((r) => r.extrude !== null && r.extrude.sketch === sid && r.extrude.region === rid)
+        if (entry === undefined) throw new Error('UnknownRegion: that region is not in its sketch')
+        const before = new Set(Array.from(s.sketch_regions(sid), String))
+        runDraft(s, { kind: 'ctx', ctx }, 'Offset', (d) => {
+          s.draft_offset_region(d, keyToId(entry.key), distance)
+        })
+        return Array.from(s.sketch_regions(sid), String).filter((r) => !before.has(r))
       }),
 
     offsetFace: (object, face, distance) =>
-      act((s) => s.offset_face(BigInt(object), BigInt(face), distance).toString()),
+      act((s) => {
+        const oid = BigInt(object)
+        const fid = BigInt(face)
+        const ctx = ctxOfFace(s, oid, fid, null)
+        if (ctx === null) throw new Error('UnknownFace: no such face')
+        const pu = readPlaneUnits(s as unknown as PlaneUnitsScene, ctx)
+        const entry = pu?.regions.find((r) => r.over !== null && r.over.object === oid && r.over.face === fid)
+        if (entry === undefined) throw new Error('UnknownFace: that face is not in its plane listing')
+        const c = entry.outer.reduce<V3>((a, p) => [a[0] + p[0] / entry.outer.length, a[1] + p[1] / entry.outer.length, a[2] + p[2] / entry.outer.length], [0, 0, 0])
+        runDraft(s, { kind: 'ctx', ctx }, 'Offset', (d) => {
+          s.draft_offset_region(d, keyToId(entry.key), distance)
+        })
+        const sub = faceRegionAt(s, ctx, c)
+        if (sub === null || sub.over === null || sub.over.face === null) throw new Error('offsetFace: no sub-face formed')
+        return sub.over.face.toString()
+      }),
 
     drawArc: (a, b, sagitta, close = false) =>
       act((s) => {
@@ -1666,13 +1777,9 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         if (basis === null) throw new Error('drawArcOnFace: degenerate face normal')
         const pts = arcPolylineOnPlane(a, b, sagitta, basis.u, basis.v)
         if (pts === null) throw new Error('drawArcOnFace: degenerate chord or flat sagitta')
-        const path = new Float64Array(pts.length * 3)
-        for (let i = 0; i < pts.length; i++) {
-          path[i * 3 + 0] = pts[i][0]
-          path[i * 3 + 1] = pts[i][1]
-          path[i * 3 + 2] = pts[i][2]
-        }
-        s.split_face(objId, faceId, path).free()
+        runDraft(s, { kind: 'face', object: objId, face: faceId, instance: null }, 'Arc', (d) => {
+          for (let i = 0; i < pts.length - 1; i++) addDraftSegment(s, d, pts[i], pts[i + 1])
+        })
       })
     },
 
@@ -1931,6 +2038,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         return out
       }),
 
+    getSketchSegmentsExact: (sketch) =>
+      query((s) => {
+        const out: number[][] = []
+        for (const island of s.sketch_island_ids(BigInt(sketch))) {
+          for (const edge of s.sketch_island_edges(BigInt(sketch), island)) {
+            const e = s.sketch_edge_endpoints(BigInt(sketch), edge)
+            if (e !== undefined) out.push(Array.from(e))
+          }
+        }
+        return out
+      }),
+
     getSketchIslands: (sketch) =>
       query((s) =>
         Array.from(s.sketch_island_ids(BigInt(sketch)), (island) => ({
@@ -1940,6 +2059,8 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       ),
 
     getSketchRegionCount: (sketch) => query((s) => s.sketch_regions(BigInt(sketch)).length),
+
+    getSketchRegionIds: (sketch) => query((s) => Array.from(s.sketch_regions(BigInt(sketch)), String)),
 
     followMeAlongEdges: (sketch, region, pathSketch, edges, group, stopLen) =>
       act((s) =>
@@ -2074,9 +2195,9 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       deps.setSelection(
         nodes.map((n) => ({
           kind: n.kind as NodeKind,
-          id: BigInt(n.id),
-          ...(n.sketch !== undefined ? { sketch: BigInt(n.sketch) } : {}),
-          ...(n.object !== undefined ? { object: BigInt(n.object) } : {}),
+          id: n.key !== undefined ? BigInt('0x' + n.key) : BigInt(n.id),
+          ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
+          ...(n.key !== undefined ? { key: n.key } : {}),
         })),
       ),
 

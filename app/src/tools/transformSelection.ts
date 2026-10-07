@@ -4,26 +4,43 @@
  *
  * Every gesture — one node or many — commits through
  * `Scene.transform_selection`: one kernel call, one undo step, and one
- * session-recording entry regardless of selection size or node kinds.
+ * session-recording entry regardless of selection size or node kinds. A
+ * gesture that spans several kernel edits (drawing in several planes, drawing
+ * plus objects, a copy array) runs inside a history bracket, so it is still ONE
+ * undo step and a refusal restores the document exactly.
  *
- * Sketch selections transform as RIGID BODIES at island granularity — the
- * connected shape is the unit, exactly as it is for per-shape Delete:
+ * DRAWN things (the `draft-*` refs of planeUnits.ts: lines, curves, shapes
+ * on a solid's face or over the void or both at once) go through the
+ * drafting engine, one path for every store (unified-drafting design §8):
  *
- * - A `sketch-edge` or `sketch-curve` selection transforms the ISLAND it
- *   belongs to (an open chain of lines is an island too; it moves/rotates
- *   as one rigid body — never silently skipped).
- * - Islands that together cover EVERY island of their sketch fold into one
- *   whole-sketch bake (`transform_sketch`), which keeps every handle stable
- *   and is valid for any axis, including out-of-plane rotations.
- * - A strict subset of a sketch's islands goes through
- *   `transform_sketch_island`, whose kernel now also accepts out-of-plane
- *   transforms by detaching the island into its own sketch.
+ * - The selection is grouped by PLANE CONTEXT. A selected edge or curve
+ *   moves the shape (island) it belongs to, exactly as a sketch edge always
+ *   did — the connected shape is the unit.
+ * - Per context, ONE draft: `draft_transform_edges` over the shape's edge
+ *   keys (copy mode: `draft_copy_edges`). Landings ARRANGE like a draw — a
+ *   shape moved onto others splits and merges with them, half over a face
+ *   and half over the void is fine.
+ * - A MIXED shape (part of it rides with a selected object, the rest is
+ *   free or on unselected objects) is moved by drawing it there: its
+ *   non-riding edges are captured and erased, the objects transform, and the
+ *   captured edges are drawn again carried through the transform (circles
+ *   stay circles under a similarity). Copies draw the captured edges per rep.
+ * - A transform that LEAVES the plane commits only for a shape drawn
+ *   entirely over the void (every edge in a free sketch): it detaches into
+ *   its own sketch exactly as it always did. A shape with any edge on a
+ *   solid's face refuses `NotInPlane`: a face shape stays on its face.
+ * - After the commit the selection is re-resolved BY GEOMETRY (the moved
+ *   edge positions in a fresh listing), so a typed retype or a second move
+ *   targets the moved shape.
+ *
+ * Whole free sketches (`'sketch'` refs) fold into one whole-sketch bake
+ * (`transform_sketch`), valid for any axis, as before.
  */
 
 import * as THREE from 'three'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
-import { nodeKindToNumber, collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
+import { isDraftKind, nodeKindToNumber, collectLeafIds, nodeRefFromJs } from '../panels/treeModel'
 import {
   translationAffine,
   affineToFloat64,
@@ -38,50 +55,57 @@ import {
   buildInstanceMemberPreviewClone,
   buildSketchPreviewClone,
 } from './transformPreview'
-import { findImprint, imprintNodes, imprintSegments } from './imprints'
+import {
+  allFree,
+  ctxOfObjectPlane,
+  ctxOfSketch,
+  ctxThroughAffine,
+  draftRef,
+  isDraftRef,
+  keysToArray,
+  planeOfCtx,
+  readPlaneUnits,
+  resolveDraft,
+  segmentsOf,
+  storesOf,
+  unitsAtSegments,
+  type PlaneEdge,
+} from './planeUnits'
+import { runDraft } from './draftCommit'
+import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
 
-/** The island a sketch-geometry selection transforms as: the node's own
- * island, or the owning island of a selected edge/curve (a drawn curve's
- * NodeRef id is its chain's canonical edge, so the edge→island query covers
- * both). Null for a stale handle — the caller skips it like any other
- * pruned-away selection. */
-export function resolveSketchIsland(
-  wasmScene: WasmScene,
-  node: NodeRef,
-): { sketch: bigint; island: bigint } | null {
-  if (node.sketch === undefined) return null
-  if (node.kind === 'sketch-island') {
-    return { sketch: node.sketch, island: node.id }
-  }
-  if (node.kind === 'sketch-edge' || node.kind === 'sketch-curve') {
-    const island = wasmScene.sketch_edge_island(node.sketch, node.id)
-    if (island === undefined) return null
-    return { sketch: node.sketch, island }
-  }
-  return null
+type V3 = [number, number, number]
+
+/** The islands of one sketch that move together (one kernel call). */
+export interface SketchIslandGroup {
+  sketch: bigint
+  islands: bigint[]
 }
 
-/** How a selection's sketch geometry commits: whole sketches (selected as
- * such, or islands covering the whole sketch) and strict-subset islands. */
+/** The refs of `selection` that are not drawing refs. */
+function nonDraft(selection: readonly NodeRef[]): NodeRef[] {
+  return selection.filter((n) => !isDraftKind(n.kind))
+}
+
+/** How a selection's whole-sketch geometry commits: whole sketches (selected
+ * as such, or islands covering the whole sketch) and strict-subset islands
+ * (only ever supplied by `freeIslands`, the detaching free shapes). */
 export function planSketchTransforms(
   wasmScene: WasmScene,
   selection: readonly NodeRef[],
-): { sketches: bigint[]; islands: { sketch: bigint; island: bigint }[] } {
+  freeIslands: readonly SketchIslandGroup[] = [],
+): { sketches: bigint[]; islands: SketchIslandGroup[] } {
   const wholeSketches = new Set<bigint>()
   const islandsBySketch = new Map<bigint, Set<bigint>>()
   for (const node of selection) {
-    if (node.kind === 'sketch') {
-      wholeSketches.add(node.id)
-      continue
-    }
-    const resolved = resolveSketchIsland(wasmScene, node)
-    if (resolved !== null) {
-      const set = islandsBySketch.get(resolved.sketch) ?? new Set<bigint>()
-      set.add(resolved.island)
-      islandsBySketch.set(resolved.sketch, set)
-    }
+    if (node.kind === 'sketch') wholeSketches.add(node.id)
   }
-  const islands: { sketch: bigint; island: bigint }[] = []
+  for (const g of freeIslands) {
+    const set = islandsBySketch.get(g.sketch) ?? new Set<bigint>()
+    for (const i of g.islands) set.add(i)
+    islandsBySketch.set(g.sketch, set)
+  }
+  const islands: SketchIslandGroup[] = []
   for (const [sketch, set] of islandsBySketch) {
     if (wholeSketches.has(sketch)) continue // already moving whole
     // Islands covering EVERY island of their sketch = the whole sketch:
@@ -90,16 +114,410 @@ export function planSketchTransforms(
       wholeSketches.add(sketch)
       continue
     }
-    for (const island of set) islands.push({ sketch, island })
+    islands.push({ sketch, islands: [...set] })
   }
   return { sketches: [...wholeSketches], islands }
 }
 
+// ── Drawn things (draft refs) ───────────────────────────────────────────────
+
+/** The drawn shapes of one plane context a selection moves together. */
+export interface DraftGroup {
+  ctx: string
+  /** The selection nodes that fed this group. */
+  nodes: NodeRef[]
+  /** The shapes (islands) the group moves, by unit key. */
+  unitKeys: string[]
+  /** The edges of those shapes that are transformed as drawing (those riding
+   *  with a selected owner are left to the owner's own transform). */
+  edges: PlaneEdge[]
+  /** True when some of a shape's edges ride with a selected owner: only the
+   *  rest is drafted: erased and drawn again around the owners' move. */
+  mixed: boolean
+}
+
+/** The owners a selection carries drawing along with: objects selected
+ *  directly or through a selected group, and component instances likewise. */
+export interface RidingOwners {
+  objects: Set<bigint>
+  instances: Set<bigint>
+}
+
+export function ridingOwners(wasmScene: WasmScene, selection: readonly NodeRef[]): RidingOwners {
+  const objects = new Set<bigint>()
+  const instances = new Set<bigint>()
+  for (const n of selection) {
+    if (n.kind === 'object') objects.add(n.id)
+    else if (n.kind === 'instance') instances.add(n.id)
+    else if (n.kind === 'group') {
+      const { objectIds, instanceIds } = collectLeafIds(n, (g) => wasmScene.group_members(g).map(nodeRefFromJs))
+      for (const o of objectIds) objects.add(o)
+      for (const i of instanceIds) instances.add(i)
+    }
+  }
+  return { objects, instances }
+}
+
+/** True when `edge` (drawn in plane context `ctx`) moves/copies/deletes WITH
+ *  its owner: its context lies inside a selected instance, or it is stored on
+ *  a selected object's own faces (free sketch edges never ride an object). */
+export function edgeRides(owners: RidingOwners, ctx: string, edge: PlaneEdge): boolean {
+  const inst = planeOfCtx(ctx)?.instance ?? null
+  if (inst !== null && owners.instances.has(inst)) return true
+  return edge.store.kind !== 'free' && owners.objects.has(edge.store.object)
+}
+
 /**
- * Commit one affine to the whole selection: sketch geometry per
- * `planSketchTransforms`, everything else via a single
+ * The selection without the drawn shapes that ride with their own object: a
+ * draft ref lying wholly on a selected object's faces (or its owned
+ * sketches), or inside a selected component instance (or one inside a
+ * selected group), moves/copies WITH that owner, so transforming it as a
+ * draft as well would apply the transform twice (or refuse a vertical move
+ * as NotInPlane). Ground/free drawing is untouched, and so is a shape with
+ * any edge that does not ride (a mixed shape keeps its ref;
+ * `planDraftTransforms` then drafts only its non-riding edges). Mirrors
+ * Delete's "an object also in this delete covers the drawing on it" rule.
+ */
+export function dropRidingDrafts(wasmScene: WasmScene, selection: readonly NodeRef[]): NodeRef[] {
+  if (!selection.some(isDraftRef)) return [...selection]
+  const owners = ridingOwners(wasmScene, selection)
+  if (owners.objects.size === 0 && owners.instances.size === 0) return [...selection]
+  return selection.filter((node) => {
+    if (!isDraftRef(node)) return true
+    const inst = planeOfCtx(node.ctx)?.instance ?? null
+    if (inst !== null && owners.instances.has(inst)) return false
+    const r = resolveDraft(wasmScene, node)
+    if (r === null || r.edges.length === 0) return true
+    return !r.edges.every((e) => edgeRides(owners, node.ctx, e))
+  })
+}
+
+/**
+ * What Delete must erase through drafts: per plane context, the edge keys of
+ * every selected drawn shape that does NOT go with another part of the same
+ * delete — edges riding with a deleted object (directly or inside a deleted
+ * group) or a deleted component instance, and free edges of a sketch
+ * deleted whole. Select All + Delete is thereby one node delete: drawing on a
+ * group's faces dies with the group (one undo restores both), and the shared
+ * definition of a deleted instance is never stripped first. `huskCandidates`
+ * are the free sketches the erase may leave empty.
+ */
+export function draftEdgesToErase(
+  wasmScene: WasmScene,
+  nodes: readonly NodeRef[],
+  deletedSketches: ReadonlySet<bigint>,
+): { draftEdgeKeys: Map<string, Set<string>>; huskCandidates: Set<bigint> } {
+  const owners = ridingOwners(wasmScene, nodes)
+  const draftEdgeKeys = new Map<string, Set<string>>()
+  const huskCandidates = new Set<bigint>()
+  for (const n of nodes) {
+    if (!isDraftRef(n)) continue
+    const r = resolveDraft(wasmScene, n)
+    if (r === null) continue // stale — an earlier step consumed it
+    const rest = r.edges.filter(
+      (e) => !edgeRides(owners, n.ctx, e) && !(e.store.kind === 'free' && deletedSketches.has(e.store.sketch)),
+    )
+    if (rest.length === 0) continue
+    const keys = draftEdgeKeys.get(n.ctx) ?? new Set<string>()
+    for (const e of rest) {
+      keys.add(e.key)
+      if (e.store.kind === 'free') huskCandidates.add(e.store.sketch)
+    }
+    draftEdgeKeys.set(n.ctx, keys)
+  }
+  return { draftEdgeKeys, huskCandidates }
+}
+
+/** Group the draft refs of `selection` by plane context. Edges and curves
+ *  lift to their shape; stale refs are skipped like any pruned selection.
+ *  A shape part of which rides with a selected owner (a mixed shape) keeps
+ *  only its non-riding edges in the group, flagged `mixed` so the commit
+ *  draws it again around the owners' move (erase, move, redraw). */
+export function planDraftTransforms(wasmScene: WasmScene, selection: readonly NodeRef[]): DraftGroup[] {
+  const groups = new Map<string, DraftGroup>()
+  const owners = ridingOwners(wasmScene, selection)
+  const anyOwner = owners.objects.size > 0 || owners.instances.size > 0
+  for (const node of dropRidingDrafts(wasmScene, selection)) {
+    if (!isDraftRef(node)) continue
+    const r = resolveDraft(wasmScene, node)
+    if (r === null || r.unit === null) continue
+    const all = r.unit.edges
+    const own = anyOwner ? all.filter((e) => !edgeRides(owners, node.ctx, e)) : all
+    if (own.length === 0) continue
+    let g = groups.get(node.ctx)
+    if (g === undefined) {
+      g = { ctx: node.ctx, nodes: [], unitKeys: [], edges: [], mixed: false }
+      groups.set(node.ctx, g)
+    }
+    g.nodes.push(node)
+    if (own.length < all.length) g.mixed = true
+    if (g.unitKeys.includes(r.unit.key)) continue
+    g.unitKeys.push(r.unit.key)
+    g.edges.push(...own)
+  }
+  return [...groups.values()]
+}
+
+/** Largest distance any of the group's endpoints (and circle centers) lands
+ *  from its plane under `affine` — an in-plane transform keeps this ~0. */
+function offPlaneAfter(group: DraftGroup, affine: Float64Array): number {
+  const pl = planeOfCtx(group.ctx)
+  if (pl === null) return 0
+  let worst = 0
+  const check = (p: V3) => {
+    const q = applyAffineToPoint(affine, p)
+    const d = Math.abs(
+      (q[0] - pl.point[0]) * pl.normal[0] + (q[1] - pl.point[1]) * pl.normal[1] + (q[2] - pl.point[2]) * pl.normal[2],
+    )
+    if (d > worst) worst = d
+  }
+  for (const e of group.edges) {
+    check(e.a)
+    check(e.b)
+    if (e.curve !== null) check(e.curve.center)
+  }
+  return worst
+}
+
+/** Tolerance for "still in the plane" (the kernel's own plane gate is 1e-9). */
+const IN_PLANE_EPS = 0.5e-9
+
+function inPlane(group: DraftGroup, affine: Float64Array): boolean {
+  return offPlaneAfter(group, affine) <= IN_PLANE_EPS
+}
+
+/** The NotInPlane refusal for a face shape asked to leave its face. */
+function notInPlane(): Error {
+  return new Error("NotInPlane: A shape on a face can only move within the face's plane")
+}
+
+// ── One gesture = one history step ──────────────────────────────────────────
+
+/** Scenes with a bracket open right now (brackets do not nest in the kernel,
+ *  so a helper called inside another helper's bracket joins it). */
+const bracketed = new WeakSet<object>()
+
+/**
+ * Run `body` as ONE undo step: every edit it records lands as a single
+ * history entry labeled `label`, and ANY throw restores the document exactly
+ * as it was (geometry, undo and redo stacks) before rethrowing — no
+ * hand-written retraction. `needed = false` runs `body` bare, for a gesture
+ * already known to record at most one atomic entry (the bracket snapshots the
+ * document, so it is skipped when it cannot matter). A nested call joins the
+ * enclosing bracket. The bracket is never left open.
+ */
+export function inHistoryBracket<T>(wasmScene: WasmScene, label: string, body: () => T, needed = true): T {
+  if (!needed || bracketed.has(wasmScene)) return body()
+  wasmScene.history_bracket_open()
+  bracketed.add(wasmScene)
+  let committed = false
+  try {
+    const result = body()
+    wasmScene.history_bracket_commit(label)
+    committed = true
+    return result
+  } finally {
+    bracketed.delete(wasmScene)
+    if (!committed) {
+      try {
+        wasmScene.history_bracket_abort()
+      } catch {
+        // The original error is the one worth surfacing.
+      }
+    }
+  }
+}
+
+// ── Drawing a mixed shape "there" ───────────────────────────────────────────
+
+/** One curve run of a captured shape: the facets that stay a circle (or
+ *  regular polygon) when they are drawn again. */
+interface CapturedRun {
+  kind: 'circle' | 'polygon'
+  center: V3
+  radius: number | null
+  edges: PlaneEdge[]
+}
+
+/** A group's non-riding edges as they stand now, ready to be drawn again at
+ *  a transformed position: per curve run (kind, center, radius, facets) and
+ *  the plain remainder. */
+interface CapturedDrawing {
+  runs: CapturedRun[]
+  plain: PlaneEdge[]
+}
+
+function captureDrawing(wasmScene: WasmScene, g: DraftGroup): CapturedDrawing {
+  const mine = new Map(g.edges.map((e) => [e.key, e]))
+  const inRun = new Set<string>()
+  const runs: CapturedRun[] = []
+  const pu = readPlaneUnits(wasmScene, g.ctx)
+  for (const unit of pu?.units ?? []) {
+    for (const run of unit.curves) {
+      const edges = run.edges.flatMap((k) => {
+        const e = mine.get(k)
+        return e === undefined ? [] : [e]
+      })
+      if (edges.length === 0) continue
+      for (const e of edges) inRun.add(e.key)
+      runs.push({ kind: run.kind, center: run.center, radius: run.radius, edges })
+    }
+  }
+  return { runs, plain: g.edges.filter((e) => !inRun.has(e.key)) }
+}
+
+/** The uniform scale `affine` applies within `ctx`'s plane, or `null` when it
+ *  is not a similarity there (a circle drawn through it is no longer one). */
+function planeSimilarity(ctx: string, affine: Float64Array): number | null {
+  const pl = planeOfCtx(ctx)
+  if (pl === null) return null
+  const n = pl.normal
+  const axis: V3 =
+    Math.abs(n[0]) <= Math.abs(n[1]) && Math.abs(n[0]) <= Math.abs(n[2]) ? [1, 0, 0] : Math.abs(n[1]) <= Math.abs(n[2]) ? [0, 1, 0] : [0, 0, 1]
+  const u = normalize3([n[1] * axis[2] - n[2] * axis[1], n[2] * axis[0] - n[0] * axis[2], n[0] * axis[1] - n[1] * axis[0]])
+  if (u === null) return null
+  const v: V3 = [n[1] * u[2] - n[2] * u[1], n[2] * u[0] - n[0] * u[2], n[0] * u[1] - n[1] * u[0]]
+  const lu = applyAffineLinear(affine, u)
+  const lv = applyAffineLinear(affine, v)
+  const su = Math.hypot(lu[0], lu[1], lu[2])
+  const sv = Math.hypot(lv[0], lv[1], lv[2])
+  if (!(su > 0) || Math.abs(su - sv) > 1e-9 * su) return null
+  const dot = lu[0] * lv[0] + lu[1] * lv[1] + lu[2] * lv[2]
+  return Math.abs(dot) <= 1e-9 * su * sv ? su : null
+}
+
+/** Draw `cap` carried through `affine` into the open draft `d` (plane
+ *  context `ctx`): each curve run re-bracketed — a circle or polygon keeps
+ *  its analytic circle (center mapped, radius scaled) under a similarity,
+ *  anything else becomes a plain chain — then the plain segments. */
+function drawCaptured(wasmScene: WasmScene, d: bigint, ctx: string, cap: CapturedDrawing, affine: Float64Array): void {
+  const scale = planeSimilarity(ctx, affine)
+  const add = (e: PlaneEdge) => {
+    const a = applyAffineToPoint(affine, e.a)
+    const b = applyAffineToPoint(affine, e.b)
+    wasmScene.draft_add_segment(d, a[0], a[1], a[2], b[0], b[1], b[2]).free()
+  }
+  for (const run of cap.runs) {
+    if (scale !== null && run.radius !== null) {
+      const c = new Float64Array(applyAffineToPoint(affine, run.center))
+      if (run.kind === 'polygon') wasmScene.draft_begin_polygon_with(d, c, run.radius * scale)
+      else wasmScene.draft_begin_curve_with(d, c, run.radius * scale)
+    } else {
+      wasmScene.draft_begin_curve(d)
+    }
+    for (const e of run.edges) add(e)
+    wasmScene.draft_end_curve(d)
+  }
+  for (const e of cap.plain) add(e)
+}
+
+/** Draw a captured shape at each of `affines` in ONE draft of `g`'s plane. */
+function redrawCaptured(
+  wasmScene: WasmScene,
+  g: DraftGroup,
+  cap: CapturedDrawing,
+  affines: readonly Float64Array[],
+  label: string,
+): void {
+  runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+    for (const affine of affines) drawCaptured(wasmScene, d, g.ctx, cap, affine)
+  })
+}
+
+/** The free islands a pure-void group detaches, per store sketch, found by
+ *  the edges' own positions. The listing's endpoints are WORLD coordinates;
+ *  a definition sketch inside an entered instance lives in the definition's
+ *  own frame, so the endpoints go through the inverse instance pose first.
+ *  An island that cannot be found refuses — never a silent no-op. */
+function freeIslandsOf(wasmScene: WasmScene, group: DraftGroup): SketchIslandGroup[] {
+  const instance = planeOfCtx(group.ctx)?.instance ?? null
+  let toLocal: ((p: V3) => V3) | null = null
+  if (instance !== null) {
+    const pose = wasmScene.instance_pose(instance)
+    const inv = pose === undefined ? null : invertAffine3x4(pose)
+    if (inv === null) {
+      throw new Error('StaleReference: the component instance holding this shape is gone')
+    }
+    toLocal = (p) => applyAffine3x4(inv, p)
+  }
+  const bySketch = new Map<bigint, Set<bigint>>()
+  for (const e of group.edges) {
+    if (e.store.kind !== 'free') continue
+    const a = toLocal === null ? e.a : toLocal(e.a)
+    const b = toLocal === null ? e.b : toLocal(e.b)
+    const island = wasmScene.sketch_island_at_edge_positions(e.store.sketch, new Float64Array(a), new Float64Array(b))
+    if (island === undefined) {
+      throw new Error('StaleReference: could not find the shape to move out of its plane; nothing was changed')
+    }
+    const set = bySketch.get(e.store.sketch) ?? new Set<bigint>()
+    set.add(island)
+    bySketch.set(e.store.sketch, set)
+  }
+  return [...bySketch].map(([sketch, set]) => ({ sketch, islands: [...set] }))
+}
+
+/** Segment pairs of the group's edges carried through `affine` — where the
+ *  moved shapes will be found again. */
+function movedAnchors(group: DraftGroup, affine: Float64Array): [V3, V3][] {
+  return group.edges.map((e) => [applyAffineToPoint(affine, e.a), applyAffineToPoint(affine, e.b)] as [V3, V3])
+}
+
+/** The island refs holding `anchors` in the listing of `ctx` (fresh). */
+function refsAtAnchors(wasmScene: WasmScene, ctx: string | null, anchors: readonly [V3, V3][]): NodeRef[] {
+  if (ctx === null) return []
+  const pu = readPlaneUnits(wasmScene, ctx)
+  if (pu === null) return []
+  return unitsAtSegments(pu, anchors).map((u) => draftRef('draft-island', ctx, u.key))
+}
+
+/** Replace each group's nodes in `committed` with the refs found at its
+ *  moved anchors (in the position of the group's first node), dropping a
+ *  group that cannot be re-found. Duplicate refs collapse. */
+function repointGroups(
+  committed: NodeRef[],
+  groups: readonly DraftGroup[],
+  found: ReadonlyMap<DraftGroup, NodeRef[]>,
+): void {
+  const seen = new Set<string>()
+  const out: NodeRef[] = []
+  const placed = new Set<DraftGroup>()
+  for (const node of committed) {
+    const g = groups.find((x) => x.nodes.includes(node))
+    if (g === undefined) {
+      out.push(node)
+      continue
+    }
+    if (placed.has(g)) continue
+    placed.add(g)
+    for (const ref of found.get(g) ?? []) {
+      const k = `${ref.ctx}:${ref.key}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      out.push(ref)
+    }
+  }
+  committed.splice(0, committed.length, ...out)
+}
+
+/**
+ * Commit one affine to the whole selection: drawn shapes per plane context
+ * through drafts, whole sketches and everything else via a single
  * `transform_selection` call. Kernel errors propagate to the caller's toast
  * handling.
+ *
+ * The gesture is ONE undo step labeled `label`, and atomic: when it would
+ * record more than one history entry (drafts in several contexts, drafts and
+ * objects, objects and whole sketches…) it runs inside a history bracket, and
+ * any refusal restores the document exactly (`inHistoryBracket`).
+ *
+ * A shape drawn half on a selected object's face and half beside it (MIXED)
+ * is moved by drawing it there, in a fixed order that needs no guessing:
+ * (a) its non-riding edges are captured from the listing and erased; (b) the
+ * objects transform — their face parts ride along; (c) the captured edges are
+ * drawn again, carried through the affine, each curve run re-bracketed so a
+ * circle stays a circle under a similarity. A mixed shape that leaves its
+ * plane (every non-riding edge free) detaches through the sketch machinery
+ * after the owners move.
  *
  * `activeInstance`, when set (component-edit-parity.md phase A2 — editing
  * INSIDE a component instance's own definition), routes every selected
@@ -107,383 +525,349 @@ export function planSketchTransforms(
  * instead — `affineF64` is still the WORLD gesture affine; the kernel
  * conjugates it through the instance's pose itself (never ambiguous under
  * any pose, unlike a scalar distance — no non-uniform-scale refusal here).
- * A definition has no nested groups/instances/sketches of its own (the data
- * model is flat), so this is the only node kind an instance-scoped selection
- * can ever contain; anything else in the selection is skipped rather than
- * routed through the world path, which would silently touch the wrong scene.
+ * Drawn shapes inside an instance carry the instance in their context, so
+ * their drafts conjugate the same way.
  */
 export function commitSelectionTransform(
   wasmScene: WasmScene,
   selection: readonly NodeRef[],
   affineF64: Float64Array,
   activeInstance?: bigint | null,
+  label = 'Move',
 ): NodeRef[] {
-  // The post-commit selection: every node as it was, except a chord
-  // imprint, whose run is RE-CUT by its move (fresh edge handles) and so is
-  // re-keyed to the edge the kernel hands back — the caller re-selects
-  // exactly these, so a moved chord stays selected.
   const committed: NodeRef[] = [...selection]
-  // Validate everything that CAN be validated up front (sub-face imprints,
-  // sketch islands), and make the whole commit atomic: every kernel step
-  // that lands is counted, and a later refusal retracts exactly those
-  // steps through scene_undo — no half-moved selections, the posture
-  // `duplicateSketchSelection` already takes.
-  let landed = 0
-  const retract = () => {
-    while (landed > 0) {
-      wasmScene.scene_undo().free()
-      landed -= 1
+  const groups = planDraftTransforms(wasmScene, selection)
+  // Classify and validate EVERY group before anything lands: in-plane groups
+  // draft (a mixed one is captured to be drawn again); a pure-void group that
+  // leaves its plane detaches; a group with any face edge that leaves its
+  // plane refuses, whole selection.
+  const pureDrafts: DraftGroup[] = []
+  const redraws = new Map<DraftGroup, CapturedDrawing>()
+  const detachIslands: SketchIslandGroup[] = []
+  const detachPostIslands: SketchIslandGroup[] = []
+  const detaching: DraftGroup[] = []
+  for (const g of groups) {
+    if (inPlane(g, affineF64)) {
+      if (g.mixed) redraws.set(g, captureDrawing(wasmScene, g))
+      else pureDrafts.push(g)
+    } else if (g.edges.every((e) => e.store.kind === 'free')) {
+      detaching.push(g)
+      ;(g.mixed ? detachPostIslands : detachIslands).push(...freeIslandsOf(wasmScene, g))
+    } else {
+      throw notInPlane()
     }
   }
-  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
-  for (const { sketch, island } of islands) {
-    if (!wasmScene.can_transform_sketch_island(sketch, island, affineF64)) {
-      throw new Error('WouldRetopologize: the move would land a shape on other geometry')
+  const { sketches, islands } = planSketchTransforms(wasmScene, selection, detachIslands)
+  // The mixed islands' own plan (folded to whole sketches like any other),
+  // minus anything the main plan already moves.
+  let post: { sketches: bigint[]; islands: SketchIslandGroup[] } = { sketches: [], islands: [] }
+  if (detachPostIslands.length > 0) {
+    const plan = planSketchTransforms(wasmScene, [], detachPostIslands)
+    const moving = new Set<bigint>([...sketches, ...islands.map((g) => g.sketch)])
+    post = {
+      sketches: plan.sketches.filter((x) => !moving.has(x)),
+      islands: plan.islands.filter((g) => !moving.has(g.sketch)),
     }
-  }
-  // Imprints (drawn shapes on a solid's face — imprints.ts) move on their
-  // face through their own kernel ops: a sub-face slides in place (handle
-  // kept), a chord run is re-cut (fresh handle, returned). They commit
-  // FIRST: each is a single validated kernel op that refuses typed and
-  // leaves the object untouched (`NotInPlane` off the face, the imprint
-  // gates when it would leave the face), so a refusal aborts before any
-  // node below has moved — no half-moved selections. A sub-face is
-  // pre-checked (`check_transform_imprint`, which throws the real typed
-  // refusal) so a multi-imprint selection refuses whole rather than
-  // moving some.
-  const imprints = imprintNodes(selection)
-  if (imprints.length > 0) {
-    for (const node of imprints) {
-      if (node.kind !== 'imprint') continue
-      if (activeInstance != null) {
-        wasmScene.check_transform_imprint_in_instance(activeInstance, node.object, node.id, affineF64)
-      } else {
-        wasmScene.check_transform_imprint(node.object, node.id, affineF64)
-      }
-    }
-    try {
-      for (const node of imprints) {
-        if (node.kind === 'imprint') {
-          if (activeInstance != null) {
-            wasmScene.transform_imprint_in_instance(activeInstance, node.object, node.id, affineF64)
-          } else {
-            wasmScene.transform_imprint(node.object, node.id, affineF64)
-          }
-          landed += 1
-          continue
-        }
-        const edge = activeInstance != null
-          ? wasmScene.transform_chord_in_instance(activeInstance, node.object, node.id, affineF64)
-          : wasmScene.transform_chord(node.object, node.id, affineF64)
-        landed += 1
-        const at = committed.findIndex((n) => n === node)
-        if (at >= 0) committed[at] = { kind: 'imprint-chord', id: edge, object: node.object }
-      }
-    } catch (err) {
-      retract()
-      throw err
-    }
-  }
-  if (activeInstance != null) {
-    const objects = selection.filter((node) => node.kind === 'object').map((node) => node.id)
-    if (objects.length > 0 || sketches.length > 0 || islands.length > 0) {
-      try {
-        wasmScene.transform_def_selection(
-          activeInstance,
-          new BigUint64Array(objects),
-          new BigUint64Array(sketches),
-          new BigUint64Array(islands.map(({ sketch }) => sketch)),
-          new BigUint64Array(islands.map(({ island }) => island)),
-          affineF64,
-        )
-      } catch (err) {
-        retract()
-        throw err
-      }
-    }
-    return committed
   }
   const kinds: number[] = []
   const ids: bigint[] = []
-  for (const node of selection) {
-    if (
-      node.kind === 'sketch' ||
-      node.kind === 'sketch-island' ||
-      node.kind === 'sketch-edge' ||
-      node.kind === 'sketch-curve'
-    ) {
-      continue // handled by the sketch plan below
-    }
-    if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
-      continue // committed above
-    }
+  for (const node of nonDraft(selection)) {
+    if (node.kind === 'sketch') continue // handled by the sketch plan
+    if (activeInstance != null && node.kind !== 'object') continue
     kinds.push(nodeKindToNumber(node.kind))
     ids.push(node.id)
   }
-  // Islands were validated above (one refused landing aborts before
-  // anything commits); a refusal from here on retracts what landed.
+  // History entries this gesture would record unbracketed.
+  const hasPost = post.sketches.length > 0 || post.islands.length > 0
+  const mainSteps =
+    activeInstance != null
+      ? (ids.length > 0 || sketches.length > 0 || islands.length > 0 ? 1 : 0) + (hasPost ? 1 : 0)
+      : islands.length + (kinds.length > 0 || sketches.length > 0 ? 1 : 0) + post.islands.length + (post.sketches.length > 0 ? 1 : 0)
+  const steps = pureDrafts.length + 2 * redraws.size + mainSteps
+
+  const found = new Map<DraftGroup, NodeRef[]>()
+  // Shapes riding with a selected owner (dropped from the plan) move with
+  // it; remember where they are so they stay selected where they land.
+  const planned = new Set(groups.flatMap((g) => g.nodes))
+  const riding = selection
+    .filter((n) => isDraftRef(n) && !planned.has(n))
+    .map((n) => ({ node: n, segs: segmentsOf(wasmScene, n) }))
+  const ridingFound = new Map<NodeRef, NodeRef[]>()
+  inHistoryBracket(
+    wasmScene,
+    label,
+    () => {
+      // (a) Erase the mixed shapes' non-riding edges; the pure shapes move.
+      for (const g of redraws.keys()) {
+        runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+          wasmScene.draft_remove_edges(d, keysToArray(g.edges.map((e) => e.key)))
+        })
+      }
+      for (const g of pureDrafts) {
+        runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, label, (d) => {
+          wasmScene.draft_transform_edges(d, keysToArray(g.edges.map((e) => e.key)), affineF64)
+        })
+      }
+      // (b) The owners (and detaching shapes) transform.
+      if (activeInstance != null) {
+        const defMove = (objs: bigint[], sks: bigint[], isl: SketchIslandGroup[]) => {
+          wasmScene.transform_def_selection(
+            activeInstance,
+            new BigUint64Array(objs),
+            new BigUint64Array(sks),
+            new BigUint64Array(isl.flatMap(({ sketch, islands: list }) => list.map(() => sketch))),
+            new BigUint64Array(isl.flatMap(({ islands: list }) => list)),
+            affineF64,
+          )
+        }
+        if (ids.length > 0 || sketches.length > 0 || islands.length > 0) defMove(ids, sketches, islands)
+      } else {
+        for (const group of islands) {
+          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+        }
+        if (kinds.length > 0 || sketches.length > 0) {
+          wasmScene.transform_selection(
+            new Uint8Array(kinds),
+            new BigUint64Array(ids),
+            new BigUint64Array(sketches),
+            affineF64,
+          )
+        }
+      }
+      // (c) Draw the mixed shapes' captured edges where they now belong.
+      for (const [g, cap] of redraws) redrawCaptured(wasmScene, g, cap, [affineF64], label)
+      if (activeInstance != null) {
+        if (hasPost) {
+          wasmScene.transform_def_selection(
+            activeInstance,
+            new BigUint64Array(0),
+            new BigUint64Array(post.sketches),
+            new BigUint64Array(post.islands.flatMap(({ sketch, islands: list }) => list.map(() => sketch))),
+            new BigUint64Array(post.islands.flatMap(({ islands: list }) => list)),
+            affineF64,
+          )
+        }
+      } else {
+        for (const group of post.islands) {
+          wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64)
+        }
+        if (post.sketches.length > 0) {
+          wasmScene.transform_selection(new Uint8Array(0), new BigUint64Array(0), new BigUint64Array(post.sketches), affineF64)
+        }
+      }
+      // Re-resolve the moved shapes BY GEOMETRY in the final state.
+      for (const g of [...pureDrafts, ...redraws.keys()]) {
+        found.set(g, refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affineF64)))
+      }
+      for (const g of detaching) {
+        found.set(g, refsAtAnchors(wasmScene, ctxThroughAffine(g.ctx, affineF64), movedAnchors(g, affineF64)))
+      }
+      for (const { node, segs } of riding) {
+        if (!isDraftRef(node) || segs.length === 0) continue
+        const anchors = segs.map(([a, b]) => [applyAffineToPoint(affineF64, a), applyAffineToPoint(affineF64, b)] as [V3, V3])
+        ridingFound.set(node, refsAtAnchors(wasmScene, ridingCtx(node.ctx, affineF64), anchors))
+      }
+    },
+    steps > 1,
+  )
+  repointGroups(committed, groups, found)
+  if (ridingFound.size > 0) {
+    const seen = new Set(
+      committed.filter((n) => isDraftRef(n) && !ridingFound.has(n)).map((n) => `${n.ctx}:${n.key}`),
+    )
+    const out: NodeRef[] = []
+    for (const node of committed) {
+      const refs = ridingFound.get(node)
+      if (refs === undefined) {
+        out.push(node)
+        continue
+      }
+      for (const ref of refs) {
+        const k = `${ref.ctx}:${ref.key}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        out.push(ref)
+      }
+    }
+    committed.splice(0, committed.length, ...out)
+  }
+  return committed
+}
+
+/** Where a shape riding on a moved owner is listed afterwards: its (world)
+ *  plane moved through `affine`, keeping an instance context's instance and
+ *  an object-scoped context's object. */
+function ridingCtx(ctx: string, affine: Float64Array): string | null {
+  const pl = planeOfCtx(ctx)
+  if (pl === null) return null
+  const moved = ctxThroughAffine(ctx, affine)
+  if (moved === null) return null
+  let object: unknown
   try {
-    for (const { sketch, island } of islands) {
-      wasmScene.transform_sketch_island(sketch, island, affineF64)
-      landed += 1
+    object = (JSON.parse(ctx) as { object?: unknown }).object
+  } catch {
+    object = undefined
+  }
+  if (typeof object !== 'number') return moved
+  const mp = planeOfCtx(moved)
+  return mp === null ? null : ctxOfObjectPlane([...mp.point, ...mp.normal], BigInt(object))
+}
+
+/** The draft ref (island) of a sketch's island, by its edges' positions —
+ *  how a copy made through the sketch machinery is handed back as a drawn
+ *  shape. `null` when it cannot be found. */
+function draftRefOfSketchIsland(wasmScene: WasmScene, sketch: bigint, island: bigint): NodeRef | null {
+  const ctx = ctxOfSketch(wasmScene, sketch)
+  if (ctx === null) return null
+  const anchors: [V3, V3][] = []
+  for (const edge of wasmScene.sketch_island_edges(sketch, island)) {
+    const ends = wasmScene.sketch_edge_endpoints(sketch, edge)
+    if (ends === undefined) continue
+    anchors.push([[ends[0], ends[1], ends[2]], [ends[3], ends[4], ends[5]]])
+  }
+  return refsAtAnchors(wasmScene, ctx, anchors)[0] ?? null
+}
+
+/**
+ * Lay copies of a selection's owners (objects, groups, instances) and of its
+ * drawn shapes at `affines`. `copyOwners` performs the owners' copy (one
+ * kernel call) and returns the created refs.
+ *
+ * The whole gesture is ONE undo step ("Copy") and atomic: with owners and
+ * drawing both present it runs in a history bracket, and any refusal puts the
+ * document back exactly. The order is deterministic. Whole drawn shapes and
+ * sketches copy first (`draft_copy_edges`); then the owners copy — the drawing
+ * on their faces rides with the copies; then a MIXED shape (part of it rides
+ * with an owner, the rest is drawn) draws its captured non-riding edges again
+ * at every rep, circles kept as circles under a similarity.
+ */
+export function copyOwnersAndDrawing(
+  wasmScene: WasmScene,
+  owners: readonly NodeRef[],
+  drawn: readonly NodeRef[],
+  affines: readonly Float64Array[],
+  copyOwners: () => NodeRef[],
+): NodeRef[] {
+  if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
+  if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
+  return inHistoryBracket(wasmScene, 'Copy', () => {
+    const plan = planCopy(wasmScene, [...owners, ...drawn], affines)
+    const whole = copyWholeDrawing(wasmScene, plan, affines)
+    const ownerCopies = copyOwners()
+    return [...whole, ...copyMixedDrawing(wasmScene, plan, affines), ...ownerCopies]
+  })
+}
+
+/** What a copy of a selection's drawing does, decided before anything lands. */
+interface CopyPlan {
+  /** In-plane shapes drawn whole: copied with `draft_copy_edges`. */
+  pure: DraftGroup[]
+  /** In-plane shapes part of which rides with an owner: drawn again. */
+  mixed: Map<DraftGroup, CapturedDrawing>
+  /** Free islands of shapes that leave their plane: detach-copied. */
+  detachIslands: SketchIslandGroup[]
+  wholeSketchSources: NodeRef[]
+}
+
+function planCopy(wasmScene: WasmScene, selection: readonly NodeRef[], affines: readonly Float64Array[]): CopyPlan {
+  const plan: CopyPlan = {
+    pure: [],
+    mixed: new Map(),
+    detachIslands: [],
+    wholeSketchSources: selection.filter((n) => n.kind === 'sketch'),
+  }
+  for (const g of planDraftTransforms(wasmScene, selection)) {
+    if (affines.every((a) => inPlane(g, a))) {
+      if (g.mixed) plan.mixed.set(g, captureDrawing(wasmScene, g))
+      else plan.pure.push(g)
+    } else if (g.edges.every((e) => e.store.kind === 'free')) {
+      plan.detachIslands.push(...freeIslandsOf(wasmScene, g))
+    } else {
+      throw notInPlane()
     }
-    if (kinds.length > 0 || sketches.length > 0) {
-      wasmScene.transform_selection(
-        new Uint8Array(kinds),
-        new BigUint64Array(ids),
-        new BigUint64Array(sketches),
-        affineF64,
-      )
+  }
+  return plan
+}
+
+/** The shapes of a plane context copied by `draft_copy_edges`, and the whole
+ *  sketches / detaching islands. */
+function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonly Float64Array[]): NodeRef[] {
+  const committed: NodeRef[] = []
+  for (const g of plan.pure) {
+    const seen = new Set<string>()
+    const addRefs = (affine: Float64Array) => {
+      for (const ref of refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affine))) {
+        const k = `${ref.ctx}:${ref.key}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        committed.push(ref)
+      }
     }
-  } catch (err) {
-    retract()
-    throw err
+    // ALL reps of one context go in ONE draft — `draft_copy_edges` once per
+    // rep over the original shapes' keys. A rep landing across the originals
+    // re-keys them inside the draft and the next rep's keys go stale; the
+    // draft is then cancelled whole and the reps are laid down one draft
+    // each, re-finding the originals by geometry between reps.
+    const original = g.edges.map((e) => e.key)
+    try {
+      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, 'Copy', (d) => {
+        for (const affine of affines) wasmScene.draft_copy_edges(d, keysToArray(original), affine)
+      })
+      for (const affine of affines) addRefs(affine)
+      continue
+    } catch (err) {
+      if (affines.length === 1) throw err
+    }
+    for (const affine of affines) {
+      const pu = readPlaneUnits(wasmScene, g.ctx)
+      if (pu === null) continue
+      const anchors = g.edges.map((e) => [e.a, e.b] as [V3, V3])
+      const keys = unitsAtSegments(pu, anchors).flatMap((u) => u.edges.map((e) => e.key))
+      if (keys.length === 0) continue
+      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, 'Copy', (d) => {
+        wasmScene.draft_copy_edges(d, keysToArray(keys), affine)
+      })
+      addRefs(affine)
+    }
+  }
+  if (plan.wholeSketchSources.length > 0 || plan.detachIslands.length > 0) {
+    committed.push(...duplicateWholeSketchesByAffineArray(wasmScene, plan.wholeSketchSources, affines, plan.detachIslands))
+  }
+  return committed
+}
+
+/** The mixed shapes' captured non-riding edges, drawn at every rep (the
+ *  originals stay). */
+function copyMixedDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonly Float64Array[]): NodeRef[] {
+  const committed: NodeRef[] = []
+  for (const [g, cap] of plan.mixed) {
+    redrawCaptured(wasmScene, g, cap, affines, 'Copy')
+    const seen = new Set<string>()
+    for (const affine of affines) {
+      for (const ref of refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affine))) {
+        const k = `${ref.ctx}:${ref.key}`
+        if (seen.has(k)) continue
+        seen.add(k)
+        committed.push(ref)
+      }
+    }
   }
   return committed
 }
 
 /**
- * Duplicate a selection's sketch geometry at an offset — Move+Alt's copy
- * path for sketches, which have no single kernel duplicate op. The delta
- * splits the work per target sketch, because a sketch is PLANAR:
- *
- * - **In-plane delta** (stays on the sketch plane) → REPLAY: each source
- *   island's edges are re-drawn into the SAME sketch through the ordinary
- *   sticky machinery (`sketch_add_segment`), translated by `delta`, inside
- *   one drawing gesture per sketch so a single undo removes that sketch's
- *   whole copy. Curve chains replay inside a `sketch_begin_curve_with`
- *   bracket carrying the translated analytic definition, so a copied circle
- *   is a true circle (center snap and all).
- * - **Out-of-plane delta** (leaves the plane — e.g. a ground shape copied up
- *   the Z axis) → NEW-SKETCH copy: a translated replay cannot leave the
- *   plane (points would come off it edge by edge), so a source sketch's
- *   planned islands are copied TOGETHER via `copy_sketch_islands` onto ONE
- *   new sketch on the translated plane, leaving the source untouched. This
- *   reuses the kernel's detach/rebuild machinery — the same
- *   replay-with-identity a MOVE off the plane already takes, minus the
- *   source removal — so the copy keeps curve identity too. Keeping a
- *   sketch's islands together is what preserves a region's HOLES (a hole
- *   boundary is its own island): copying a donut's outer and inner loops
- *   onto separate sketches would silently drop the hole.
- *
- * Granularity mirrors `planSketchTransforms`: a selected edge/curve copies
- * the island it rides with; islands covering every island of their sketch
- * (or a whole-sketch selection) copy the whole sketch. Each in-plane sketch
- * is one undo step; each out-of-plane SOURCE SKETCH is one undo step
- * (regardless of how many of its islands are copied). Islands on different
- * source sketches each land on their own new sketch.
- *
- * FAILURE SEMANTICS — the call is atomic: on any throw the document is left
- * exactly as it was found, including copies earlier iterations had already
- * committed. Getting there takes real work for the in-plane replay, because
- * a sketch replay cannot be rolled back by abandoning it. `sketch_add_segment`
- * mutates the live sketch IMMEDIATELY (in the kernel each add is its own
- * committed clone-validate-swap); the gesture bracket only groups those
- * already-applied edits into one undo step at `sketch_end_gesture`.
- * `sketch_cancel_gesture` is therefore NOT a rollback — it drops the pending
- * undo record and LEAVES the mutations (kernel
- * `Document::cancel_sketch_gesture`: "Any mutations made inside the abandoned
- * bracket stay in the sketch but out of the undo log; cancel-before-mutate is
- * the caller's contract"). Cancelling a replay that had already added an edge
- * would strand a half-copy that Ctrl+Z cannot reach. So recovery runs in two
- * steps:
- *
- * 1. ALWAYS close the bracket with `sketch_end_gesture`, including when the
- *    replay threw — the pattern every other sketch tool follows
- *    (`runSketchGesture`, OffsetTool). It diffs against the pre-gesture
- *    snapshot and records ONE undo step for whatever actually landed, or
- *    nothing at all if the sketch is unchanged. That alone keeps any partial
- *    within reach of a single Ctrl+Z.
- * 2. Then RETRACT those steps, so a refused copy is invisible rather than
- *    merely undoable. Each in-plane gesture's retracting `scene_undo` is
- *    guarded by `history_generation`: the step is only counted when the
- *    generation moved by exactly one across the bracket, which proves the
- *    step is ours and sits on top of the stack. An unguarded undo after a
- *    no-op gesture would pop an unrelated action instead — the
- *    wrong-action-undo bug this repo has already fixed once.
- *
- * The out-of-plane arm needs no such dance: `copy_sketch_islands` is atomic
- * kernel-side (it builds the new sketch fully before mutating and throws with
- * nothing recorded), so a successful call is provably exactly one undo step
- * on top of the stack and is counted directly.
- *
- * Atomicity is also what the caller assumes: MoveTool reselects only the
- * copies it receives as a return value, so a throw has to mean nothing
- * landed — anything else leaves unselected copies sitting in the document
- * behind a toast saying the copy failed.
- *
- * Returns the copies as `sketch-island` NodeRefs (in-plane: post-gesture
- * island ids on the source sketch, merged islands deduped; out-of-plane: the
- * island(s) of each new copy sketch) so the caller can reselect them.
+ * Duplicate a selection at an offset — Move+Alt's copy path for drawn
+ * shapes and whole sketches. A translation is just an affine, so this is
+ * `duplicateSketchSelectionByAffineArray` with one translation.
  */
 export function duplicateSketchSelection(
   wasmScene: WasmScene,
   selection: readonly NodeRef[],
   delta: [number, number, number],
 ): NodeRef[] {
-  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
-
-  // Islands to copy, per sketch: whole-sketch selections take every island.
-  const islandsBySketch = new Map<bigint, bigint[]>()
-  for (const sketch of sketches) {
-    islandsBySketch.set(sketch, [...wasmScene.sketch_island_ids(sketch)])
-  }
-  for (const { sketch, island } of islands) {
-    const list = islandsBySketch.get(sketch) ?? []
-    list.push(island)
-    islandsBySketch.set(sketch, list)
-  }
-
-  // Route each target sketch by whether `delta` leaves its plane (kernel
-  // PLANE_DIST is 1e-9 m): in-plane sketches replay into themselves; an
-  // out-of-plane delta detach-copies each sketch's islands onto ONE new
-  // sketch on the translated plane. The out-of-plane path keeps a source
-  // sketch's islands TOGETHER (one copy sketch per source, not per island):
-  // a region's hole boundary is its own island, so splitting a donut's outer
-  // and inner loops onto separate sketches would silently drop the hole.
-  const inPlaneEdges = new Map<bigint, bigint[]>()
-  const outOfPlaneBySketch = new Map<bigint, bigint[]>()
-  for (const [sketch, islandIds] of islandsBySketch) {
-    const plane = wasmScene.sketch_plane(sketch)
-    if (plane === undefined) continue // stale — skip like any pruned selection
-    const off = delta[0] * plane[3] + delta[1] * plane[4] + delta[2] * plane[5]
-    if (Math.abs(off) > 1e-9) {
-      outOfPlaneBySketch.set(sketch, islandIds)
-    } else {
-      const all: bigint[] = []
-      for (const island of islandIds) {
-        all.push(...wasmScene.sketch_island_edges(sketch, island))
-      }
-      inPlaneEdges.set(sketch, all)
-    }
-  }
-
-  const committed: NodeRef[] = []
-  // Undo steps this call has pushed, newest last — the retraction stack for a
-  // mid-copy failure. Only provably-ours steps are counted (see the guards).
-  let recorded = 0
-  try {
-    for (const [sketch, edges] of inPlaneEdges) {
-      if (edges.length === 0) continue
-      // Snapshot geometry and curve grouping up front — the replay's sticky
-      // splits may invalidate source edge handles mid-loop otherwise.
-      interface Seg { a: [number, number, number]; b: [number, number, number] }
-      const plain: Seg[] = []
-      const curves = new Map<string, { geom: number[] | undefined; segs: Seg[] }>()
-      for (const edge of edges) {
-        const ends = wasmScene.sketch_edge_endpoints(sketch, edge)
-        if (ends === undefined) continue // stale handle — nothing to copy
-        const seg: Seg = {
-          a: [ends[0] + delta[0], ends[1] + delta[1], ends[2] + delta[2]],
-          b: [ends[3] + delta[0], ends[4] + delta[1], ends[5] + delta[2]],
-        }
-        const curve = wasmScene.sketch_edge_curve(sketch, edge)
-        if (curve === undefined) {
-          plain.push(seg)
-        } else {
-          const key = curve.toString()
-          const entry = curves.get(key) ?? {
-            geom: wasmScene.sketch_curve_geom(sketch, curve) as number[] | undefined,
-            segs: [],
-          }
-          entry.segs.push(seg)
-          curves.set(key, entry)
-        }
-      }
-      if (plain.length === 0 && curves.size === 0) continue
-
-      const genBefore = wasmScene.history_generation()
-      wasmScene.sketch_begin_gesture(sketch)
-      const newEdges: bigint[] = []
-      try {
-        const add = (s: Seg): void => {
-          const report = wasmScene.sketch_add_segment(
-            sketch, s.a[0], s.a[1], s.a[2], s.b[0], s.b[1], s.b[2],
-          )
-          newEdges.push(...report.new_edges())
-          report.free()
-        }
-        for (const { geom, segs } of curves.values()) {
-          if (geom !== undefined) {
-            // Translation preserves the circle exactly: center shifts, radius
-            // stays — the copy is a true curve, not just facets.
-            wasmScene.sketch_begin_curve_with(
-              sketch,
-              geom[0] + delta[0],
-              geom[1] + delta[1],
-              geom[2] + delta[2],
-              geom[3],
-            )
-          } else {
-            wasmScene.sketch_begin_curve(sketch) // identity-only chain
-          }
-          for (const s of segs) add(s)
-          wasmScene.sketch_end_curve(sketch)
-        }
-        for (const s of plain) add(s)
-      } finally {
-        // ALWAYS close the bracket — never `sketch_cancel_gesture`. Every add
-        // above has already mutated the live sketch, and `sketch_end_gesture`
-        // is what turns whatever landed into ONE undo step (an unchanged
-        // sketch records nothing, so this is safe whether the replay finished,
-        // partially applied, or threw on its first call). Cancelling would
-        // drop the record and keep the geometry.
-        wasmScene.sketch_end_gesture(sketch)
-        // Exactly +1 proves this gesture recorded exactly one step AND that it
-        // is the stack top — nothing else in this loop pushes, every other
-        // call being a pure query. On any other delta ownership is unproven,
-        // so the step is left for Ctrl+Z rather than risk retracting
-        // someone else's.
-        if (wasmScene.history_generation() === genBefore + 1n) recorded += 1
-      }
-
-      // Map the replayed edges to their (possibly merged) islands.
-      const seen = new Set<string>()
-      for (const edge of newEdges) {
-        const island = wasmScene.sketch_edge_island(sketch, edge)
-        if (island === undefined) continue // split away later in the replay
-        const key = island.toString()
-        if (seen.has(key)) continue
-        seen.add(key)
-        committed.push({ kind: 'sketch-island', id: island, sketch })
-      }
-    }
-
-    // Out-of-plane copies: each SOURCE sketch's islands land TOGETHER on one
-    // new sketch on the translated plane via the kernel's detach/rebuild
-    // machinery, source left untouched. All of a sketch's islands go in one
-    // call so regions (and their holes) re-derive correctly. Every call is
-    // atomic and, on success, exactly one undo step on top of the stack —
-    // counted directly (no gesture bracket to diff, no history-generation
-    // guard needed).
-    const affine = affineToFloat64(translationAffine(delta[0], delta[1], delta[2]))
-    for (const [sketch, islandIds] of outOfPlaneBySketch) {
-      if (islandIds.length === 0) continue
-      const copySketch = wasmScene.copy_sketch_islands(
-        sketch,
-        new BigUint64Array(islandIds),
-        affine,
-      )
-      recorded += 1
-      for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
-        committed.push({ kind: 'sketch-island', id: copyIsland, sketch: copySketch })
-      }
-    }
-  } catch (err) {
-    // Retract every step this call recorded, newest first: Move+Alt is ONE
-    // user action, so a refused copy puts the document back as it found it.
-    try {
-      for (let i = 0; i < recorded; i += 1) wasmScene.scene_undo().free()
-    } catch {
-      // A refused retraction would be a kernel bug (undo is never turned away
-      // by a heuristic — DEVELOPMENT.md rule 9). Falling back to "the partial
-      // stays, as one undo step per sketch" keeps the floor that matters: no
-      // geometry is ever stranded outside the undo log. The replay's own
-      // error is the one worth reporting, so it still propagates below.
-    }
-    throw err
-  }
-  return committed
+  return duplicateSketchSelectionByAffineArray(wasmScene, selection, [
+    affineToFloat64(translationAffine(delta[0], delta[1], delta[2])),
+  ])
 }
 
 /**
@@ -626,13 +1010,11 @@ function projectOntoSketchPlane(
  *
  * Granularity mirrors `planSketchTransforms`: a selected edge/curve copies
  * the island it rides with; islands covering every island of their sketch
- * (or a whole-sketch selection) copy the whole sketch. Atomicity mirrors
- * `duplicateSketchSelection`: every step this call records (in-plane
- * gesture brackets guarded by history-generation, like the translate arm;
- * out-of-plane `copy_sketch_islands` calls counted unconditionally, since
- * each is atomic kernel-side) is retracted, newest first, on any throw — a
- * refused copy puts the document back exactly as it found it, whether the
- * failure came from an in-plane replay or an out-of-plane detach-copy.
+ * (or a whole-sketch selection) copy the whole sketch. The whole copy
+ * is ONE undo step and atomic: it runs in a history bracket (see
+ * `duplicateSketchSelectionByAffineArray`), so a refused copy puts the
+ * document back exactly as it found it, whether the failure came from an
+ * in-plane replay or an out-of-plane detach-copy.
  *
  * Returns the copies as `sketch-island` NodeRefs so the caller can reselect
  * them, matching `duplicateSketchSelection`'s return shape.
@@ -644,6 +1026,54 @@ export function duplicateSketchSelectionByAffine(
 ): NodeRef[] {
   return duplicateSketchSelectionByAffineArray(wasmScene, selection, [affineF64])
 }
+
+/**
+ * `duplicateSketchSelectionByAffine`, generalized to an ORDERED array of
+ * cumulative affines — one per copy — for Rotate+Alt's and Move+Alt's ×N /
+ * ÷N array refinement (`[stepAffine, 2·stepAffine, …]`, already composed by
+ * the caller). Copies drawn shapes and whole sketches.
+ *
+ * Drawn shapes (`draft-*` refs) group by plane context, edges and curves
+ * lifting to their shape. Routing is decided ONCE for the whole array:
+ *
+ * - every rep in the plane → ONE draft per context (one undo step for the
+ *   whole array), `draft_copy_edges` once per rep over the shapes' edge keys,
+ *   the originals left. If a rep landing across the originals re-keys them
+ *   mid-draft, the draft is cancelled and each rep gets its own draft,
+ *   re-reading the originals' keys by geometry. Copies arrange like a draw,
+ *   so a copy half over a face and half over the void is fine. A MIXED shape
+ *   (part of it rides with a selected owner) is not copied by key: its
+ *   non-riding edges are captured and drawn again at every rep.
+ * - any rep leaves the plane: a pure-void shape (every edge free) copies
+ *   onto new sketches through the kernel's detach machinery
+ *   (`copy_sketch_islands`, per rep); a shape with any face edge refuses
+ *   `NotInPlane`, before anything lands.
+ *
+ * Whole sketches replay as they always did (data-driven in-plane vs
+ * out-of-plane routing). The call is ONE undo step ("Copy") and ATOMIC: when
+ * it could record more than one entry it runs in a history bracket, and any
+ * throw restores the document exactly.
+ *
+ * Returns the copies as selection refs (drawn shapes as `draft-island` refs
+ * found by geometry) so the caller can reselect them.
+ */
+export function duplicateSketchSelectionByAffineArray(
+  wasmScene: WasmScene,
+  selection: readonly NodeRef[],
+  affines: readonly Float64Array[],
+): NodeRef[] {
+  const plan = planCopy(wasmScene, selection, affines)
+  const sketchPart = plan.wholeSketchSources.length > 0 || plan.detachIslands.length > 0
+  const steps = plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0)
+  return inHistoryBracket(
+    wasmScene,
+    'Copy',
+    () => [...copyWholeDrawing(wasmScene, plan, affines), ...copyMixedDrawing(wasmScene, plan, affines)],
+    sketchPart || steps > 1,
+  )
+}
+
+
 
 /**
  * `duplicateSketchSelectionByAffine`, generalized to an ORDERED array of
@@ -669,13 +1099,11 @@ export function duplicateSketchSelectionByAffine(
  * In-plane reps replay into the SAME sketch inside ONE
  * `sketch_begin_gesture` / `sketch_end_gesture` bracket covering every rep
  * — so N reps still cost exactly ONE document history entry, matching the
- * object array's `duplicate_selection_array(count=N)` shape (`_resolveArray`
- * in RotateTool.ts relies on this to retract the whole array with a known,
- * fixed number of `scene_undo` calls). Out-of-plane reps have no such
- * kernel primitive to batch through — each `copy_sketch_islands` call is
- * its own atomic step, so N out-of-plane reps cost N history entries; the
- * caller's `recordedEntries` bookkeeping (a history-generation delta, not a
- * hardcoded count) accounts for however many that turns out to be.
+ * object array's `duplicate_selection_array(count=N)` shape . Out-of-plane
+ * reps have no such kernel primitive to batch through — each
+ * `copy_sketch_islands` call is its own atomic step; the caller's history
+ * bracket folds however many of those (and per-sketch replays) into the one
+ * undo step of the gesture.
  *
  * The original single-affine doc comment, otherwise unchanged:
  *
@@ -741,32 +1169,31 @@ export function duplicateSketchSelectionByAffine(
  *
  * Granularity mirrors `planSketchTransforms`: a selected edge/curve copies
  * the island it rides with; islands covering every island of their sketch
- * (or a whole-sketch selection) copy the whole sketch. Atomicity mirrors
- * `duplicateSketchSelection`: every step this call records (in-plane
- * gesture brackets guarded by history-generation, like the translate arm;
- * out-of-plane `copy_sketch_islands` calls counted unconditionally, since
- * each is atomic kernel-side) is retracted, newest first, on any throw — a
- * refused copy puts the document back exactly as it found it, whether the
- * failure came from an in-plane replay or an out-of-plane detach-copy.
+ * (or a whole-sketch selection) copy the whole sketch. The whole copy
+ * is ONE undo step and atomic: it runs in a history bracket (see
+ * `duplicateSketchSelectionByAffineArray`), so a refused copy puts the
+ * document back exactly as it found it, whether the failure came from an
+ * in-plane replay or an out-of-plane detach-copy.
  *
  * Returns the copies as `sketch-island` NodeRefs so the caller can reselect
  * them, matching `duplicateSketchSelection`'s return shape.
  */
-export function duplicateSketchSelectionByAffineArray(
+function duplicateWholeSketchesByAffineArray(
   wasmScene: WasmScene,
   selection: readonly NodeRef[],
   affines: readonly Float64Array[],
+  freeIslands: readonly SketchIslandGroup[] = [],
 ): NodeRef[] {
-  const { sketches, islands } = planSketchTransforms(wasmScene, selection)
+  const { sketches, islands } = planSketchTransforms(wasmScene, selection, freeIslands)
 
   // Islands to copy, per sketch: whole-sketch selections take every island.
   const islandsBySketch = new Map<bigint, bigint[]>()
   for (const sketch of sketches) {
     islandsBySketch.set(sketch, [...wasmScene.sketch_island_ids(sketch)])
   }
-  for (const { sketch, island } of islands) {
+  for (const { sketch, islands: ids } of islands) {
     const list = islandsBySketch.get(sketch) ?? []
-    list.push(island)
+    list.push(...ids)
     islandsBySketch.set(sketch, list)
   }
 
@@ -846,109 +1273,90 @@ export function duplicateSketchSelectionByAffineArray(
   }
 
   const committed: NodeRef[] = []
-  // Undo steps this call has pushed, newest last — the retraction stack for
-  // a mid-copy failure, shared across both arms so the whole gesture is one
-  // atomic action (see the doc comment above).
-  let recorded = 0
-  try {
-    for (const [sketch, repPlans] of inPlanePlan) {
-      // Re-fetch: a pure query, and the plane used to classify this sketch
-      // above (needed again here to project points exactly onto it).
-      const plane = wasmScene.sketch_plane(sketch)
-      if (plane === undefined) continue // stale — vanishingly unlikely mid-call, never crash on it
+  for (const [sketch, repPlans] of inPlanePlan) {
+    // Re-fetch: a pure query, and the plane used to classify this sketch
+    // above (needed again here to project points exactly onto it).
+    const plane = wasmScene.sketch_plane(sketch)
+    if (plane === undefined) continue // stale — vanishingly unlikely mid-call, never crash on it
 
-      const genBefore = wasmScene.history_generation()
-      wasmScene.sketch_begin_gesture(sketch)
-      const newEdges: bigint[] = []
-      try {
-        const add = (s: Seg): void => {
-          // Project exactly onto the plane right before feeding the kernel:
-          // `withinMargin` already proved the true point sits inside HALF
-          // the kernel's own PLANE_DIST, so this moves it by at most that
-          // half-margin — `sketch_add_segment` can never reject on plane
-          // distance for a point that passed the check above.
-          const pa = projectOntoSketchPlane(plane, s.a)
-          const pb = projectOntoSketchPlane(plane, s.b)
-          const report = wasmScene.sketch_add_segment(
-            sketch, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2],
-          )
-          newEdges.push(...report.new_edges())
-          report.free()
-        }
-        // Every rep replays into this SAME bracket — see the doc comment:
-        // that's what keeps an N-rep array down to ONE history entry.
-        for (const { plain, curves } of repPlans) {
-          for (const { center, radius, segs } of curves.values()) {
-            if (center !== undefined && radius !== undefined) {
-              // The affine is a rigid rotation (no scale), so the radius
-              // survives unchanged — only the center moves, carried through
-              // the FULL affine rather than a plain offset, then projected
-              // exactly onto the plane for the same reason as `add` above, so
-              // a rotated circle stays a true circle (center snap and all).
-              const pc = projectOntoSketchPlane(plane, center)
-              wasmScene.sketch_begin_curve_with(sketch, pc[0], pc[1], pc[2], radius)
-            } else {
-              wasmScene.sketch_begin_curve(sketch) // identity-only chain
-            }
-            for (const s of segs) add(s)
-            wasmScene.sketch_end_curve(sketch)
-          }
-          for (const s of plain) add(s)
-        }
-      } finally {
-        // ALWAYS close the bracket — never `sketch_cancel_gesture` (see
-        // `duplicateSketchSelection`'s identical reasoning: every add above
-        // already mutated the live sketch).
-        wasmScene.sketch_end_gesture(sketch)
-        if (wasmScene.history_generation() === genBefore + 1n) recorded += 1
-      }
-
-      // Map the replayed edges to their (possibly merged) islands.
-      const seen = new Set<string>()
-      for (const edge of newEdges) {
-        const island = wasmScene.sketch_edge_island(sketch, edge)
-        if (island === undefined) continue // split away later in the replay
-        const key = island.toString()
-        if (seen.has(key)) continue
-        seen.add(key)
-        committed.push({ kind: 'sketch-island', id: island, sketch })
-      }
-    }
-
-    // Out-of-plane (or orientation-flipping, or margin-failing) copies: each
-    // source sketch's islands land TOGETHER on one new sketch via the
-    // kernel's detach/rebuild machinery, source left untouched — same
-    // reasoning as `duplicateSketchSelection`'s out-of-plane branch (a
-    // region's hole boundary is its own island). One `copy_sketch_islands`
-    // call PER REP (no kernel primitive batches these, unlike the in-plane
-    // bracket above), so N reps cost N history entries here — the caller's
-    // history-generation delta accounts for it, not a hardcoded count.
-    for (const [sketch, islandIds] of copyBySketch) {
-      if (islandIds.length === 0) continue
-      for (const affineF64 of affines) {
-        const copySketch = wasmScene.copy_sketch_islands(
-          sketch,
-          new BigUint64Array(islandIds),
-          affineF64,
-        )
-        recorded += 1
-        for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
-          committed.push({ kind: 'sketch-island', id: copyIsland, sketch: copySketch })
-        }
-      }
-    }
-  } catch (err) {
-    // Retract every step this call recorded, newest first: the copy gesture
-    // is ONE user action, so a refused copy puts the document back as it
-    // found it.
+    wasmScene.sketch_begin_gesture(sketch)
+    const newEdges: bigint[] = []
     try {
-      for (let i = 0; i < recorded; i += 1) wasmScene.scene_undo().free()
-    } catch {
-      // A refused retraction would be a kernel bug (undo is never turned
-      // away by a heuristic — DEVELOPMENT.md rule 9); see
-      // `duplicateSketchSelection`'s identical fallback comment.
+      const add = (s: Seg): void => {
+        // Project exactly onto the plane right before feeding the kernel:
+        // `withinMargin` already proved the true point sits inside HALF
+        // the kernel's own PLANE_DIST, so this moves it by at most that
+        // half-margin — `sketch_add_segment` can never reject on plane
+        // distance for a point that passed the check above.
+        const pa = projectOntoSketchPlane(plane, s.a)
+        const pb = projectOntoSketchPlane(plane, s.b)
+        const report = wasmScene.sketch_add_segment(
+          sketch, pa[0], pa[1], pa[2], pb[0], pb[1], pb[2],
+        )
+        newEdges.push(...report.new_edges())
+        report.free()
+      }
+      // Every rep replays into this SAME bracket — see the doc comment:
+      // that's what keeps an N-rep array down to ONE history entry.
+      for (const { plain, curves } of repPlans) {
+        for (const { center, radius, segs } of curves.values()) {
+          if (center !== undefined && radius !== undefined) {
+            // The affine is a rigid rotation (no scale), so the radius
+            // survives unchanged — only the center moves, carried through
+            // the FULL affine rather than a plain offset, then projected
+            // exactly onto the plane for the same reason as `add` above, so
+            // a rotated circle stays a true circle (center snap and all).
+            const pc = projectOntoSketchPlane(plane, center)
+            wasmScene.sketch_begin_curve_with(sketch, pc[0], pc[1], pc[2], radius)
+          } else {
+            wasmScene.sketch_begin_curve(sketch) // identity-only chain
+          }
+          for (const s of segs) add(s)
+          wasmScene.sketch_end_curve(sketch)
+        }
+        for (const s of plain) add(s)
+      }
+    } finally {
+      // ALWAYS close the bracket — never `sketch_cancel_gesture` (see
+      // `duplicateSketchSelection`'s identical reasoning: every add above
+      // already mutated the live sketch).
+      wasmScene.sketch_end_gesture(sketch)
     }
-    throw err
+
+    // Map the replayed edges to their (possibly merged) islands.
+    const seen = new Set<string>()
+    for (const edge of newEdges) {
+      const island = wasmScene.sketch_edge_island(sketch, edge)
+      if (island === undefined) continue // split away later in the replay
+      const key = island.toString()
+      if (seen.has(key)) continue
+      seen.add(key)
+      const ref = draftRefOfSketchIsland(wasmScene, sketch, island)
+      if (ref !== null) committed.push(ref)
+    }
+  }
+
+  // Out-of-plane (or orientation-flipping, or margin-failing) copies: each
+  // source sketch's islands land TOGETHER on one new sketch via the
+  // kernel's detach/rebuild machinery, source left untouched — same
+  // reasoning as `duplicateSketchSelection`'s out-of-plane branch (a
+  // region's hole boundary is its own island). One `copy_sketch_islands`
+  // call PER REP (no kernel primitive batches these, unlike the in-plane
+  // bracket above), so N reps are N kernel steps here, folded into the gesture's one
+  // undo step by the caller's history bracket.
+  for (const [sketch, islandIds] of copyBySketch) {
+    if (islandIds.length === 0) continue
+    for (const affineF64 of affines) {
+      const copySketch = wasmScene.copy_sketch_islands(
+        sketch,
+        new BigUint64Array(islandIds),
+        affineF64,
+      )
+      for (const copyIsland of wasmScene.sketch_island_ids(copySketch)) {
+        const ref = draftRefOfSketchIsland(wasmScene, copySketch, copyIsland)
+        if (ref !== null) committed.push(ref)
+      }
+    }
   }
   return committed
 }
@@ -997,28 +1405,15 @@ export function buildNodePreview(
   if (node.kind === 'sketch') {
     return poseDefinitionPreview(buildSketchPreviewClone(wasmScene.sketch_lines(node.id)))
   }
-  if (node.kind === 'imprint' || node.kind === 'imprint-chord') {
-    // A drawn shape on a face: the ghost is its own line work (posed when
-    // the object is a definition member edited through an instance).
-    const feature = findImprint(wasmScene, node)
-    if (feature === null) return null // stale — nothing to preview
-    return poseDefinitionPreview(buildSketchPreviewClone(imprintSegments(feature)))
-  }
-  if (
-    node.kind === 'sketch-island' ||
-    node.kind === 'sketch-edge' ||
-    node.kind === 'sketch-curve'
-  ) {
-    // Sketch geometry transforms at island granularity (the connected
-    // shape), so the ghost previews the island a selected edge/curve rides
-    // with — matching exactly what the commit will move.
-    const resolved = resolveSketchIsland(wasmScene, node)
-    if (resolved === null) return null // stale — nothing to preview
-    return poseDefinitionPreview(
-      buildSketchPreviewClone(
-        wasmScene.sketch_island_lines(resolved.sketch, resolved.island),
-      ),
-    )
+  if (isDraftKind(node.kind)) {
+    // A drawn shape: the ghost is its own line work (already WORLD
+    // coordinates, instanced or not). Edges and curves preview the shape
+    // (island) they ride with, matching exactly what the commit will move.
+    const r = resolveDraft(wasmScene, node)
+    if (r === null || r.unit === null) return null // stale — nothing to preview
+    const out = new Float32Array(r.unit.edges.length * 6)
+    r.unit.edges.forEach((e, i) => out.set([e.a[0], e.a[1], e.a[2], e.b[0], e.b[1], e.b[2]], i * 6))
+    return buildSketchPreviewClone(out)
   }
   if (activeInstance != null) {
     const group = instanceGroupGetter !== null ? instanceGroupGetter(activeInstance) : null

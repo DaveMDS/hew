@@ -73,7 +73,7 @@ describe('computeEditContext', () => {
 
   it('a deepest entry of an unexpected kind (defensive fallback) degrades to top', () => {
     const scene = makeScene(new Map())
-    const path: NodeRef[] = [{ kind: 'sketch-edge', id: 1n, sketch: 9n }]
+    const path: NodeRef[] = [{ kind: 'draft-edge', id: 1n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000001' }]
     expect(computeEditContext(scene, path)).toEqual({ kind: 'top' })
   })
 })

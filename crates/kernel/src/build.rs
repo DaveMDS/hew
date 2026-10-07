@@ -168,6 +168,11 @@ impl Object {
                 .collect::<Result<_, _>>()?;
             let plane = Plane::from_polygon(&pts)
                 .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
+            // The plane a saved file recomputes for this face must exist too
+            // (the validator holds every live face to it).
+            if crate::serialize::outer_ring_plane(&pts).is_err() {
+                return Err(TopologyError::DegenerateFace { face: face_index });
+            }
             let on_plane = |i: usize| {
                 positions
                     .get(i)
@@ -239,6 +244,7 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            polygon: None,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -252,6 +258,7 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        polygon: None,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -373,6 +380,7 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            polygon: None,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -386,6 +394,7 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        polygon: None,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -478,6 +487,33 @@ impl Object {
         for (id, g) in mapped {
             self.edges[id].curve = Some(g);
         }
+        // A regular polygon's side carried with the sweep keeps its mark,
+        // moved with it (its pieces need not end on the circumcircle).
+        let polys: Vec<(EdgeId, crate::sketch::CurveGeom)> = self
+            .edges
+            .iter()
+            .filter_map(|(id, edge)| {
+                let g = edge.polygon?;
+                let h = self.half_edges[edge.half_edge];
+                let (va, vb) = (h.origin, self.half_edges[h.next].origin);
+                let carried = |v: VertexId| {
+                    moved.contains(&v)
+                        && before.vertices.get(v).is_some_and(|b| {
+                            (self.vertices[v].position - (b.position + sweep)).length() <= tol
+                        })
+                };
+                (carried(va) && carried(vb)).then_some((
+                    id,
+                    crate::sketch::CurveGeom {
+                        center: g.center + sweep,
+                        radius: g.radius,
+                    },
+                ))
+            })
+            .collect();
+        for (id, g) in polys {
+            self.edges[id].polygon = Some(g);
+        }
     }
 
     pub(crate) fn drop_stale_edge_curves(&mut self) {
@@ -499,6 +535,22 @@ impl Object {
             .collect();
         for id in stale {
             self.edges[id].curve = None;
+        }
+        // A polygon side (or a piece of one) still lies along a regular
+        // polygon's side of its circumcircle.
+        let stale: Vec<crate::ids::EdgeId> = self
+            .edges
+            .iter()
+            .filter_map(|(id, edge)| {
+                let g = edge.polygon?;
+                let h = self.half_edges[edge.half_edge];
+                let a = self.vertices[h.origin].position;
+                let b = self.vertices[self.half_edges[h.next].origin].position;
+                g.polygon_side_count(a, b).is_none().then_some(id)
+            })
+            .collect();
+        for id in stale {
+            self.edges[id].polygon = None;
         }
     }
 

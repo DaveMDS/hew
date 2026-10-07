@@ -1,15 +1,21 @@
 //! Executable specs for editable imprints (docs/design/editable-face-sketches.md):
 //! a shape drawn on a solid's face — a sub-face imprint or a boundary chord —
-//! is recovered structurally as a [`FaceFeature`], slides/turns/scales on its
-//! face in place ([`Object::transform_sub_face`], [`Document::transform_chord`]),
-//! and dissolves back into its face ([`Document::dissolve_imprint`]), every
-//! edit undoable as one step.
+//! is recovered structurally from the face topology, slides/turns/scales on
+//! its face in place ([`Object::transform_sub_face`], and as a drafting move),
+//! and dissolves back into its face (a drafting erase), every edit undoable as
+//! one step.
 
+use kernel::topo::LoopKind;
 use kernel::{
-    CurveGeom, Document, FaceFeature, FaceId, History, KernelOp, KernelOpReport, Object, Plane,
+    CurveGeom, Document, DocumentError, FaceId, History, KernelOp, KernelOpReport, Object, Plane,
     Point3, StickyError, Transform, Vec3, WatertightState, tol,
 };
 use proptest::prelude::*;
+
+mod face_arrangement_support;
+use face_arrangement_support::{
+    delete_unit_at, draft_on_face, draw_loop, face_plane, group_faces, move_unit_at,
+};
 
 // ---------------------------------------------------------------- helpers
 
@@ -107,34 +113,74 @@ fn objects_equivalent(x: &Object, y: &Object) -> bool {
     true
 }
 
-/// `(face, parent, loop, curve, nested)` of one reported sub-face feature.
+/// `(face, parent, loop, curve, nested)` of one imprint sub-face.
 type SubFaceFeat = (FaceId, FaceId, Vec<Point3>, Option<CurveGeom>, Vec<FaceId>);
 
-fn sub_faces(obj: &Object) -> Vec<SubFaceFeat> {
-    obj.face_features()
-        .into_iter()
-        .filter_map(|f| match f {
-            FaceFeature::SubFace {
-                face,
-                parent,
-                loop_path,
-                curve,
-                nested,
-                ..
-            } => Some((face, parent, loop_path, curve, nested)),
-            _ => None,
-        })
-        .collect()
+/// The parent of `face` when it is an imprint: its outer loop is wholly
+/// twinned with ONE hole loop of one coplanar, same-facing face.
+fn imprint_parent(obj: &Object, face: FaceId) -> Option<FaceId> {
+    let f = &obj.faces()[face];
+    let mut twin_loop = None;
+    for h in obj.loop_half_edges(f.outer_loop) {
+        let l = obj.half_edges()[obj.half_edges()[h].twin?].loop_id;
+        match twin_loop {
+            None => twin_loop = Some(l),
+            Some(x) if x == l => {}
+            _ => return None,
+        }
+    }
+    let l = twin_loop?;
+    let lp = &obj.loops()[l];
+    if lp.kind != LoopKind::Inner || lp.face == face {
+        return None;
+    }
+    if obj.loop_half_edges(l).count() != obj.loop_half_edges(f.outer_loop).count() {
+        return None;
+    }
+    let parent = &obj.faces()[lp.face];
+    let coplanar = (parent.plane.normal() - f.plane.normal()).length() < tol::NORMAL_DIRECTION
+        && obj
+            .loop_positions(f.outer_loop)
+            .all(|p| parent.plane.signed_distance(p).abs() <= tol::PLANE_DIST);
+    coplanar.then_some(lp.face)
 }
 
-fn chords(obj: &Object) -> Vec<(kernel::EdgeId, [FaceId; 2], Vec<Point3>)> {
-    obj.face_features()
-        .into_iter()
-        .filter_map(|f| match f {
-            FaceFeature::Chord {
-                edge, faces, path, ..
-            } => Some((edge, faces, path)),
-            _ => None,
+/// The circle every edge of the loop claims, when they all claim one.
+fn uniform_curve(obj: &Object, l: kernel::LoopId) -> Option<CurveGeom> {
+    let mut it = obj
+        .loop_half_edges(l)
+        .map(|h| obj.edges()[obj.half_edges()[h].edge].curve);
+    let first = it.next()??;
+    it.all(|c| {
+        c.is_some_and(|c| {
+            c.center.approx_eq(first.center, tol::POINT_MERGE)
+                && (c.radius - first.radius).abs() < tol::POINT_MERGE
+        })
+    })
+    .then_some(first)
+}
+
+fn sub_faces(obj: &Object) -> Vec<SubFaceFeat> {
+    obj.faces()
+        .iter()
+        .filter_map(|(fid, f)| {
+            let parent = imprint_parent(obj, fid)?;
+            let nested = f
+                .inner_loops
+                .iter()
+                .filter_map(|&il| {
+                    let h = obj.loop_half_edges(il).next()?;
+                    let g = obj.loops()[obj.half_edges()[obj.half_edges()[h].twin?].loop_id].face;
+                    (imprint_parent(obj, g) == Some(fid)).then_some(g)
+                })
+                .collect();
+            Some((
+                fid,
+                parent,
+                obj.loop_positions(f.outer_loop).collect(),
+                uniform_curve(obj, f.outer_loop),
+                nested,
+            ))
         })
         .collect()
 }
@@ -191,6 +237,38 @@ fn doc_cube() -> (Document, kernel::ObjectId) {
     (doc, id)
 }
 
+/// The plane z = 1 (the cube's top).
+fn top_plane() -> Plane {
+    Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap()
+}
+
+/// Draws `ring` on the top plane through one draft and returns the face
+/// carrying the drawn region.
+fn draw(
+    doc: &mut Document,
+    id: kernel::ObjectId,
+    ring: Vec<Point3>,
+    curve: Option<CurveGeom>,
+) -> FaceId {
+    let t = top(doc.object(id).unwrap());
+    draw_loop(doc, None, id, t, &ring, curve).expect("the loop draws");
+    face_arrangement_support::region_face_in(doc, None, id, top_plane(), &ring)
+        .expect("a face carries the drawn region")
+}
+
+/// The imprint whose loop is `ring`, as `(face, parent, ..)`.
+fn imprint_with_ring(obj: &Object, ring: &[Point3]) -> SubFaceFeat {
+    sub_faces(obj)
+        .into_iter()
+        .find(|x| cyclic_match(&x.2, ring))
+        .expect("an imprint with that ring")
+}
+
+/// The face of the cube's top plane holding the point `(x, y, 1)`.
+fn top_at(obj: &Object, x: f64, y: f64) -> FaceId {
+    face_with_normal_at(obj, Vec3::new(0.0, 0.0, 1.0), Point3::new(x, y, 1.0))
+}
+
 // ------------------------------------------------------- feature query
 
 #[test]
@@ -207,10 +285,10 @@ fn a_square_drawn_on_the_top_is_one_sub_face_feature() {
     assert!(cyclic_match(loop_path, &path));
     assert!(curve.is_none());
     assert!(nested.is_empty());
-    assert!(chords(&cube).is_empty(), "an interior loop is not a chord");
-    assert!(
-        cube.face_features().len() == 1,
-        "a pristine cube carries no other features"
+    assert_eq!(
+        sub_faces(&cube).len(),
+        1,
+        "a pristine cube carries no other imprints"
     );
 }
 
@@ -237,57 +315,31 @@ fn a_boss_is_not_a_feature() {
     let t = top(&cube);
     let sf = imprint(&mut cube, t, &square(0.3, 0.3, 0.2));
     cube.extrude_sub_face(sf, 0.1).unwrap();
-    assert!(cube.face_features().is_empty());
-}
-
-#[test]
-fn a_chord_cut_is_one_chord_feature_with_an_ordered_path() {
-    let mut cube = unit_cube();
-    let t = top(&cube);
-    let path = [Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
-    let rep = cube.split_face(t, &path).unwrap();
-    let cs = chords(&cube);
-    assert_eq!(cs.len(), 1);
-    let (edge, faces, cpath) = &cs[0];
-    assert!(rep.new_edges.contains(edge));
-    assert!(faces[0] < faces[1]);
-    assert_eq!(cpath.len(), 2);
-    assert!(
-        cpath[0].approx_eq(path[0], tol::POINT_MERGE)
-            || cpath[0].approx_eq(path[1], tol::POINT_MERGE)
-    );
     assert!(sub_faces(&cube).is_empty());
 }
 
 #[test]
-fn a_painted_half_is_not_a_chord_feature() {
+fn a_line_across_a_face_is_one_topology_drawing_unit() {
+    // Replaces the chord-feature query: a cut from edge to edge is ONE
+    // drawing unit of the plane, every edge of it face topology.
     let (mut doc, id) = doc_cube();
     let t = top(doc.object(id).unwrap());
-    let path = vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
-    let (rep, _) = doc
-        .apply_object_op(
-            id,
-            KernelOp::SplitFace {
-                face: t,
-                path,
-                restore: None,
-                curves: Vec::new(),
-            },
-        )
-        .unwrap();
-    let KernelOpReport::FaceSplit(rep) = rep else {
-        unreachable!()
-    };
-    assert_eq!(chords(doc.object(id).unwrap()).len(), 1);
-    let red = doc.add_material(kernel::Material::solid(
-        "red",
-        kernel::Rgba8::rgb(255, 0, 0),
-    ));
-    doc.paint_face(id, rep.new_faces[0], Some(red)).unwrap();
+    let path = [Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
+    draft_on_face(&mut doc, None, id, t, "Line", |w| {
+        w.add_segment(path[0], path[1]).map(|_| ())
+    })
+    .unwrap();
+    let plane = face_plane(&doc, id, t);
+    let units = face_arrangement_support::units_on(&doc, None, id, plane);
+    assert_eq!(units.units.len(), 1);
     assert!(
-        chords(doc.object(id).unwrap()).is_empty(),
-        "differently painted faces are content, not a drawing"
+        units.units[0]
+            .edges
+            .iter()
+            .all(|e| e.store == kernel::DraftStore::Topology(id))
     );
+    assert_eq!(units.regions.len(), 2);
+    assert!(sub_faces(doc.object(id).unwrap()).is_empty());
 }
 
 // ------------------------------------------------------- transform_sub_face
@@ -621,11 +673,11 @@ fn move_then_boss_then_undo_all_the_way() {
             },
         )
         .unwrap();
-    assert!(cube.face_features().is_empty());
+    assert!(sub_faces(&cube).is_empty());
     history.undo(&mut cube).unwrap();
     assert!(objects_equivalent(&moved, &cube));
     assert_eq!(
-        cube.face_features().len(),
+        sub_faces(&cube).len(),
         1,
         "the boss undone is an imprint again"
     );
@@ -639,38 +691,33 @@ fn move_then_boss_then_undo_all_the_way() {
 #[test]
 fn deleting_an_outer_shape_keeps_the_shapes_inside_it() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    let (outer, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.2, 0.2, 0.5), None)
-        .unwrap();
-    let (inner, _) = doc
-        .imprint_loop_on_face(None, id, outer.region, square(0.3, 0.3, 0.1), None)
-        .unwrap();
+    let outer_ring = square(0.2, 0.2, 0.5);
+    let inner_ring = square(0.3, 0.3, 0.1);
+    draw(&mut doc, id, outer_ring.clone(), None);
+    draw(&mut doc, id, inner_ring.clone(), None);
     let with_both = doc.object(id).unwrap().clone();
     let depth = doc.undo_depth();
-    doc.dissolve_imprint(None, id, outer.region).unwrap();
+    delete_unit_at(&mut doc, None, id, top_plane(), Point3::new(0.2, 0.45, 1.0)).unwrap();
     assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
-    let feats = sub_faces(doc.object(id).unwrap());
+    let obj = doc.object(id).unwrap();
+    let feats = sub_faces(obj);
     assert_eq!(feats.len(), 1, "only the outer shape is gone");
-    assert_eq!(
-        feats[0].0, inner.region,
-        "the inner shape survives with its handle"
+    assert!(
+        cyclic_match(&feats[0].2, &inner_ring),
+        "the inner shape survives"
     );
-    assert_eq!(feats[0].1, t, "and now sits on the top face itself");
-    assert!(cyclic_match(&feats[0].2, &square(0.3, 0.3, 0.1)));
-    doc.object(id).unwrap().validate().unwrap();
+    assert_eq!(
+        feats[0].1,
+        top_at(obj, 0.05, 0.05),
+        "and now sits on the top face itself"
+    );
+    obj.validate().unwrap();
     doc.undo().unwrap();
     assert!(objects_equivalent(&with_both, doc.object(id).unwrap()));
-    let feats = sub_faces(doc.object(id).unwrap());
-    assert_eq!(feats.len(), 2);
-    let inner_feat = feats
-        .iter()
-        .find(|f| cyclic_match(&f.2, &square(0.3, 0.3, 0.1)))
-        .unwrap();
-    let outer_feat = feats
-        .iter()
-        .find(|f| cyclic_match(&f.2, &square(0.2, 0.2, 0.5)))
-        .unwrap();
+    let obj = doc.object(id).unwrap();
+    assert_eq!(sub_faces(obj).len(), 2);
+    let inner_feat = imprint_with_ring(obj, &inner_ring);
+    let outer_feat = imprint_with_ring(obj, &outer_ring);
     assert_eq!(
         inner_feat.1, outer_feat.0,
         "undo nests the inner shape again"
@@ -680,17 +727,15 @@ fn deleting_an_outer_shape_keeps_the_shapes_inside_it() {
 #[test]
 fn deleting_a_drawn_circle_and_undoing_gives_the_circle_back() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
     let g = CurveGeom {
         center: Point3::new(0.5, 0.5, 1.0),
         radius: 0.2,
     };
-    let (rep, _) = doc
-        .imprint_loop_on_face(None, id, t, circle(0.5, 0.5, 0.2, 24), Some(g))
-        .unwrap();
+    let ring = circle(0.5, 0.5, 0.2, 24);
+    draw(&mut doc, id, ring.clone(), Some(g));
     assert!(sub_faces(doc.object(id).unwrap())[0].3.is_some());
-    doc.dissolve_imprint(None, id, rep.region).unwrap();
-    assert!(doc.object(id).unwrap().face_features().is_empty());
+    delete_unit_at(&mut doc, None, id, top_plane(), ring[0]).unwrap();
+    assert!(sub_faces(doc.object(id).unwrap()).is_empty());
     doc.undo().unwrap();
     let obj = doc.object(id).unwrap();
     let feats = sub_faces(obj);
@@ -708,35 +753,35 @@ fn deleting_a_drawn_circle_and_undoing_gives_the_circle_back() {
 }
 
 #[test]
-fn dissolve_refuses_a_non_imprint_and_hands_a_boss_back_to_the_face() {
+fn erasing_an_outer_shape_hands_a_boss_inside_it_back_to_the_face() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    assert!(doc.dissolve_imprint(None, id, t).is_err());
-    let (outer, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.2, 0.2, 0.5), None)
-        .unwrap();
-    let (inner, _) = doc
-        .imprint_loop_on_face(None, id, outer.region, square(0.3, 0.3, 0.1), None)
-        .unwrap();
+    // A pristine top has no drawing unit to erase.
+    assert!(
+        face_arrangement_support::units_on(&doc, None, id, top_plane())
+            .units
+            .is_empty()
+    );
+    draw(&mut doc, id, square(0.2, 0.2, 0.5), None);
+    let inner = draw(&mut doc, id, square(0.3, 0.3, 0.1), None);
     doc.apply_object_op(
         id,
         KernelOp::ExtrudeSubFace {
-            sub_face: inner.region,
+            sub_face: inner,
             distance: 0.1,
         },
     )
     .unwrap();
     let before = doc.object(id).unwrap().clone();
-    doc.dissolve_imprint(None, id, outer.region).unwrap();
+    delete_unit_at(&mut doc, None, id, top_plane(), Point3::new(0.2, 0.45, 1.0)).unwrap();
     let obj = doc.object(id).unwrap();
     obj.validate().unwrap();
     assert_eq!(obj.watertight(), WatertightState::Watertight);
     assert!(
-        obj.face_features().is_empty(),
+        sub_faces(obj).is_empty(),
         "the boss is solid, the shape is gone"
     );
     assert_eq!(
-        obj.faces()[t].inner_loops.len(),
+        obj.faces()[top_at(obj, 0.05, 0.05)].inner_loops.len(),
         1,
         "the boss footprint is a hole of the top face again"
     );
@@ -838,13 +883,12 @@ fn a_shape_drawn_around_a_boss_or_a_hole_adopts_it() {
     assert!(!cube.is_flat_sub_face(ring.sub_face));
     let feats = sub_faces(&cube);
     assert_eq!(feats.len(), 1, "the boss top is not a shape");
-    match &cube.face_features()[0] {
-        FaceFeature::SubFace { nested, holes, .. } => {
-            assert!(nested.is_empty(), "a boss is not a nested shape");
-            assert_eq!(holes.len(), 1, "but its footprint is a hole of the ring");
-        }
-        other => panic!("unexpected feature {other:?}"),
-    }
+    assert!(feats[0].4.is_empty(), "a boss is not a nested shape");
+    assert_eq!(
+        cube.faces()[feats[0].0].inner_loops.len(),
+        1,
+        "but its footprint is a hole of the ring"
+    );
     assert_eq!(
         cube.transform_sub_face(ring.sub_face, &slide(0.05, 0.0)),
         Err(StickyError::NestedNotFlat),
@@ -868,21 +912,15 @@ fn a_shape_drawn_around_a_boss_or_a_hole_adopts_it() {
     }
     let regions = doc.extrudable_regions(s).unwrap();
     let (id, _) = doc.extrude_region(s, regions[0], 1.0).unwrap();
-    let t = top(doc.object(id).unwrap());
-    let (hole, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.4, 0.4, 0.2), None)
-        .unwrap();
-    let (objs, _) = doc.push_pull_through(id, hole.region, -1.5).unwrap();
+    let hole = draw(&mut doc, id, square(0.4, 0.4, 0.2), None);
+    let (objs, _) = doc.push_pull_through(id, hole, -1.5).unwrap();
     let id = objs[0];
-    let t = top(doc.object(id).unwrap());
-    let (ring, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.2, 0.2, 0.6), None)
-        .unwrap();
+    let ring = draw(&mut doc, id, square(0.2, 0.2, 0.6), None);
     let obj = doc.object(id).unwrap();
     obj.validate().unwrap();
     assert_eq!(obj.watertight(), WatertightState::Watertight);
     assert_eq!(
-        obj.faces()[ring.region].inner_loops.len(),
+        obj.faces()[ring].inner_loops.len(),
         1,
         "the ring holds the hole"
     );
@@ -1112,46 +1150,51 @@ fn moving_a_shape_inside_or_across_another_still_refuses() {
 fn offsetting_a_face_that_carries_shapes_adopts_them() {
     let (mut doc, id) = doc_cube();
     let t = top(doc.object(id).unwrap());
-    doc.imprint_loop_on_face(None, id, t, square(0.2, 0.2, 0.2), None)
-        .unwrap();
-    let (b, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.6, 0.6, 0.2), None)
-        .unwrap();
+    draw(&mut doc, id, square(0.2, 0.2, 0.2), None);
+    let b = draw(&mut doc, id, square(0.6, 0.6, 0.2), None);
     doc.apply_object_op(
         id,
         KernelOp::ExtrudeSubFace {
-            sub_face: b.region,
+            sub_face: b,
             distance: 0.1,
         },
     )
     .unwrap();
+    let t = if doc.object(id).unwrap().faces().contains_key(t) {
+        t
+    } else {
+        top_at(doc.object(id).unwrap(), 0.05, 0.05)
+    };
     let loop_ = kernel::offset_face_boundary(doc.object(id).unwrap(), t, -0.05).unwrap();
-    let (ring, _) = doc
-        .imprint_loop_on_face(None, id, t, loop_.points, None)
-        .unwrap();
+    let ring = draw(&mut doc, id, loop_.points, None);
     let obj = doc.object(id).unwrap();
     obj.validate().unwrap();
     assert_eq!(obj.watertight(), WatertightState::Watertight);
     assert_eq!(
-        obj.faces()[ring.region].inner_loops.len(),
+        obj.faces()[ring].inner_loops.len(),
         2,
         "the inset holds both"
     );
     doc.undo().unwrap();
-    assert_eq!(doc.object(id).unwrap().faces()[t].inner_loops.len(), 2);
+    let obj = doc.object(id).unwrap();
+    assert_eq!(obj.faces()[top_at(obj, 0.05, 0.05)].inner_loops.len(), 2);
 }
 
 #[test]
-fn transform_imprint_records_one_undoable_step() {
+fn moving_an_imprint_records_one_undoable_step() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    let (rep, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.3, 0.3, 0.2), None)
-        .unwrap();
+    draw(&mut doc, id, square(0.3, 0.3, 0.2), None);
     let before = doc.object(id).unwrap().clone();
     let depth = doc.undo_depth();
-    doc.transform_imprint(None, id, rep.region, slide(0.2, 0.0))
-        .unwrap();
+    move_unit_at(
+        &mut doc,
+        None,
+        id,
+        top_plane(),
+        Point3::new(0.3, 0.4, 1.0),
+        &slide(0.2, 0.0),
+    )
+    .unwrap();
     assert_eq!(doc.undo_depth(), depth + 1);
     let feats = sub_faces(doc.object(id).unwrap());
     assert!(cyclic_match(&feats[0].2, &square(0.5, 0.3, 0.2)));
@@ -1159,108 +1202,161 @@ fn transform_imprint_records_one_undoable_step() {
     assert!(objects_equivalent(&before, doc.object(id).unwrap()));
 }
 
-#[test]
-fn a_chord_slides_along_its_edge_as_one_undo_entry() {
-    let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    // A rectangle drawn from the south edge: three chord segments.
-    let drawn = vec![
+/// A rectangle drawn from the south edge: three chord sides.
+fn south_rect() -> Vec<Point3> {
+    vec![
         Point3::new(0.2, 0.0, 1.0),
         Point3::new(0.5, 0.0, 1.0),
         Point3::new(0.5, 0.3, 1.0),
         Point3::new(0.2, 0.3, 1.0),
-    ];
-    doc.imprint_loop_on_face(None, id, t, drawn, None).unwrap();
+    ]
+}
+
+/// The top-plane faces of `id` as rings.
+fn top_rings(doc: &Document, id: kernel::ObjectId) -> Vec<face_arrangement_support::Rings> {
     let obj = doc.object(id).unwrap();
-    let cs = chords(obj);
-    assert_eq!(cs.len(), 1, "one run of three edges");
-    assert_eq!(cs[0].2.len(), 4);
-    let before = obj.clone();
+    group_faces(obj, &top_plane())
+        .into_iter()
+        .map(|f| face_arrangement_support::face_rings(obj, f))
+        .collect()
+}
+
+fn has_ring(doc: &Document, id: kernel::ObjectId, want: &[Point3]) -> bool {
+    let n = Vec3::new(0.0, 0.0, 1.0);
+    let want = face_arrangement_support::without_straight(want, n);
+    top_rings(doc, id).iter().any(|(o, _)| {
+        face_arrangement_support::cyclic_match(
+            &face_arrangement_support::without_straight(o, n),
+            &want,
+            true,
+        )
+    })
+}
+
+#[test]
+fn a_chord_slides_along_its_edge_as_one_undo_entry() {
+    let (mut doc, id) = doc_cube();
+    draw(&mut doc, id, south_rect(), None);
+    assert!(has_ring(&doc, id, &south_rect()));
+    assert_eq!(top_rings(&doc, id).len(), 2);
+    let before = doc.object(id).unwrap().clone();
     let depth = doc.undo_depth();
-    let (rep, _) = doc
-        .transform_chord(None, id, cs[0].0, slide(0.3, 0.0))
-        .unwrap();
-    assert_eq!(
-        doc.undo_depth(),
-        depth + 1,
-        "merge + split bundle as one entry"
-    );
-    let obj = doc.object(id).unwrap();
-    let cs = chords(obj);
-    assert_eq!(cs.len(), 1);
-    assert_eq!(
-        cs[0].0, rep.edge,
-        "the report keys the run the way the query does"
-    );
-    assert_eq!(cs[0].1, rep.faces);
-    // The run is the three OFF-boundary sides, slid 0.3 east.
-    let expected = [
-        Point3::new(0.5, 0.0, 1.0),
-        Point3::new(0.5, 0.3, 1.0),
-        Point3::new(0.8, 0.3, 1.0),
-        Point3::new(0.8, 0.0, 1.0),
-    ];
-    let mut path = cs[0].2.clone();
-    let matches_fwd = path
+    // The unit is the three off-boundary sides; slide them 0.3 east.
+    move_unit_at(
+        &mut doc,
+        None,
+        id,
+        top_plane(),
+        Point3::new(0.5, 0.15, 1.0),
+        &slide(0.3, 0.0),
+    )
+    .unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one entry");
+    let moved: Vec<Point3> = south_rect()
         .iter()
-        .zip(expected.iter())
-        .all(|(a, b)| a.approx_eq(*b, tol::POINT_MERGE));
-    path.reverse();
-    let matches_rev = path
-        .iter()
-        .zip(expected.iter())
-        .all(|(a, b)| a.approx_eq(*b, tol::POINT_MERGE));
+        .map(|p| *p + Vec3::new(0.3, 0.0, 0.0))
+        .collect();
     assert!(
-        matches_fwd || matches_rev,
-        "the run slid 0.3 along the south edge: {path:?}"
+        has_ring(&doc, id, &moved),
+        "the rectangle slid 0.3 along the south edge"
     );
+    assert_eq!(top_rings(&doc, id).len(), 2, "still one chord");
+    assert!(doc.object_owned_sketches(id).is_empty());
+    let obj = doc.object(id).unwrap();
+    obj.validate().unwrap();
     assert_eq!(obj.watertight(), WatertightState::Watertight);
     doc.undo().unwrap();
     assert!(objects_equivalent(&before, doc.object(id).unwrap()));
     doc.redo().unwrap();
-    assert_eq!(chords(doc.object(id).unwrap())[0].2.len(), 4);
+    assert!(has_ring(&doc, id, &moved));
 }
 
 #[test]
-fn a_chord_that_would_leave_the_boundary_refuses_and_restores() {
+fn a_chord_moved_off_the_boundary_stays_as_drawing_instead_of_refusing() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    let drawn = vec![
-        Point3::new(0.2, 0.0, 1.0),
-        Point3::new(0.5, 0.0, 1.0),
-        Point3::new(0.5, 0.3, 1.0),
-        Point3::new(0.2, 0.3, 1.0),
-    ];
-    doc.imprint_loop_on_face(None, id, t, drawn, None).unwrap();
-    let edge = chords(doc.object(id).unwrap())[0].0;
-    let before = doc.object(id).unwrap().clone();
+    draw(&mut doc, id, south_rect(), None);
+    let faces_before = top_rings(&doc, id);
+    assert_eq!(faces_before.len(), 2);
+    let pivot = Point3::new(0.5, 0.15, 1.0);
+    let sketch_edges = |doc: &Document, owned: bool| -> usize {
+        doc.sketch_ids()
+            .iter()
+            .filter(|&&s| doc.sketch_owner_object(s).is_some() == owned)
+            .map(|&s| doc.sketch(s).unwrap().edges().len())
+            .sum()
+    };
+
+    // Into the interior: no endpoint touches the boundary any more, so the
+    // face is whole again and the three sides are the object's owned drawing.
+    let bytes0 = doc.save();
     let depth = doc.undo_depth();
-    // Into the interior: the endpoints leave the boundary.
+    move_unit_at(&mut doc, None, id, top_plane(), pivot, &slide(0.0, 0.2)).unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    let rings = top_rings(&doc, id);
+    assert_eq!(rings.len(), 1, "the top is one face again");
+    assert!(has_ring(&doc, id, &square(0.0, 0.0, 1.0)));
+    assert_eq!(sketch_edges(&doc, true), 3, "the sides are owned drawing");
+    assert_eq!(sketch_edges(&doc, false), 0);
+    doc.object(id).unwrap().validate().unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.save(), bytes0, "undo is byte-exact");
+
+    // Past the east edge: the part on the face stays a chord (x 0.9..1.0),
+    // the overhang beyond the edge is free drawing.
+    move_unit_at(&mut doc, None, id, top_plane(), pivot, &slide(0.7, 0.0)).unwrap();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(top_rings(&doc, id).len(), 2);
+    let strip = [
+        Point3::new(0.9, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(1.0, 0.3, 1.0),
+        Point3::new(0.9, 0.3, 1.0),
+    ];
     assert!(
-        doc.transform_chord(None, id, edge, slide(0.0, 0.2))
-            .is_err()
+        has_ring(&doc, id, &strip),
+        "the on-face part is a chord strip"
     );
-    // Past the east edge.
+    assert_eq!(sketch_edges(&doc, false), 2, "the overhang is free drawing");
+    assert_eq!(sketch_edges(&doc, true), 0);
+    doc.object(id).unwrap().validate().unwrap();
+    doc.undo().unwrap();
+    assert_eq!(doc.save(), bytes0, "undo is byte-exact");
+}
+
+#[test]
+fn a_solid_s_own_edge_cannot_be_moved_or_erased_by_drafting() {
+    let (mut doc, id) = doc_cube();
+    draw(&mut doc, id, south_rect(), None);
+    let t = top(doc.object(id).unwrap());
+    let before = doc.object(id).unwrap().clone();
+    let bytes0 = doc.save();
+    let depth = doc.undo_depth();
+    // The east edge of the cube's top is the solid's own.
+    let err = draft_on_face(&mut doc, None, id, t, "Erase", |w| {
+        let e = w
+            .edge_at_positions(Point3::new(1.0, 0.0, 1.0), Point3::new(1.0, 1.0, 1.0))
+            .expect("east edge in the working sketch");
+        w.remove_edge(e).map(|_| ())
+    })
+    .expect_err("a solid's edge stays");
     assert!(
-        doc.transform_chord(None, id, edge, slide(0.7, 0.0))
-            .is_err()
+        matches!(err, DocumentError::DraftBoundaryEdgeTouched),
+        "got {err:?}"
+    );
+    let err = draft_on_face(&mut doc, None, id, t, "Move", |w| {
+        let e = w
+            .edge_at_positions(Point3::new(1.0, 0.0, 1.0), Point3::new(1.0, 1.0, 1.0))
+            .expect("east edge in the working sketch");
+        w.apply_transform_edges(&[e], &slide(-0.1, 0.0))
+    })
+    .expect_err("a solid's edge stays");
+    assert!(
+        matches!(err, DocumentError::DraftBoundaryEdgeTouched),
+        "got {err:?}"
     );
     assert!(objects_equivalent(&before, doc.object(id).unwrap()));
-    assert_eq!(doc.undo_depth(), depth, "a refused move records nothing");
-    // A non-chord edge refuses typed too.
-    let some_wall_edge = doc
-        .object(id)
-        .unwrap()
-        .edges()
-        .keys()
-        .find(|&e| !chords(doc.object(id).unwrap()).iter().any(|c| c.0 == e))
-        .unwrap();
-    assert!(matches!(
-        doc.transform_chord(None, id, some_wall_edge, slide(0.1, 0.0)),
-        Err(kernel::DocumentError::Op(kernel::KernelOpError::Sticky(
-            StickyError::NotAChord
-        )))
-    ));
+    assert_eq!(doc.save(), bytes0, "saved bytes untouched");
+    assert_eq!(doc.undo_depth(), depth, "a refused edit records nothing");
 }
 
 // ------------------------------------------------------- playtest II
@@ -1268,56 +1364,53 @@ fn a_chord_that_would_leave_the_boundary_refuses_and_restores() {
 #[test]
 fn a_circle_started_inside_a_shape_can_enclose_it() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
-    let (inner, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.45, 0.45, 0.1), None)
-        .unwrap();
+    let square_ring = square(0.45, 0.45, 0.1);
+    draw(&mut doc, id, square_ring.clone(), None);
     // A circle's first click is its center, which lands inside the small
-    // square, so the tool hands the kernel the SQUARE's face; the loop only
-    // fits the top.
+    // square; the loop only fits the top, and drafting is by plane, so the
+    // circle lands around the square on the top face.
     let g = CurveGeom {
         center: Point3::new(0.5, 0.5, 1.0),
         radius: 0.3,
     };
-    let (ring, _) = doc
-        .imprint_loop_on_face(None, id, inner.region, circle(0.5, 0.5, 0.3, 48), Some(g))
-        .unwrap();
+    let circle_ring = circle(0.5, 0.5, 0.3, 48);
+    draw(&mut doc, id, circle_ring.clone(), Some(g));
     let obj = doc.object(id).unwrap();
     obj.validate().unwrap();
-    let feats = sub_faces(obj);
-    let circle_feat = feats.iter().find(|f| f.0 == ring.region).unwrap();
-    assert_eq!(circle_feat.1, t, "the circle sits on the top face");
-    assert!(circle_feat.3.is_some(), "and is still a circle");
-    let square_feat = feats.iter().find(|f| f.0 == inner.region).unwrap();
+    let circle_feat = imprint_with_ring(obj, &circle_ring);
     assert_eq!(
-        square_feat.1, ring.region,
+        circle_feat.1,
+        top_at(obj, 0.05, 0.05),
+        "the circle sits on the top face"
+    );
+    assert!(circle_feat.3.is_some(), "and is still a circle");
+    let square_feat = imprint_with_ring(obj, &square_ring);
+    assert_eq!(
+        square_feat.1, circle_feat.0,
         "the square is now inside the circle"
     );
-    // A shape that does fit the clicked shape still nests inside it.
-    let (tiny, _) = doc
-        .imprint_loop_on_face(None, id, inner.region, square(0.47, 0.47, 0.03), None)
-        .unwrap();
-    let feats = sub_faces(doc.object(id).unwrap());
-    assert_eq!(
-        feats.iter().find(|f| f.0 == tiny.region).unwrap().1,
-        inner.region
-    );
+    // A shape that fits inside the square nests inside it.
+    let tiny_ring = square(0.47, 0.47, 0.03);
+    draw(&mut doc, id, tiny_ring.clone(), None);
+    let obj = doc.object(id).unwrap();
+    let square_feat = imprint_with_ring(obj, &square_ring);
+    assert_eq!(imprint_with_ring(obj, &tiny_ring).1, square_feat.0);
 }
 
 #[test]
 fn pushing_a_shape_around_a_circle_raises_a_smooth_cylinder_that_stays_a_circle() {
     let (mut doc, id) = doc_cube();
-    let t = top(doc.object(id).unwrap());
     let g = CurveGeom {
         center: Point3::new(0.5, 0.5, 1.0),
         radius: 0.2,
     };
-    let (c, _) = doc
-        .imprint_loop_on_face(None, id, t, circle(0.5, 0.5, 0.2, 48), Some(g))
-        .unwrap();
-    let (r, _) = doc
-        .imprint_loop_on_face(None, id, t, square(0.15, 0.15, 0.7), None)
-        .unwrap();
+    draw(&mut doc, id, circle(0.5, 0.5, 0.2, 48), Some(g));
+    let r = draw(&mut doc, id, square(0.15, 0.15, 0.7), None);
+    let c = imprint_with_ring(doc.object(id).unwrap(), &circle(0.5, 0.5, 0.2, 48)).0;
+    struct Reg {
+        region: FaceId,
+    }
+    let (c, r) = (Reg { region: c }, Reg { region: r });
     let drawn = doc.object(id).unwrap().clone();
     let is_circle = |doc: &Document| {
         sub_faces(doc.object(id).unwrap())

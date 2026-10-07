@@ -14,7 +14,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { GUIDE_COLOR } from '../viewport/guideColors'
 import { AXIS_ALONG_EDGE_COS } from './tapeOffset'
-import { formatLength } from '../settings/units'
+import { formatLength, setLengthUnit, getLengthUnit } from '../settings/units'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -1640,5 +1640,72 @@ describe('TapeMeasureTool — Shop Mode (measure-only) parts flow', () => {
     expect(tool.getMovableEndpoints()).not.toBeNull()
     tool.cancel()
     expect(tool.getMovableEndpoints()).toBeNull()
+  })
+})
+
+
+describe('TapeMeasureTool — a clicked distance is exactly the displayed distance', () => {
+  const prev = getLengthUnit()
+  const P = { x: 0.0093987, y: 0.0037873 } // |P| = 10.134 mm, shows "10.1 mm"
+
+  function measure(kind: string, typed: string | null) {
+    const { scene, guidePoints } = makeWasmScene()
+    const { tool, onMeasurement } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+    const s = makeSnap({ ...P, z: 0, kind })
+    tool.onPointerMove(s, RAY)
+    if (typed === null) tool.onPointerDown(s, RAY)
+    else typeAndEnter(tool, typed)
+    return { guidePoints, onMeasurement }
+  }
+
+  it('a free-space measure click drops the guide point at the shown distance, same as typing it', () => {
+    setLengthUnit('mm')
+    try {
+      const clicked = measure('ground', null)
+      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.1 mm', expect.anything())
+      expect(clicked.guidePoints).toEqual(measure('ground', '10.1').guidePoints)
+      expect(Math.hypot(clicked.guidePoints[0][0], clicked.guidePoints[0][1])).toBeCloseTo(10.1 * 0.001, 15)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a measure click onto real geometry reports that point exactly (no guide, no rounding)', () => {
+    setLengthUnit('mm')
+    try {
+      const points: [number, number, number][][] = []
+      const { scene } = makeWasmScene()
+      const { tool } = makeTool(scene, { onGesturePoint: (p) => points.push([...p]) })
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
+      const s = makeSnap({ ...P, z: 0, kind: 'endpoint' })
+      tool.onPointerMove(s, RAY)
+      tool.onPointerDown(s, RAY)
+      expect(points[points.length - 1][1]).toEqual([P.x, P.y, 0])
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
+  it('a free parallel-guide click lands at the shown offset, same as typing it; an endpoint cursor keeps its offset', () => {
+    setLengthUnit('mm')
+    try {
+      const run = (kind: string, typed: string | null) => {
+        const { scene, guideLines } = makeWasmScene()
+        const { tool } = makeTool(scene)
+        tool.onPointerDown(makeSnap({ x: 0.05, y: 0, z: 0, kind: 'on-axis', direction: [1, 0, 0] }), RAY)
+        const s = makeSnap({ x: 0.05, y: 0.0123456, z: 0, kind })
+        tool.onPointerMove(s, RAY)
+        if (typed === null) tool.onPointerDown(s, RAY)
+        else typeAndEnter(tool, typed)
+        return guideLines[0]
+      }
+      const clicked = run('ground', null)
+      expect(clicked).toEqual(run('ground', '12.3'))
+      expect(clicked[1]).toBeCloseTo(12.3 * 0.001, 15)
+      expect(run('endpoint', null)[1]).toBeCloseTo(0.0123456, 15)
+    } finally {
+      setLengthUnit(prev)
+    }
   })
 })

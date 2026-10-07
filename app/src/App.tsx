@@ -32,7 +32,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, type NodeRef } from './panels/treeModel'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -40,6 +40,7 @@ import { installTestHarness, type PrintRecorder } from './test/harness'
 import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
+import { setKernelHidden } from './tools/planeUnits'
 import { makeFileHost, isTauri, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   INITIAL_SESSION,
@@ -1265,11 +1266,7 @@ export default function App() {
     // EditContext this would push. Silently ignore, no toast — exactly what
     // Escape does when `toolHasArmedGesture` is true.
     if (api.hasArmedGesture()) return
-    if (
-      target.kind === 'sketch' || target.kind === 'sketch-island' ||
-      target.kind === 'sketch-curve' || target.kind === 'sketch-edge' ||
-      target.kind === 'imprint' || target.kind === 'imprint-chord'
-    ) {
+    if (isSketchScopedKind(target.kind)) {
       // No kernel NodeId / container chain — select-only, same as today.
       setSelectedIds([target])
       return
@@ -1839,13 +1836,7 @@ export default function App() {
         ? n.kind === 'object' && componentMemberIds.has(n.id)
         : isBooleanOperand(n),
     )
-    const isSketchKind = (n: NodeRef) =>
-      n.kind === 'sketch' ||
-      n.kind === 'sketch-island' ||
-      n.kind === 'sketch-curve' ||
-      n.kind === 'sketch-edge' ||
-      n.kind === 'imprint' ||
-      n.kind === 'imprint-chord'
+    const isSketchKind = (n: NodeRef) => isSketchScopedKind(n.kind)
     const parentOf = (n: NodeRef) => {
       if (isSketchKind(n)) return undefined
       const k = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
@@ -5294,7 +5285,7 @@ export default function App() {
       // geometry so snap/pick_face skip it — otherwise you'd still snap to and
       // be unable to click past a hidden solid's edges/faces.
       viewportApi.current?.setHidden(objectIds, instanceIds)
-      scene.set_hidden(new BigUint64Array(objectIds), new BigUint64Array(instanceIds))
+      setKernelHidden(scene, objectIds, instanceIds)
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -6198,10 +6189,15 @@ export default function App() {
                   {toast.state === 'done' && (
                     <span aria-hidden="true" style={{ color: 'var(--status-solid)', flexShrink: 0 }}>✓</span>
                   )}
-                  {toast.code !== undefined && (
-                    <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
-                  )}
-                  {toast.message}
+                  {/* One flex item for the code and the message, so a long
+                      message wraps under the code instead of in a narrow
+                      column beside it. */}
+                  <span>
+                    {toast.code !== undefined && (
+                      <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
+                    )}
+                    {toast.message}
+                  </span>
                 </div>
               )
             })}
