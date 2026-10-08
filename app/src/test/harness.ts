@@ -1055,6 +1055,11 @@ export interface HewTestHarness {
     up: Vec3
   }
 
+  /** Fly's engagement, speed readout, and cursor lock (`Viewport.FlyState`)
+   * — whether the hold or Camera ▸ Fly is on, and whether the cursor is
+   * hidden and frozen for it. */
+  getFlyState(): { mode: 'off' | 'hold' | 'latched'; speedText: string; locked: boolean; canLock: boolean }
+
   /**
    * Pushes the CURRENT live camera view into the document (the same
    * `Document::set_camera_state` call App's real Save/Save As run right
@@ -2290,6 +2295,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getCameraState()
+    },
+
+    getFlyState: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getFlyState()
     },
 
     saveWithCameraState: () =>

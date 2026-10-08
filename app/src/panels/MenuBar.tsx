@@ -238,6 +238,12 @@ export interface MenuBarProps {
   parallelProjectionChecked?: boolean
   /** Toggle Camera ▸ Parallel Projection. */
   onToggleParallelProjection?: () => void
+  /** Camera ▸ Fly check state — the LATCHED fly mode (docs/design/
+   *  fly-navigation.md §10), for trackpads; a right-button hold flies
+   *  under any tool without it. */
+  flyChecked?: boolean
+  /** Toggle Camera ▸ Fly. */
+  onToggleFly?: () => void
   /** Open document windows (Tauri multi-window only), rendered as a tail of
    *  focus-this-window entries at the end of the Window menu — the current
    *  window's entry is checked. `undefined` on plain web (single window, no
@@ -688,6 +694,8 @@ export function MenuBar({
   onStandardView,
   parallelProjectionChecked = false,
   onToggleParallelProjection,
+  flyChecked,
+  onToggleFly,
   onOpenSettings,
   onReportBug,
   onCheckForUpdates,
@@ -1165,6 +1173,14 @@ export function MenuBar({
               label="Look Around"
               checked={activeTool === 'Look Around'}
               onClick={withClose(() => onSelectTool?.('Look Around'))}
+            />
+            {/* Fly (docs/design/fly-navigation.md): hold the right mouse
+                button to fly under any tool; this entry LATCHES the same
+                flight on for trackpads (§10) — a check, not a tool. */}
+            <CheckMenuItem
+              label="Fly"
+              checked={flyChecked ?? false}
+              onClick={withClose(() => onToggleFly?.())}
             />
             <div style={SEPARATOR_STYLE} />
             {/* No standalone Field of View entry (camera-playtest2.md §2 —

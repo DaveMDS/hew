@@ -59,8 +59,8 @@ export class LookAroundTool implements Tool {
   private typed = ''
 
   constructor(
-    getEye: GetEye,
-    getForward: GetForward,
+    private getEye: GetEye,
+    private getForward: GetForward,
     private getEyeHeight: GetEyeHeight,
     private setEyeHeight: SetEyeHeight,
     private applyPose: ApplyPose,
@@ -69,6 +69,21 @@ export class LookAroundTool implements Tool {
   ) {
     this.eye = getEye()
     const forward = getForward()
+    this.yaw = headingFromForward(forward)
+    this.pitch = pitchFromForward(forward)
+  }
+
+  /**
+   * Re-seed the running pose from the live camera after something OTHER
+   * than this tool moved it — Fly (docs/design/fly-navigation.md §5) flies
+   * the eye under any tool, so the next drag must continue from where the
+   * flight left the view instead of snapping back to the construction-time
+   * pose. The delta baseline is left alone: a drag in progress keeps
+   * accumulating from its last sample, now on top of the new pose.
+   */
+  syncFromCamera(): void {
+    this.eye = this.getEye()
+    const forward = this.getForward()
     this.yaw = headingFromForward(forward)
     this.pitch = pitchFromForward(forward)
   }

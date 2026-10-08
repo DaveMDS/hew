@@ -223,6 +223,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'toggle-section-active', label: 'Section Cut', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'section plane', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
   { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
   { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },
+  { id: 'toggle-fly', label: 'Fly', description: 'Fly through the model with no button held: the mouse or a trackpad finger looks, W A S D move, E and Q climb and descend, the wheel or a pinch sets the speed, Shift goes faster. Esc exits.', group: 'Actions', synonyms: ['fly', 'wasd', 'first person', 'free camera', 'noclip', 'spectator', 'flythrough', 'fly through'] },
   { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
   { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },
   { id: 'view-front', label: 'Standard View: Front', description: 'Look at the model from the front.', group: 'Actions' },

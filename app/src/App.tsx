@@ -6,6 +6,7 @@ import Viewport, {
   type InferenceInfo,
   type StandardView,
   type RescaleConfirmInfo,
+  type FlyState,
 } from './viewport/Viewport'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
@@ -299,6 +300,11 @@ export default function App() {
   /** Live stage-aware guidance from the active tool (Tool.statusHint);
    *  null = fall back to the palette's static tool description. */
   const [toolStageHint, setToolStageHint] = useState<string | null>(null)
+  /** Fly's live state (docs/design/fly-navigation.md §4): `'hold'` while the
+   * right button is down on the canvas, `'latched'` while Camera ▸ Fly is
+   * on — drives the status-bar movement hint, the speed readout in the
+   * Measurements box, and the Camera ▸ Fly check mark. */
+  const [fly, setFly] = useState<FlyState>({ mode: 'off', speedText: '', locked: false, canLock: false })
   /** Precision snapping (the Ctrl/⌘+Alt chord held) — modal state, so it
    * gets a status-bar chip rather than living only in the viewport. */
   const [precisionSnap, setPrecisionSnap] = useState(false)
@@ -4338,6 +4344,9 @@ export default function App() {
       case 'tool-look-around': activateTool('Look Around'); break
       case 'tool-zoom-window': activateTool('Zoom Window'); break
       case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
+      // Camera ▸ Fly (docs/design/fly-navigation.md §10): the LATCHED fly
+      // mode for trackpads — a hold of the right button needs no menu.
+      case 'toggle-fly':          viewportApi.current?.toggleFlyLatched(); break
       // Window pane toggles — must use functional updaters (StrictMode safe)
       case 'toggle-model-info':   toggleSection(setShowModelInfo, 'Outliner'); break
       case 'toggle-materials':    toggleSection(setShowMaterials, 'Materials'); break
@@ -5162,6 +5171,7 @@ export default function App() {
       'win-debug-log': showDebugLog,
       'win-library': showLibrary,
       'cam-parallel-projection': parallelProjection,
+      'cam-fly': fly.mode === 'latched',
       'scenes-transitions': sceneTransitionsOn,
     }
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
@@ -5230,6 +5240,7 @@ export default function App() {
     menuGates,
     menuFocusTick,
     parallelProjection,
+    fly.mode,
     componentFrameOpen,
     canUndo,
     canRedo,
@@ -5866,6 +5877,8 @@ export default function App() {
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
         parallelProjectionChecked={parallelProjection}
         onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
+        flyChecked={fly.mode === 'latched'}
+        onToggleFly={() => viewportApi.current?.toggleFlyLatched()}
         onOpenSettings={openSettings}
         onOpenGuide={handleOpenGuide}
         onOpenPalette={() => openPalette()}
@@ -5991,6 +6004,7 @@ export default function App() {
             onProjectionChange={(projection) => setParallelProjection(projection === 'parallel')}
             onToolReverted={() => setActiveTool('Select')}
             onSampleMaterial={setCurrentMaterialId}
+            onFlyChange={setFly}
           />
 
           {/* Inference & viewport feedback (`07_inference_feedback.md`)
@@ -6016,7 +6030,15 @@ export default function App() {
               can't see moves into its own children). display:contents keeps
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
-            <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
+            {/* While flying with no tool reading live, the box shows the
+                flight speed instead (fly-navigation.md §3.4) — a tool's own
+                measurement (a Line's length mid-gesture) always wins, since
+                that is the number the gesture is about. */}
+            {measurement === '' && fly.mode !== 'off' ? (
+              <MeasurementBox toolName={toolName} value={fly.speedText} label="Fly speed" frozen />
+            ) : (
+              <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
+            )}
             <ViewportHUD
               onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
               onOrbit={() => activateTool('Orbit')}
@@ -6403,11 +6425,40 @@ export default function App() {
         }}
       >
         <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }}>{toolName}</span>
-        {/* Stage-aware guidance from the active tool when it provides one
-            (Tool.statusHint — "Click the opposite corner…"), else the
-            palette's static description; the app always says what to do
-            next. */}
-        {(toolStageHint ?? toolHint(toolName)) !== '' && (
+        {/* While flying (fly-navigation.md §4), the movement keys replace
+            the tool's guidance — shown the moment the right button goes
+            down, so a right-drag that used to pan explains itself. The
+            tool itself keeps working underneath (its name stays). */}
+        {fly.mode !== 'off' ? (
+          <>
+            <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
+            <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }} data-testid="fly-hint">Fly</span>
+            <span style={{ color: 'var(--text-faint)' }}>
+              {fly.mode === 'hold'
+                ? 'W S forward/back · A D strafe · E Q up/down · wheel speed · Shift fast'
+                : fly.locked
+                  ? 'W S forward/back · A D strafe · E Q up/down · mouse or trackpad looks · wheel or pinch sets speed · Shift fast · Esc exits'
+                  : fly.canLock
+                    ? 'click the view to look with the mouse · W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits'
+                    : 'W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits'}
+            </span>
+            {/* The tool keeps working underneath, so its own stage guidance
+                ("Click the next point…") stays visible after the keys —
+                a latched flight can last a whole drawing session. */}
+            {(toolStageHint ?? '') !== '' && (
+              <>
+                <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
+                {/* Truncated rather than wrapped: the legend plus a long stage
+                    hint would otherwise grow the status bar to two lines. */}
+                <span style={{ color: 'var(--text-faint)', minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>{toolStageHint}</span>
+              </>
+            )}
+          </>
+        ) : (toolStageHint ?? toolHint(toolName)) !== '' && (
+          /* Stage-aware guidance from the active tool when it provides one
+             (Tool.statusHint — "Click the opposite corner…"), else the
+             palette's static description; the app always says what to do
+             next. */
           <>
             <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
             <span style={{ color: 'var(--text-faint)' }}>{toolStageHint ?? toolHint(toolName)}</span>

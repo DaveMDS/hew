@@ -397,6 +397,20 @@ below.
   and walkthrough navigation (click or drag to stand and look, mouse-look,
   and forward/turn/strafe movement), sharing one session eye height that's
   typed like any other measurement
+- Fly: hold the right mouse button under any tool to fly through the
+  model in perspective — the mouse looks, W A S D move along the view
+  direction and sideways, E and Q climb and descend along world Z, the
+  wheel sets a session speed, Shift sprints — with a short glide on
+  starting and stopping; the active tool keeps the left button and its
+  gesture throughout, and its preview follows the moving view. The cursor
+  is hidden and frozen for the flight (the Pointer Lock API where the
+  browser or webview grants it; the macOS shell warps, freezes and hides
+  it itself, since WKWebView denies the API) and comes back where it was.
+  Camera ▸ Fly latches the same flight on with no button held: the mouse
+  or a trackpad finger looks, the wheel, a two-finger scroll or a pinch
+  sets the speed, Esc exits; without a lock a two-finger scroll looks and a
+  click on the view locks. Right-drag no longer pans: pan is
+  Shift+middle-drag or the Pan tool
 - The working camera view (projection, field of view, eye, target, and up)
   is saved with the document and restored on load — optional and additive,
   so older files are unaffected and simply open to today's home framing

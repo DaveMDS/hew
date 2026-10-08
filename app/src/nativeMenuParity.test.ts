@@ -410,3 +410,35 @@ describe('Save Selection to Library menu item parity', () => {
     expect(appSource.includes("'edit-save-selection-to-library':")).toBe(true)
   })
 })
+
+/**
+ * Camera ▸ Fly (docs/design/fly-navigation.md §10): the LATCHED fly mode
+ * for trackpads — a checkable item like Parallel Projection, no accelerator
+ * (its keys are live only while flying), synced from the webview's fly
+ * state through sync_menu_state, mirrored in the web MenuBar and the
+ * palette. The right-button hold needs no menu at all.
+ */
+describe('Camera ▸ Fly menu item parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
+
+  it('cam-fly is built via check_item, attached to the Camera submenu, dispatches to toggle-fly, and is synced', () => {
+    const binding = /let\s+(\w+)\s*=\s*check_item\([^;]*?"cam-fly"/s.exec(source)
+    expect(binding, 'no check_item binding found for cam-fly').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), 'cam-fly is built but never attached to a SubmenuBuilder chain').toBe(true)
+    expect(/"cam-fly"\s*=>\s*"toggle-fly"/.test(source), 'cam-fly has no dispatch arm to toggle-fly').toBe(true)
+    expect(appSource.includes(`'cam-fly':`), "App.tsx never pushes cam-fly's check mark through sync_menu_state").toBe(true)
+    expect(/case 'toggle-fly':/.test(appSource), 'App.tsx has no toggle-fly dispatch case').toBe(true)
+  })
+
+  it('cam-fly takes no accelerator', () => {
+    expect(/check_item\([^;]*?"cam-fly",[^;]*?None,\s*None,?\s*\)/s.test(source)).toBe(true)
+  })
+
+  it('is offered from the web MenuBar and the command palette', () => {
+    expect(menuBarSource.includes('label="Fly"')).toBe(true)
+    expect(paletteEntries().some((e) => e.id === 'toggle-fly')).toBe(true)
+  })
+})

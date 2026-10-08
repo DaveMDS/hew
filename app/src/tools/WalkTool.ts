@@ -67,8 +67,8 @@ export class WalkTool implements Tool {
   private typed = ''
 
   constructor(
-    getEye: GetEye,
-    getForward: GetForward,
+    private getEye: GetEye,
+    private getForward: GetForward,
     private getEyeHeight: GetEyeHeight,
     private setEyeHeight: SetEyeHeight,
     private applyPose: ApplyPose,
@@ -82,6 +82,36 @@ export class WalkTool implements Tool {
     // seeded eye onto the shared session height immediately, so entering
     // Walk from a tilted Position-Camera/Look-Around pose levels out.
     this.baseEye = [eye[0], eye[1], this.baseHeight]
+    this.liveEye = this.baseEye
+    this.liveYaw = this.baseYaw
+    this.liveHeight = this.baseHeight
+  }
+
+  /**
+   * Re-seed the base pose from the live camera after something OTHER than
+   * this tool moved it — Fly (docs/design/fly-navigation.md §5) flies the
+   * eye under any tool. The next drag then walks on from where the flight
+   * ended, at the height it ended at (a flight up to the second floor
+   * leaves Walk walking the second floor; the SESSION eye height is not
+   * touched — only a typed value changes that). A drag in progress keeps
+   * its press anchor and heading and is shifted by the outside eye delta
+   * instead (a flight chorded onto a Walk drag carries the drag along):
+   * re-basing it outright would re-apply the drag's whole delta on top of
+   * the new base as a jump.
+   */
+  syncFromCamera(): void {
+    const eye = this.getEye()
+    if (this.dragging) {
+      const d: V3 = [eye[0] - this.liveEye[0], eye[1] - this.liveEye[1], eye[2] - this.liveEye[2]]
+      this.baseEye = [this.baseEye[0] + d[0], this.baseEye[1] + d[1], this.baseEye[2] + d[2]]
+      this.baseHeight += d[2]
+      this.liveEye = [eye[0], eye[1], eye[2]]
+      this.liveHeight += d[2]
+      return
+    }
+    this.baseYaw = headingFromForward(this.getForward())
+    this.baseHeight = eye[2]
+    this.baseEye = [eye[0], eye[1], eye[2]]
     this.liveEye = this.baseEye
     this.liveYaw = this.baseYaw
     this.liveHeight = this.baseHeight

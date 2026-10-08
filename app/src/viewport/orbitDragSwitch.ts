@@ -95,13 +95,15 @@ export function orbitDragState(controls: OrbitControls): OrbitDragState {
  * The gesture a pressed button is bound to with no modifier held — the
  * "base" a Shift press inverts. `leftBinding` is the live
  * `controls.mouseButtons.LEFT` (null under Select and the draw tools, ROTATE
- * under Orbit, PAN under Pan, DOLLY under Zoom). Middle is always orbit and
- * right always pan (`configureControls`). Null when the button starts no
- * switchable drag at all.
+ * under Orbit, PAN under Pan, DOLLY under Zoom). Middle is always orbit;
+ * right is Fly's (`configureControls` sets RIGHT: null) and starts no
+ * switchable drag. Null when the button starts no switchable drag at all.
  */
 export function baseBindingFor(button: number, leftBinding: MOUSE | null | undefined): SwitchableDrag | null {
   if (button === 1) return 'rotate'
-  if (button === 2) return 'pan'
+  // The right button is Fly's (docs/design/fly-navigation.md §3.1), not a
+  // pan: it never starts a switchable drag.
+  if (button === 2) return null
   if (button !== 0) return null
   if (leftBinding === MOUSE.ROTATE) return 'rotate'
   if (leftBinding === MOUSE.PAN) return 'pan'

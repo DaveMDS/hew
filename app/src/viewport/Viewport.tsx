@@ -5,8 +5,9 @@
  *   - THREE.js WebGL2 renderer + PerspectiveCamera
  *   - OrbitControls with SketchUp-style bindings:
  *       middle-drag  → orbit
- *       right-drag   → pan
  *       wheel        → dolly toward cursor
+ *     (right-drag is Fly — docs/design/fly-navigation.md — not a pan;
+ *      pan is Shift+middle-drag or the Pan tool)
  *   - CueLayer (snap-point overlay, rebuilt each pointer move)
  *   - SnapService (wraps Scene.snap with ground-plane fallback)
  *   - SceneRenderer (live object + sketch geometry, refreshed after commits)
@@ -68,9 +69,18 @@ import { EditVertexTool } from '../tools/EditVertexTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
 import { LibraryPlaceTool, type LibraryPlacement } from '../tools/LibraryPlaceTool'
 import { PositionCameraTool } from '../tools/PositionCameraTool'
-import { LookAroundTool } from '../tools/LookAroundTool'
+import { LookAroundTool, LOOK_AROUND_RAD_PER_PIXEL } from '../tools/LookAroundTool'
 import { WalkTool } from '../tools/WalkTool'
-import { DEFAULT_EYE_HEIGHT_M, type V3 as WalkV3 } from '../tools/cameraWalkMath'
+import {
+  DEFAULT_EYE_HEIGHT_M,
+  forwardFromYawPitch,
+  headingFromForward,
+  lookAroundDrag,
+  type V3 as WalkV3,
+} from '../tools/cameraWalkMath'
+import { FLY_SCROLL_LOOK_GAIN, FlyIntegrator, flyKeyForCode, formatFlySpeed } from './flyNavigation'
+import { FlyCursorLock, chooseFlyCursorLockProvider, flyLookDelta } from './flyCursorLock'
+import { isTauri } from '../io/fileHost'
 import { AxesTool } from '../tools/AxesTool'
 import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
 import { DimensionTool } from '../tools/DimensionTool'
@@ -149,7 +159,7 @@ import { cursorFor } from '../tools/toolIcons'
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
-import { getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
+import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
@@ -522,6 +532,14 @@ interface Props {
    *  selection follows exactly like picking the swatch directly. */
   onSampleMaterial?: (id: bigint) => void
   /**
+   * Fly (docs/design/fly-navigation.md §4): fired whenever the flight state
+   * changes — engaged by a right-button hold, latched on from Camera ▸ Fly,
+   * released, or the wheel changing the speed — so the parent can show the
+   * movement-key hint in the status bar, the speed in the Measurements box,
+   * and the Camera ▸ Fly check mark. `mode` is `'off'` between flights.
+   */
+  onFlyChange?: (state: FlyState) => void
+  /**
    * Tape Measure's fixed gesture points (shop-mode playtest finding 3) — see
    * `TapeMeasureTool`'s `OnGesturePoint` doc. Optional and additive; the
    * editor never subscribes. Shop Mode uses this to render persistent
@@ -565,6 +583,26 @@ const STANDARD_VIEWS: Record<StandardView, { eye: [number, number, number] }> = 
   right:  { eye: [1, 0, 0] },
   left:   { eye: [-1, 0, 0] },
   iso:    { eye: [1, -1, 1] },
+}
+
+/**
+ * Fly's engagement (docs/design/fly-navigation.md §3.1, §10): `'hold'` while
+ * the right mouse button is down on the canvas, `'latched'` while
+ * Camera ▸ Fly is on (a hold inside a latched flight reports `'hold'`),
+ * `'off'` otherwise. `speedText` is the Measurements-box readout of the
+ * session base speed (`2 m/s`), empty when off. `locked` is true while the
+ * cursor is hidden and frozen for the flight (`flyCursorLock.ts`), so the
+ * mouse or a trackpad finger looks with no button held; `canLock` is true
+ * when a lock could be acquired at all (false on an older shell or a
+ * platform without one), which decides whether the latched hint says to
+ * click the view to look or to scroll.
+ */
+export type FlyMode = 'off' | 'hold' | 'latched'
+export interface FlyState {
+  mode: FlyMode
+  speedText: string
+  locked: boolean
+  canLock: boolean
 }
 
 export interface ViewportApi {
@@ -727,6 +765,16 @@ export interface ViewportApi {
    * seam for the editor — nothing there calls it.
    */
   clearSnapHold: () => void
+  /**
+   * Fly (docs/design/fly-navigation.md §10): turn the LATCHED fly mode on or
+   * off — Camera ▸ Fly / the palette's "Fly". A hold (right button) still
+   * works inside a latched flight; Escape latches off. Refused under
+   * `readOnly` (Shop Mode has no keyboard).
+   */
+  setFlyLatched: (on: boolean) => void
+  toggleFlyLatched: () => void
+  /** The current flight state — what the last `onFlyChange` reported. */
+  getFlyState: () => FlyState
   /**
    * Call after a `scene.load()` to rebuild all viewport-side caches and
    * propagate the new watertight state / docRev to the parent.  Mirrors the
@@ -2105,6 +2153,7 @@ export default function Viewport({
   onProjectionChange,
   onToolReverted,
   onSampleMaterial,
+  onFlyChange,
   onTapeMeasurePoints,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -2161,6 +2210,8 @@ export default function Viewport({
   readOnlyRef.current = readOnly
   const onMeasurementRef = useRef(onMeasurement)
   onMeasurementRef.current = onMeasurement
+  const onFlyChangeRef = useRef(onFlyChange)
+  onFlyChangeRef.current = onFlyChange
   const onRescaleArmedRef = useRef(onRescaleArmed)
   onRescaleArmedRef.current = onRescaleArmed
   const onCameraDragChangeRef = useRef(onCameraDragChange)
@@ -6140,7 +6191,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold() }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -6868,6 +6919,12 @@ export default function Viewport({
     // what's actually on screen instead of wherever the target was frozen at
     // before the walkthrough began.
     const WALKTHROUGH_TOOL_NAMES = new Set(['Position Camera', 'Look Around', 'Walk'])
+    // Fly's engagement flags (docs/design/fly-navigation.md; the Fly block near
+    // the end of this effect owns them). Declared here, ahead of the tool
+    // switch, because the walkthrough-exit block below must leave
+    // OrbitControls alone while a flight owns it.
+    let flyHold = false
+    let flyLatched = false
 
     // Switch tool by name
     switchToolRef.current = (toolName: string) => {
@@ -6932,7 +6989,10 @@ export default function Viewport({
       // === camera.position` and `getDistance()` collapses to (numerically)
       // zero, silently discarding the reseed (a real bug this fixes, not
       // just a test artifact: EVERY walkthrough exit hit it).
-      if (WALKTHROUGH_TOOL_NAMES.has(toolController.activeToolName)) {
+      // Not while a flight is engaged (review finding): Fly disabled the
+      // controls and `flyEnd` re-enables them from the tool active THEN —
+      // re-enabling here would let a middle-drag orbit fight the fly writes.
+      if (WALKTHROUGH_TOOL_NAMES.has(toolController.activeToolName) && !(flyHold || flyLatched)) {
         controls.enabled = true
         camera.getWorldDirection(walkthroughForwardV)
         // The RAW distance under perspective. `effectiveDistance` normalizes
@@ -6955,6 +7015,10 @@ export default function Viewport({
       // case without ever clearing it, leaving the FOV readout stuck
       // showing the stale Zoom reading.
       activeCameraTool = activeCameraToolForName(toolName)
+      // Picking a camera tool (Orbit/Pan/Zoom/Zoom Window) ends a LATCHED
+      // flight (review finding): those tools need OrbitControls live, and a
+      // flight holds it disabled. A right-button hold is unaffected.
+      if (flyLatched && activeCameraTool !== null) setFlyLatched(false)
       // A mid-hold Ctrl/Meta tap must not survive a tool switch: without
       // this, holding Ctrl on Scale then clicking over to Push/Pull before
       // releasing would leave a tap armed against the OLD tool, and the
@@ -7157,7 +7221,8 @@ export default function Viewport({
     }
 
     // ------------------------------------------------------------------ OrbitControls
-    // middle-drag = orbit, right-drag = pan, wheel = dolly-to-cursor. Extracted
+    // middle-drag = orbit, Shift+middle-drag = pan, wheel = dolly-to-cursor;
+    // right-drag is Fly's, outside OrbitControls (RIGHT: null). Extracted
     // (docs/design/camera.md §1) so `rebindControlsForProjectionChange` below
     // can dispose and recreate an OrbitControls bound to whichever camera
     // just became active — OrbitControls binds to one camera for its whole
@@ -7185,10 +7250,16 @@ export default function Viewport({
     // the origin a mid-drag switch re-seeds its gesture at.
     const lastPointerClient = { x: 0, y: 0 }
     function configureControls(c: OrbitControls): void {
+      // RIGHT is null, not PAN: the right button is Fly's (docs/design/
+      // fly-navigation.md §3.1, §5 — "configureControls sets RIGHT: null so
+      // OrbitControls never starts a pan on the button Fly owns"). Pan stays
+      // on Shift+middle (OrbitControls' own modifier inversion) and the Pan
+      // tool. A projection toggle rebuilds the instance through this same
+      // function, so the binding survives it.
       c.mouseButtons = {
         LEFT: null,
         MIDDLE: THREE.MOUSE.ROTATE,
-        RIGHT: THREE.MOUSE.PAN,
+        RIGHT: null,
       }
       c.zoomToCursor = true
       c.enableDamping = !preciseOrbitHeld
@@ -7304,6 +7375,9 @@ export default function Viewport({
       c.addEventListener('change', scheduleRender)
       c.addEventListener('change', recordCameraInput)
       c.addEventListener('change', noteCameraMoved)
+      // The tool preview follows a middle-button orbit (fly-navigation.md
+      // §3.6) — see `reresolveToolDuringCameraDrag` in the Fly block.
+      c.addEventListener('change', reresolveToolDuringCameraDrag)
     }
     attachControlsListeners(controls)
 
@@ -7403,13 +7477,15 @@ export default function Viewport({
       retargetToCursorDepth(ev.clientX, ev.clientY)
     }
     function onRetargetPointerDownCapture(ev: PointerEvent): void {
-      // Middle button = orbit (configureControls). Right-drag pans, which
-      // OrbitControls keeps screen-relative regardless of target depth.
+      // Middle button = orbit (configureControls). The right button is Fly
+      // (its own block below), which has no pivot to retarget.
       if (ev.button !== 1) return
       retargetToCursorDepth(ev.clientX, ev.clientY)
     }
 
-    // Prevent the browser context menu on right-drag so pan isn't interrupted.
+    // Prevent the browser context menu on the canvas: the right button is
+    // Fly's hold-to-fly engagement (docs/design/fly-navigation.md §3.1), and
+    // a menu popping on the press or release would interrupt it.
     function onContextMenu(ev: MouseEvent): void {
       ev.preventDefault()
     }
@@ -8229,7 +8305,7 @@ export default function Viewport({
     const hoverGate = new SketchHoverGate()
     // Shared "should the hover probe be suppressed right now" predicate —
     // explicit selection, a camera-nav tool, or an in-flight camera drag
-    // (stray middle/right-drag orbit/pan while a non-camera tool is active —
+    // (a stray middle-drag orbit while a non-camera tool is active —
     // cameraModeRef alone wouldn't catch that). Factored out of
     // `updateSketchHover` so `reevaluateHoverNow` (post-mutation re-poll,
     // below) shares the exact same rule instead of drifting from it.
@@ -9572,6 +9648,582 @@ export default function Viewport({
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
     renderer.domElement.addEventListener('dblclick', onDoubleClickTracked)
     window.addEventListener('keydown', onKeyDownTracked)
+
+    // ------------------------------------------------------------------ Fly (docs/design/fly-navigation.md)
+    // Hold the right button on the canvas to fly under ANY tool (§3.1): the
+    // mouse looks (§3.2), W A S D / Q E move (§3.3), the wheel sets the
+    // speed, Shift sprints. Camera ▸ Fly LATCHES the same flight on for
+    // trackpads (§10): the keys move, a two-finger scroll looks, a pinch
+    // (ctrl+wheel in every engine) sets the speed, Escape latches off, and a
+    // right-button hold inside a latched flight behaves exactly like the
+    // hold. Neither is a tool or a mode the tool stack knows about: the
+    // active tool keeps the left button and its gesture throughout (§3.6).
+    //
+    // The cursor is hidden and frozen for the duration (`flyCursorLock.ts`,
+    // §10 "Cursor lock"): a long look never walks it off the window edge,
+    // the latched mode looks with the mouse or a trackpad finger with no
+    // button held, and the cursor comes back where it was hidden — at the
+    // press for a hold, at the view center for a latched flight. Look reads
+    // the raw movement while locked. Where no lock can be had (an older
+    // shell, iPadOS) a latched flight looks with a two-finger scroll and a
+    // hold looks by the captured drag, as before; where the browser takes
+    // the lock away with focus intact (its own Escape, which Chromium
+    // consumes before the page sees the key) a latched flight ends, since
+    // Escape is how a latched flight ends; a focus loss just unlocks, and
+    // a click on the view locks again.
+    //
+    // OrbitControls is disabled for the duration exactly as the walkthrough
+    // tools disable it, and re-enabled on release with its target re-seeded
+    // ahead of the eye (§3.1). Every frame that moves the camera re-resolves
+    // the tool at the last pointer position so its preview follows the view
+    // (`reresolveToolAtPointer`, which a middle-button orbit shares). A left
+    // press or release while the right button is held — which the Pointer
+    // Events spec delivers as a CHORDED `pointermove` carrying the changed
+    // `button`, never as a `pointerdown`/`pointerup` — is re-synthesized
+    // into the tool's own down/up path, or a click made while flying would
+    // never reach the tool at all.
+    //
+    // Keys are consumed in a window CAPTURE listener while engaged, so the
+    // bare-letter tool shortcuts (Q Rotate, S Scale, A Arc) in App.tsx and
+    // the arrow-key axis locks in `onKeyDown` never see them (§3.6); keyup
+    // is always processed and never consumed, so a key that went down
+    // before engagement cannot stick. Space and Escape are left alone
+    // during a hold (Space still returns to Select, Escape still cancels the
+    // tool's gesture); Escape latches a latched flight off. A window blur
+    // ends every hold and stops every key — the same posture as the
+    // `onWindowBlurClears…` handlers above.
+    const flight = new FlyIntegrator()
+    let flyPointerId: number | null = null
+    let flyPrevButtons = 0
+    let flyLookX = 0
+    let flyLookY = 0
+    let flyYaw = 0
+    let flyPitch = 0
+    let flyRaf: number | null = null
+    let flyLastFrameMs = 0
+    let flyState: FlyState = { mode: 'off', speedText: '', locked: false, canLock: false }
+    /** The pointer whose left press was consumed to re-lock a latched
+     * flight; its release is consumed too, or Select's click-pick (a
+     * pointerup path) would fire on a click that was never a pick. */
+    let flyLockClickPointerId: number | null = null
+    let flyLockLossTimer: number | null = null
+    /** Screen minus client, from the last pointer event over the view:
+     * the shell warps in screen coordinates (the page's own
+     * `screenX`/`screenY` frame is the one that accounts for WebKit's
+     * content inset under the title bar). Null until a pointer event has
+     * been seen; the fallback derives it from the window's chrome. */
+    let flyScreenOffset: { x: number; y: number } | null = null
+    const cursorLock = new FlyCursorLock({
+      provider: chooseFlyCursorLockProvider({
+        isTauri,
+        isMac,
+        hasPointerLock: typeof renderer.domElement.requestPointerLock === 'function',
+      }),
+      target: renderer.domElement,
+      document,
+      shell: (locked, x, y) => import('@tauri-apps/api/core').then(({ invoke }) => invoke<boolean>('set_fly_cursor_lock', { locked, x, y })),
+      onChange: onFlyCursorLockChange,
+    })
+    cursorLock.attach()
+
+    function flyEngaged(): boolean {
+      return flyHold || flyLatched
+    }
+
+    function pitchFromForwardV(forward: WalkV3): number {
+      const len = Math.hypot(forward[0], forward[1], forward[2])
+      if (len < 1e-9) return 0
+      return Math.asin(Math.min(1, Math.max(-1, forward[2] / len)))
+    }
+
+    /** Read yaw/pitch from the LIVE camera. Called before every look delta
+     * and every frame step, not just at engagement, so anything else that
+     * writes the camera mid-flight — a Look Around drag chorded onto the
+     * hold, a Scene, a standard view — is continued from, never undone by
+     * the next fly write. */
+    function flySeedFromCamera(): void {
+      const f = currentForward()
+      flyYaw = headingFromForward(f)
+      flyPitch = pitchFromForwardV(f)
+    }
+
+    function reportFly(): void {
+      const mode: FlyMode = flyHold ? 'hold' : flyLatched ? 'latched' : 'off'
+      const next: FlyState = {
+        mode,
+        speedText: mode === 'off' ? '' : formatFlySpeed(flight.baseSpeedMps, getLengthSystem()),
+        locked: cursorLock.locked,
+        canLock: cursorLock.available,
+      }
+      const prev = flyState
+      if (next.mode === prev.mode && next.speedText === prev.speedText && next.locked === prev.locked && next.canLock === prev.canLock) return
+      flyState = next
+      onFlyChangeRef.current?.({ ...next })
+    }
+    function onFlyCursorLockChange(locked: boolean, unexpected: boolean): void {
+      // The browser took the lock away while the window kept focus: its
+      // own Escape exit. Chromium consumes that keydown before the page
+      // sees it, so this is the only sign of it — and Escape ends a
+      // latched flight. A focus loss merely unlocks (the blur handler
+      // releases first, so a loss that follows a blur is never
+      // "unexpected"); the focus check is deferred a tick in case a
+      // browser reports the loss before the blur that caused it.
+      if (!locked && unexpected && flyLatched) {
+        if (flyLockLossTimer !== null) clearTimeout(flyLockLossTimer)
+        flyLockLossTimer = window.setTimeout(() => {
+          flyLockLossTimer = null
+          if (flyLatched && !cursorLock.locked && document.hasFocus()) setFlyLatched(false)
+          else reportFly()
+        }, 0)
+      }
+      reportFly()
+    }
+    function noteFlyScreenOffset(ev: PointerEvent): void {
+      flyScreenOffset = { x: ev.screenX - ev.clientX, y: ev.screenY - ev.clientY }
+    }
+    /** A client point in the page's screen frame, for the shell's warp. */
+    function flyScreenPoint(clientX: number, clientY: number): { x: number; y: number } {
+      const off = flyScreenOffset ?? {
+        x: window.screenX + (window.outerWidth - window.innerWidth),
+        y: window.screenY + (window.outerHeight - window.innerHeight),
+      }
+      return { x: clientX + off.x, y: clientY + off.y }
+    }
+    function flyViewCenterScreen(): { x: number; y: number } {
+      const r = el.getBoundingClientRect()
+      return flyScreenPoint(r.left + r.width / 2, r.top + r.height / 2)
+    }
+
+    function syncWalkthroughToolFromCamera(): void {
+      const t = toolController.activeTool
+      if ('syncFromCamera' in t) (t as { syncFromCamera(): void }).syncFromCamera()
+    }
+
+    /**
+     * Re-run the active tool's pointer-move at the LAST pointer position
+     * against the camera as it is NOW (§3.6): a camera moving under a
+     * stationary cursor — a fly frame, a middle-button orbit — otherwise
+     * leaves the rubber band, the push/pull preview, and the inference chip
+     * computed for the old view until the next real move. The same resolve
+     * and cue update as the live re-lock after a captured key, and skipped
+     * in the same states where the pointer path itself skips snapping
+     * (camera-nav tools, an in-flight marquee/drag), exactly like
+     * `applyPrecision`. Screen-space drag tools (Look Around/Walk) have no
+     * world pick to redo.
+     */
+    function reresolveToolAtPointer(): void {
+      const ndc = lastPointerNdcRef.current
+      if (ndc === null) return
+      if (cameraModeRef.current || marqueeDrag !== null || deferredTapDrag !== null || dragMove !== null) return
+      if (fovDragState !== null || zoomWindowActive || annotationDrag !== null) return
+      const activeTool = toolController.activeTool
+      if ('onPointerRawMove' in activeTool) return
+      const ray = makeWorldRay(ndc.ndcX, ndc.ndcY, camera)
+      const viewportH = el.clientHeight
+      const basis = apertureBasis()
+      lastRayRef.current = { ray, viewportH, basis }
+      const constraint = 'snapConstraint' in activeTool
+        ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
+        : null
+      const { snap: rawSnap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+      const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
+      activeTool.onPointerMove(snap, ray)
+      const cueSnap = toolSnapForCues(snap, activeTool)
+      cueLayer.update(cueSnap, readOnlyRef.current)
+      drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+      publishSnapCues(cueSnap, activeTool)
+      reportToolHint()
+    }
+    /** OrbitControls 'change' while a pointer-driven orbit/pan is live —
+     * the middle-button orbit's share of the §3.6 fix (registered in
+     * `attachControlsListeners`). Pointer-gated so a wheel dolly, a Scene
+     * tween, or the damping tail after release doesn't re-resolve. */
+    function reresolveToolDuringCameraDrag(): void {
+      if (cameraPointerDown && !flyEngaged()) reresolveToolAtPointer()
+    }
+
+    /** Pose the camera from the flight's eye and yaw/pitch, and let
+     * everything that depends on the camera follow: the inactive rig camera
+     * (`applyWalkthroughPose`), a walkthrough tool's base pose, the tool
+     * preview under a stationary cursor, the input recorder, drift
+     * detection. */
+    function flyApplyPose(eye: WalkV3, reresolve = true): void {
+      applyWalkthroughPose(eye, forwardFromYawPitch(flyYaw, flyPitch))
+      syncWalkthroughToolFromCamera()
+      if (reresolve) reresolveToolAtPointer()
+      recordCameraInput()
+      noteCameraMoved()
+    }
+
+    /** `reresolve` is false on the POINTER look path: that capture-phase
+     * look runs just before the same event reaches the tool's own
+     * pointer-move, which resolves at the new camera AND the new cursor —
+     * re-resolving here first would use the previous cursor position
+     * (review finding) and do the work twice. The wheel look (latched) has
+     * no pointer move behind it, so it keeps the re-resolve. */
+    function flyLook(dxPx: number, dyPx: number, radPerPixel: number, reresolve = true): void {
+      flySeedFromCamera()
+      const { yawRad, pitchRad } = lookAroundDrag(flyYaw, flyPitch, dxPx, dyPx, radPerPixel)
+      flyYaw = yawRad
+      flyPitch = pitchRad
+      flyApplyPose(currentEye(), reresolve)
+    }
+
+    function flyFrame(nowMs: number): void {
+      flyRaf = null
+      if (!flyEngaged()) return
+      const dt = nowMs - flyLastFrameMs
+      flyLastFrameMs = nowMs
+      flySeedFromCamera()
+      const d = flight.step(dt, flyYaw, flyPitch)
+      if (d[0] !== 0 || d[1] !== 0 || d[2] !== 0) {
+        const eye = currentEye()
+        flyApplyPose([eye[0] + d[0], eye[1] + d[1], eye[2] + d[2]])
+      }
+      if (flight.isMoving) flyRaf = requestAnimationFrame(flyFrame)
+    }
+    /** The frame loop runs only while engaged AND moving (§3.4): started on
+     * a key press, it stops itself once the glide rests. */
+    function flyEnsureLoop(): void {
+      if (flyRaf !== null || !flyEngaged()) return
+      flyLastFrameMs = performance.now()
+      flyRaf = requestAnimationFrame(flyFrame)
+    }
+    function flyStopLoop(): void {
+      if (flyRaf !== null) {
+        cancelAnimationFrame(flyRaf)
+        flyRaf = null
+      }
+    }
+
+    /** A flight begins (either engagement; idempotent): perspective first
+     * (§3.5 — flight along the view direction is invisible under parallel,
+     * and nothing is restored on exit), OrbitControls off, pose seeded. */
+    function flyBegin(): void {
+      if (rig.projection === 'parallel') toggleProjection()
+      controls.enabled = false
+      flySeedFromCamera()
+      flyLastFrameMs = performance.now()
+    }
+
+    /** The LAST engagement ends: keys and velocity reset, OrbitControls back
+     * unless a walkthrough tool owns it, with its target re-seeded ahead of
+     * the eye at the depth of whatever sits at the view center (so a
+     * following middle-button orbit orbits around what's on screen — the
+     * walkthrough exit's own reseed), falling back to the prior orbit
+     * distance when nothing is there. `prior` is read BEFORE the target is
+     * overwritten, for the same evaluation-order reason the walkthrough exit
+     * documents. */
+    function flyEnd(): void {
+      flyStopLoop()
+      flight.stop()
+      flyLockClickPointerId = null
+      if (!WALKTHROUGH_TOOL_NAMES.has(toolController.activeToolName)) {
+        const prior = controls.getDistance()
+        camera.getWorldDirection(walkthroughForwardV)
+        const depth = pickDepthAlongRay(makeWorldRay(0, 0, camera))
+        const dist = depth !== null && depth > controls.minDistance
+          ? Math.min(depth, controls.maxDistance)
+          : Math.min(controls.maxDistance, Math.max(controls.minDistance, prior))
+        controls.target.copy(camera.position).addScaledVector(walkthroughForwardV, dist)
+        controls.enabled = true
+        controls.update()
+      }
+      syncWalkthroughToolFromCamera()
+      noteCameraMoved()
+      recordCameraInput()
+      scheduleRender()
+    }
+
+    function flyHoldBegin(ev: PointerEvent): void {
+      if (flyHold || readOnlyRef.current) return
+      flyHold = true
+      flyPointerId = ev.pointerId
+      flyPrevButtons = ev.buttons
+      flyLookX = ev.clientX
+      flyLookY = ev.clientY
+      try {
+        renderer.domElement.setPointerCapture(ev.pointerId)
+      } catch {
+        /* a pointer the browser no longer tracks — the hold still works on-canvas */
+      }
+      flyBegin()
+      // The cursor hides where it is and comes back there on release.
+      noteFlyScreenOffset(ev)
+      cursorLock.request(ev.screenX, ev.screenY, { gesture: true })
+      // Shift already down at the press sprints from the first frame (review
+      // finding): no Shift keydown will arrive while engaged.
+      flight.setSprint(ev.shiftKey)
+      reportFly()
+    }
+    function flyHoldEnd(): void {
+      if (!flyHold) return
+      flyHold = false
+      flyPointerId = null
+      if (!flyLatched) {
+        flyEnd()
+        cursorLock.release()
+      }
+      reportFly()
+    }
+    function setFlyLatched(on: boolean): void {
+      const want = on && !readOnlyRef.current
+      if (want === flyLatched) return
+      flyLatched = want
+      if (want) {
+        flyBegin()
+        // Hidden at the view center (and back there on exit): the menu
+        // click that latched the flight left the cursor over the menu,
+        // where a frozen cursor would steer its events away from the view.
+        const c = flyViewCenterScreen()
+        cursorLock.request(c.x, c.y)
+      } else if (!flyHold) {
+        flyEnd()
+        cursorLock.release()
+      }
+      reportFly()
+    }
+
+    function onFlyPointerDownCapture(ev: PointerEvent): void {
+      if (ev.pointerType === 'touch') return
+      if (ev.button === 2) {
+        flyHoldBegin(ev)
+        return
+      }
+      // A latched flight that lost its lock (a focus loss, a request denied
+      // for want of a gesture): a left click on the view locks again, and
+      // is the lock's — not a pick. Never where no lock can be had, where
+      // the click is the tool's as always.
+      if (ev.button === 0 && flyLatched && !cursorLock.locked && cursorLock.available) {
+        ev.preventDefault()
+        ev.stopImmediatePropagation()
+        flyLockClickPointerId = ev.pointerId
+        // Captured, so the release reaches this listener wherever the
+        // cursor is by then (a warp, the window edge) and the id never
+        // goes stale to swallow a later real release (review finding).
+        try {
+          renderer.domElement.setPointerCapture(ev.pointerId)
+        } catch {
+          /* a pointer the browser no longer tracks */
+        }
+        noteFlyScreenOffset(ev)
+        const c = flyViewCenterScreen()
+        cursorLock.request(c.x, c.y, { gesture: true })
+      }
+    }
+    function onFlyPointerMoveCapture(ev: PointerEvent): void {
+      if (ev.pointerType === 'touch') return
+      if (!cursorLock.locked) noteFlyScreenOffset(ev)
+      const prev = flyPrevButtons
+      flyPrevButtons = ev.buttons
+      const rightNow = (ev.buttons & 2) !== 0
+      const rightWas = (prev & 2) !== 0
+      // A chorded right press (another button was already down).
+      if (!flyHold && rightNow && !rightWas && ev.button === 2) {
+        flyHoldBegin(ev)
+        return
+      }
+      if (!flyHold) {
+        // Latched with the cursor locked: the mouse (or a trackpad finger)
+        // looks with no button held.
+        if (flyLatched && cursorLock.locked) {
+          const { dx, dy } = flyLookDelta(true, ev, { x: 0, y: 0 })
+          if (dx !== 0 || dy !== 0) flyLook(dx, dy, LOOK_AROUND_RAD_PER_PIXEL, false)
+        }
+        return
+      }
+      if (ev.pointerId !== flyPointerId) return
+      // A chorded right release (another button is still down).
+      if (rightWas && !rightNow) {
+        flyHoldEnd()
+        return
+      }
+      // A chorded LEFT press/release: replay it into the tool path.
+      const leftNow = (ev.buttons & 1) !== 0
+      const leftWas = (prev & 1) !== 0
+      if (ev.button === 0 && leftNow !== leftWas) {
+        const synth = new PointerEvent(leftNow ? 'pointerdown' : 'pointerup', {
+          clientX: ev.clientX,
+          clientY: ev.clientY,
+          screenX: ev.screenX,
+          screenY: ev.screenY,
+          button: 0,
+          buttons: ev.buttons,
+          pointerId: ev.pointerId,
+          pointerType: ev.pointerType,
+          isPrimary: ev.isPrimary,
+          shiftKey: ev.shiftKey,
+          ctrlKey: ev.ctrlKey,
+          metaKey: ev.metaKey,
+          altKey: ev.altKey,
+          detail: 1,
+          bubbles: false,
+        })
+        if (leftNow) onPointerDownTracked(synth)
+        else onPointerUpTracked(synth)
+      }
+      // Mouse-look (§3.2): raw movement while the cursor is locked (its
+      // position is frozen), else incremental deltas since the last sample;
+      // the Look Around sensitivity either way, pitch clamp in
+      // `lookAroundDrag`.
+      const { dx, dy } = flyLookDelta(cursorLock.locked, ev, { x: flyLookX, y: flyLookY })
+      flyLookX = ev.clientX
+      flyLookY = ev.clientY
+      if (dx !== 0 || dy !== 0) flyLook(dx, dy, LOOK_AROUND_RAD_PER_PIXEL, false)
+      // A tool's own chorded click can't drop the capture (implicit release
+      // happens only on the LAST button's pointerup), but keep the hold
+      // tracking off-canvas regardless of who else touched capture.
+      if (!renderer.domElement.hasPointerCapture(ev.pointerId)) {
+        try {
+          renderer.domElement.setPointerCapture(ev.pointerId)
+        } catch {
+          /* see flyHoldBegin */
+        }
+      }
+    }
+    function onFlyPointerUpCapture(ev: PointerEvent): void {
+      if (ev.pointerId === flyLockClickPointerId) {
+        flyLockClickPointerId = null
+        if (ev.button === 0) {
+          ev.preventDefault()
+          ev.stopImmediatePropagation()
+          return
+        }
+      }
+      if (!flyHold || ev.pointerId !== flyPointerId) return
+      flyPrevButtons = ev.buttons
+      if (ev.type === 'pointercancel' || ev.button === 2 || (ev.buttons & 2) === 0) flyHoldEnd()
+    }
+    function onFlyLostCapture(ev: PointerEvent): void {
+      // Not while locked: acquiring the Pointer Lock releases pointer
+      // capture, and a locked pointer's events reach the element anyway.
+      if (flyHold && ev.pointerId === flyPointerId && !cursorLock.locked) flyHoldEnd()
+    }
+    function onFlyWheelCapture(ev: WheelEvent): void {
+      if (!flyEngaged()) return
+      // Ours entirely: no dolly, no fov, no pivot retarget behind it.
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+      if (flyHold || ev.ctrlKey || cursorLock.locked) {
+        // Speed (§3.3): the wheel while the button is held, or whenever
+        // the cursor is locked (the mouse or finger looks, so the wheel
+        // and a two-finger scroll are free to be the speed); a pinch while
+        // latched, which Chromium and Firefox deliver as ctrl+wheel (WebKit
+        // delivers it as gesture events — `onFlyGesture` below). Session-
+        // persistent in `flight`.
+        flight.wheel(ev.deltaY, ev.deltaMode)
+        reportFly()
+        return
+      }
+      // Latched, no lock to be had (§10): a two-finger scroll looks around.
+      // Scrolling "down" (`deltaY > 0`, content moving up) pitches down and
+      // scrolling right yaws right — the same reading of the deltas on both
+      // natural and classic scroll directions.
+      const scale = ev.deltaMode === 1 ? 16 : ev.deltaMode === 2 ? 800 : 1
+      flyLook(ev.deltaX * scale, ev.deltaY * scale, LOOK_AROUND_RAD_PER_PIXEL * FLY_SCROLL_LOOK_GAIN)
+    }
+    // WebKit (the macOS desktop shell's WKWebView, Safari) reports a trackpad
+    // pinch as its own gesturestart/gesturechange/gestureend events carrying
+    // a cumulative `scale`, never as ctrl+wheel (review finding) — the
+    // latched flight's speed pinch would otherwise be dead on the primary
+    // laptop target. Non-standard, so the events are typed structurally.
+    let flyGestureScale = 1
+    function onFlyGesture(ev: Event): void {
+      if (!flyEngaged()) return
+      ev.preventDefault()
+      const scale = (ev as Event & { scale?: number }).scale
+      if (ev.type === 'gesturestart' || typeof scale !== 'number' || !(scale > 0)) {
+        flyGestureScale = 1
+        return
+      }
+      if (ev.type === 'gesturechange') {
+        flight.scaleSpeed(scale / flyGestureScale)
+        flyGestureScale = scale
+        reportFly()
+      }
+    }
+    function flyKeyBelongsElsewhere(ev: KeyboardEvent): boolean {
+      const t = ev.target as HTMLElement | null
+      if (t !== null && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return true
+      // A tool mid-measurement-entry owns the keyboard (§3.6) — "45deg" has
+      // a d and an e in it. The same per-key reading `ViewportApi.
+      // isCapturingInput` gives App's shortcut gates (declared in the api
+      // block, out of scope here).
+      if (fovEntryBuffer !== null) return true
+      const tool = toolController.activeTool
+      if ('capturesKey' in tool) return (tool as { capturesKey(key: string): boolean }).capturesKey(ev.key)
+      return 'capturingInput' in tool && (tool as { capturingInput(): boolean }).capturingInput()
+    }
+    function onFlyKeyDownCapture(ev: KeyboardEvent): void {
+      if (!flyEngaged()) return
+      if (ev.metaKey || ev.ctrlKey || ev.altKey) return
+      if (flyKeyBelongsElsewhere(ev)) return
+      if (ev.key === 'Escape') {
+        if (!flyLatched) return
+        ev.preventDefault()
+        ev.stopPropagation()
+        setFlyLatched(false)
+        return
+      }
+      if (ev.key === 'Shift') {
+        ev.preventDefault()
+        ev.stopPropagation()
+        flight.setSprint(true)
+        flyEnsureLoop()
+        return
+      }
+      const key = flyKeyForCode(ev.code)
+      if (key === null) return
+      ev.preventDefault()
+      ev.stopPropagation()
+      // Auto-repeats press too: `press` is a Set add, and a key physically
+      // held before engagement (or across a blur) is only ever seen as a
+      // repeat (review finding).
+      flight.press(key)
+      flyEnsureLoop()
+    }
+    function onFlyKeyUpCapture(ev: KeyboardEvent): void {
+      if (ev.key === 'Shift') flight.setSprint(false)
+      const key = flyKeyForCode(ev.code)
+      if (key !== null) flight.release(key)
+    }
+    function onWindowBlurClearsFly(): void {
+      // A blur swallows both the keyup and the pointerup (Cmd-Tab mid-hold).
+      flight.stop()
+      if (flyHold) flyHoldEnd()
+      // A latched flight stays on but gives the cursor back: the other
+      // app needs it. A click on the view locks again.
+      cursorLock.release()
+      reportFly()
+    }
+    /** A text field taking focus while latched (the palette, a dialog
+     * opened by shortcut) gets the cursor back too — it is unclickable
+     * frozen and hidden (review finding). The flight stays on; a click on
+     * the view locks again. */
+    function onFocusInReleasesFlyLock(ev: FocusEvent): void {
+      if (!flyLatched || flyHold) return
+      const t = ev.target as HTMLElement | null
+      if (t === null || !(t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      cursorLock.release()
+      reportFly()
+    }
+    el.addEventListener('pointerdown', onFlyPointerDownCapture, true)
+    el.addEventListener('pointermove', onFlyPointerMoveCapture, true)
+    el.addEventListener('pointerup', onFlyPointerUpCapture, true)
+    el.addEventListener('pointercancel', onFlyPointerUpCapture, true)
+    renderer.domElement.addEventListener('lostpointercapture', onFlyLostCapture)
+    // Registered BEFORE the fov/retarget wheel captures below so its
+    // stopImmediatePropagation reaches them (same-element capture listeners
+    // fire in registration order).
+    el.addEventListener('wheel', onFlyWheelCapture, { capture: true, passive: false })
+    for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+      el.addEventListener(type, onFlyGesture, { capture: true, passive: false })
+    }
+    window.addEventListener('keydown', onFlyKeyDownCapture, true)
+    window.addEventListener('keyup', onFlyKeyUpCapture, true)
+    window.addEventListener('blur', onWindowBlurClearsFly)
+    document.addEventListener('focusin', onFocusInReleasesFlyLock)
+
     // Shift-fov drag/wheel pre-emption (camera-playtest2.md §3): CAPTURE
     // phase on `el` (the canvas's PARENT, not the canvas itself — see
     // onFovDragPointerDownCapture's doc for why registering on the canvas
@@ -9629,6 +10281,7 @@ export default function Viewport({
       controls.removeEventListener('change', scheduleRender)
       controls.removeEventListener('change', recordCameraInput)
       controls.removeEventListener('change', noteCameraMoved)
+      controls.removeEventListener('change', reresolveToolDuringCameraDrag)
       controls.removeEventListener('start', onControlsStart)
       controls.removeEventListener('start', cancelCameraTween)
       controls.removeEventListener('end', onControlsEnd)
@@ -9657,6 +10310,25 @@ export default function Viewport({
       window.removeEventListener('keydown', onPrecisionKey)
       window.removeEventListener('keyup', onPrecisionKey)
       window.removeEventListener('blur', onWindowBlurClearsPrecision)
+      flyStopLoop()
+      if (flyLockLossTimer !== null) {
+        clearTimeout(flyLockLossTimer)
+        flyLockLossTimer = null
+      }
+      cursorLock.detach()
+      el.removeEventListener('pointerdown', onFlyPointerDownCapture, true)
+      el.removeEventListener('pointermove', onFlyPointerMoveCapture, true)
+      el.removeEventListener('pointerup', onFlyPointerUpCapture, true)
+      el.removeEventListener('pointercancel', onFlyPointerUpCapture, true)
+      renderer.domElement.removeEventListener('lostpointercapture', onFlyLostCapture)
+      el.removeEventListener('wheel', onFlyWheelCapture, { capture: true })
+      for (const type of ['gesturestart', 'gesturechange', 'gestureend']) {
+        el.removeEventListener(type, onFlyGesture, { capture: true })
+      }
+      window.removeEventListener('keydown', onFlyKeyDownCapture, true)
+      window.removeEventListener('keyup', onFlyKeyUpCapture, true)
+      window.removeEventListener('blur', onWindowBlurClearsFly)
+      document.removeEventListener('focusin', onFocusInReleasesFlyLock)
       window.removeEventListener('blur', onWindowBlurClearsLoupe)
       clearLoupeTimer()
       window.removeEventListener('keydown', onKeyDownRecord)

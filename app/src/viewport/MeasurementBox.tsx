@@ -36,6 +36,10 @@ const VCB_LABEL: Record<string, string> = {
 export interface MeasurementBoxProps {
   toolName: string
   value: string
+  /** Overrides the tool-derived label — Fly's speed readout
+   *  (docs/design/fly-navigation.md §3.4) shows under whatever tool is
+   *  active, so its label can't come from `toolName`. */
+  label?: string
   /** True when `value` is a finished reading kept on screen for reference
    *  rather than a live typed buffer (Tape Measure only) — hides the caret.
    *  Defaults to false (every other tool). */
@@ -104,13 +108,14 @@ const shopChipChromeStyle: React.CSSProperties = {
 export function MeasurementBox({
   toolName,
   value,
+  label: labelOverride,
   frozen = false,
   variant = 'editor',
   bottomOffsetPx = 0,
   orientation = 'portrait',
 }: MeasurementBoxProps) {
   if (value === '') return null
-  const label = VCB_LABEL[toolName] ?? 'Value'
+  const label = labelOverride ?? VCB_LABEL[toolName] ?? 'Value'
 
   if (variant === 'shop') {
     const positionStyle: React.CSSProperties =

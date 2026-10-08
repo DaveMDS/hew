@@ -24,6 +24,7 @@ use tauri::{
 // System font enumeration + reading for the 3D Text font picker — see
 // fonts.rs's top-of-file doc comment for the security model
 // (`read_font_file` takes an opaque token, never a path).
+mod fly_cursor;
 mod fonts;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
@@ -2708,6 +2709,7 @@ fn main() {
             set_document_dirty,
             focus_window_with_path,
             set_window_title,
+            fly_cursor::set_fly_cursor_lock,
             open_settings_window,
             open_library_window,
             library_dispatch,
@@ -3570,6 +3572,12 @@ fn main() {
                 None,
                 None,
             )?;
+            // Fly (docs/design/fly-navigation.md): holding the right mouse
+            // button flies under any tool with no menu involved; this entry
+            // LATCHES the same flight on for trackpads (§10) — a CHECK item
+            // (on/off, synced from the webview), not a tool. No accelerator:
+            // its keys (W A S D Q E) are live only while flying.
+            let cam_fly = check_item(handle, &mut checks, "cam-fly", "Fly", None, None)?;
             // Zoom Window (docs/design/camera.md §3): one-shot rectangle-drag
             // reframe, springs back to Select — no default shortcut in v1
             // (SketchUp ships none for it either), same as the tool registry.
@@ -3625,6 +3633,7 @@ fn main() {
                 .item(&cam_position_camera)
                 .item(&cam_walk)
                 .item(&cam_look_around)
+                .item(&cam_fly)
                 .separator()
                 .item(&cam_zoom_window)
                 .item(&cam_zoom_extents)
@@ -3789,6 +3798,7 @@ fn main() {
                 items: gated,
             }));
             app.manage(ClipboardState(Mutex::new(None)));
+            app.manage(fly_cursor::FlyCursorState::default());
             // Seeded past any main-N recovery slot a crashed session left, so
             // this session's fresh window labels never alias an unclaimed
             // snapshot slot (see main_slot_suffix).
@@ -3860,6 +3870,11 @@ fn main() {
                     }
                     refresh_window_list(app);
                 }
+                // A flight's hidden, frozen cursor must not outlive the
+                // window's focus (src/fly_cursor.rs).
+                tauri::WindowEvent::Focused(false) => {
+                    fly_cursor::unlock_if_locked(app, window);
+                }
                 // Dropped files are a user gesture — approve them like a
                 // dialog pick (write too: a dropped .hew is opened, and Save
                 // then writes back to it).
@@ -3869,6 +3884,7 @@ fn main() {
                     }
                 }
                 tauri::WindowEvent::Destroyed => {
+                    fly_cursor::unlock_if_locked(app, window);
                     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
                         ready.0.remove(window.label());
                     }
@@ -4084,6 +4100,7 @@ fn main() {
                 "cam-position-camera" => "tool-position-camera",
                 "cam-walk" => "tool-walk",
                 "cam-look-around" => "tool-look-around",
+                "cam-fly" => "toggle-fly",
                 "cam-zoom-window" => "tool-zoom-window",
                 "cam-zoom-extents" => "zoom-extents",
                 "cam-parallel-projection" => "toggle-parallel-projection",

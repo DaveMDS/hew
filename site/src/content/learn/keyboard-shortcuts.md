@@ -84,10 +84,27 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | Double-click | Enter a group/component/object's editing context; end a Line chain |
 | `Delete` / `Backspace` | Delete the selection (any tool) |
 
+## Flying
+
+Hold the **right mouse button** in the viewport to fly (see [Viewing your model](/learn/viewing#fly)). These keys mean movement only while the button is held, or while **Camera ▸ Fly** is switched on for a trackpad; the rest of the time they are the tool shortcuts above.
+
+| Key | Motion |
+|---|---|
+| `W` / `S` | Forward / back along the view direction |
+| `A` / `D` | Strafe left / right |
+| `E` / `Q` | Up / down |
+| `↑` `↓` `←` `→` | Same as `W` `S` `A` `D` |
+| `Shift` (held) | Four times faster |
+| Scroll wheel | Faster / slower, for the rest of the session |
+| Mouse or trackpad finger (Camera ▸ Fly on) | Look around, no button held |
+| Pinch or two-finger scroll (Camera ▸ Fly on) | Faster / slower |
+| `Esc` (Camera ▸ Fly on) | Switch Fly off |
+
 ## Mouse
 
 | Action | Input |
 |---|---|
 | Orbit | Middle-button drag (hold `⌘`/`Ctrl` to turn off inertia for a precise orbit) |
-| Pan | Right-button drag |
+| Pan | `Shift` + middle-button drag, or the Pan tool (`H`) |
 | Zoom (to cursor) | Scroll wheel |
+| Fly | Hold the right button; `W` `A` `S` `D` move, the mouse looks, the cursor hides until you let go |

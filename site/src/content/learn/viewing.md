@@ -13,8 +13,9 @@ Camera navigation never interrupts your work. With any tool active, at any momen
 | Action | Input |
 |---|---|
 | Orbit | Drag with the **middle mouse button** |
-| Pan | Drag with the **right mouse button** |
+| Pan | Hold `Shift` and drag with the **middle mouse button** |
 | Zoom | **Scroll wheel** — zooms toward the cursor |
+| Fly | Hold the **right mouse button** and press `W` to move forward — see [Fly](#fly) below |
 
 Zooming follows the cursor, so point at what you want to get closer to and scroll. Orbiting pivots around whatever is under the cursor when you start the drag, and each scroll step covers a fixed fraction of the distance to the surface you're pointing at — so a small detail on a large model is a few scrolls away, and orbiting around it keeps it on screen. The camera has gentle inertia. Hold `⌘` (Mac) or `Ctrl` (Windows, Linux) during a drag for a precise orbit or pan instead: the camera tracks the pointer 1:1 with no inertia for as long as the key is held. Pressing it while the view is still coasting from a released drag stops it dead.
 
@@ -39,6 +40,27 @@ These three walk you through a model at eye level instead of orbiting around it 
 - **Camera ▸ Walk** — drag up or down to walk forward or back, left or right to turn; hold `Shift` to strafe sideways and change height instead. Walk keeps you at a constant eye height above the ground plane; there's no collision detection, so you can walk through geometry.
 
 Eye height defaults to 1.68 m (SketchUp's classic 5′6″) and is shared across all three: type a new height and press Enter in any of them, and it carries over to the others for the rest of the session. `Esc` returns to the Select tool from any of the three.
+
+## Fly
+
+Walk keeps your feet on the ground. Fly is for moving through a house the way a game spectator does: hold the **right mouse button** anywhere in the viewport, move the mouse to look, and use the keys to move. The cursor disappears while you fly and comes back where it was when you let go, so a long look never runs it into the edge of the screen. Let go and you are back in whatever tool you were using. It works under every tool, in the middle of any gesture, and the left button stays with the tool the whole time — fly up to a window, then click its sill with Push/Pull without letting go.
+
+| Key | Motion |
+|---|---|
+| `W` / `S` | Forward / back along the direction you are looking |
+| `A` / `D` | Sideways |
+| `E` / `Q` | Up / down, always straight up and down |
+| Arrow keys | Same as `W` `A` `S` `D` |
+| `Shift` | Four times faster while held |
+| Scroll wheel | Faster or slower; the new speed stays for the rest of the session |
+
+The keys are read by their position on the keyboard, so the same cluster works on an AZERTY or Dvorak layout. Movement starts and stops with a short glide rather than a jolt. The status bar lists the keys the moment the button goes down, and the measurement box shows the current speed, which starts at a brisk walk of 2 m/s. Flying switches the view to perspective and leaves it there. There is no collision detection: walls do not stop you.
+
+If you would rather not hold a button, **Camera ▸ Fly** (or "Fly" in the command palette) switches Fly on until you press `Esc`. The cursor disappears, and from then on the mouse looks around with nothing held, the same keys move you, and the scroll wheel sets the speed. On a laptop trackpad it is the same: a finger on the pad looks, a two-finger scroll or a pinch changes the speed. Holding the right button inside it still works. Press `Esc` to get the cursor back where it was.
+
+If the browser will not hide the cursor (it has to be asked from a click or a key press, and some will not do it at all), Fly still switches on: a two-finger scroll looks around and a pinch sets the speed, and the status bar says to click the view to lock the mouse. That click is for the lock, not the tool. Switching to another window gives the cursor back; click the view when you return.
+
+Right-drag used to pan. Pan is now `Shift` plus a middle-button drag, or the Pan tool (`H`).
 
 ## Parallel projection
 

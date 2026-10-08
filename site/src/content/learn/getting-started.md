@@ -72,7 +72,7 @@ Congratulations - you made your first watertight solid Object in Hew! Press `Spa
 
 ## 5. Look around while you work
 
-Navigation is always available, whatever tool is active. Drag the **middle mouse button** to orbit, drag the **right mouse button** to pan, and scroll to zoom toward the cursor.
+Navigation is always available, whatever tool is active. Drag the **middle mouse button** to orbit (hold `Shift` to pan instead), and scroll to zoom toward the cursor. To move through a model at eye level, hold the **right mouse button** and press `W` to fly forward, moving the mouse to look around.
 
 No mouse wheel? Press `O`, `H`, or `Z` for Orbit, Pan, and Zoom and drag with the left button.
 
