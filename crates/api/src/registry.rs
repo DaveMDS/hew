@@ -658,6 +658,20 @@ impl Registry {
             "Set a material's opacity.",
         );
         add(
+            "hew.material.position_texture",
+            M,
+            Kernel,
+            Std,
+            "Position a face's texture by three tile-corner pins, or reset it to the default projection.",
+        );
+        add(
+            "hew.material.replace",
+            M,
+            Kernel,
+            Std,
+            "Replace one material with another everywhere it is painted, or within one object.",
+        );
+        add(
             "hew.tag.create",
             M,
             Kernel,
@@ -886,14 +900,14 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.",
+            "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).",
         );
         add(
             "hew.library.save",
             R,
             Kernel,
             Std,
-            "Save a selection (or the whole document) to the library. Records no undo entry (§6.4).",
+            "Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).",
         );
         add("hew.library.remove", R, Host, Std, "Delete a library item.");
         add(
@@ -1707,7 +1721,7 @@ impl Registry {
                 .get_mut("hew.library.insert")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.";
+            cmd.summary = "Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1723,6 +1737,7 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "roots": { "type": "array", "items": { "type": "string" } },
+                    "materials": { "type": "array", "items": { "type": "string" }, "description": "a material item only: its palette materials, added or reused, in item order" },
                     "definitions_added": { "type": "integer" },
                     "definitions_reused": { "type": "integer" },
                     "materials_added": { "type": "integer" },
@@ -1750,13 +1765,14 @@ impl Registry {
                 .get_mut("hew.library.save")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Save a selection (or the whole document) to the library. Records no undo entry (§6.4).";
+            cmd.summary = "Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "selection": { "type": "array", "items": { "type": "string" }, "description": "node ids to save as a component item; omitted saves the whole document as a model item" },
                     "name": { "type": "string" },
-                    "category": { "type": "string", "enum": ["component", "material", "model"], "description": "defaults to component (a selection) or model (the whole document)" },
+                    "material": { "type": "string", "description": "one palette material to save alone as a material item, as the palette's Save to Library does — not with selection" },
+                    "category": { "type": "string", "enum": ["component", "material", "model"], "description": "defaults to component (a selection), material (a material), or model (the whole document)" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
                     "collection": { "type": "string" },
                     "return_bytes": { "type": "boolean", "description": "also return the saved item's bytes base64" },
@@ -1776,6 +1792,7 @@ impl Registry {
             });
             cmd.refusals = vec![
                 "host_capability_missing",
+                "unknown_entity",
                 "empty_component",
                 "duplicate_member",
                 "unknown_object",
@@ -2325,10 +2342,28 @@ impl Registry {
                         "type": "array",
                         "items": { "type": "integer", "minimum": 0, "maximum": 255 },
                         "minItems": 3,
-                        "maxItems": 4
+                        "maxItems": 4,
+                        "description": "required without a texture; with one it tints the image (default white: the image as-is)"
+                    },
+                    "texture": {
+                        "type": "object",
+                        "description": "an image texture: a PNG or JPEG, inline or a file path (hew-cli reads it), and the meters one tile covers",
+                        "properties": {
+                            "bytes_base64": { "type": "string", "description": "the encoded PNG/JPEG — exactly one of bytes_base64/path" },
+                            "path": { "type": "string", "description": "an image file, read by hew-cli — exactly one of bytes_base64/path" },
+                            "world_size": {
+                                "type": "array",
+                                "items": { "type": "number", "exclusiveMinimum": 0 },
+                                "minItems": 2,
+                                "maxItems": 2,
+                                "description": "[width, height] in meters of one tile"
+                            }
+                        },
+                        "required": ["world_size"],
+                        "additionalProperties": false
                     }
                 },
-                "required": ["name", "color"],
+                "required": ["name"],
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
@@ -2337,10 +2372,11 @@ impl Registry {
                 "required": ["material"]
             });
             // Palette additions are deliberately not undoable in the
-            // kernel (docs/design/api-kernel-map.md §1.9) — nothing here
-            // can be typed-refused; a malformed color/name is a protocol
-            // error (`-32602`), not a refusal.
-            cmd.refusals = Vec::new();
+            // kernel (docs/design/api-kernel-map.md §1.9). A malformed
+            // color/name/texture (not PNG/JPEG, bad base64, world_size not
+            // positive) is a protocol error (`-32602`); only reading a
+            // texture `path` can be refused.
+            cmd.refusals = vec!["load_failed", "host_capability_missing"];
         }
         {
             let cmd = commands
@@ -2412,6 +2448,71 @@ impl Registry {
                 "additionalProperties": false
             });
             cmd.refusals = vec!["unknown_entity", "unknown_material"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.material.position_texture")
+                .expect("declared above");
+            cmd.implemented = true;
+            let point = serde_json::json!({
+                "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3
+            });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "face": { "description": "a face locator (§5.2)" },
+                    "pins": {
+                        "type": "object",
+                        "description": "three corners of one texture tile, in the face's object frame (as a locator's `at`), projected onto the face: origin, one tile along the width (u), one tile along the height (v) — exactly one of pins/reset",
+                        "properties": { "origin": point, "u": point, "v": point },
+                        "required": ["origin", "u", "v"],
+                        "additionalProperties": false
+                    },
+                    "reset": {
+                        "type": "boolean",
+                        "description": "true: back to the default projection at the material's tile size — exactly one of pins/reset"
+                    }
+                },
+                "required": ["face"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_object",
+                "unknown_face",
+                "locator_missed",
+                "ambiguous_locator",
+                "face_token_unknown",
+                "face_token_stale",
+                "degenerate_pins",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.material.replace")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "from": { "type": ["string", "null"], "description": "the material to replace; null: unpainted object bases" },
+                    "to": { "type": ["string", "null"], "description": "the material it becomes; null: unpaint" },
+                    "object": { "type": "string", "description": "only within this object; omitted: the whole document" }
+                },
+                "required": ["from", "to"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "unknown_object"];
         }
         {
             let cmd = commands.get_mut("hew.tag.create").expect("declared above");

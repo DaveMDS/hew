@@ -293,6 +293,41 @@ describe('installLiveBridge', () => {
     )
   })
 
+  it('marks the document unsaved when a Library material item lands in the palette', async () => {
+    const markLibraryMaterialsDirty = vi.fn<() => void>()
+    installLiveBridge({ ...deps, markLibraryMaterialsDirty })
+    await flush()
+    fire('hew://api-connection-open', { connId: 3 })
+    scene.api_dispatch.mockReturnValue(
+      '{"jsonrpc":"2.0","id":2,"result":{"label":"hew.library.insert","results":[{"roots":[],"materials":["mat_4"],"materials_added":1}]}}',
+    )
+    fire('hew://api-frame', {
+      connId: 3,
+      frame: '{"jsonrpc":"2.0","id":2,"method":"hew.library.insert","params":{}}',
+    })
+    await vi.waitFor(() => {
+      expect(markLibraryMaterialsDirty).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('does not mark unsaved for an ordinary insert that places geometry', async () => {
+    const markLibraryMaterialsDirty = vi.fn<() => void>()
+    installLiveBridge({ ...deps, markLibraryMaterialsDirty })
+    await flush()
+    fire('hew://api-connection-open', { connId: 3 })
+    scene.api_dispatch.mockReturnValue(
+      '{"jsonrpc":"2.0","id":2,"result":{"label":"hew.library.insert","results":[{"roots":["ins_9"],"materials_added":0}]}}',
+    )
+    fire('hew://api-frame', {
+      connId: 3,
+      frame: '{"jsonrpc":"2.0","id":2,"method":"hew.library.insert","params":{}}',
+    })
+    await vi.waitFor(() => {
+      expect(refreshScene).toHaveBeenCalledTimes(1)
+    })
+    expect(markLibraryMaterialsDirty).not.toHaveBeenCalled()
+  })
+
   it('falls back to reconcile() when no Viewport is mounted', async () => {
     deps.getViewportApi = () => null
     installLiveBridge(deps)

@@ -100,6 +100,30 @@ export interface LiveBridgeDeps {
    * wires it to its `reconcileVisibility`.
    */
   reconcileVisibility?: () => void
+  /**
+   * Marks the document unsaved because materials came into its palette
+   * from a Library material item (`hew.library.insert`). The palette rides
+   * the document but records no undo entry, so the saved-mark check after
+   * a mutation can't see it — the same non-undoable reason the Library's
+   * own "Add to palette" stamps. Optional; App.tsx wires it.
+   */
+  markLibraryMaterialsDirty?: () => void
+}
+
+/** Whether a successful reply added a Library material item to the
+ * palette: `hew.library.insert`'s result carries a `materials` list only
+ * for a material item, bare or as one entry of a transaction's results. */
+export function addedLibraryMaterials(reply: string): boolean {
+  try {
+    const result = (JSON.parse(reply) as { result?: { results?: unknown } }).result
+    if (result === undefined || result === null) return false
+    const entries = Array.isArray(result.results) ? result.results : [result]
+    return entries.some(
+      (e) => typeof e === 'object' && e !== null && Array.isArray((e as { materials?: unknown }).materials),
+    )
+  } catch {
+    return false
+  }
 }
 
 /** Whether a dispatch of `method` could have changed the document, per
@@ -443,6 +467,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     emitReply(connId, reply)
     const mutated = shouldRefreshAfterDispatch(scene, frame, reply)
     if (mutated) refreshAfterMutation()
+    if (mutated && addedLibraryMaterials(reply)) deps.markLibraryMaterialsDirty?.()
     // `hew.view.camera`/`zoom_extents`/`units`: a non-mutating host effect
     // `Scene::api_dispatch` left for this bridge to actually perform
     // (`take_pending_view_directive`'s own doc comment has the full

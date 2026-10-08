@@ -1632,6 +1632,10 @@ export default function App() {
       // renderer, and the camera exactly as a row click would.
       activateScene: (sid) => scenesRef.current.activate(sid),
       reconcileVisibility: () => reconcileVisibilityRef.current(),
+      // A live `hew.library.insert` of a material item: dirty for the same
+      // reason as the Library's own "Add to palette".
+      markLibraryMaterialsDirty: () =>
+        setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now())),
     })
   }, [])
 

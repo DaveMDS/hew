@@ -512,7 +512,7 @@ centroid, and boundary loops:
   {"object": "obj_7", "area": 0.96, "centroid": [0.6, 0.4, 0.72],
    "plane": {"normal": [0.0, 0.0, -1.0], "point": [0.0, 0.0, 0.72]},
    "outer": [[0.0, 0.0, 0.72], [0.0, 0.8, 0.72], [1.2, 0.8, 0.72], [1.2, 0.0, 0.72]],
-   "holes": [], "material": null, "surface": null}, ... ]}
+   "holes": [], "material": null, "surface": null, "texture_pins": null}, ... ]}
 ```
 
 `hew.query.measure` gives distance and delta between any two points,
@@ -593,6 +593,55 @@ and `hew.*` belong to Hew: writing one refuses
 your namespace and goes through. Reading a `hew.*` dictionary is
 allowed. Writes are ordinary mutations — transactional and undoable. The contract that matters: your data survives a
 round-trip through clients, and users, that know nothing about it.
+
+## Paint with an image texture
+
+A texture material is an image plus the real-world size one tile of it
+covers, just like the palette's Add Texture. Give `hew-cli` a file path
+and it reads the image for you, headless or live. A PNG or a JPEG works.
+
+```sh
+hew-cli dispatch hew.material.create \
+  '{"name": "White Oak", "texture": {"path": "oak.jpg", "world_size": [0.2, 1.0]}}' \
+  --file table.hew
+# {"result": {"label": "hew.material.create", "results": [{"material": "mat_9"}]}}
+
+hew-cli dispatch hew.material.set_default \
+  '{"id": "obj_7", "material": "mat_9"}' --file table.hew
+```
+
+On a face that points up, the image's height runs along x, so an image
+with up-and-down grain follows the tabletop's 1.2 m length. To turn it,
+scale it, or slide it on one face, do what the Position Texture tool
+does: pin the corners of one tile. `origin` is a corner, `u` is one tile
+along the image's width, and `v` is one tile along its height. This
+turns the grain a quarter turn, across the top:
+
+```sh
+hew-cli dispatch hew.material.position_texture \
+  '{"face": {"object": "obj_7", "at": [0.6, 0.4, 0.76]},
+    "pins": {"origin": [0, 0, 0.76], "u": [0.2, 0, 0.76], "v": [0, 1.0, 0.76]}}' \
+  --file table.hew
+```
+
+`hew.query.faces` reads each face's pins back, and
+`{"face": …, "reset": true}` puts a face back to the default layout.
+Positioning is one undo entry, like the tool's.
+
+Two more palette moves work the same way. `hew.material.replace` is the
+Paint tool's Shift-click: everything painted one material becomes
+another, across the model or, with `"object"`, inside one object. And
+`hew.library.save` with a `material` saves it to your Library, where
+`hew.library.insert` adds it back to any model's palette:
+
+```sh
+hew-cli dispatch hew.material.replace \
+  '{"from": "mat_3", "to": "mat_9"}' --file table.hew
+
+hew-cli dispatch hew.library.save \
+  '{"material": "mat_9", "name": "White Oak"}' --file table.hew
+# {"result": {"path": "Materials/white-oak-5b1c07.hew", "id": "5b1c07…"}}
+```
 
 ## Save and insert library items
 

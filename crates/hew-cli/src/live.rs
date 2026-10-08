@@ -932,14 +932,24 @@ impl LiveSession {
                 &path,
             ));
         }
-        if let Err(refusal) = attach_import_inputs(&mut request) {
-            let response = Response::err_with(
-                request.id.clone(),
-                api::codes::REFUSED,
-                "refused",
-                refusal.into_data(0, "hew.doc.import"),
-            );
-            return Ok(DispatchOutcome::Reply(response));
+        // A file read here that fails is refused as the app would refuse
+        // it, naming the command's index within a transaction.
+        for (attach, method) in [
+            (
+                attach_import_inputs as fn(&mut Request) -> Result<(), (usize, api::Refusal)>,
+                "hew.doc.import",
+            ),
+            (attach_texture_inputs, "hew.material.create"),
+        ] {
+            if let Err((index, refusal)) = attach(&mut request) {
+                let response = Response::err_with(
+                    request.id.clone(),
+                    api::codes::REFUSED,
+                    "refused",
+                    refusal.into_data(index, method),
+                );
+                return Ok(DispatchOutcome::Reply(response));
+            }
         }
         let response = self.conn.send_receive(&request)?;
         if is_unrendered_by_live_host(&request.method, &response)
@@ -1029,7 +1039,7 @@ impl LiveSession {
 /// for the one-command transaction MCP sends. A request that already
 /// carries `bytes_base64` is left alone. A file that cannot be read is
 /// refused `load_failed`, exactly as the headless host would.
-fn attach_import_inputs(request: &mut Request) -> Result<(), api::Refusal> {
+fn attach_import_inputs(request: &mut Request) -> Result<(), (usize, api::Refusal)> {
     fn attach(params: &mut Value) -> Result<(), api::Refusal> {
         if params.get("bytes_base64").is_some() {
             return Ok(());
@@ -1062,7 +1072,7 @@ fn attach_import_inputs(request: &mut Request) -> Result<(), api::Refusal> {
     }
     match request.method.as_str() {
         "hew.doc.import" => match request.params.as_mut() {
-            Some(params) => attach(params),
+            Some(params) => attach(params).map_err(|r| (0, r)),
             None => Ok(()),
         },
         "hew.doc.transact" => {
@@ -1074,11 +1084,67 @@ fn attach_import_inputs(request: &mut Request) -> Result<(), api::Refusal> {
             else {
                 return Ok(());
             };
-            for command in commands {
+            for (index, command) in commands.iter_mut().enumerate() {
                 if command.get("method").and_then(Value::as_str) == Some("hew.doc.import")
                     && let Some(params) = command.get_mut("params")
                 {
-                    attach(params)?;
+                    attach(params).map_err(|r| (index, r))?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// `hew.material.create {texture: {path}}` against a live app: the app has no
+/// filesystem, so read the image HERE and send it as `texture.bytes_base64`
+/// in place of `path`, for the bare command and inside a transaction. A
+/// texture that already carries `bytes_base64` is left alone (the app's
+/// params check refuses one with both). An unreadable file is refused
+/// `load_failed`, exactly as the headless host would.
+fn attach_texture_inputs(request: &mut Request) -> Result<(), (usize, api::Refusal)> {
+    fn attach(params: &mut Value) -> Result<(), api::Refusal> {
+        let Some(texture) = params.get_mut("texture").and_then(Value::as_object_mut) else {
+            return Ok(());
+        };
+        if texture.contains_key("bytes_base64") {
+            return Ok(());
+        }
+        let Some(path) = texture
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return Ok(());
+        };
+        let bytes = crate::host::read_texture_file(&path)?;
+        texture.remove("path");
+        texture.insert(
+            "bytes_base64".to_string(),
+            Value::String(api::commands::doc::encode_base64(&bytes)),
+        );
+        Ok(())
+    }
+    match request.method.as_str() {
+        "hew.material.create" => match request.params.as_mut() {
+            Some(params) => attach(params).map_err(|r| (0, r)),
+            None => Ok(()),
+        },
+        "hew.doc.transact" => {
+            let Some(commands) = request
+                .params
+                .as_mut()
+                .and_then(|p| p.get_mut("commands"))
+                .and_then(Value::as_array_mut)
+            else {
+                return Ok(());
+            };
+            for (index, command) in commands.iter_mut().enumerate() {
+                if command.get("method").and_then(Value::as_str) == Some("hew.material.create")
+                    && let Some(params) = command.get_mut("params")
+                {
+                    attach(params).map_err(|r| (index, r))?;
                 }
             }
             Ok(())
@@ -1309,6 +1375,89 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(Path::new(&path).is_absolute(), "{path}");
+    }
+
+    #[test]
+    fn a_texture_path_is_read_here_and_sent_as_bytes() {
+        let dir = scratch_dir("texture");
+        let file = dir.join("grain.png");
+        std::fs::write(&file, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        let path = file.to_str().unwrap();
+
+        let mut bare = request(
+            "hew.material.create",
+            json!({ "name": "B", "texture": { "path": path, "world_size": [1, 1] } }),
+        );
+        attach_texture_inputs(&mut bare).unwrap();
+        let texture = &bare.params.unwrap()["texture"];
+        assert!(
+            texture.get("path").is_none(),
+            "the app gets bytes, not a path"
+        );
+        assert_eq!(
+            api::commands::doc::decode_base64(texture["bytes_base64"].as_str().unwrap()).unwrap(),
+            b"\x89PNG\r\n\x1a\nrest"
+        );
+        assert_eq!(texture["world_size"], json!([1, 1]));
+
+        let mut wrapped = request(
+            "hew.doc.transact",
+            json!({ "commands": [
+                { "method": "hew.material.create", "params": { "name": "B", "texture": { "path": path, "world_size": [1, 1] } } },
+                { "method": "hew.material.create", "params": { "name": "C", "color": [1, 2, 3] } }
+            ] }),
+        );
+        attach_texture_inputs(&mut wrapped).unwrap();
+        let commands = &wrapped.params.unwrap()["commands"];
+        assert!(commands[0]["params"]["texture"]["bytes_base64"].is_string());
+        assert_eq!(
+            commands[1]["params"],
+            json!({ "name": "C", "color": [1, 2, 3] })
+        );
+
+        // Inline bytes are left alone; an unreadable file refuses load_failed.
+        let mut inline = request(
+            "hew.material.create",
+            json!({ "name": "B", "texture": { "bytes_base64": "AAAA", "world_size": [1, 1] } }),
+        );
+        attach_texture_inputs(&mut inline).unwrap();
+        assert_eq!(inline.params.unwrap()["texture"]["bytes_base64"], "AAAA");
+        let mut missing = request(
+            "hew.material.create",
+            json!({ "name": "B", "texture": { "path": dir.join("nope.png").to_str().unwrap(), "world_size": [1, 1] } }),
+        );
+        let (index, refusal) = attach_texture_inputs(&mut missing).unwrap_err();
+        assert_eq!((index, refusal.name.as_str()), (0, "load_failed"));
+
+        // Inside a transaction the refusal names the command that failed.
+        let mut second = request(
+            "hew.doc.transact",
+            json!({ "commands": [
+                { "method": "hew.material.create", "params": { "name": "A", "color": [1, 2, 3] } },
+                { "method": "hew.material.create", "params": { "name": "B", "texture": { "path": dir.join("nope.png").to_str().unwrap(), "world_size": [1, 1] } } }
+            ] }),
+        );
+        assert_eq!(attach_texture_inputs(&mut second).unwrap_err().0, 1);
+
+        // Only a regular file is read: a FIFO is refused at once, not waited on.
+        #[cfg(unix)]
+        {
+            let fifo = dir.join("pipe");
+            assert!(
+                std::process::Command::new("mkfifo")
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let mut piped = request(
+                "hew.material.create",
+                json!({ "name": "B", "texture": { "path": fifo.to_str().unwrap(), "world_size": [1, 1] } }),
+            );
+            let (_, refusal) = attach_texture_inputs(&mut piped).unwrap_err();
+            assert_eq!(refusal.name, "load_failed");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

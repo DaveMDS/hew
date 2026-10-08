@@ -570,6 +570,13 @@ below.
   Ctrl/Cmd, only within the clicked object) in one undoable step
 - Position Texture: drag a texture's corner pins on a face to move, rotate,
   scale, and shear it, or type an exact angle or scale factor
+- From the Hew API, `hew.material.create` makes a texture material from an
+  image (inline bytes, or a file `hew-cli` reads) and its real-world tile
+  size, and `hew.material.position_texture` pins a face's texture the way
+  the tool does; the query commands read both back. `hew.material.replace`
+  is the Paint tool's Shift-click, and `hew.library.save {material}` /
+  `hew.library.insert` save a material to the Library and add it back to
+  the palette
 - A searchable material palette, with the add-color and add-texture panels
   collapsed until needed
 - Rename and delete a palette material from the Materials panel; deleting

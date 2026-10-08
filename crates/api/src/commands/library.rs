@@ -356,6 +356,38 @@ fn library_meta_text(item_doc: &Document, key: &str) -> Option<String> {
         })
 }
 
+/// A material item goes into the palette, as the Library's "Add to palette"
+/// does (`Document::insert_palette`): each of its materials is added, or
+/// reused when the palette already holds an identical one. Nothing is
+/// placed, and like `hew.material.create` it records no undo entry.
+fn insert_material_item(ctx: &mut Ctx, item_doc: &Document) -> Result<Value, CmdError> {
+    // The palette's own growth, so duplicates inside the item count once.
+    let before = ctx.doc.materials().len();
+    let ids = ctx.doc.insert_palette(item_doc);
+    let added = ctx.doc.materials().len() - before;
+    let resolver = ctx.resolver();
+    let materials: Vec<String> = ids
+        .iter()
+        .map(|&m| {
+            resolver
+                .public_of(ctx.doc, &EntityRef::Material(m))
+                .expect("in the palette")
+        })
+        .collect();
+    Ok(serde_json::json!({
+        "roots": [],
+        "materials": materials,
+        "definitions_added": 0,
+        "definitions_reused": 0,
+        "materials_added": added,
+        "materials_reused": ids.len() - added,
+        "objects_added": 0,
+        "guides_added": 0,
+        "world_sketches_skipped": 0,
+        "annotations_skipped": 0,
+    }))
+}
+
 fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: InsertParams = parse(params)?;
     if p.item.is_some() == p.bytes_base64.is_some() {
@@ -379,6 +411,14 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     };
 
     let item_doc = Document::load(&bytes).map_err(load_failed)?;
+    if library_meta_text(&item_doc, "category").as_deref() == Some("material") {
+        if p.at.is_some() || p.name.is_some() {
+            return Err(CmdError::Params(
+                "a material item goes into the palette; \"at\" and \"name\" place geometry".into(),
+            ));
+        }
+        return insert_material_item(ctx, &item_doc);
+    }
     let source_id = library_meta_text(&item_doc, "id");
     let provenance = match (source_id, content_hash) {
         (Some(source_id), Some(content_hash)) => Some(LibraryProvenance {
@@ -437,6 +477,10 @@ fn insert_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 struct SaveParams {
     #[serde(default)]
     selection: Option<Vec<String>>,
+    /// One palette material, saved alone as a material item — the
+    /// palette's "Save to Library".
+    #[serde(default)]
+    material: Option<String>,
     name: String,
     #[serde(default)]
     category: Option<String>,
@@ -461,7 +505,27 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: SaveParams = parse(params)?;
 
     let selection = p.selection.filter(|s| !s.is_empty());
+    if selection.is_some() && p.material.is_some() {
+        return Err(CmdError::Params(
+            "library.save takes \"selection\" or \"material\", not both".into(),
+        ));
+    }
     let (mut item_doc, default_category, source_nodes) = match &selection {
+        None if p.material.is_some() => {
+            let public = p.material.as_deref().expect("checked above");
+            let Some(EntityRef::Material(mid)) = ctx.resolver().resolve(public) else {
+                return Err(super::entity::unknown_entity(public));
+            };
+            let material = ctx
+                .doc
+                .material(mid)
+                .ok_or_else(|| super::entity::unknown_entity(public))?
+                .clone();
+            // As the palette's Save to Library does: the material alone.
+            let mut item = Document::new();
+            item.add_material(material);
+            (item, "material", Vec::new())
+        }
         Some(ids) => {
             let nodes: Vec<NodeId> = ids
                 .iter()
@@ -481,6 +545,11 @@ fn save_item(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         Some(c) => parse_category(c)?,
         None => default_category,
     };
+    if default_category == "material" && category != "material" {
+        return Err(CmdError::Params(
+            "a saved \"material\" is a material item; leave \"category\" off or make it \"material\"".into(),
+        ));
+    }
 
     let id = mint_item_id(ctx.host);
     let mut set = |key: &str, value: AttrValue| -> Result<(), CmdError> {

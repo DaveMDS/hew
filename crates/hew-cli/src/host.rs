@@ -126,6 +126,10 @@ impl Host for CliHost {
         import_by_extension(doc, path, options)
     }
 
+    fn read_texture(&mut self, path: &str) -> Result<Vec<u8>, Refusal> {
+        read_texture_file(path)
+    }
+
     fn snapshot(
         &mut self,
         doc: &Document,
@@ -496,6 +500,54 @@ fn unit_scale(units: &str) -> Option<f64> {
     }
 }
 
+// ------------------------------------------------------------------ texture
+
+/// Reads a texture image for `hew.material.create {texture: {path}}`: the
+/// headless host's read, and what `hew-cli` sends a live app as
+/// `bytes_base64` (the app has no filesystem). Whether the bytes are an image
+/// is the command's check, the same for both.
+pub(crate) fn read_texture_file(path: &str) -> Result<Vec<u8>, Refusal> {
+    // Held in the document and, live, sent whole over a socket as base64.
+    const MAX_TEXTURE_BYTES: u64 = 64 * 1024 * 1024;
+    read_input_file(
+        path,
+        MAX_TEXTURE_BYTES,
+        "a texture image may be; scale the image down",
+    )
+}
+
+/// Reads a file a command names, as `load_failed` on any failure: only a
+/// regular file (a FIFO would block the open and a device never ends), and
+/// at most `cap` bytes however the file reports its size. `limit` finishes
+/// the too-large message: "{n} MiB is more than the {cap} MiB {limit}".
+fn read_input_file(path: &str, cap: u64, limit: &str) -> Result<Vec<u8>, Refusal> {
+    use std::io::Read;
+    let failed =
+        |why: &dyn std::fmt::Display| Refusal::api("load_failed", &format!("{path}: {why}"));
+    let meta = std::fs::metadata(path).map_err(|e| failed(&e))?;
+    if !meta.is_file() {
+        return Err(failed(&"not a regular file"));
+    }
+    let too_big = |len: u64| {
+        failed(&format!(
+            "{} MiB is more than the {} MiB {limit}.",
+            len / (1024 * 1024),
+            cap / (1024 * 1024)
+        ))
+    };
+    if meta.len() > cap {
+        return Err(too_big(meta.len()));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(cap + 1).read_to_end(&mut bytes))
+        .map_err(|e| failed(&e))?;
+    if bytes.len() as u64 > cap {
+        return Err(too_big(bytes.len() as u64));
+    }
+    Ok(bytes)
+}
+
 // ------------------------------------------------------------------ import
 
 /// Reads what `hew.doc.import` needs from disk, for a client whose host has
@@ -518,20 +570,11 @@ pub(crate) fn read_import_inputs(
     // Sent whole over a socket as base64 (and held in the app's memory), so
     // a file this large is refused up front rather than wedging a connection.
     const MAX_IMPORT_BYTES: u64 = 128 * 1024 * 1024;
-    if let Ok(meta) = std::fs::metadata(path)
-        && meta.len() > MAX_IMPORT_BYTES
-    {
-        return Err(Refusal::api(
-            "load_failed",
-            &format!(
-                "{path}: {} MiB is more than the {} MiB a live import carries; import it in the app (File > Import).",
-                meta.len() / (1024 * 1024),
-                MAX_IMPORT_BYTES / (1024 * 1024)
-            ),
-        ));
-    }
-    let bytes =
-        std::fs::read(path).map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let bytes = read_input_file(
+        path,
+        MAX_IMPORT_BYTES,
+        "a live import carries; import it in the app (File > Import)",
+    )?;
     let mut images = std::collections::BTreeMap::new();
     let is_dae = Path::new(path)
         .extension()

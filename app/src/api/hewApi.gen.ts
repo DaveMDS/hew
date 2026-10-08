@@ -587,7 +587,7 @@ export interface LibraryDescribeResult {
 }
 
 /**
- * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.
+ * `hew.library.insert` (v1) — Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: host_capability_missing, unknown_library_item, load_failed, component_expansion_exceeded, singular, degenerate_axis, reflection, explode_session_scope
  */
@@ -608,6 +608,8 @@ export interface LibraryInsertResult {
   definitions_added: number
   definitions_reused: number
   guides_added: number
+  /** a material item only: its palette materials, added or reused, in item order */
+  materials?: string[]
   materials_added: number
   materials_reused: number
   objects_added: number
@@ -648,15 +650,17 @@ export interface LibraryRemoveResult {
 }
 
 /**
- * `hew.library.save` (v1) — Save a selection (or the whole document) to the library. Records no undo entry (§6.4).
+ * `hew.library.save` (v1) — Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
  * Tier: Standard · Class: read-only · Served: kernel
- * Refusals: host_capability_missing, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed
+ * Refusals: host_capability_missing, unknown_entity, empty_component, duplicate_member, unknown_object, unknown_group, unknown_instance, explode_session_scope, save_failed
  */
 export interface LibrarySaveParams {
-  /** defaults to component (a selection) or model (the whole document) */
+  /** defaults to component (a selection), material (a material), or model (the whole document) */
   category?: "component" | "material" | "model"
   collection?: string
   keywords?: string[]
+  /** one palette material to save alone as a material item, as the palette's Save to Library does — not with selection */
+  material?: string
   name: string
   /** also return the saved item's bytes base64 */
   return_bytes?: boolean
@@ -698,11 +702,14 @@ export interface LibraryUpdateMetaResult {
 /**
  * `hew.material.create` (v1) — Add a color or texture material to the palette. Registry-state: records no undo entry (§6.4).
  * Tier: Standard · Class: model-mutating · Served: kernel
- * Refusals: none.
+ * Refusals: load_failed, host_capability_missing
  */
 export interface MaterialCreateParams {
-  color: number[]
+  /** required without a texture; with one it tints the image (default white: the image as-is) */
+  color?: number[]
   name: string
+  /** an image texture: a PNG or JPEG, inline or a file path (hew-cli reads it), and the meters one tile covers */
+  texture?: { bytes_base64?: string; path?: string; world_size: [number, number] }
 }
 
 export interface MaterialCreateResult {
@@ -721,6 +728,38 @@ export interface MaterialPaintParams {
 }
 
 export interface MaterialPaintResult {}
+
+/**
+ * `hew.material.position_texture` (v1) — Position a face's texture by three tile-corner pins, or reset it to the default projection.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, unknown_object, unknown_face, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale, degenerate_pins
+ */
+export interface MaterialPositionTextureParams {
+  /** a face locator (§5.2) */
+  face: UnspecifiedShape
+  /** three corners of one texture tile, in the face's object frame (as a locator's `at`), projected onto the face: origin, one tile along the width (u), one tile along the height (v) — exactly one of pins/reset */
+  pins?: { origin: [number, number, number]; u: [number, number, number]; v: [number, number, number] }
+  /** true: back to the default projection at the material's tile size — exactly one of pins/reset */
+  reset?: boolean
+}
+
+export interface MaterialPositionTextureResult {}
+
+/**
+ * `hew.material.replace` (v1) — Replace one material with another everywhere it is painted, or within one object.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: unknown_entity, unknown_object
+ */
+export interface MaterialReplaceParams {
+  /** the material to replace; null: unpainted object bases */
+  from: string | null
+  /** only within this object; omitted: the whole document */
+  object?: string
+  /** the material it becomes; null: unpaint */
+  to: string | null
+}
+
+export interface MaterialReplaceResult {}
 
 /**
  * `hew.material.set_default` (v1) — Set an object's default material.
@@ -1756,6 +1795,8 @@ export class HewApiClient {
   readonly material = {
     create: (params: MaterialCreateParams): Promise<MaterialCreateResult> => this.mutate('hew.material.create', params),
     paint: (params: MaterialPaintParams): Promise<MaterialPaintResult> => this.mutate('hew.material.paint', params),
+    positionTexture: (params: MaterialPositionTextureParams): Promise<MaterialPositionTextureResult> => this.mutate('hew.material.position_texture', params),
+    replace: (params: MaterialReplaceParams): Promise<MaterialReplaceResult> => this.mutate('hew.material.replace', params),
     setDefault: (params: MaterialSetDefaultParams): Promise<MaterialSetDefaultResult> => this.mutate('hew.material.set_default', params),
     setOpacity: (params: MaterialSetOpacityParams): Promise<MaterialSetOpacityResult> => this.mutate('hew.material.set_opacity', params),
   }

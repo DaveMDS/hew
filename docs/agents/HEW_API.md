@@ -663,7 +663,8 @@ The registry classes every command, and the class governs placement:
   The kernel deliberately keeps palette and registry additions outside the
   undo log — an unreferenced material is harmless, and a tag's visibility
   is view state, not a modeled edit. Their registry entries note this in
-  their summaries.
+  their summaries. `hew.library.insert` of a `material` item is the same
+  kind of write — it only adds palette entries — and also records none.
 
   `hew.tag.rename` is an ordinary undoable edit: it moves a tag path — and
   every tag nested under it — to a new path while keeping the tag's
@@ -707,7 +708,7 @@ for, not shipped.
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
 | `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
-| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity` | Standard |
+| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `position_texture`, `replace` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
@@ -1003,6 +1004,31 @@ Semantics notes, normative:
   `normals_png_base64` inline, or `<path>.depth.png` / `<path>.normals.png`
   (returned as `depth_path` / `normals_path`) with `path`; the metric
   range (`depth_near`, `depth_far`, `depth_bits`) is always inline.
+- `hew.material.create` makes what the palette's "Add color" and "Add
+  texture" make. A `texture` is `{bytes_base64 | path, world_size}`: a PNG
+  or JPEG (recognized by its bytes; anything else is a params error) and
+  the `[width, height]` in meters one tile covers. `color` is required
+  without a texture; with one it defaults to white, so the image shows as
+  it is, and a given color tints it. A `path` is read by `hew-cli`, never
+  by the app (§12.2). `hew.query.scene` and `hew.query.entity` report a
+  material's `texture` as `{format, world_size}`, or `null` for a flat
+  color.
+- `hew.material.position_texture` is the Position Texture tool:
+  `{face, pins: {origin, u, v}}` lays one texture tile on the face with
+  its corners at `origin`, one tile along the width at `u`, and one along
+  the height at `v`, which sets scale, rotation and skew together. The
+  pins are in the face's object frame (a locator's `at` frame) and are
+  projected onto the face's plane, as the tool's pins are. Pins that don't
+  span a tile refuse `degenerate_pins`. `{face, reset: true}` returns the
+  face to the default projection at the material's tile size. Each is one
+  undo entry, or none when the face is already positioned that way. Positioning is per face and independent of the material, so
+  it also works on a face with no texture yet. `hew.query.faces` reports
+  each face's `texture_pins` in the same form, or `null` for the default.
+- `hew.material.replace {from, to, object?}` is the Paint tool's
+  Shift-click: every face and object base painted `from` becomes `to`
+  across the document, or only within `object` (Ctrl/Cmd+Shift-click).
+  `null` on either side means unpainted, and both keys are required. It is
+  one undo entry, or none when nothing matches.
 - `hew.entity.rename`/`hew.entity.delete` reach a palette material
   (`mat_…`) or a component definition (`cmp_…`) the same way they reach
   any other entity kind — no separate namespace. A material's `name` is a
@@ -1072,9 +1098,15 @@ Semantics notes, normative:
   uses: giving a provenance-bearing `item` (or `bytes_base64` with a
   `content_hash`) makes a second insert of the same item version reuse
   the in-document definition instead of copying it again, exactly as
-  described in §8.1. `hew.library.save` extracts a `selection` (wrapped
-  as a component, UI parity) or, with no selection, the whole document
-  (a `model` item); either way it stamps the saved selection's source
+  described in §8.1. A `material` item instead goes into the palette, as
+  the Library's "Add to palette" does (`Document::insert_palette`): each
+  of its materials is added, or reused when an identical one is already
+  there, and the result lists them as `materials`; nothing is placed, and
+  like `hew.material.create` it adds no undo entry. `hew.library.save`
+  extracts a `selection` (wrapped as a component, UI parity), one palette
+  `material` (a `material` item holding just that material, as the
+  palette's Save to Library makes), or, with neither, the whole document
+  (a `model` item); for a selection it stamps the saved selection's source
   nodes with the new item's provenance (`Document::stamp_library_source`)
   — a real document mutation, but not an undoable one, which is why it is
   `ReadOnly` class like `hew.scenes.*` rather than `ModelMutating`. A
@@ -1597,7 +1629,7 @@ invocation) — is handled identically.
 
 ### 12.2 Headless and live: what is the same, and what cannot be
 
-The 73 commands the kernel serves run the same dispatcher over the same
+The 81 commands the kernel serves run the same dispatcher over the same
 kernel in both modes — a script's replies are the same, byte for byte
 (exports included), except where §12.2's last list says otherwise. The 18
 host-served commands are where the two hosts differ, and each is either
@@ -1612,6 +1644,7 @@ at parity or a stated, reasoned difference:
 | `hew.doc.save`, no path, never saved | refuses `path_required` | hands the bytes back (the app cannot ask where) |
 | `hew.doc.export` | writes the file | `hew-cli` writes it from the bytes the app returns |
 | `hew.doc.import` | reads the file (and a COLLADA file's textures) | the same: `hew-cli` reads them and sends `bytes_base64`/`images`; the app merges additively, one undo entry, and records it for replay |
+| `hew.material.create {texture: {path}}` | the host reads the image | the same: `hew-cli` reads it and sends `texture.bytes_base64` in place of `path` |
 | `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
 | `hew.library.*` | the library folder | the library folder, on the client's side (§12.1); `save` records the document's file as `source_doc` as headless does |
 | `hew.view.camera`, `zoom_extents`, `units` | refused (`core` profile) | take effect in the window |

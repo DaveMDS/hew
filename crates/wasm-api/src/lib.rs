@@ -12390,6 +12390,115 @@ mod tests {
         );
     }
 
+    /// A texture material made and positioned over the live API is the same
+    /// thing the palette's Add Texture and the Position Texture tool make:
+    /// the UI's own readers see the image and its tile size, and the
+    /// recorded session (bytes inline, as hew-cli sends a live app) replays
+    /// to the identical document.
+    #[test]
+    fn a_live_api_texture_material_reads_back_in_the_palette_and_replays() {
+        let mut scene = Scene::new();
+        recording::start();
+        let conn = scene.api_connection_open();
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+        );
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        // A PNG signature is all the kernel looks at; it never decodes.
+        let png = api::commands::doc::encode_base64(b"\x89PNG\r\n\x1a\nimage");
+        let frame = format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{{"label":"Textured box","commands":[
+                {{"method":"hew.sketch.draw_rect","as":"s","params":{{"plane":{{"ground":true}},"corner_a":[0,0,0],"corner_b":[1,1,0]}}}},
+                {{"method":"hew.solid.extrude","as":"box","params":{{"region":{{"$ref":"s#/region_id"}},"distance":0.5}}}},
+                {{"method":"hew.material.create","as":"m","params":{{"name":"Bamboo","texture":{{"bytes_base64":"{png}","world_size":[0.2,1.0]}}}}}},
+                {{"method":"hew.material.set_default","params":{{"id":{{"$ref":"box#/object_id"}},"material":{{"$ref":"m#/material"}}}}}},
+                {{"method":"hew.material.position_texture","params":{{"face":{{"object":{{"$ref":"box#/object_id"}},"at":[0.5,0.5,0.5]}},"pins":{{"origin":[0,0,0.5],"u":[0.2,0,0.5],"v":[0,1,0.5]}}}}}}]}}}}"#
+        );
+        let reply = scene.api_dispatch(conn, &frame).expect("transact replies");
+        assert!(
+            !reply.contains("\"error\""),
+            "the transaction must succeed: {reply}"
+        );
+        // Save to Library over the live connection hands the item back (the
+        // app has no folder of its own; hew-cli writes it), and Shift-click's
+        // replace is recorded like any edit.
+        let parsed: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        let material = parsed["result"]["results"][2]["material"]
+            .as_str()
+            .expect("the material's id")
+            .to_string();
+        let saved = scene
+            .api_dispatch(
+                conn,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":3,"method":"hew.library.save","params":{{"material":"{material}","name":"Bamboo","return_bytes":true}}}}"#
+                ),
+            )
+            .expect("save replies");
+        let saved: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        let item = api::commands::doc::decode_base64(
+            saved["result"]["bytes_base64"]
+                .as_str()
+                .expect("item bytes"),
+        )
+        .unwrap();
+        let item = Document::load(&item).unwrap();
+        assert_eq!(item.materials().len(), 1, "the material alone");
+        let replaced = scene
+            .api_dispatch(
+                conn,
+                &format!(
+                    r#"{{"jsonrpc":"2.0","id":4,"method":"hew.material.replace","params":{{"from":"{material}","to":null}}}}"#
+                ),
+            )
+            .expect("replace replies");
+        assert!(!replaced.contains("\"error\""), "{replaced}");
+        scene.api_connection_close(conn);
+
+        let textured: Vec<MaterialJs> = scene
+            .material_ids()
+            .into_iter()
+            .filter_map(|id| scene.material_info(id))
+            .filter(|m| m.has_texture)
+            .collect();
+        assert_eq!(textured.len(), 1, "the palette sees one texture material");
+        let m = &textured[0];
+        assert_eq!(
+            (m.name.as_str(), m.world_w, m.world_h),
+            ("Bamboo", 0.2, 1.0)
+        );
+        assert_eq!((m.r, m.g, m.b, m.a), (255, 255, 255, 255));
+        let positioned = scene.doc.visible_object_ids().into_iter().any(|o| {
+            scene.doc.object(o).is_some_and(|obj| {
+                obj.faces().keys().any(|f| {
+                    scene
+                        .face_uv_frame(o.data().as_ffi(), f.data().as_ffi())
+                        .is_some()
+                })
+            })
+        });
+        assert!(
+            positioned,
+            "the Position Texture tool's reader sees the frame"
+        );
+
+        let golden = scene.state_hash();
+        recording::stop();
+        let calls = recording::take_calls();
+        let artifact = serde_json::to_string(&recording::Recording {
+            version: recording::RECORDING_FORMAT_VERSION,
+            calls,
+            golden_hash: golden,
+        })
+        .expect("recording serializes");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&artifact).expect("replay succeeds"), golden);
+    }
+
     /// `hew.history.undo` over the live API is a document change and must
     /// be recorded like any other. It is classed `Solitary` — it cannot
     /// ride inside the very history it moves — so deriving "did this

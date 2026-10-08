@@ -487,6 +487,15 @@ pub trait Host {
         Err(unsupported("export"))
     }
 
+    /// Read a texture image file for `hew.material.create {texture: {path}}`.
+    /// A host with no filesystem of its own (the live WASM boundary) never
+    /// sees a `path` from `hew-cli`, which reads the file and sends
+    /// `bytes_base64` instead (docs/agents/HEW_API.md §12.2).
+    fn read_texture(&mut self, path: &str) -> Result<Vec<u8>, Refusal> {
+        let _ = path;
+        Err(unsupported("read texture files"))
+    }
+
     /// Merge a foreign-format file into the document (`hew.doc.import`),
     /// returning the kernel's import report as JSON.
     fn import_document(

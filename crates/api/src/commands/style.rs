@@ -13,7 +13,7 @@ use super::entity::{resolve_node, unknown_entity};
 use super::{CmdError, Ctx, Handler};
 use crate::locate;
 use crate::refusal::Refusal;
-use kernel::{EntityRef, Material, Rgba8, Transform};
+use kernel::{EntityRef, ImageFormat, Material, Point3, Rgba8, Texture, Transform, UvFrame, Vec3};
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
@@ -23,6 +23,8 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.material.paint" => material_paint,
         "hew.material.set_default" => material_set_default,
         "hew.material.set_opacity" => material_set_opacity,
+        "hew.material.position_texture" => material_position_texture,
+        "hew.material.replace" => material_replace,
         "hew.tag.create" => tag_create,
         "hew.tag.assign" => tag_assign,
         "hew.tag.set_visible" => tag_set_visible,
@@ -75,14 +77,83 @@ fn parse_rgba(color: &[Value]) -> Result<Rgba8, CmdError> {
 #[serde(deny_unknown_fields)]
 struct MaterialCreateParams {
     name: String,
-    color: Vec<Value>,
+    #[serde(default)]
+    color: Option<Vec<Value>>,
+    #[serde(default)]
+    texture: Option<TextureParams>,
+}
+
+/// An image texture, the API's form of the palette's "Add texture": the
+/// image (inline, or a file the host reads) and the real-world size one
+/// tile covers.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TextureParams {
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    world_size: [f64; 2],
+}
+
+/// The codec of encoded image bytes, from their signature. The kernel
+/// never decodes an image (material.rs), so this is the whole check: PNG
+/// and JPEG are what the renderer and file format carry.
+fn sniff_image_format(bytes: &[u8]) -> Option<ImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(ImageFormat::Png)
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(ImageFormat::Jpeg)
+    } else {
+        None
+    }
+}
+
+fn parse_texture(ctx: &mut Ctx, t: TextureParams) -> Result<Texture, CmdError> {
+    let [w, h] = t.world_size;
+    if !(w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0) {
+        return Err(CmdError::Params(
+            "texture.world_size must be two positive lengths in meters".into(),
+        ));
+    }
+    let image = match (t.bytes_base64, t.path) {
+        (Some(b64), None) => super::doc::decode_base64(&b64)
+            .ok_or_else(|| CmdError::Params("texture.bytes_base64 is not valid base64".into()))?,
+        (None, Some(path)) => ctx.host.read_texture(&path).map_err(CmdError::Refusal)?,
+        _ => {
+            return Err(CmdError::Params(
+                "texture needs exactly one of \"bytes_base64\" or \"path\"".into(),
+            ));
+        }
+    };
+    let format = sniff_image_format(&image)
+        .ok_or_else(|| CmdError::Params("texture image must be a PNG or a JPEG".into()))?;
+    Ok(Texture {
+        image,
+        format,
+        world_size: [w, h],
+    })
 }
 
 fn material_create(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let p: MaterialCreateParams =
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
-    let color = parse_rgba(&p.color)?;
-    let id = ctx.doc.add_material(Material::solid(p.name, color));
+    // A texture is shown as-is under white, as the palette's "Add texture"
+    // makes it; a color given with one tints it (the kernel modulates).
+    let color = match (&p.color, &p.texture) {
+        (Some(c), _) => parse_rgba(c)?,
+        (None, Some(_)) => Rgba8::rgba(255, 255, 255, 255),
+        (None, None) => {
+            return Err(CmdError::Params(
+                "material.create needs \"color\", \"texture\", or both".into(),
+            ));
+        }
+    };
+    let material = match p.texture {
+        Some(t) => Material::textured(p.name, color, parse_texture(ctx, t)?),
+        None => Material::solid(p.name, color),
+    };
+    let id = ctx.doc.add_material(material);
     let resolver = ctx.resolver();
     let public = resolver
         .public_of(ctx.doc, &EntityRef::Material(id))
@@ -163,6 +234,129 @@ fn material_set_opacity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     }
     let material = resolve_material(ctx, &p.material)?;
     ctx.doc.set_material_alpha(material, p.alpha as u8)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PositionTextureParams {
+    face: Value,
+    #[serde(default)]
+    pins: Option<Pins>,
+    #[serde(default)]
+    reset: Option<bool>,
+}
+
+/// The Position Texture tool's three pins: corners of one texture tile laid
+/// on the face, in the face's object frame (the frame a face locator's
+/// `at` uses). `u` is one tile along the texture's width from `origin`,
+/// `v` one tile along its height.
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Pins {
+    origin: [f64; 3],
+    u: [f64; 3],
+    v: [f64; 3],
+}
+
+fn degenerate_pins() -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "degenerate_pins",
+        "The three pins don't span a tile on the face. Place origin, u and v at three corners of one tile, not in a line.",
+    ))
+}
+
+/// The UV frame that puts tile corner (0, 0) at `origin`, (1, 0) at `u` and
+/// (0, 1) at `v`, after projecting the pins onto the face's plane (as the
+/// tool's pins are constrained to it). Solves `s·(u−o) = 1, s·(v−o) = 0,
+/// s·n = 0` and the same for `t`, so both gradients lie in the plane.
+fn frame_from_pins(pins: &Pins, normal: Vec3, plane_point: Point3) -> Result<UvFrame, CmdError> {
+    let p = |a: [f64; 3]| Point3::new(a[0], a[1], a[2]);
+    let project = |q: Point3| q - normal * (q - plane_point).dot(normal);
+    let (o, pu, pv) = (
+        project(p(pins.origin)),
+        project(p(pins.u)),
+        project(p(pins.v)),
+    );
+    let (a, b, n) = (pu - o, pv - o, normal);
+    // Rows a, b, n; its inverse's columns are (b×n, n×a, a×b) / det.
+    let det = a.dot(b.cross(n));
+    if a.length() < 1e-9
+        || b.length() < 1e-9
+        || !det.is_finite()
+        || det.abs() <= 1e-9 * a.length() * b.length()
+    {
+        return Err(degenerate_pins());
+    }
+    let s = b.cross(n) * (1.0 / det);
+    let t = n.cross(a) * (1.0 / det);
+    let ov = Vec3::new(o.x, o.y, o.z);
+    let frame = UvFrame::new(s, t, -s.dot(ov), -t.dot(ov));
+    if !frame.is_valid() {
+        return Err(degenerate_pins());
+    }
+    Ok(frame)
+}
+
+fn material_position_texture(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: PositionTextureParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let face = locate::resolve_face(ctx, &p.face)?;
+    let frame = match (p.pins, p.reset) {
+        (Some(pins), None | Some(false)) => {
+            let f = &ctx
+                .doc
+                .object(face.object)
+                .ok_or_else(|| CmdError::Internal("dangling object behind a resolved face".into()))?
+                .faces()[face.face];
+            Some(frame_from_pins(&pins, f.plane.normal(), f.plane.point())?)
+        }
+        (None, Some(true)) => None,
+        _ => {
+            return Err(CmdError::Params(
+                "material.position_texture needs exactly one of \"pins\" or \"reset\": true".into(),
+            ));
+        }
+    };
+    // Already so (a reset of an unpositioned face, the same pins again):
+    // nothing changes, so nothing is recorded, as hew.doc.purge_unused does.
+    if ctx.doc.face_uv_frame(face.object, face.face) == Some(frame) {
+        return Ok(serde_json::json!({}));
+    }
+    ctx.doc.set_face_uv_frame(face.object, face.face, frame)?;
+    Ok(serde_json::json!({}))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReplaceParams {
+    from: Option<String>,
+    to: Option<String>,
+    #[serde(default)]
+    object: Option<String>,
+}
+
+/// The Paint tool's Shift-click: every face and object base painted `from`
+/// becomes `to` (`null` is unpainted), across the document, or within one
+/// object as Ctrl/Cmd+Shift-click does.
+fn material_replace(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    // `null` is a value here (unpainted), so a missing key is not one.
+    for key in ["from", "to"] {
+        if params.get(key).is_none() {
+            return Err(CmdError::Params(format!(
+                "material.replace needs \"{key}\" (a material id, or null for unpainted)"
+            )));
+        }
+    }
+    let p: ReplaceParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let from = resolve_optional_material(ctx, &p.from)?;
+    let to = resolve_optional_material(ctx, &p.to)?;
+    let scope = match &p.object {
+        Some(id) => kernel::MaterialScope::Object(resolve_object(ctx, id)?),
+        None => kernel::MaterialScope::Document,
+    };
+    ctx.doc.replace_material(scope, from, to)?;
     Ok(serde_json::json!({}))
 }
 

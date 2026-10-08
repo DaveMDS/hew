@@ -425,6 +425,72 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ----------------------------------------------------------------- texture
+
+/// `hew.material.create {texture: {path}}` headless: the CLI host reads the
+/// image and the material carries it at the stated tile size; a missing
+/// file refuses `load_failed`.
+#[test]
+fn cli_host_reads_a_texture_path_for_material_create() {
+    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
+    let dir = scratch_dir("texture");
+    let file = dir.join("grain.jpg");
+    let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    std::fs::write(&file, jpeg).unwrap();
+
+    let mut conn = Connection::new(Profile::Core, "t");
+    let mut doc = Document::new();
+    let mut host = CliHost::new();
+    let mut call = |id: i64, method: &str, params: serde_json::Value, doc: &mut Document| {
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(id)),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        };
+        match conn.dispatch(doc, &mut host, request) {
+            DispatchOutcome::Reply(r) => r,
+            DispatchOutcome::Dropped => unreachable!(),
+        }
+    };
+    call(
+        1,
+        "hew.meta.hello",
+        serde_json::json!({"protocol": 1}),
+        &mut doc,
+    );
+    call(2, "hew.doc.new", serde_json::json!({}), &mut doc);
+    let made = call(
+        3,
+        "hew.material.create",
+        serde_json::json!({ "name": "Grain", "texture": { "path": file.to_str().unwrap(), "world_size": [0.25, 2.0] } }),
+        &mut doc,
+    );
+    assert!(made.error.is_none(), "{:?}", made.error);
+    let texture = doc
+        .materials()
+        .values()
+        .find(|m| m.name == "Grain")
+        .and_then(|m| m.texture.clone())
+        .expect("a textured material");
+    assert_eq!(texture.image, jpeg);
+    assert_eq!(texture.format, kernel::ImageFormat::Jpeg);
+    assert_eq!(texture.world_size, [0.25, 2.0]);
+
+    let missing = call(
+        4,
+        "hew.material.create",
+        serde_json::json!({ "name": "X", "texture": { "path": dir.join("nope.png").to_str().unwrap(), "world_size": [1, 1] } }),
+        &mut doc,
+    );
+    assert_eq!(
+        missing.error.unwrap().data.unwrap()["refusal"],
+        "load_failed"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------ import
 
 /// `CliHost::import_document` on a hand-built one-tetrahedron STL fixture:

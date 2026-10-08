@@ -2174,7 +2174,7 @@ One library item's full metadata, manifest summary, and document attributes.
 - **Class:** model-mutating
 - **Served:** kernel
 
-Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement.
+Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
 
 **Params schema:**
 
@@ -2234,6 +2234,13 @@ Insert a library item into the attached document, wired for idempotent re-insert
     },
     "guides_added": {
       "type": "integer"
+    },
+    "materials": {
+      "description": "a material item only: its palette materials, added or reused, in item order",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     },
     "materials_added": {
       "type": "integer"
@@ -2451,7 +2458,7 @@ Delete a library item.
 - **Class:** read-only
 - **Served:** kernel
 
-Save a selection (or the whole document) to the library. Records no undo entry (§6.4).
+Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
 
 **Params schema:**
 
@@ -2460,7 +2467,7 @@ Save a selection (or the whole document) to the library. Records no undo entry (
   "additionalProperties": false,
   "properties": {
     "category": {
-      "description": "defaults to component (a selection) or model (the whole document)",
+      "description": "defaults to component (a selection), material (a material), or model (the whole document)",
       "enum": [
         "component",
         "material",
@@ -2476,6 +2483,10 @@ Save a selection (or the whole document) to the library. Records no undo entry (
         "type": "string"
       },
       "type": "array"
+    },
+    "material": {
+      "description": "one palette material to save alone as a material item, as the palette's Save to Library does — not with selection",
+      "type": "string"
     },
     "name": {
       "type": "string"
@@ -2530,6 +2541,7 @@ Save a selection (or the whole document) to the library. Records no undo entry (
 **Refusals:**
 
 - `host_capability_missing`
+- `unknown_entity`
 - `empty_component` — Select at least one object to turn into a component.
 - `duplicate_member` — The same object is in the selection twice. Reselect and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
@@ -2642,6 +2654,7 @@ Add a color or texture material to the palette. Registry-state: records no undo 
   "additionalProperties": false,
   "properties": {
     "color": {
+      "description": "required without a texture; with one it tints the image (default white: the image as-is)",
       "items": {
         "maximum": 255,
         "minimum": 0,
@@ -2653,11 +2666,38 @@ Add a color or texture material to the palette. Registry-state: records no undo 
     },
     "name": {
       "type": "string"
+    },
+    "texture": {
+      "additionalProperties": false,
+      "description": "an image texture: a PNG or JPEG, inline or a file path (hew-cli reads it), and the meters one tile covers",
+      "properties": {
+        "bytes_base64": {
+          "description": "the encoded PNG/JPEG — exactly one of bytes_base64/path",
+          "type": "string"
+        },
+        "path": {
+          "description": "an image file, read by hew-cli — exactly one of bytes_base64/path",
+          "type": "string"
+        },
+        "world_size": {
+          "description": "[width, height] in meters of one tile",
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "world_size"
+      ],
+      "type": "object"
     }
   },
   "required": [
-    "name",
-    "color"
+    "name"
   ],
   "type": "object"
 }
@@ -2679,7 +2719,10 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 }
 ```
 
-**Refusals:** none.
+**Refusals:**
+
+- `load_failed`
+- `host_capability_missing`
 
 ### `hew.material.paint`
 
@@ -2732,6 +2775,150 @@ Paint a face or entity.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `locator_missed`
 - `ambiguous_locator`
+
+### `hew.material.position_texture`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Position a face's texture by three tile-corner pins, or reset it to the default projection.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "face": {
+      "description": "a face locator (§5.2)"
+    },
+    "pins": {
+      "additionalProperties": false,
+      "description": "three corners of one texture tile, in the face's object frame (as a locator's `at`), projected onto the face: origin, one tile along the width (u), one tile along the height (v) — exactly one of pins/reset",
+      "properties": {
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "u": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "v": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "u",
+        "v"
+      ],
+      "type": "object"
+    },
+    "reset": {
+      "description": "true: back to the default projection at the material's tile size — exactly one of pins/reset",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "face"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `degenerate_pins`
+
+### `hew.material.replace`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Replace one material with another everywhere it is painted, or within one object.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "from": {
+      "description": "the material to replace; null: unpainted object bases",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "object": {
+      "description": "only within this object; omitted: the whole document",
+      "type": "string"
+    },
+    "to": {
+      "description": "the material it becomes; null: unpaint",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "from",
+    "to"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 
 ### `hew.material.set_default`
 

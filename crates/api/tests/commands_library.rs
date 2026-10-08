@@ -645,6 +645,137 @@ fn save_with_a_selection_extracts_wraps_as_component_and_stamps_provenance() {
     );
 }
 
+/// The palette's Save to Library: one material, alone, as a material item
+/// that inserts back with its texture intact.
+#[test]
+fn save_a_material_writes_a_material_item_that_inserts_back() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    let png = api::commands::doc::encode_base64(b"\x89PNG\r\n\x1a\nimage");
+    let made = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.material.create",
+        json!({"name": "Bamboo", "texture": {"bytes_base64": png, "world_size": [0.2, 1.0]}}),
+    );
+    let material = made["results"][0]["material"].as_str().unwrap().to_string();
+
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.save",
+        json!({"material": material, "name": "Bamboo", "return_bytes": true}),
+    );
+    let path = saved["path"].as_str().unwrap();
+    assert!(path.starts_with("Materials/"), "{path}");
+    let item = Document::load(&host.write_log[0].1).unwrap();
+    assert!(
+        item.visible_object_ids().is_empty(),
+        "the material alone, no geometry"
+    );
+    let mats: Vec<_> = item.materials().values().collect();
+    assert_eq!(mats.len(), 1);
+    assert_eq!(mats[0].name, "Bamboo");
+    assert_eq!(mats[0].texture.as_ref().unwrap().world_size, [0.2, 1.0]);
+    assert_eq!(
+        item_summary(&host.write_log[0].1).doc_attrs["hew.library"]["category"],
+        "material"
+    );
+
+    // Into a fresh document it adds just the material, with no undo entry
+    // (a palette addition, like hew.material.create).
+    let mut fresh = Document::new();
+    let mut conn2 = new_conn();
+    hello_attach(&mut conn2, &mut fresh, &mut host);
+    let depth = fresh.undo_depth();
+    let inserted = call_ok(
+        &mut conn2,
+        &mut fresh,
+        &mut host,
+        5,
+        "hew.library.insert",
+        json!({"bytes_base64": saved["bytes_base64"]}),
+    );
+    assert_eq!(inserted["results"][0]["materials_added"], 1);
+    assert!(
+        fresh
+            .materials()
+            .values()
+            .any(|m| m.name == "Bamboo" && m.texture.is_some())
+    );
+    assert_eq!(
+        inserted["results"][0]["materials"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // Again: the identical material is reused, not duplicated.
+    let again = call_ok(
+        &mut conn2,
+        &mut fresh,
+        &mut host,
+        6,
+        "hew.library.insert",
+        json!({"bytes_base64": saved["bytes_base64"]}),
+    );
+    assert_eq!(again["results"][0]["materials_reused"], 1);
+    assert_eq!(
+        again["results"][0]["materials"],
+        inserted["results"][0]["materials"]
+    );
+    assert_eq!(fresh.materials().len(), 1);
+    assert_eq!(
+        fresh.undo_depth(),
+        depth,
+        "palette additions record no undo entry"
+    );
+    // Placement arguments don't apply to a material item.
+    let r = call(
+        &mut conn2,
+        &mut fresh,
+        &mut host,
+        7,
+        "hew.library.insert",
+        json!({"bytes_base64": saved["bytes_base64"], "at": [1, 0, 0]}),
+    );
+    assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
+
+    // A material with a selection, or under another category, is a params
+    // error; an unknown material refuses typed.
+    for params in [
+        json!({"material": material, "selection": ["obj_1"], "name": "X"}),
+        json!({"material": material, "category": "component", "name": "X"}),
+    ] {
+        let r = call(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            6,
+            "hew.library.save",
+            params,
+        );
+        assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
+    }
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        7,
+        "hew.library.save",
+        json!({"material": "mat_ffffff", "name": "X"}),
+    );
+    assert_eq!(data["refusal"], "unknown_entity");
+    assert_eq!(host.write_log.len(), 1, "nothing else was written");
+}
+
 #[test]
 fn save_with_no_selection_saves_the_whole_document_as_a_model_item() {
     let mut conn = new_conn();

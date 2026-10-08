@@ -725,6 +725,453 @@ fn material_set_opacity_sets_alpha_and_refuses_an_unknown_material() {
     assert_eq!(data["refusal"], "unknown_entity");
 }
 
+/// A 1x1 PNG (signature onward) — the kernel never decodes an image, but a
+/// real one keeps the fixture honest.
+const PNG_1X1: &[u8] = &[
+    0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
+    0xDE, 0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54, 0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00,
+    0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xDD, 0x8D, 0xB0, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E,
+    0x44, 0xAE, 0x42, 0x60, 0x82,
+];
+
+fn b64(bytes: &[u8]) -> String {
+    api::commands::doc::encode_base64(bytes)
+}
+
+fn call_params_err(
+    conn: &mut Connection,
+    doc: &mut Document,
+    id: i64,
+    method: &str,
+    params: Value,
+) -> String {
+    let r = call(conn, doc, id, method, params);
+    let err = r
+        .error
+        .unwrap_or_else(|| panic!("{method} was expected to fail"));
+    assert_eq!(err.code, codes::INVALID_PARAMS, "{method}: {}", err.message);
+    err.message
+}
+
+#[test]
+fn material_create_with_a_texture_matches_the_palettes_add_texture() {
+    let mut doc = Document::new();
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+
+    let result = call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.material.create",
+        json!({ "name": "Bamboo", "texture": { "bytes_base64": b64(PNG_1X1), "world_size": [0.5, 1.25] } }),
+    );
+    let material_pub = result["material"]
+        .as_str()
+        .expect("material id")
+        .to_string();
+    let Some(EntityRef::Material(id)) = api::IdResolver::new(&doc).resolve(&material_pub) else {
+        panic!("a material id")
+    };
+    let m = doc.material(id).expect("live");
+    // As "Add texture" makes it: white, so the image shows unmodulated.
+    assert_eq!(m.color, Rgba8::rgba(255, 255, 255, 255));
+    let t = m.texture.as_ref().expect("textured");
+    assert_eq!(t.image, PNG_1X1);
+    assert_eq!(t.format, kernel::ImageFormat::Png);
+    assert_eq!(t.world_size, [0.5, 1.25]);
+    assert_eq!(
+        doc.undo_depth(),
+        depth_before,
+        "a palette addition adds no undo entry"
+    );
+
+    // Read back the way the palette shows it.
+    let entity = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.query.entity",
+        json!({ "id": material_pub }),
+    );
+    assert_eq!(entity["has_texture"], true);
+    assert_eq!(
+        entity["texture"],
+        json!({ "format": "png", "world_size": [0.5, 1.25] })
+    );
+    let scene = call_ok(&mut conn, &mut doc, 4, "hew.query.scene", json!({}));
+    let row = scene["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == material_pub.as_str())
+        .expect("listed");
+    assert_eq!(row["texture"]["world_size"], json!([0.5, 1.25]));
+
+    // A color with a texture tints it; a JPEG is recognized by its bytes.
+    let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
+    let tinted = call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.material.create",
+        json!({ "name": "Tinted", "color": [200, 150, 100], "texture": { "bytes_base64": b64(&jpeg), "world_size": [1, 1] } }),
+    );
+    let Some(EntityRef::Material(tid)) =
+        api::IdResolver::new(&doc).resolve(tinted["material"].as_str().unwrap())
+    else {
+        panic!("a material id")
+    };
+    let tm = doc.material(tid).unwrap();
+    assert_eq!(tm.color, Rgba8::rgba(200, 150, 100, 255));
+    assert_eq!(
+        tm.texture.as_ref().unwrap().format,
+        kernel::ImageFormat::Jpeg
+    );
+
+    // A flat material still reports no texture.
+    let flat = call_ok(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.material.create",
+        json!({ "name": "Flat", "color": [1, 2, 3] }),
+    );
+    let e = call_ok(
+        &mut conn,
+        &mut doc,
+        7,
+        "hew.query.entity",
+        json!({ "id": flat["material"] }),
+    );
+    assert_eq!(e["texture"], Value::Null);
+}
+
+#[test]
+fn material_create_rejects_a_malformed_texture_and_refuses_a_path_without_file_access() {
+    let mut doc = Document::new();
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let png = b64(PNG_1X1);
+    let cases = [
+        (json!({ "name": "A" }), "color"),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": "not base64!", "world_size": [1, 1] } }),
+            "base64",
+        ),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": b64(b"GIF89a..."), "world_size": [1, 1] } }),
+            "PNG or a JPEG",
+        ),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": png, "world_size": [0, 1] } }),
+            "world_size",
+        ),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": png, "world_size": [1, -2] } }),
+            "world_size",
+        ),
+        (
+            json!({ "name": "A", "texture": { "world_size": [1, 1] } }),
+            "exactly one",
+        ),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": png, "path": "a.png", "world_size": [1, 1] } }),
+            "exactly one",
+        ),
+        (
+            json!({ "name": "A", "texture": { "bytes_base64": png } }),
+            "world_size",
+        ),
+    ];
+    for (i, (params, needle)) in cases.into_iter().enumerate() {
+        let message = call_params_err(
+            &mut conn,
+            &mut doc,
+            10 + i as i64,
+            "hew.material.create",
+            params,
+        );
+        assert!(
+            message.contains(needle),
+            "case {i}: {message:?} should mention {needle:?}"
+        );
+    }
+    assert_eq!(doc.materials().len(), 0, "nothing was added");
+
+    // A host with no file access (NoHost, like the live WASM boundary)
+    // refuses a path typed; hew-cli reads it instead.
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        30,
+        "hew.material.create",
+        json!({ "name": "A", "texture": { "path": "bamboo.png", "world_size": [1, 1] } }),
+    );
+    assert_eq!(data["refusal"], "host_capability_missing");
+}
+
+/// The top face of `build_box(doc, 0.0)`: z = 0.5 over [0,1] x [0,1].
+fn top_face(doc: &Document, obj: kernel::ObjectId) -> kernel::FaceId {
+    let object = doc.object(obj).unwrap();
+    object
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .expect("a top face")
+}
+
+fn assert_point(v: &Value, want: [f64; 3]) {
+    let got: Vec<f64> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_f64().unwrap())
+        .collect();
+    for (g, w) in got.iter().zip(want) {
+        assert!((g - w).abs() < 1e-9, "{got:?} != {want:?}");
+    }
+}
+
+#[test]
+fn material_position_texture_pins_a_tile_and_resets_like_the_tool() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let obj_pub = public_of(&doc, &EntityRef::Object(obj));
+    let face = top_face(&doc, obj);
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth_before = doc.undo_depth();
+    let bytes_before = doc.save();
+    let locator = json!({ "object": obj_pub, "at": [0.5, 0.5, 0.5] });
+
+    // A 0.2 m tile turned 90 degrees, its corner at (0.1, 0.1); `v` sits
+    // 3 mm above the face and is projected onto it, as the tool's pins are.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.material.position_texture",
+        json!({ "face": locator, "pins": { "origin": [0.1, 0.1, 0.5], "u": [0.1, 0.3, 0.5], "v": [-0.1, 0.1, 0.503] } }),
+    );
+    let frame = doc
+        .face_uv_frame(obj, face)
+        .unwrap()
+        .expect("a frame is set");
+    let uv = |x: f64, y: f64| {
+        let p = Point3::new(x, y, 0.5);
+        frame.apply(p)
+    };
+    let close = |a: [f64; 2], b: [f64; 2]| (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9;
+    assert!(close(uv(0.1, 0.1), [0.0, 0.0]));
+    assert!(close(uv(0.1, 0.3), [1.0, 0.0]));
+    assert!(close(uv(-0.1, 0.1), [0.0, 1.0]));
+    assert!(close(uv(0.3, 0.5), [2.0, -1.0]));
+
+    // query.faces reads the pins back, on the plane.
+    let faces = call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.query.faces",
+        json!({ "object": obj_pub }),
+    );
+    let top = faces["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| !f["texture_pins"].is_null())
+        .expect("the positioned face reports its pins");
+    assert_point(&top["texture_pins"]["origin"], [0.1, 0.1, 0.5]);
+    assert_point(&top["texture_pins"]["u"], [0.1, 0.3, 0.5]);
+    assert_point(&top["texture_pins"]["v"], [-0.1, 0.1, 0.5]);
+    assert_eq!(
+        faces["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["texture_pins"].is_null())
+            .count(),
+        5,
+        "the other faces keep the default projection"
+    );
+    assert_one_undo_and_clean_undo(&mut doc, depth_before, &bytes_before);
+    assert_eq!(
+        doc.face_uv_frame(obj, face),
+        Some(None),
+        "undo restores the default"
+    );
+
+    // Reset returns the face to the default projection, as one undo entry.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.material.position_texture",
+        json!({ "face": locator, "pins": { "origin": [0, 0, 0.5], "u": [1, 0, 0.5], "v": [0, 1, 0.5] } }),
+    );
+    let depth = doc.undo_depth();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.material.position_texture",
+        json!({ "face": locator, "reset": true }),
+    );
+    assert_eq!(doc.face_uv_frame(obj, face), Some(None));
+    assert_eq!(doc.undo_depth(), depth + 1);
+
+    // Already so: resetting again changes nothing and records nothing.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.material.position_texture",
+        json!({ "face": locator, "reset": true }),
+    );
+    assert_eq!(doc.undo_depth(), depth + 1, "a no-op adds no undo entry");
+}
+
+#[test]
+fn material_position_texture_refuses_degenerate_pins_and_malformed_params() {
+    let mut doc = Document::new();
+    let obj = build_box(&mut doc, 0.0);
+    let obj_pub = public_of(&doc, &EntityRef::Object(obj));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let locator = json!({ "object": obj_pub, "at": [0.5, 0.5, 0.5] });
+    let depth = doc.undo_depth();
+
+    for (i, pins) in [
+        json!({ "origin": [0, 0, 0.5], "u": [1, 0, 0.5], "v": [2, 0, 0.5] }), // collinear
+        json!({ "origin": [0, 0, 0.5], "u": [0, 0, 0.5], "v": [0, 1, 0.5] }), // u on origin
+        json!({ "origin": [0, 0, 0.5], "u": [1, 0, 0.5], "v": [0, 0, 1.5] }), // v projects onto origin
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let data = call_err(
+            &mut conn,
+            &mut doc,
+            2 + i as i64,
+            "hew.material.position_texture",
+            json!({ "face": locator, "pins": pins }),
+        );
+        assert_eq!(data["refusal"], "degenerate_pins", "case {i}");
+    }
+    for (i, params) in [
+        json!({ "face": locator }),
+        json!({ "face": locator, "reset": false }),
+        json!({ "face": locator, "reset": true, "pins": { "origin": [0, 0, 0.5], "u": [1, 0, 0.5], "v": [0, 1, 0.5] } }),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        call_params_err(&mut conn, &mut doc, 10 + i as i64, "hew.material.position_texture", params);
+    }
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        20,
+        "hew.material.position_texture",
+        json!({ "face": { "object": obj_pub, "at": [5, 5, 5] }, "reset": true }),
+    );
+    assert_eq!(data["refusal"], "locator_missed");
+    assert_eq!(doc.undo_depth(), depth, "nothing was recorded");
+}
+
+/// The Paint tool's Shift-click (document) and Ctrl/Cmd+Shift-click
+/// (one object): every base and face painted `from` becomes `to`.
+#[test]
+fn material_replace_repaints_everywhere_or_within_one_object() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0);
+    let b = build_box(&mut doc, 3.0);
+    let oak = doc.add_material(Material::solid("Oak", Rgba8::rgb(180, 140, 90)));
+    let ash = doc.add_material(Material::solid("Ash", Rgba8::rgb(230, 210, 180)));
+    doc.set_object_material(a, Some(oak)).unwrap();
+    doc.set_object_material(b, Some(oak)).unwrap();
+    let face = top_face(&doc, b);
+    doc.paint_face(b, face, Some(oak)).unwrap();
+    let (oak_pub, ash_pub) = (
+        public_of(&doc, &EntityRef::Material(oak)),
+        public_of(&doc, &EntityRef::Material(ash)),
+    );
+    let a_pub = public_of(&doc, &EntityRef::Object(a));
+    let mut conn = Connection::new(Profile::Core, "test");
+    hello_attach(&mut conn, &mut doc);
+    let depth = doc.undo_depth();
+    let bytes_before = doc.save();
+
+    // Within one object: only `a` changes.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.material.replace",
+        json!({ "from": oak_pub, "to": ash_pub, "object": a_pub }),
+    );
+    let base = |doc: &Document, o: kernel::ObjectId| {
+        let any = top_face(doc, o);
+        doc.face_material_pair(o, any).expect("live").1
+    };
+    assert_eq!(base(&doc, a), Some(ash));
+    assert_eq!(base(&doc, b), Some(oak));
+    assert_one_undo_and_clean_undo(&mut doc, depth, &bytes_before);
+
+    // Everywhere: both bases and the painted face, as one undo entry.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.material.replace",
+        json!({ "from": oak_pub, "to": ash_pub }),
+    );
+    assert_eq!((base(&doc, a), base(&doc, b)), (Some(ash), Some(ash)));
+    assert_eq!(
+        doc.face_material_pair(b, face).map(|p| p.0),
+        Some(Some(ash))
+    );
+    assert_eq!(doc.undo_depth(), depth + 1);
+
+    // Nothing left to match: no undo entry. Unpaint with `to: null`.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.material.replace",
+        json!({ "from": oak_pub, "to": ash_pub }),
+    );
+    assert_eq!(doc.undo_depth(), depth + 1);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.material.replace",
+        json!({ "from": ash_pub, "to": null }),
+    );
+    assert_eq!(base(&doc, a), None);
+
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.material.replace",
+        json!({ "from": "mat_ffffff", "to": ash_pub }),
+    );
+    assert_eq!(data["refusal"], "unknown_entity");
+    call_params_err(
+        &mut conn,
+        &mut doc,
+        7,
+        "hew.material.replace",
+        json!({ "to": ash_pub }),
+    );
+}
+
 // ==================================================================== hew.tag
 
 #[test]

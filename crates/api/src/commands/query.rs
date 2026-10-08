@@ -295,8 +295,51 @@ fn material_summary(ctx: &Ctx, id: kernel::MaterialId) -> Result<Value, CmdError
         "name": m.name,
         "color": { "r": m.color.r, "g": m.color.g, "b": m.color.b, "a": m.color.a },
         "has_texture": m.texture.is_some(),
+        "texture": texture_json(m),
         "usage": ctx.doc.material_usage(id),
     }))
+}
+
+/// A material's image texture as the palette shows it — its codec and the
+/// meters one tile covers — or `null` for a flat color. The image bytes
+/// themselves stay out of the scene dump.
+fn texture_json(m: &kernel::Material) -> Value {
+    match &m.texture {
+        Some(t) => json!({
+            "format": match t.format {
+                kernel::ImageFormat::Png => "png",
+                kernel::ImageFormat::Jpeg => "jpeg",
+            },
+            "world_size": [t.world_size[0], t.world_size[1]],
+        }),
+        None => Value::Null,
+    }
+}
+
+/// A face's positioned texture as `hew.material.position_texture` takes it:
+/// the tile corners (0,0), (1,0) and (0,1) of its UV frame on the face's
+/// plane, or `null` while the face uses the default projection.
+fn texture_pins_json(uv: Option<kernel::UvFrame>, plane: &kernel::Plane) -> Value {
+    let Some(f) = uv else {
+        return Value::Null;
+    };
+    // Solve s·p + u0 = u, t·p + v0 = v, n·p = n·q for the three corners.
+    let n = plane.normal();
+    let q = plane.point();
+    let d = n.dot(Vec3::new(q.x, q.y, q.z));
+    let det = f.s.dot(f.t.cross(n));
+    // Relative, like UvFrame::is_valid's own test, so a valid frame of any
+    // tile size reads back.
+    if !det.is_finite() || det.abs() <= 1e-9 * f.s.length() * f.t.length() {
+        return Value::Null;
+    }
+    let corner = |u: f64, v: f64| {
+        let (a, b, c) = (u - f.u0, v - f.v0, d);
+        // p = (a (t×n) + b (n×s) + c (s×t)) / det
+        let p = (f.t.cross(n) * a + n.cross(f.s) * b + f.s.cross(f.t) * c) * (1.0 / det);
+        point_json(Point3::new(p.x, p.y, p.z))
+    };
+    json!({ "origin": corner(0.0, 0.0), "u": corner(1.0, 0.0), "v": corner(0.0, 1.0) })
 }
 
 fn tag_summary(ctx: &Ctx, path: &[String]) -> Result<Value, CmdError> {
@@ -523,6 +566,7 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "name": m.name,
                 "color": { "r": m.color.r, "g": m.color.g, "b": m.color.b, "a": m.color.a },
                 "has_texture": m.texture.is_some(),
+                "texture": texture_json(m),
             }))
         }
         EntityRef::Tag(path) => {
@@ -625,6 +669,7 @@ fn face_description(ctx: &Ctx, face: locate::FaceRef) -> Result<Value, CmdError>
             .collect::<Vec<_>>(),
         "material": material,
         "surface": surface,
+        "texture_pins": texture_pins_json(f.uv_frame, &f.plane),
     }))
 }
 
