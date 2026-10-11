@@ -7,7 +7,8 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { CommandPalette } from './CommandPalette'
-import { clearRecent } from './recency'
+import { clearRecent, recordRun } from './recency'
+import { paletteEntries } from './registry'
 
 beforeEach(() => {
   clearRecent()
@@ -155,5 +156,51 @@ describe('CommandPalette', () => {
     rerender(<CommandPalette open={false} onClose={vi.fn()} onRun={vi.fn()} />)
     rerender(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} />)
     expect(screen.getByPlaceholderText(/search tools, actions, help/i)).toHaveValue('')
+  })
+
+  it('hover only selects once the pointer has actually moved', () => {
+    render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} />)
+    const rows = screen.getAllByRole('option')
+    expect(rows[0]).toHaveAttribute('aria-selected', 'true')
+    // A re-fired mouseenter under a still pointer must not steal the selection.
+    fireEvent.mouseEnter(rows[2])
+    expect(rows[0]).toHaveAttribute('aria-selected', 'true')
+    // A real move does.
+    fireEvent.mouseMove(rows[2], { clientX: 10, clientY: 20 })
+    expect(rows[2]).toHaveAttribute('aria-selected', 'true')
+    // The same position again (layout shifted a row under it) does not.
+    fireEvent.keyDown(screen.getByRole('dialog'), { key: 'ArrowUp' })
+    expect(rows[1]).toHaveAttribute('aria-selected', 'true')
+    fireEvent.mouseMove(rows[2], { clientX: 10, clientY: 20 })
+    expect(rows[1]).toHaveAttribute('aria-selected', 'true')
+  })
+
+  it('keeps focus in the search field when dead space in the dialog is pressed', () => {
+    render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} />)
+    const dialog = screen.getByRole('dialog')
+    // fireEvent returns false when the event's default was prevented.
+    expect(fireEvent.mouseDown(dialog)).toBe(false)
+    expect(fireEvent.mouseDown(screen.getByPlaceholderText(/search tools, actions, help/i))).toBe(true)
+  })
+
+  it('Enter runs the highlighted row even when a recent Action outranks the Tools drawn above it', () => {
+    // A recent run lifts "Parallel Projection" (an Action, drawn under Tools)
+    // to the top of the ranking, so ranked order != on-screen order.
+    recordRun('toggle-parallel-projection')
+    const onRun = vi.fn()
+    render(<CommandPalette open onClose={vi.fn()} onRun={onRun} />)
+    fireEvent.change(screen.getByPlaceholderText(/search tools, actions, help/i), { target: { value: 'para' } })
+    const dialog = screen.getByRole('dialog')
+    const count = screen.getAllByRole('option').length
+    expect(count).toBeGreaterThan(2)
+    for (let i = 0; i < count; i += 1) {
+      const selected = screen.getAllByRole('option').find((r) => r.getAttribute('aria-selected') === 'true')!
+      onRun.mockClear()
+      fireEvent.keyDown(dialog, { key: 'Enter' })
+      const ran = paletteEntries().find((e) => e.id === onRun.mock.calls[0]?.[0])
+      expect(ran, `row ${i}`).toBeDefined()
+      expect(selected.textContent ?? '').toContain(ran!.label)
+      if (i < count - 1) fireEvent.keyDown(dialog, { key: 'ArrowDown' })
+    }
   })
 })

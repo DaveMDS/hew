@@ -49,6 +49,12 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  // Where the pointer last really moved to. Chromium re-fires mouseenter on
+  // whichever row ends up under a STILL pointer whenever the list re-ranks or
+  // scrolls, which would steal the keyboard selection — so hover only
+  // selects once the pointer has actually changed position.
+  const pointerRef = useRef<{ x: number; y: number } | null>(null)
 
   useEffect(() => subscribeRecent(setRecentIds), [])
 
@@ -60,6 +66,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     if (!open) return
     setQuery(initialQuery ?? '')
     setSelectedIndex(0)
+    pointerRef.current = null
     const id = requestAnimationFrame(() => inputRef.current?.focus())
     return () => cancelAnimationFrame(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -70,11 +77,27 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     [extraEntries],
   )
   const ranked = useMemo(() => rankEntries(query, allEntries, recentIds), [query, allEntries, recentIds])
+  // The rows as the user SEES them: ranked order, regrouped under the group
+  // headers. `selectedIndex` counts these rows, so arrows, Enter, and
+  // scrolling must all index this list — not `ranked`, which interleaves
+  // groups (a recently-run Action outranks Tools but is drawn below them).
+  const shown = useMemo(
+    () => GROUP_ORDER.flatMap((group) => ranked.filter((e) => e.group === group)),
+    [ranked],
+  )
 
   // Clamp selection whenever the ranked list changes shape (e.g. typing narrows it).
   useEffect(() => {
-    setSelectedIndex((i) => Math.max(0, Math.min(i, ranked.length - 1)))
-  }, [ranked.length])
+    setSelectedIndex((i) => Math.max(0, Math.min(i, shown.length - 1)))
+  }, [shown.length])
+
+  // Keep the keyboard selection visible as arrows walk past the fold.
+  useEffect(() => {
+    if (!open) return
+    const row = listRef.current?.querySelector('[role="option"][aria-selected="true"]')
+    // jsdom has no scrollIntoView.
+    row?.scrollIntoView?.({ block: 'nearest' })
+  }, [open, selectedIndex, shown])
 
   const isDisabled = (entry: PaletteEntry): boolean =>
     entry.gate !== undefined && (gates?.[entry.gate] ?? false) === false
@@ -95,7 +118,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     }
     if (ev.key === 'ArrowDown') {
       ev.preventDefault()
-      setSelectedIndex((i) => Math.min(i + 1, ranked.length - 1))
+      setSelectedIndex((i) => Math.min(i + 1, shown.length - 1))
       return
     }
     if (ev.key === 'ArrowUp') {
@@ -105,7 +128,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     }
     if (ev.key === 'Enter') {
       ev.preventDefault()
-      const entry = ranked[selectedIndex]
+      const entry = shown[selectedIndex]
       if (entry !== undefined) run(entry)
     }
   }
@@ -115,7 +138,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
   // Group the ranked (already-ordered) list into sections, preserving order.
   const grouped = GROUP_ORDER.map((group) => ({
     group,
-    items: ranked.filter((e) => e.group === group),
+    items: shown.filter((e) => e.group === group),
   })).filter((g) => g.items.length > 0)
 
   let flatIndex = -1
@@ -138,7 +161,15 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
-        onMouseDown={(e) => e.stopPropagation()}
+        onMouseDown={(e) => {
+          e.stopPropagation()
+          // Keep focus in the search input: the key handler lives on this
+          // dialog, so a click on dead space (header padding, scrollbar,
+          // section titles) must not strand focus on the page, where arrows
+          // and Enter do nothing and bare letters switch tools. Rows still
+          // get their click.
+          if (e.target !== inputRef.current) e.preventDefault()
+        }}
         onKeyDown={onKeyDown}
         style={{
           width: '550px',
@@ -192,7 +223,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
         </div>
 
         {/* Results */}
-        <div style={{ overflowY: 'auto', padding: 'var(--space-3) 0' }}>
+        <div ref={listRef} style={{ overflowY: 'auto', padding: 'var(--space-3) 0' }}>
           {grouped.length === 0 && (
             <div style={{ padding: 'var(--space-7)', textAlign: 'center', color: 'var(--text-faint)', fontSize: '13px' }}>
               No matches for “{query}”.
@@ -215,7 +246,8 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
               </div>
               {items.map((entry) => {
                 flatIndex += 1
-                const selected = flatIndex === selectedIndex
+                const index = flatIndex
+                const selected = index === selectedIndex
                 const disabled = isDisabled(entry)
                 const shortcut = paletteShortcut(entry, isMac)
                 return (
@@ -224,7 +256,12 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                     role="option"
                     aria-selected={selected}
                     aria-disabled={disabled || undefined}
-                    onMouseEnter={() => setSelectedIndex(flatIndex)}
+                    onMouseMove={(ev) => {
+                      const last = pointerRef.current
+                      if (last !== null && last.x === ev.clientX && last.y === ev.clientY) return
+                      pointerRef.current = { x: ev.clientX, y: ev.clientY }
+                      setSelectedIndex(index)
+                    }}
                     onClick={() => run(entry)}
                     style={{
                       display: 'flex',

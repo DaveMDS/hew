@@ -230,6 +230,66 @@ test('palette: Ctrl+K opens it; running a tool entry activates the tool', async 
   ).toHaveAttribute('aria-checked', 'true')
 })
 
+test('palette: a pointer parked over the list never steals the keyboard selection', async ({
+  page,
+}) => {
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  const search = palette.getByRole('textbox', { name: 'Search' })
+  const selected = palette.locator('[role=option][aria-selected=true]')
+
+  // First use: mouse. The pointer is left resting over the list.
+  await page.keyboard.press('Control+/')
+  await expect(search).toBeFocused()
+  await page.keyboard.type('para')
+  await palette.getByRole('option', { name: /Parallel Projection/ }).click()
+  await expect(palette).not.toBeVisible()
+
+  // Second use: keyboard only, pointer still parked where it clicked. Chromium
+  // re-fires hover on whichever row lands under a still pointer as the list
+  // re-ranks; that must not move the selection.
+  await page.keyboard.press('Control+/')
+  await expect(search).toBeFocused()
+  await expect(selected).toContainText('Select')
+  await page.keyboard.type('para')
+  await expect(selected).not.toContainText('Select')
+  const first = (await selected.innerText()).split('\n')[0]
+  await page.keyboard.press('ArrowDown')
+  const second = (await selected.innerText()).split('\n')[0]
+  expect(second).not.toBe(first)
+  await page.keyboard.press('ArrowUp')
+  await expect(selected).toContainText(first)
+  await page.keyboard.press('ArrowDown')
+  await expect(selected).toContainText(second)
+  await page.keyboard.press('Enter')
+  await expect(palette).not.toBeVisible()
+  // Enter ran the row the arrows had selected, not the one under the pointer.
+  // Assumes the 'para' result set (Tape Measure, Slice, Pan, Parallel
+  // Projection); a registry change that alters it should update this map.
+  const ids: Record<string, string> = {
+    'Tape Measure': 'tool-tape-measure',
+    Slice: 'tool-slice',
+    Pan: 'tool-pan',
+    'Parallel Projection': 'toggle-parallel-projection',
+  }
+  const recent = JSON.parse((await page.evaluate(() => localStorage.getItem('hew.palette.recent'))) ?? '[]')
+  expect(recent[0]).toBe(ids[second])
+})
+
+test('palette: clicking dead space inside the dialog keeps focus in the search field', async ({
+  page,
+}) => {
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  const search = palette.getByRole('textbox', { name: 'Search' })
+  await page.keyboard.press('Control+/')
+  await expect(search).toBeFocused()
+  const box = (await palette.boundingBox())!
+  await page.mouse.click(box.x + box.width - 10, box.y + 8)
+  await expect(search).toBeFocused()
+  await page.keyboard.press('ArrowDown')
+  await page.keyboard.press('Enter')
+  await expect(palette).not.toBeVisible()
+})
+
 // ---------------------------------------------------------------------------
 // Welcome screen
 // ---------------------------------------------------------------------------
