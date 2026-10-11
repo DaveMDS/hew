@@ -1434,3 +1434,95 @@ describe('PushPullTool — routing through the plane listing', () => {
     expect(scene.push_pull).not.toHaveBeenCalled()
   })
 })
+
+describe('PushPullTool — a flat surface is pulled into a solid (Model Health, design F7)', () => {
+  const INSTANCE = 42n
+  const COMPONENT = 5n
+
+  /** A scene whose health report gives `kind` for every object asked about. */
+  function healthScene(kind: string | null, opts: Parameters<typeof makeWasmScene>[0] = {}, faces = 1): WasmScene {
+    const base = makeWasmScene(opts) as unknown as Record<string, unknown>
+    base.thicken_sheet = vi.fn(() => new BigUint64Array())
+    base.thicken_sheet_in_instance = vi.fn(() => new BigUint64Array())
+    base.health_report_json = vi.fn(() =>
+      JSON.stringify({
+        rows: kind === null ? [] : [{ object: '3', verdict: { kind, holes: 0 }, rims: [], faces }],
+        families: [],
+        counts: {},
+      }),
+    )
+    return base as unknown as WasmScene
+  }
+
+  const drag = (tool: PushPullTool) => {
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 2, kind: 'endpoint' }), RAY)
+  }
+
+  it('a flat_sheet face commits thicken_sheet(object, 0, distance), not push_pull', () => {
+    const scene = healthScene('flat_sheet', { facePick: makeFacePick(3n, 4n) })
+    const { tool, onCommit, onToast } = makeTool(scene)
+    drag(tool)
+    expect(scene.thicken_sheet).toHaveBeenCalledTimes(1)
+    const call = (scene.thicken_sheet as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(3n)
+    expect(call[1]).toBe(0)
+    expect(call[2]).toBeCloseTo(2)
+    expect(scene.push_pull).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(3n)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a flat_sheet picked through an instance commits thicken_sheet_in_instance with the world distance', () => {
+    const scene = healthScene('flat_sheet', { facePick: makeFacePick(3n, 4n, INSTANCE) })
+    const { tool, onCommit } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
+    tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
+    drag(tool)
+    expect(scene.thicken_sheet_in_instance).toHaveBeenCalledTimes(1)
+    const call = (scene.thicken_sheet_in_instance as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(call[0]).toBe(INSTANCE)
+    expect(call[1]).toBe(3n)
+    expect(call[2]).toBeCloseTo(2)
+    expect(scene.thicken_sheet).not.toHaveBeenCalled()
+    expect(scene.push_pull_in_component).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledWith(3n)
+  })
+
+  it('a solid (no report row) and a bent sheet keep the ordinary push_pull', () => {
+    for (const kind of [null, 'bent_sheet', 'cappable']) {
+      const scene = healthScene(kind, { facePick: makeFacePick(3n, 4n) })
+      const { tool } = makeTool(scene)
+      drag(tool)
+      expect(scene.push_pull).toHaveBeenCalledTimes(1)
+      expect(scene.thicken_sheet).not.toHaveBeenCalled()
+    }
+  })
+
+  it('a flat sheet of several faces (a region drawn on it) keeps the ordinary push_pull', () => {
+    const scene = healthScene('flat_sheet', { facePick: makeFacePick(3n, 4n) }, 2)
+    const { tool } = makeTool(scene)
+    drag(tool)
+    expect(scene.thicken_sheet).not.toHaveBeenCalled()
+    expect(scene.push_pull).toHaveBeenCalledTimes(1)
+  })
+
+  it('the extrude-as-new modifier is unchanged on a flat sheet', () => {
+    const scene = healthScene('flat_sheet', { facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.toggleExtrudeAsNew()
+    drag(tool)
+    expect(scene.thicken_sheet).not.toHaveBeenCalled()
+  })
+
+  it('a refusal from thicken_sheet toasts the kernel copy', () => {
+    const scene = healthScene('flat_sheet', { facePick: makeFacePick(3n, 4n) })
+    ;(scene.thicken_sheet as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      throw new Error('ThicknessTooSmall: too thin')
+    })
+    const { tool, onToast, onCommit } = makeTool(scene)
+    drag(tool)
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledWith(expect.stringMatching(/too small/), 'ThicknessTooSmall')
+  })
+})

@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `17`**, and **geometry buffer format version `7`**. Both are covered
+version `20`**, and **geometry buffer format version `8`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,8 +59,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 17,
-  "geometry_version": 6,
+  "format_version": 22,
+  "geometry_version": 8,
   "app": "hew",
   "app_version": "0.1.0",
 
@@ -102,17 +102,25 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "plane": [0.0, 0.0, 1.0, 0.0],
       "vertices": [ {"id":0, "p":[0.0, 0.0, 0.0]} ],
       "edges":    [ {"id":0, "from":0, "to":1, "curve":0} ],
-      "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]]} ],
+      "regions":  [ {"id":0, "outer":[0,1,2,3], "holes":[[4,5,6]],
+                     "faceless": true} ], // "faceless" is v21+, optional;
+                                          // omitted = the loop has a face
       "curves":   [ {"id":0, "center":[1.0, 2.0, 0.0], "radius":0.75,
                      "kind":"polygon"} ], // v10+; "kind" is v12+, optional
       "owner":    0,  // v13+, optional; dense `components[]` id. Omitted =
                        // world-owned (the only possibility before v13)
-      "owner_object": 0 // v17+, optional; dense `objects[]` id. Omitted =
+      "owner_object": 0, // v17+, optional; dense `objects[]` id. Omitted =
                        // not owned by an Object (the only possibility before v17)
+      "owner_group": 0, // v19+, optional; dense `groups[]` id. Omitted =
+                       // in no group (the only possibility before v19)
+      "tags": [["Site"]] // v20+, optional; omitted = untagged
     }
   ],
   "guides": [
-    { "id": 0, "sid": 8, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0] },
+    { "id": 0, "sid": 8, "kind": "line", "p": [0.0, 0.0, 0.0], "dir": [1.0, 0.0, 0.0],
+      "tags": [["Rig"]] }, // v21+, optional; omitted = untagged
+    { "id": 2, "sid": 10, "kind": "line", "p": [0.0, 1.0, 0.0], "dir": [0.0, 0.0, 1.0],
+      "from": 0.0, "to": 0.0127 }, // v22+, optional; omitted = runs on forever
     { "id": 1, "sid": 9, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "annotations": [
@@ -164,9 +172,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `17`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `20`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `7`.
+  used by every entry under `geometry/` in this file. Current: `8`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
@@ -187,12 +195,12 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   v14+ (it would consume a stable id nothing can address).
 - **`sid`** (`u64`, v14+, required at v14+) — on every `materials[]`,
   `objects[]`, `groups[]`, `components[]`, `instances[]`, `sketches[]`,
-  `guides[]`, and `tags[]` entry: the entity's **stable id**, the
-  persistent identity that survives save/load where dense ids do not
-  (§4.2). Globally unique across every kind in one file — a duplicate, or
-  a missing `sid` in a v14+ manifest, is a fatal, typed load error, never
-  silently re-minted. Annotations deliberately carry none (they are not
-  independently addressable entities; their identity is their anchor).
+  `guides[]`, and `tags[]` entry, and (v19+, required at v19+) on every
+  `annotations[]` entry: the entity's **stable id**, the persistent
+  identity that survives save/load where dense ids do not (§4.2).
+  Globally unique across every kind in one file — a duplicate, or a
+  missing `sid` where it is required, is a fatal, typed load error,
+  never silently re-minted.
 - **`attrs`** (v14+, optional) — attribute dictionaries (docs/agents/HEW_API.md
   §8): on every entity kind that carries a `sid`, and once at the manifest
   top level for the document's own. Shape: `namespace → key → value`,
@@ -203,9 +211,14 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   fatal, typed error, as is a value nested more than 64 levels deep
   (lists and objects count one level each). Omitted entirely when empty, so an attribute-free
   document is byte-identical to one written before the field existed. The
-  kernel stores and round-trips dictionaries verbatim and never interprets
-  them.
+  kernel stores and round-trips dictionaries verbatim and interprets one
+  first-party key only: `hew.health` → `surface: true` on an object (a
+  definition member included) marks it as a surface someone accepted
+  (Model Health); it is an ordinary attribute in the file, and any other
+  value means "not marked".
 - **`camera`** (v13+, optional) — the camera's working view at last save.
+- **`view_style`** (v19+, optional) — how the document asks to be shown:
+  its backdrop and axes (§4.15). Absent → Hew's own look.
 - **`axes`** (optional object, v13+) — the document-level movable drawing
   axes frame: `origin` (`[f64;3]`), `x` and `y` (`[f64;3]`, unit length and
   mutually perpendicular). The blue axis is never stored — it is always
@@ -272,6 +285,16 @@ of the manifest:
 | `section_plane` (top-level object) | 16 | absent — no section plane placed |
 | `scenes` (top-level array) | 16 | empty list (no Scenes) |
 | `sketches[].owner_object` | 17 | absent — no sketch is owned by an Object (the only kind before v17) |
+| `sketches[].owner_group` | 19 | absent — no sketch is held by a group (the only possibility before v19) |
+| `annotations[].tags` | 18 | empty list (the annotation carries no tag) |
+| `camera.parallel_height` (top-level and in `scenes[].camera`) | 19 | the height the perspective view spans at the target: `2 · |eye − target| · tan(fov_deg / 2)` |
+| `view_style` (top-level object) | 19 | absent — Hew's own look, the only possibility before this field |
+| `scenes[].view_style` | 19 | absent — a Scene restored the editor's toggles alone |
+| `annotations[].sid` | 19 | pre-v19 upgrade: the loader mints fresh stable ids in list order, as the v14 upgrade does for the other kinds. At v19+ absence is a fatal, typed error |
+| `sketches[].tags` | 20 | empty list (the sketch carries no tag) |
+| `sketches[].regions[].faceless` | 21 | `false` (every closed loop has a face, the only possibility before v21) |
+| `guides[].tags` | 21 | empty list (the guide carries no tag) |
+| `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -364,12 +387,12 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `6`)
+### 3.1 Layout (current version, `8`)
 
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 6)
+4       u32                 version (currently 8)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
@@ -406,7 +429,14 @@ offset  type                field
         u8                  edge polygon flag: 0 = plain edge, 1 = polygon claim follows
         f64[4]              edge polygon, present only when the flag above is 1:
                              circumcircle center.x .y .z  radius
+        u8                  back paint flag (v8): 0 = the back shows what the front shows, 1 = a back material id follows
+        u32                 back material id, present only when the flag above is 1
 ```
+
+A face's back paint (v8) is the material on its back side: a `.skp` face
+can be painted on each side. Renderers draw it where the back can be seen
+(an open shell, a cut); it never changes shape or watertightness. Any flag
+value other than 0 or 1 is malformed and MUST be rejected.
 
 An edge polygon claim (v7) marks an edge as a side, or a piece of a side,
 of a regular polygon drawn on the face, naming the polygon's circumcircle.
@@ -486,7 +516,7 @@ ignores the block loses only the drawn circle's analytic identity, never shape.
 A conforming writer always writes one buffer version per file, matching the
 manifest's `geometry_version`; a reader should nonetheless decode each
 buffer by its own header `version` field, not by trusting the manifest
-value uncritically. Two fields are version-gated; every other field is
+value uncritically. These fields are version-gated; every other field is
 present at every version:
 
 | Field | First appears at buffer `version` | Byte layout when absent | Effective value when absent |
@@ -497,6 +527,7 @@ present at every version:
 | per-face `edge_curves` flag + payload | 5 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the last hole loop directly | no edge carries an analytic circle |
 | per-face `soft_edges` flag + payload | 6 | flag byte and payload are not present at all — the `edge_curves` flag (v5) follows the last hole loop directly | no edge is soft |
 | per-face `edge_polygons` flag + payload | 7 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the `edge_curves` block directly | no edge is a polygon's side |
+| per-face back paint flag + id | 8 | flag byte and id are not present at all — the next face's material id (or the buffer's end) follows the `edge_polygons` block directly | no face has a painted back |
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -716,10 +747,18 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   Chain ids carry no geometry of their own (that lives in `curves[]`,
   v10+) — a reader that ignores them loses only selection grouping, never
   shape.
-- `regions[]` — `{id, outer, holes}`: a closed planar polygon-with-holes.
-  `outer` is a vertex-id cycle, counter-clockwise from the plane normal's
-  side; each `holes` entry is clockwise (same convention as). This
-  winding is a writer guarantee, not something the loader re-validates.
+- `regions[]` — `{id, outer, holes, faceless?}`: a closed planar
+  polygon-with-holes. `outer` is a vertex-id cycle, counter-clockwise from
+  the plane normal's side; each `holes` entry is clockwise (same
+  convention as). This winding is a writer guarantee, not something the
+  loader re-validates. `faceless` (v21+, optional, omitted when false)
+  marks a loop of edges with no face: what SketchUp has where a face was
+  erased from its edges or where edges alone were drawn (a wire frame, a
+  light rig). Such a region is not filled, not picked as a face and not
+  extruded, and a `.skp` save back writes its edges alone; drawing over
+  one of its edges gives it its face, and a region a drawing step brings
+  about has one. A manifest declaring `format_version < 21` that sets
+  `faceless` MUST be rejected.
 - `curves[]` (v10+, optional) — `{id, center, radius, kind?}`: the
   **analytic definition** of one curve chain — the exact circle, in the
   sketch plane, that the chain's edges relate to. `id` is the same dense
@@ -784,6 +823,28 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   is not saved (deleted, or consumed by a boolean) is not saved either; a
   writer never emits an `owner_object` that names an unsaved object.
 
+- `owner_group` (v19+, optional) — the dense `groups[]` id of the group the
+  sketch is drawn in: a `.skp` group of edges, or lines drawn while
+  editing a group. The sketch keeps its frame — a group inside component
+  `C` holds sketches with `owner` = `C`, a world group holds world
+  sketches — so a reader MUST reject an `owner_group` whose group's
+  definition disagrees with the sketch's `owner`, and a dangling one like
+  any other dangling reference. Such a sketch is not drawn while its
+  group (or a group above it) is user-hidden or carries a hidden tag, is
+  deleted with the group, and is released by an ungroup. A `.skp` save
+  back writes it into the group's own list.
+
+- `tags` (v20+, optional, omitted when empty) — the tag paths the sketch
+  carries, root-first, as a node's `tags` do (§4.10). A sketch with a
+  hidden tag, or a tag below a hidden one, is not drawn, on top of what
+  its group hides. A `.skp` edge that bounds no face takes its layer's
+  tag (edges of one plane on different layers open as different
+  sketches), and a save back writes the first tag as the edges' layer. A
+  tag rename or delete rewrites these lists as it does a node's. A
+  manifest declaring `format_version < 20` that carries a non-empty
+  `tags` on a sketch, or any sketch with an empty tag path or path
+  segment, MUST be rejected.
+
 ### 4.7 Guides
 
 A **guide** (`guides[]`) is non-solid construction geometry: never rendered,
@@ -792,6 +853,27 @@ of `"line"` or `"point"`, and a position `p`. For `"line"`, `p` is the
 origin and `dir` (required) is a unit direction; for `"point"`, `dir` is
 omitted. A zero/non-normalizable `dir`, or any non-finite coordinate, is a
 fatal load error — never defaulted or dropped.
+
+`tags` (v21+, optional, omitted when empty) are the tag paths the guide
+carries, root-first, as a node's `tags` are (§4.10). A guide with a hidden
+tag, or a tag below a hidden one, is in the document and in a save but is
+not drawn or snapped to, so a Scene that hides the tag hides the guide. A
+`.skp` guide opens tagged with its layer and then each container's layer
+above it, and a save back writes the first tag as its layer. A tag rename
+or delete rewrites these lists as it does a node's. A manifest declaring
+`format_version < 21` that carries a non-empty `tags` on a guide, or any
+guide with an empty tag path or path segment, MUST be rejected.
+
+`from` and `to` (v22+, optional, `"line"` only) are the stretch of the
+line that exists, in meters along `dir` from `p`. An end left out runs on
+forever, so a line with neither is a whole line, one with `from` alone is
+a ray, and one with both is a segment. SketchUp's Tape Measure makes rays
+and segments and shows only that stretch; a `.skp` guide opens with its
+own, a save back writes it as the guide's bounds, and only that stretch
+is drawn and snapped to. A guide Hew draws is a whole line and writes
+neither. A manifest declaring `format_version < 22` that carries either
+on a guide, a `"point"` that carries either, a non-number, or `to` not
+past `from` by more than the merge tolerance, MUST be rejected.
 
 ### 4.8 Annotations
 
@@ -851,6 +933,23 @@ or `radial_kind`; a non-finite coordinate anywhere (`p`, `offset`, `curve`);
 a non-positive `curve.radius`; coincident `a`/`b` anchors on a `"linear"`
 entry; or a missing field required by its own `kind` (e.g. `"leader"`
 without `text`).
+
+`tags` (v18+, optional, omitted when empty) lists the tag paths the
+annotation carries, root-first, as a node's `tags` do (§4.10): an
+annotation with a hidden tag, or a tag below a hidden one, is not drawn.
+A `.skp` dimension or text takes its layer's tag. A manifest declaring
+`format_version < 18` that carries a non-empty `tags` on an annotation, or
+any annotation with an empty tag path or path segment, MUST be rejected.
+
+`sid` (v19+, required at v19+) is the annotation's stable id (§4.2), the
+same table every other entity draws from: a `.skp` save back uses it to
+keep an unchanged SketchUp dimension's own record across saves, and the
+Hew API addresses an annotation by it (`ann_<hex>`). Gated both ways
+like every `sid`: present in a manifest declaring `format_version < 19`
+it is a smuggled field and the file is rejected; missing or duplicated
+at v19+ it is a fatal, typed error. A pre-v19 file's annotations are
+minted fresh ids in list order on load, as the v14 upgrade does for the
+other kinds.
 
 **Version gate.** `annotations` is not merely field-optional: a manifest
 declaring `format_version < 13` MUST NOT carry a non-empty `annotations`
@@ -912,6 +1011,7 @@ in world space.
 "camera": {
   "projection": "perspective",   // "perspective" | "parallel"
   "fov_deg": 45.0,                // perspective vertical fov, degrees
+  "parallel_height": 5.96,       // v19+: what the view spans at target, meters
   "eye": [4.0, -6.0, 3.0],
   "target": [0.0, 0.0, 0.0],
   "up": [0.0, 0.0, 1.0]
@@ -926,6 +1026,15 @@ in world space.
   returns to on a later toggle back to perspective — mirroring the app's
   own `CameraRig`, which keeps a single persistent fov across projection
   toggles rather than one per projection.
+- **`parallel_height`** (v19+) — the height the view spans at `target`, in
+  meters: the parallel frustum's own height under `"parallel"`, which does
+  not follow the eye distance (a SketchUp parallel view keeps exactly
+  this, with its eye wherever the file left it); under `"perspective"`
+  the height that view spans at the target, so a toggle to parallel keeps
+  the framing. Always written. A reader of an older file derives it as
+  `2 · |eye − target| · tan(fov_deg / 2)`, which is how such a file was
+  shown; a value that is not finite and positive, or one present in a
+  manifest declaring `format_version < 19`, is a fatal, typed error.
 - **`eye`**, **`target`**, **`up`** — world-space xyz triples: the camera
   position, the point it looks toward, and its up direction. A non-finite
   coordinate (in `fov_deg` or any of the three triples) is a fatal, typed
@@ -1030,6 +1139,11 @@ entirely when empty. Each entry:
     mean different things.
   - `display` — `{grid, axes, guides}` booleans, the editor's display
     toggles; opaque to the file format's readers other than the app.
+  - `view_style` (v19+) — the look the Scene restores along with its
+    display toggles, the §4.15 shape: a `.skp` scene's saved style
+    (backdrop and axes) opens here, and a Scene captured in Hew takes the
+    document's own `view_style` when it has one. Absent when the Scene
+    captures no look (a document shown Hew's way).
 
 **References.** Every `sid` in `hidden_nodes` / `hidden_tags` MUST name a
 live entity of the file (an object, group, or instance for the former; a
@@ -1051,6 +1165,36 @@ handed to the app.
 
 Thumbnails are never stored: they are derived at runtime, and GPU output
 is not deterministic (§1).
+
+### 4.15 View style
+
+`view_style` (manifest v19+, optional) is how the document asks to be
+shown: its backdrop and whether the model axes are drawn. A SketchUp
+model carries a style, and a document opened from a `.skp` keeps the
+part of it Hew can honor today; a `.skp` written from a document with a
+`view_style` carries it in the file's display settings. Omitted entirely
+for a document shown Hew's own way (the theme's backdrop, the ground
+grid, the axes) — the only state every pre-v19 file is in.
+
+```jsonc
+"view_style": {
+  "background": [255, 255, 255],   // sRGB, behind everything
+  "sky": [189, 209, 208],          // optional: the sky's color above the horizon; absent = no sky
+  "ground": [210, 208, 185],       // optional: the ground plane's color; absent = no ground
+  "axes": false                    // whether the model axes are shown
+}
+```
+
+With `sky` absent the background shows above the horizon; with `ground`
+absent no ground plane is drawn (Hew's grid lines, a drawing aid the
+user toggles, still draw on the ground). Edge and face styles are not
+part of this record; they wait for a styles feature of their own.
+
+**Not undoable.** Like `camera` (§4.11), the view style is view state
+outside the document's undo/redo history, persisted with the document
+and applied on load. A file declaring `format_version < 19` that carries
+a `view_style` key is malformed for its own declared version and MUST be
+rejected (reject-not-repair, as every version-gated field).
 
 ## 5. Versioning policy
 

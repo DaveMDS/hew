@@ -27,6 +27,14 @@
 //! 5. After insertion, the set of closed regions is recomputed: every minimal
 //!    closed circuit of edges bounds exactly one region; a circuit strictly
 //!    inside another region's boundary makes a hole in it.
+//! 6. A region that a drawn segment brings about has a face. A region can
+//!    also be a loop of edges with no face ([`SketchRegion::faceless`]):
+//!    what SketchUp has where a face was erased from its edges, or where
+//!    edges alone were drawn — a wire frame, a light rig. Such a loop is
+//!    not filled, picked or extruded. Drawing over one of its edges gives
+//!    it its face, as in SketchUp; a region unchanged by an insertion
+//!    keeps its state, and one the insertion reshapes (split by a new
+//!    edge) is new, with a face.
 //!
 //! The executable contract lives in `crates/kernel/tests/op_specs.rs`.
 
@@ -245,7 +253,7 @@ pub struct SketchEdge {
 }
 
 /// A closed region bounded by sketch edges: what the user perceives as "a
-/// face appeared" while drawing.
+/// face appeared" while drawing — unless it is `faceless`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SketchRegion {
     /// Outer boundary vertices in cycle order, counter-clockwise seen from
@@ -253,6 +261,22 @@ pub struct SketchRegion {
     pub outer: Vec<SketchVertexId>,
     /// Hole boundaries, each clockwise seen from the plane normal side.
     pub holes: Vec<Vec<SketchVertexId>>,
+    /// A loop of edges with no face (module docs, rule 6): not filled,
+    /// not picked as a face and not extruded ([`Sketch::profile`] refuses
+    /// it). Set on the loops an import brings in as bare edges; cleared
+    /// when a segment is drawn over one of the loop's edges. A region a
+    /// drawing step brings about has a face.
+    pub faceless: bool,
+}
+
+/// A region as it was before a mutation: its id and value, and its rings
+/// as positions (its vertices may be gone once the mutation has run).
+#[derive(Debug, Clone)]
+struct RegionSnapshot {
+    id: SketchRegionId,
+    region: SketchRegion,
+    outer: Vec<Point3>,
+    holes: Vec<Vec<Point3>>,
 }
 
 /// What [`Sketch::add_segment`] did, so tools and undo can react precisely.
@@ -366,6 +390,10 @@ pub enum SketchError {
     UnknownVertex,
     /// The given region handle is not in this sketch (or already invalid).
     UnknownRegion,
+    /// The region is a loop of edges with no face ([`SketchRegion::faceless`]),
+    /// so there is no profile to extrude. Drawing over one of its edges gives
+    /// it a face. No silent repair (rule 4) — the caller decides.
+    RegionHasNoFace,
     /// A topology-preserving [`Sketch::move_vertex`] was refused because it
     /// would require re-stitching the sketch: an incident edge would cross or
     /// overlap another edge, or the moved vertex would land on another vertex
@@ -431,6 +459,12 @@ impl std::fmt::Display for SketchError {
             SketchError::UnknownEdge => write!(f, "no such edge in this sketch"),
             SketchError::UnknownVertex => write!(f, "no such vertex in this sketch"),
             SketchError::UnknownRegion => write!(f, "no such region in this sketch"),
+            SketchError::RegionHasNoFace => {
+                write!(
+                    f,
+                    "the loop has no face to extrude; draw over one of its edges to give it one"
+                )
+            }
             SketchError::UnknownIsland => {
                 write!(f, "no such island in this sketch")
             }
@@ -493,6 +527,11 @@ pub struct Sketch {
     /// `begin_curve`/`end_curve` bracket is open. Transient tool state — a
     /// gesture snapshot restores it with the rest of the sketch.
     active_curve: Option<SketchCurveId>,
+    /// Transient bulk-insertion state ([`Sketch::add_segments`]; never
+    /// saved, ignored by equality, `None` outside a bulk call): every
+    /// vertex by the cell of [`vertex_cell`] it falls in, so the merge
+    /// lookup of a new end probes a few cells instead of every vertex.
+    bulk_vertex_cells: Option<std::collections::BTreeMap<[i64; 3], Vec<SketchVertexId>>>,
     /// Transient drafting state (never saved, ignored by equality): while
     /// set, [`Sketch::add_segment`] first moves each endpoint within
     /// [`tol::POINT_MERGE`] of existing geometry onto it — a vertex, else the
@@ -543,6 +582,7 @@ impl Sketch {
             curves: SlotMap::with_key(),
             active_curve: None,
             islands: SlotMap::with_key(),
+            bulk_vertex_cells: None,
             snap_to_existing: false,
             seams: Vec::new(),
         }
@@ -1238,8 +1278,7 @@ impl Sketch {
         // moved into a closed loop becomes its hole; out of one, no longer):
         // re-derive regions — ids survive while outer cycles are unchanged —
         // and islands.
-        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
-            s.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let old_regions = s.region_snapshot();
         s.recompute_regions_with_diff(&old_regions);
         s.recompute_islands();
 
@@ -1362,6 +1401,7 @@ impl Sketch {
                 t.apply_point(self.vertices[e.to].position),
             )
         };
+        let keep_faced = target.faced_rings();
         for &eid in edges {
             match self.edges[eid].curve {
                 None => {
@@ -1399,6 +1439,11 @@ impl Sketch {
                 }
             }
         }
+        // A faceless loop replayed stays faceless (module docs, rule 6):
+        // the region in `target` with its ring, carried through `t`, is the
+        // same loop moved or copied, not one drawn. A loop `target` had
+        // with a face before the replay keeps it.
+        target.carry_faceless_from(self, &|p| t.apply_point(p), &keep_faced);
         Ok(())
     }
 
@@ -1406,6 +1451,307 @@ impl Sketch {
     /// never recomputed lazily.
     pub fn regions(&self) -> &SlotMap<SketchRegionId, SketchRegion> {
         &self.regions
+    }
+
+    /// Make every closed region a loop with no face (module docs, rule 6):
+    /// what an import brings in as bare edges, which bound no face in the
+    /// source. Drawing over an edge of a loop gives it its face again.
+    pub fn make_regions_faceless(&mut self) {
+        for r in self.regions.values_mut() {
+            r.faceless = true;
+        }
+    }
+
+    /// Set whether one region is a loop with no face (module docs, rule 6).
+    ///
+    /// # Errors
+    /// [`SketchError::UnknownRegion`] for a stale handle.
+    pub fn set_region_faceless(
+        &mut self,
+        region: SketchRegionId,
+        faceless: bool,
+    ) -> Result<(), SketchError> {
+        let r = self
+            .regions
+            .get_mut(region)
+            .ok_or(SketchError::UnknownRegion)?;
+        r.faceless = faceless;
+        Ok(())
+    }
+
+    /// Adds many segments at once, each through the same sticky rules as
+    /// [`Sketch::add_segment`] and in the same order, so the result is
+    /// exactly what adding them one by one builds. What differs is the
+    /// cost: a segment is tested only against the edges in the cells of a
+    /// grid it crosses (a scan of every edge per segment was quadratic,
+    /// and a floor of thousands of coplanar faces lifted in minutes), a
+    /// new end finds the vertex it merges with through cells too, no
+    /// copy of the sketch is taken per segment, and the regions and
+    /// islands are recomputed once at the end. The faces of a solid are
+    /// the usual input: lifting a plane feeds every face edge on it here.
+    ///
+    /// # Errors
+    /// The first segment the sticky rules refuse, as [`Sketch::add_segment`]
+    /// refuses it; the sketch then holds the segments before it, the
+    /// regions recomputed, and the caller decides (a lift discards it).
+    pub(crate) fn add_segments(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
+        let curve = self.active_curve;
+        let segs: Vec<(Point3, Point3, Option<SketchCurveId>)> =
+            segs.iter().map(|&(a, b)| (a, b, curve)).collect();
+        self.add_segments_on_curves(&segs)
+    }
+
+    /// [`Sketch::add_segments`] with each segment's curve given: what
+    /// adding them one by one builds, each inside a bracket of its curve
+    /// ([`Sketch::begin_curve`] … [`Sketch::end_curve`]) or outside any
+    /// when it has none. The curves must exist; the open bracket, if any,
+    /// is the same after as before.
+    pub(crate) fn add_segments_on_curves(
+        &mut self,
+        segs: &[(Point3, Point3, Option<SketchCurveId>)],
+    ) -> Result<(), SketchError> {
+        let bracket = self.active_curve;
+        let outcome = self.add_segments_on_curves_inner(segs);
+        self.active_curve = bracket;
+        outcome
+    }
+
+    fn add_segments_on_curves_inner(
+        &mut self,
+        segs: &[(Point3, Point3, Option<SketchCurveId>)],
+    ) -> Result<(), SketchError> {
+        // A coordinate that is not a number would be refused by the
+        // insertion below, but the grid is built first, and a coordinate
+        // of infinity would give it a span of every cell there is. Refuse
+        // such a point before any of that, as the one-by-one path does.
+        let finite = |p: Point3| p.x.is_finite() && p.y.is_finite() && p.z.is_finite();
+        for &(a, b, _) in segs {
+            if !finite(a) {
+                return Err(SketchError::PointOffPlane { which: 0 });
+            }
+            if !finite(b) {
+                return Err(SketchError::PointOffPlane { which: 1 });
+            }
+        }
+        let old_regions = self.region_snapshot();
+        let normal = self.plane.normal();
+        let (u_ax, v_ax) = plane_axes(normal);
+        let proj = |p: Point3| -> (f64, f64) { (p.to_vec().dot(u_ax), p.to_vec().dot(v_ax)) };
+        // A grid over the plane with about one segment per cell: cells of
+        // the extent the input spans, divided by the root of the count.
+        let mut lo = (f64::INFINITY, f64::INFINITY);
+        let mut hi = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+        let mut take = |p: Point3| {
+            let q = proj(p);
+            lo = (lo.0.min(q.0), lo.1.min(q.1));
+            hi = (hi.0.max(q.0), hi.1.max(q.1));
+        };
+        for &(a, b, _) in segs {
+            take(a);
+            take(b);
+        }
+        for v in self.vertices.values() {
+            take(v.position);
+        }
+        let n = (segs.len() + self.edges.len()).max(1) as f64;
+        let extent = (hi.0 - lo.0).max(hi.1 - lo.1);
+        // (An extent that overflows to infinity, from finite coordinates
+        // of opposite signs near the largest number, gets a cell so wide
+        // that every coordinate lands within a few cells of the origin:
+        // the scan then covers nearly everything, as the one-by-one path
+        // does, instead of spanning more cells than can be visited.)
+        let cell = if extent.is_finite() && extent > 0.0 {
+            (extent / n.sqrt()).max(tol::POINT_MERGE * 1e3)
+        } else if extent > 0.0 {
+            f64::MAX / 8.0
+        } else {
+            1.0
+        };
+        let cells_of = |a: (f64, f64), b: (f64, f64)| -> (i64, i64, i64, i64) {
+            let eps = tol::POINT_MERGE;
+            (
+                ((a.0.min(b.0) - eps) / cell).floor() as i64,
+                ((a.0.max(b.0) + eps) / cell).floor() as i64,
+                ((a.1.min(b.1) - eps) / cell).floor() as i64,
+                ((a.1.max(b.1) + eps) / cell).floor() as i64,
+            )
+        };
+        let mut grid: std::collections::BTreeMap<(i64, i64), Vec<SketchEdgeId>> =
+            std::collections::BTreeMap::new();
+        let mut placed: std::collections::BTreeMap<SketchEdgeId, (i64, i64, i64, i64)> =
+            std::collections::BTreeMap::new();
+        let edge_span = |s: &Sketch, e: SketchEdgeId| -> (i64, i64, i64, i64) {
+            let ed = s.edges[e];
+            cells_of(
+                proj(s.vertices[ed.from].position),
+                proj(s.vertices[ed.to].position),
+            )
+        };
+        let put = |grid: &mut std::collections::BTreeMap<(i64, i64), Vec<SketchEdgeId>>,
+                   placed: &mut std::collections::BTreeMap<SketchEdgeId, (i64, i64, i64, i64)>,
+                   e: SketchEdgeId,
+                   span: (i64, i64, i64, i64)| {
+            if placed.contains_key(&e) {
+                return;
+            }
+            for x in span.0..=span.1 {
+                for y in span.2..=span.3 {
+                    grid.entry((x, y)).or_default().push(e);
+                }
+            }
+            placed.insert(e, span);
+        };
+        let drop = |grid: &mut std::collections::BTreeMap<(i64, i64), Vec<SketchEdgeId>>,
+                    placed: &mut std::collections::BTreeMap<SketchEdgeId, (i64, i64, i64, i64)>,
+                    e: SketchEdgeId| {
+            let Some(span) = placed.remove(&e) else {
+                return;
+            };
+            for x in span.0..=span.1 {
+                for y in span.2..=span.3 {
+                    if let Some(list) = grid.get_mut(&(x, y)) {
+                        list.retain(|&id| id != e);
+                    }
+                }
+            }
+        };
+        let existing: Vec<SketchEdgeId> = self.edges.keys().collect();
+        for e in existing {
+            let span = edge_span(self, e);
+            put(&mut grid, &mut placed, e, span);
+        }
+        // The vertices by cell, for the merge lookup.
+        let mut vcells: std::collections::BTreeMap<[i64; 3], Vec<SketchVertexId>> =
+            std::collections::BTreeMap::new();
+        for (id, v) in &self.vertices {
+            vcells.entry(vertex_cell(v.position)).or_default().push(id);
+        }
+        self.bulk_vertex_cells = Some(vcells);
+        let mut outcome = Ok(());
+        for &(a, b, curve) in segs {
+            self.active_curve = curve;
+            let span = cells_of(proj(a), proj(b));
+            let mut scan: Vec<SketchEdgeId> = Vec::new();
+            for x in span.0..=span.1 {
+                for y in span.2..=span.3 {
+                    if let Some(list) = grid.get(&(x, y)) {
+                        scan.extend(list.iter().copied());
+                    }
+                }
+            }
+            scan.sort_unstable();
+            scan.dedup();
+            let report = match self.add_segment_inner_with(a, b, Some(&scan), true) {
+                Ok(r) => r,
+                Err(e) => {
+                    outcome = Err(e);
+                    break;
+                }
+            };
+            for (old, fragments) in &report.split_edges {
+                drop(&mut grid, &mut placed, *old);
+                for &f in fragments {
+                    let span = edge_span(self, f);
+                    put(&mut grid, &mut placed, f, span);
+                }
+            }
+            for &e in &report.new_edges {
+                let span = edge_span(self, e);
+                put(&mut grid, &mut placed, e, span);
+            }
+        }
+        self.bulk_vertex_cells = None;
+        self.recompute_regions_with_diff(&old_regions);
+        self.recompute_islands();
+        outcome
+    }
+
+    /// [`Sketch::add_segments`] for the executable specs.
+    #[doc(hidden)]
+    pub fn add_segments_for_test(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
+        self.add_segments(segs)
+    }
+
+    /// [`Sketch::add_segments_on_curves`] for the executable specs.
+    #[doc(hidden)]
+    pub fn add_segments_on_curves_for_test(
+        &mut self,
+        segs: &[(Point3, Point3, Option<SketchCurveId>)],
+    ) -> Result<(), SketchError> {
+        self.add_segments_on_curves(segs)
+    }
+
+    /// The outer rings, as positions, of every region that has a face.
+    pub(crate) fn faced_rings(&self) -> Vec<Vec<Point3>> {
+        self.regions
+            .values()
+            .filter(|r| !r.faceless)
+            .map(|r| r.outer.iter().map(|&v| self.vertices[v].position).collect())
+            .collect()
+    }
+
+    /// Make faceless every region whose outer ring is a faceless loop of
+    /// `source`, each source position passed through `map` (module docs,
+    /// rule 6: a loop replayed into this sketch, moved, copied or rebuilt,
+    /// is the same loop, not one drawn). A ring in `keep_faced` — the loops
+    /// this sketch had with a face before the replay — keeps its face: a
+    /// wire moved exactly onto a face does not take the face away.
+    pub(crate) fn carry_faceless_from(
+        &mut self,
+        source: &Sketch,
+        map: &dyn Fn(Point3) -> Point3,
+        keep_faced: &[Vec<Point3>],
+    ) {
+        let faceless: Vec<Vec<Point3>> = source
+            .regions
+            .values()
+            .filter(|r| r.faceless)
+            .map(|r| {
+                r.outer
+                    .iter()
+                    .map(|&v| map(source.vertices[v].position))
+                    .collect()
+            })
+            .collect();
+        if faceless.is_empty() {
+            return;
+        }
+        let vertices = &self.vertices;
+        for r in self.regions.values_mut().filter(|r| !r.faceless) {
+            let ring: Vec<Point3> = r.outer.iter().map(|&v| vertices[v].position).collect();
+            if keep_faced.iter().any(|k| rings_coincide(k, &ring)) {
+                continue;
+            }
+            if faceless.iter().any(|f| rings_coincide(f, &ring)) {
+                r.faceless = true;
+            }
+        }
+    }
+
+    /// Every region with its rings as positions, taken before a mutation so
+    /// [`Sketch::recompute_regions_with_diff`] can tell what a region that
+    /// came out of it was before (its vertices may be gone by then).
+    fn region_snapshot(&self) -> Vec<RegionSnapshot> {
+        self.regions
+            .iter()
+            .map(|(id, r)| {
+                // (A ring with a vertex already gone — a region left stale
+                // between the two halves of one operation — has no shape
+                // to compare, and reads as empty.)
+                let ring = |vs: &[SketchVertexId]| -> Vec<Point3> {
+                    vs.iter()
+                        .map(|v| self.vertices.get(*v).map(|x| x.position))
+                        .collect::<Option<Vec<_>>>()
+                        .unwrap_or_default()
+                };
+                RegionSnapshot {
+                    id,
+                    region: r.clone(),
+                    outer: ring(&r.outer),
+                    holes: r.holes.iter().map(|h| ring(h)).collect(),
+                }
+            })
+            .collect()
     }
 
     /// Bakes an affine `transform` into this sketch: every vertex position is
@@ -1840,8 +2186,7 @@ impl Sketch {
         // before replaying, so the sketch is never observed holding a region
         // whose boundary vertices are gone. (`add_segment_inner` recomputes
         // both itself, so this is about the state *between* the two halves.)
-        let stale_regions: Vec<(SketchRegionId, SketchRegion)> =
-            s.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let stale_regions = s.region_snapshot();
         s.recompute_regions_with_diff(&stale_regions);
         s.recompute_islands();
 
@@ -2390,8 +2735,7 @@ impl Sketch {
     /// pre-existing merge behavior of `restore_edges`; slot exactness is
     /// out of scope there, since the sketch's contents already differ.)
     pub(crate) fn remove_edges(&mut self, edges: &std::collections::BTreeSet<SketchEdgeId>) {
-        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
-            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let old_regions = self.region_snapshot();
         let mut touched: std::collections::BTreeSet<SketchVertexId> =
             std::collections::BTreeSet::new();
         for &eid in edges.iter().rev() {
@@ -2416,6 +2760,9 @@ impl Sketch {
     /// whenever a mutation reshapes them — always re-query after mutating).
     pub fn profile(&self, region: SketchRegionId) -> Result<Profile, SketchError> {
         let r = self.regions.get(region).ok_or(SketchError::UnknownRegion)?;
+        if r.faceless {
+            return Err(SketchError::RegionHasNoFace);
+        }
 
         // Outer boundary: CCW as stored — map vertex ids to positions.
         let outer: Vec<Point3> = r
@@ -2652,6 +2999,32 @@ impl Sketch {
     /// Core implementation of `add_segment`. Called on a clone so the caller
     /// can enforce the strong guarantee.
     fn add_segment_inner(&mut self, from: Point3, to: Point3) -> Result<SegmentAdded, SketchError> {
+        self.add_segment_inner_with(from, to, None, false)
+    }
+
+    /// [`Sketch::add_segment_inner`] with its scans narrowed by a bulk
+    /// caller ([`Sketch::add_segments`]): `scan` is the existing edges the
+    /// segment can touch, in id order (every edge otherwise), the merge
+    /// vertex lookup goes through `self.bulk_vertex_cells` when set, and
+    /// `defer_regions` skips the region and island recompute (the caller
+    /// does it once at the end; the report then lists no regions).
+    fn add_segment_inner_with(
+        &mut self,
+        from: Point3,
+        to: Point3,
+        scan: Option<&[SketchEdgeId]>,
+        defer_regions: bool,
+    ) -> Result<SegmentAdded, SketchError> {
+        // (A coordinate that is not a number is off every plane; the
+        // distance test below would let it through, as nothing compares
+        // greater than a tolerance when one side is not a number.)
+        let finite = |p: Point3| p.x.is_finite() && p.y.is_finite() && p.z.is_finite();
+        if !finite(from) {
+            return Err(SketchError::PointOffPlane { which: 0 });
+        }
+        if !finite(to) {
+            return Err(SketchError::PointOffPlane { which: 1 });
+        }
         // ── Step 1: validate planarity ────────────────────────────────────────
         if self.plane.signed_distance(from).abs() > tol::PLANE_DIST {
             return Err(SketchError::PointOffPlane { which: 0 });
@@ -2718,7 +3091,10 @@ impl Sketch {
         // (includes 0.0 and 1.0 from snap above, and interior crossings).
         let mut new_seg_t_params: Vec<f64> = vec![0.0, 1.0];
 
-        let existing_edge_ids: Vec<SketchEdgeId> = self.edges.keys().collect();
+        let existing_edge_ids: Vec<SketchEdgeId> = match scan {
+            Some(ids) => ids.to_vec(),
+            None => self.edges.keys().collect(),
+        };
 
         for eid in existing_edge_ids {
             let edge = self.edges[eid];
@@ -2792,8 +3168,11 @@ impl Sketch {
         }
 
         // ── Step 4: snapshot old regions for identity diffing ─────────────────
-        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
-            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let old_regions = if defer_regions {
+            Vec::new()
+        } else {
+            self.region_snapshot()
+        };
 
         // ── Step 5: materialise vertices for the new segment endpoints ─────────
         let mut report = SegmentAdded::default();
@@ -2807,6 +3186,7 @@ impl Sketch {
                 // If still not found, create a fresh vertex.
                 let vid = self.vertices.insert(SketchVertex { position: from_pos });
                 report.new_vertices.push(vid);
+                self.note_bulk_vertex(vid);
                 vid
             }
         };
@@ -2817,6 +3197,7 @@ impl Sketch {
             None => {
                 let vid = self.vertices.insert(SketchVertex { position: to_pos });
                 report.new_vertices.push(vid);
+                self.note_bulk_vertex(vid);
                 vid
             }
         };
@@ -2899,27 +3280,48 @@ impl Sketch {
 
         // ── Step 8: insert fragment edges for the new segment ─────────────────
         // Skip fragments that already have an existing edge (collinear merge).
+        // Such a fragment is drawn over an edge already there: the loops
+        // that edge bounds get their face below (rule 6).
+        // With a scan list, an edge already between two of the segment's
+        // vertices lies along the segment, so it is in the list, or it is
+        // a fragment this insertion just cut from a collinear edge.
+        let edge_between = |s: &Sketch,
+                            report: &SegmentAdded,
+                            a: SketchVertexId,
+                            b: SketchVertexId|
+         -> Option<SketchEdgeId> {
+            let joins = |e: &SketchEdge| (e.from == a && e.to == b) || (e.from == b && e.to == a);
+            match scan {
+                Some(list) => list
+                    .iter()
+                    .copied()
+                    .chain(
+                        report
+                            .split_edges
+                            .iter()
+                            .flat_map(|(_, f)| f.iter().copied()),
+                    )
+                    .chain(report.new_edges.iter().copied())
+                    .find(|&id| s.edges.get(id).is_some_and(joins)),
+                None => s.edges.iter().find(|(_, e)| joins(e)).map(|(id, _)| id),
+            }
+        };
+        let mut retraced: Vec<(SketchVertexId, SketchVertexId)> = Vec::new();
         for w in seg_vids.windows(2) {
             let a = w[0];
             let b = w[1];
-            if self.edge_exists(a, b) {
+            if let Some(eid) = edge_between(self, &report, a, b) {
+                retraced.push((a, b));
                 // Collinear merge: this sub-segment already exists. If a
                 // curve bracket is open and the existing edge is a plain
                 // line, ADOPT it into the curve — otherwise the drawn curve
                 // would have an untagged hole where it overlapped existing
                 // geometry, splitting the selectable unit. An edge already
                 // in another curve keeps its allegiance.
-                if let Some(curve) = self.active_curve {
-                    let existing = self
-                        .edges
-                        .iter()
-                        .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
-                        .map(|(id, _)| id);
-                    if let Some(eid) = existing
-                        && self.edges[eid].curve.is_none()
-                    {
-                        self.edges[eid].curve = Some(curve);
-                    }
+                if let Some(curve) = self.active_curve
+                    && self.edges[eid].curve.is_none()
+                {
+                    self.edges[eid].curve = Some(curve);
                 }
                 continue;
             }
@@ -2939,9 +3341,32 @@ impl Sketch {
         }
 
         // ── Step 9: recompute regions, islands, and diff ──────────────────────
+        if defer_regions {
+            return Ok(report);
+        }
         let (regions_created, regions_removed) = self.recompute_regions_with_diff(&old_regions);
         report.regions_created = regions_created;
         report.regions_removed = regions_removed;
+        // A loop drawn over gets its face (rule 6): every faceless region
+        // whose outer ring one of the retraced edges is on. (A region the
+        // edge bounds as a hole is left alone: tracing a loop inside a
+        // larger one faces that loop, not the ring around it.)
+        if !retraced.is_empty() {
+            for r in self.regions.values_mut().filter(|r| r.faceless) {
+                let bounded = r
+                    .outer
+                    .iter()
+                    .zip(r.outer.iter().cycle().skip(1))
+                    .any(|(&p, &q)| {
+                        retraced
+                            .iter()
+                            .any(|&(a, b)| (a == p && b == q) || (a == q && b == p))
+                    });
+                if bounded {
+                    r.faceless = false;
+                }
+            }
+        }
         self.recompute_islands();
 
         Ok(report)
@@ -2950,8 +3375,7 @@ impl Sketch {
     /// Core implementation of `remove_edge`. Called on a clone so the strong
     /// guarantee holds at the public method.
     fn remove_edge_inner(&mut self, edge: SketchEdgeId) -> EdgeRemoved {
-        let old_regions: Vec<(SketchRegionId, SketchRegion)> =
-            self.regions.iter().map(|(id, r)| (id, r.clone())).collect();
+        let old_regions = self.region_snapshot();
 
         let e = self.edges[edge];
         self.edges.remove(edge);
@@ -2980,6 +3404,29 @@ impl Sketch {
     /// Returns the id of an existing vertex within `tol::POINT_MERGE` of `pos`,
     /// or `None` if there is none.
     fn find_or_plan_vertex(&self, pos: Point3) -> Option<SketchVertexId> {
+        if let Some(cells) = &self.bulk_vertex_cells {
+            // The same answer as the scan below — the first vertex in id
+            // order within the merge tolerance — from the cell the point
+            // falls in and its neighbors.
+            let c = vertex_cell(pos);
+            let mut best: Option<SketchVertexId> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        if let Some(list) = cells.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
+                            for &id in list {
+                                if self.vertices[id].position.approx_eq(pos, tol::POINT_MERGE)
+                                    && best.is_none_or(|b| id < b)
+                                {
+                                    best = Some(id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return best;
+        }
         for (id, v) in &self.vertices {
             if v.position.approx_eq(pos, tol::POINT_MERGE) {
                 return Some(id);
@@ -3000,14 +3447,20 @@ impl Sketch {
         }
         let id = self.vertices.insert(SketchVertex { position: pos });
         new_vertices.push(id);
+        self.note_bulk_vertex(id);
         id
     }
 
-    /// True if the edge exists in either direction.
-    fn edge_exists(&self, a: SketchVertexId, b: SketchVertexId) -> bool {
-        self.edges
-            .values()
-            .any(|e| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+    /// Puts a vertex just inserted into the bulk-insertion cells, when a
+    /// bulk add is in progress, so a lookup later in the same insertion
+    /// finds it as the scan would.
+    fn note_bulk_vertex(&mut self, id: SketchVertexId) {
+        if let Some(cells) = &mut self.bulk_vertex_cells {
+            cells
+                .entry(vertex_cell(self.vertices[id].position))
+                .or_default()
+                .push(id);
+        }
     }
 
     /// Returns the id of the edge connecting `a` and `b` (in either direction),
@@ -3030,7 +3483,7 @@ impl Sketch {
     /// Returns `(created, removed)`.
     fn recompute_regions_with_diff(
         &mut self,
-        old_regions: &[(SketchRegionId, SketchRegion)],
+        old_regions: &[RegionSnapshot],
     ) -> (Vec<SketchRegionId>, Vec<SketchRegionId>) {
         let new_region_data = self.compute_all_regions();
 
@@ -3038,36 +3491,82 @@ impl Sketch {
         // (cyclic equality, same orientation) KEEPS its SketchRegionId — its
         // stored value is refreshed in place (hole sets may differ) and it
         // appears in neither report list, so handles held by tools stay
-        // valid until a mutation actually reshapes the region. Everything
-        // else is a removal + creation.
+        // valid until a mutation actually reshapes the region. It keeps
+        // whether it has a face, too (module docs, rule 6). Everything
+        // else is a removal + creation; whether a created region has a
+        // face is `inherits_no_face`'s call.
         let mut regions_created: Vec<SketchRegionId> = Vec::new();
         let mut reused: std::collections::BTreeSet<SketchRegionId> =
             std::collections::BTreeSet::new();
 
-        for new_r in new_region_data {
-            let matched = old_regions.iter().find(|(old_id, old_r)| {
-                !reused.contains(old_id) && cycles_equal(&old_r.outer, &new_r.outer)
+        for mut new_r in new_region_data {
+            let matched = old_regions.iter().find(|old| {
+                !reused.contains(&old.id) && cycles_equal(&old.region.outer, &new_r.outer)
             });
             match matched {
-                Some((old_id, _)) => {
-                    reused.insert(*old_id);
-                    self.regions[*old_id] = new_r;
+                Some(old) => {
+                    reused.insert(old.id);
+                    new_r.faceless = old.region.faceless;
+                    self.regions[old.id] = new_r;
                 }
                 None => {
+                    new_r.faceless = self.inherits_no_face(&new_r, old_regions);
                     regions_created.push(self.regions.insert(new_r));
                 }
             }
         }
 
         let mut regions_removed: Vec<SketchRegionId> = Vec::new();
-        for (old_id, _) in old_regions {
-            if !reused.contains(old_id) {
-                self.regions.remove(*old_id);
-                regions_removed.push(*old_id);
+        for old in old_regions {
+            if !reused.contains(&old.id) {
+                self.regions.remove(old.id);
+                regions_removed.push(old.id);
             }
         }
 
         (regions_created, regions_removed)
+    }
+
+    /// Whether a region a mutation brought about, with no old region of
+    /// the same vertex cycle, is a loop with no face (module docs, rule 6).
+    /// It is when it is an old loop with no face in a new guise: the same
+    /// shape with vertices added or dropped along its straight edges (a
+    /// line ending on one of its edges splits that edge; erasing such a
+    /// line heals it), or a larger loop that took in a faceless loop's
+    /// interior because an edge between them was erased (erasing an edge
+    /// never gives a face; a face next to a loop with none loses its
+    /// boundary with it). Otherwise it is a loop a drawing step closed,
+    /// and it has a face.
+    fn inherits_no_face(&self, new_r: &SketchRegion, old_regions: &[RegionSnapshot]) -> bool {
+        let normal = self.plane.normal();
+        let ring: Vec<Point3> = new_r
+            .outer
+            .iter()
+            .map(|&v| self.vertices[v].position)
+            .collect();
+        let shape = simplified_ring(&ring);
+        if let Some(old) = old_regions
+            .iter()
+            .find(|old| rings_coincide(&simplified_ring(&old.outer), &shape))
+        {
+            return old.region.faceless;
+        }
+        let holes: Vec<Vec<Point3>> = new_r
+            .holes
+            .iter()
+            .map(|h| h.iter().map(|&v| self.vertices[v].position).collect())
+            .collect();
+        let area = signed_area_on_plane(&ring, normal).abs();
+        old_regions
+            .iter()
+            .filter(|old| old.region.faceless)
+            .any(|old| {
+                signed_area_on_plane(&old.outer, normal).abs() <= area + tol::POINT_MERGE
+                    && interior_point_of_loops(&old.outer, &old.holes, normal).is_some_and(|p| {
+                        point_inside_polygon(p, &ring, normal)
+                            && !holes.iter().any(|h| point_inside_polygon(p, h, normal))
+                    })
+            })
     }
 
     /// Compute all regions (CCW outer cycles + their CW hole cycles) from the
@@ -3348,6 +3847,7 @@ impl Sketch {
             regions.push(SketchRegion {
                 outer,
                 holes: region_holes[i].clone(),
+                faceless: false,
             });
         }
 
@@ -3370,6 +3870,7 @@ impl Sketch {
             curves: SlotMap::with_key(),
             active_curve: None,
             islands: SlotMap::with_key(),
+            bulk_vertex_cells: None,
             snap_to_existing: false,
             seams: Vec::new(),
         }
@@ -3569,6 +4070,52 @@ fn seg_seg_intersections_2d(
 }
 
 // ══════════════════════════════════════════════════════════ cycle comparison
+
+/// The cell a vertex falls in for [`Sketch::add_segments`]' merge lookup:
+/// its position at the grain of [`tol::POINT_MERGE`], so two points within
+/// the tolerance are in one cell or neighboring ones.
+fn vertex_cell(p: Point3) -> [i64; 3] {
+    // Clamped short of the integer range, so a neighbor of the cell a
+    // far-off coordinate falls in can still be named.
+    let cell = |x: f64| (x / tol::POINT_MERGE).round().clamp(-4.0e18, 4.0e18) as i64;
+    [cell(p.x), cell(p.y), cell(p.z)]
+}
+
+/// A ring without the vertices that lie on the straight line between their
+/// neighbors: the loop's shape alone, whatever a T-junction or a healed
+/// split has added to or dropped from its vertex list.
+fn simplified_ring(ring: &[Point3]) -> Vec<Point3> {
+    let n = ring.len();
+    if n < 3 {
+        return ring.to_vec();
+    }
+    (0..n)
+        .filter(|&i| {
+            let (a, b, c) = (ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]);
+            let ab = b - a;
+            let len = ab.length();
+            // `b` is kept unless it sits on the line through `a` and `c`
+            // (`c`'s distance from the line `ab` within the merge tolerance).
+            len <= tol::POINT_MERGE || ab.cross(c - b).length() / len > tol::POINT_MERGE
+        })
+        .map(|i| ring[i])
+        .collect()
+}
+
+/// True if two rings of points are the same loop: equal under cyclic
+/// rotation, in either direction, within [`tol::POINT_MERGE`] per point.
+/// (A loop replayed through a transform may come back traced the other way
+/// round when the plane is turned over, so direction is not fixed here.)
+fn rings_coincide(a: &[Point3], b: &[Point3]) -> bool {
+    let n = a.len();
+    if n != b.len() || n == 0 {
+        return false;
+    }
+    (0..n).any(|start| {
+        (0..n).all(|i| a[(start + i) % n].approx_eq(b[i], tol::POINT_MERGE))
+            || (0..n).all(|i| a[(start + n - i) % n].approx_eq(b[i], tol::POINT_MERGE))
+    })
+}
 
 /// True if two vertex-id cycles are equal under cyclic rotation and same
 /// orientation (we do NOT check reversed orientation here — outer cycles are

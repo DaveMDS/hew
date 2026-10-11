@@ -61,7 +61,12 @@ use crate::transform::Transform;
 /// radius when present). Absent in v1-v6 files → all `Edge::polygon =
 /// None`. A polygon drawn on a face keeps its identity here (unified
 /// drafting).
-pub const GEOMETRY_FORMAT_VERSION: u32 = 7;
+/// v7 → v8: per-face back paint ([`crate::topo::Face::back_material`]),
+/// appended AFTER each face's polygon-claim block: a `u8` flag, and when 1
+/// the dense material id (`u32`). A face without back paint grows by the
+/// one flag byte. Absent in
+/// v1-v7 buffers → all `Face::back_material = None`.
+pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -219,7 +224,68 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 7;
 /// reader rejects an out-of-range id, and a sketch whose `owner` disagrees
 /// with its owner object's definition. Geometry buffer unchanged
 /// (`GEOMETRY_FORMAT_VERSION` stays 6).
-pub const MANIFEST_FORMAT_VERSION: u32 = 17;
+/// **v18**: `annotations[].tags` — the tag paths an annotation carries (a
+/// `.skp` dimension or text on a layer), hiding it with them. Optional and
+/// omitted when empty, so a document with no tagged annotation writes the
+/// same manifest as v17 apart from the version. Gated both ways by
+/// [`ANNOTATION_TAGS_MIN_VERSION`]. Geometry buffer v8 (per-face back
+/// paint).
+/// **v20**: `sketches[].tags` — the tag paths a sketch carries (a `.skp`
+/// edge's layer), hiding it with them the way `annotations[].tags` hides
+/// an annotation. Optional and omitted when empty, so a document with no
+/// tagged sketch writes the same manifest as v19 apart from the version.
+/// Gated by [`SKETCH_TAGS_MIN_VERSION`]. Geometry buffer unchanged.
+/// **v21**: `sketches[].regions[].faceless` — a closed loop of edges with
+/// no face (`sketch.rs` rule 6: what SketchUp has where a face was erased
+/// or edges alone were drawn), not filled, picked or extruded; and
+/// `guides[].tags` — the tag paths a guide carries (a `.skp` guide's
+/// layer), hiding it with them as `sketches[].tags` hides a sketch. Both
+/// optional and omitted when false/empty, so a document with neither
+/// writes the same manifest as v20 apart from the version. Gated by
+/// [`FACELESS_REGION_MIN_VERSION`] and [`GUIDE_TAGS_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v22**: `guides[].from` / `guides[].to` — the stretch of a guide line
+/// that exists, in meters along its direction from `p` (a `.skp` guide
+/// segment or ray, which SketchUp shows only over that stretch); an end
+/// left out runs on forever. Optional and omitted for a whole line, so a
+/// document whose guides are all whole lines writes the same manifest as
+/// v21 apart from the version. Gated by [`GUIDE_SPAN_MIN_VERSION`].
+/// Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 22;
+
+/// The manifest version at which `sketches[].tags` was introduced. A file
+/// declaring an older version that carries one is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const SKETCH_TAGS_MIN_VERSION: u32 = 20;
+
+/// The manifest version at which `sketches[].regions[].faceless` was
+/// introduced. A file declaring an older version that sets it is malformed
+/// for its own declared version and rejected (reject-not-repair).
+pub(crate) const FACELESS_REGION_MIN_VERSION: u32 = 21;
+
+/// The manifest version at which `guides[].tags` was introduced. A file
+/// declaring an older version that carries one is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const GUIDE_TAGS_MIN_VERSION: u32 = 21;
+
+/// The manifest version at which `guides[].from` / `guides[].to` were
+/// introduced. A file declaring an older version that carries either is
+/// malformed for its own declared version and rejected (reject-not-repair).
+pub(crate) const GUIDE_SPAN_MIN_VERSION: u32 = 22;
+
+/// The manifest version at which `camera.parallel_height` (the height a
+/// parallel view spans at its target, `camera.rs`), the top-level
+/// `view_style` block (`style.rs`) and `annotations[].sid` were introduced.
+/// Each is version-gated like every sibling field: a file declaring an
+/// OLDER version that carries one is malformed for its own declared
+/// version and rejected (reject-not-repair). `annotations[].sid` is gated
+/// both ways like `sid` elsewhere: required at this version and above.
+pub(crate) const VIEW_MIN_VERSION: u32 = 19;
+
+/// The manifest version at which `annotations[].tags` was introduced. A
+/// file declaring an older version that carries one is malformed for its
+/// own declared version and rejected (reject-not-repair).
+pub(crate) const ANNOTATION_TAGS_MIN_VERSION: u32 = 18;
 
 /// The manifest version at which `sketches[].owner_object` (unified
 /// drafting) was introduced. Version-gated like every sibling field: a file
@@ -641,6 +707,9 @@ impl Object {
             outer_ring: Vec<Point3>,
             holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)>,
             mat_id: u32,
+            /// The back paint (v8), `NO_MATERIAL` for none. Emitted per
+            /// face, so it participates in the sort key.
+            back_mat_id: u32,
             uv_frame: Option<UvFrame>,
             /// Analytic surface claim (v4) — emitted per face, so it also
             /// participates in the sort key below.
@@ -747,6 +816,7 @@ impl Object {
                     std::cmp::Ordering::Equal
                 })
                 .then_with(|| a.mat_id.cmp(&b.mat_id))
+                .then_with(|| a.back_mat_id.cmp(&b.back_mat_id))
                 // Coincident faces (disjoint shells sharing positions) can
                 // tie on geometry and material alone; the UV frame, analytic
                 // surface, and edge-curve claims are the remaining
@@ -920,6 +990,10 @@ impl Object {
                     outer_ring,
                     holes,
                     mat_id: match face.material {
+                        Some(m) => material_dense(m),
+                        None => NO_MATERIAL,
+                    },
+                    back_mat_id: match face.back_material {
                         Some(m) => material_dense(m),
                         None => NO_MATERIAL,
                     },
@@ -1175,6 +1249,15 @@ impl Object {
                     }
                 }
             }
+
+            // per-face back paint (v8): u8 flag (0 = none, 1 = present) +
+            // the dense material id, after the polygon claims.
+            if cf.back_mat_id == NO_MATERIAL {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                buf.extend_from_slice(&cf.back_mat_id.to_le_bytes());
+            }
         }
 
         buf
@@ -1284,6 +1367,7 @@ impl Object {
         let mut edge_soft: Vec<FaceFlags> = Vec::new();
         let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
         let mut edge_polys: Vec<FaceCurves> = Vec::with_capacity(face_count);
+        let mut backs: Vec<crate::material::FaceMaterial> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -1529,11 +1613,31 @@ impl Object {
             };
             edge_polys.push(polys);
 
+            // v8: per-face back paint (flag + dense id).
+            let back = match if version >= 8 { r.read_u8()? } else { 0 } {
+                0 => None,
+                1 => {
+                    let raw = r.read_u32()?;
+                    Some(dense_material(raw).ok_or(DecodeError::Corrupt {
+                        offset: r.pos - 4,
+                        what: "face back material id out of range",
+                    })?)
+                }
+                _ => {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "face back paint flag is neither 0 nor 1",
+                    });
+                }
+            };
+            backs.push(back);
+
             face_specs.push((outer, holes, plane, face_material, uv_frame, surface));
         }
 
         // Rebuild topology via the existing builder path.
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
+        obj.set_built_back_materials(&backs);
         obj.default_material = base_material;
         // Restore the per-object planarity gate before validating, so an imported
         // object's near-planar faces are held to IMPORT_PLANE_DIST, not the
@@ -1681,6 +1785,10 @@ pub(crate) struct Manifest {
     /// `Document::set_camera_state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<CameraDto>,
+    /// How the document asks to be shown (manifest v19+; `style.rs`).
+    /// Absent → Hew's own look, the only possibility before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_style: Option<ViewStyleDto>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4). Absent
     /// means world identity — the only possibility before this field
     /// existed, so every pre-v13 file loads unchanged, and a document whose
@@ -1751,6 +1859,9 @@ pub(crate) struct SceneDto {
     pub section: Option<Option<SectionPlaneDto>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<DisplayDto>,
+    /// The look the Scene captures (manifest v19+; §4.15's shape).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_style: Option<ViewStyleDto>,
 }
 
 /// serde's default `Option<Option<T>>` handling collapses an explicit
@@ -1784,9 +1895,44 @@ pub(crate) struct CameraDto {
     /// Perspective vertical field of view, degrees (meaningless but still
     /// stored under `"parallel"` — see [`crate::camera::CameraState`]).
     pub fov_deg: f64,
+    /// The height the view spans at `target`, meters (manifest v19+; see
+    /// [`crate::camera::CameraState::parallel_height`]). Absent in an
+    /// older file: the loader derives it from the eye distance and fov.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parallel_height: Option<f64>,
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub up: [f64; 3],
+}
+
+/// How the document asks to be shown (manifest v19+; `style.rs`): the
+/// backdrop and the axes. Absent → Hew's own look.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ViewStyleDto {
+    pub background: [u8; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sky: Option<[u8; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ground: Option<[u8; 3]>,
+    pub axes: bool,
+}
+
+fn encode_view_style(v: crate::style::ViewStyle) -> ViewStyleDto {
+    ViewStyleDto {
+        background: v.background,
+        sky: v.sky,
+        ground: v.ground,
+        axes: v.axes,
+    }
+}
+
+fn decode_view_style(v: &ViewStyleDto) -> crate::style::ViewStyle {
+    crate::style::ViewStyle {
+        background: v.background,
+        sky: v.sky,
+        ground: v.ground,
+        axes: v.axes,
+    }
 }
 
 /// The [`CameraDto::projection`] token for [`CameraProjection::Perspective`].
@@ -1839,6 +1985,18 @@ pub(crate) struct GuideDto {
     /// line only: unit direction (omitted for points).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dir: Option<[f64; 3]>,
+    /// The tag paths the guide carries (manifest v21+, root-first like a
+    /// node's), hiding it with them. Omitted when empty; presence in an
+    /// older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
+    /// line only (manifest v22+): where the line starts, in meters along
+    /// `dir` from `p`; omitted when it runs on forever that way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    /// line only (manifest v22+): where the line ends, as `from`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<f64>,
 }
 
 /// A dimension/leader-text annotation entry (manifest v13+, HEW_FILE_FORMAT.md
@@ -1848,6 +2006,10 @@ pub(crate) struct GuideDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct AnnotationDto {
     pub id: u32,
+    /// Persistent stable id (manifest v19+, docs/agents/HEW_API.md §5.1):
+    /// required at v19+, a smuggled field below it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sid: Option<u64>,
     /// `"linear"` | `"radial"` | `"leader"`.
     pub kind: String,
     /// linear: the dimension's first endpoint. radial/leader: the single
@@ -1884,6 +2046,9 @@ pub(crate) struct AnnotationDto {
     /// `annotation.rs`'s module doc comment for why).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub detached: bool,
+    /// The tag paths the annotation carries (manifest v18+), root-first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
 }
 
 /// One annotation anchor: the node it tracks (absent = a free-floating
@@ -2119,6 +2284,19 @@ pub(crate) struct SketchDto {
     /// object-owned — every sketch before v17.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_object: Option<u32>,
+    /// The GROUP the sketch is drawn in (manifest v19+): the dense
+    /// `groups[]` id of the group that holds it — a `.skp` group of edges,
+    /// or lines drawn while editing a group. The sketch keeps its frame
+    /// (a group inside a definition also carries that definition in
+    /// `owner`); it hides with the group and goes with its deletion.
+    /// Absent means in no group — every sketch before v19.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_group: Option<u32>,
+    /// The tag paths the sketch carries (manifest v20+), root-first, as a
+    /// node's `tags`: a `.skp` edge's layer. It is not shown while one of
+    /// them (or a tag above one) is hidden. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -2142,6 +2320,11 @@ pub(crate) struct SketchRegionDto {
     pub id: u32,
     pub outer: Vec<u32>,
     pub holes: Vec<Vec<u32>>,
+    /// A loop of edges with no face (manifest v21+, `sketch.rs` rule 6):
+    /// not filled, picked or extruded. Omitted when false; `true` in an
+    /// older file is a smuggled field and rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub faceless: bool,
 }
 
 /// The analytic definition of one curve chain (manifest v10+): the exact
@@ -2304,10 +2487,19 @@ pub(crate) struct DocSaveData {
     /// The OBJECT owner of each object-owned sketch in `sketches` (manifest
     /// v17+). Every owner is a saved (live) object.
     pub sketch_owner_object: std::collections::BTreeMap<SketchId, ObjectId>,
+    /// The group of each GROUP-held live sketch (manifest v19+).
+    pub sketch_owner_group: std::collections::BTreeMap<SketchId, GroupId>,
+    /// The tag paths of each sketch in `sketches` that carries any
+    /// (manifest v20+).
+    pub sketch_tags: std::collections::BTreeMap<SketchId, Vec<Vec<String>>>,
     /// Construction guides, in slotmap key order.
     pub guides: Vec<(GuideId, Guide)>,
+    /// Each guide's tag paths, parallel to `guides` (manifest v21+).
+    pub guide_tags: Vec<Vec<Vec<String>>>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
     pub annotations: Vec<(AnnotationId, Annotation, bool)>,
+    /// Each annotation's tag paths, parallel to `annotations`.
+    pub annotation_tags: Vec<Vec<Vec<String>>>,
     /// Per-object display name, keyed by id (covers world + def members).
     pub obj_names: std::collections::BTreeMap<ObjectId, Option<String>>,
     /// Per-object tag list, keyed by id (covers world + def members).
@@ -2325,6 +2517,9 @@ pub(crate) struct DocSaveData {
     /// camera.md §5), or `None` if none was ever set — NOT undoable (see
     /// `camera.rs`), same posture as the tag/hidden fields above.
     pub camera: Option<CameraState>,
+    /// How the document asks to be shown (manifest v19+; `style.rs`), or
+    /// `None` for Hew's own look — view state like `camera`.
+    pub view_style: Option<crate::style::ViewStyle>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4).
     pub axes: AxesFrame,
     /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1) — the
@@ -2559,6 +2754,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 .sketch_owner_object
                 .get(sk_id)
                 .map(|oid| obj_to_dense[oid]);
+            dto.owner_group = data
+                .sketch_owner_group
+                .get(sk_id)
+                .and_then(|gid| grp_to_dense.get(gid).copied());
+            dto.tags = data.sketch_tags.get(sk_id).cloned().unwrap_or_default();
             dto
         })
         .collect();
@@ -2570,13 +2770,20 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .iter()
         .enumerate()
         .map(|(i, (gid, guide))| match guide {
-            Guide::Line { origin, direction } => GuideDto {
+            Guide::Line {
+                origin,
+                direction,
+                span,
+            } => GuideDto {
                 id: i as u32,
                 sid: sid_for(crate::document::EntityRef::Guide(*gid)),
                 attrs: attrs_for(crate::document::EntityRef::Guide(*gid)),
                 kind: "line".to_string(),
                 p: [origin.x, origin.y, origin.z],
                 dir: Some([direction.x, direction.y, direction.z]),
+                tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
+                from: span.from,
+                to: span.to,
             },
             Guide::Point { position } => GuideDto {
                 id: i as u32,
@@ -2585,6 +2792,9 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 kind: "point".to_string(),
                 p: [position.x, position.y, position.z],
                 dir: None,
+                tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
+                from: None,
+                to: None,
             },
         })
         .collect();
@@ -2632,17 +2842,21 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .annotations
         .iter()
         .enumerate()
-        .map(|(i, (_, annotation, detached))| {
+        .map(|(i, (id, annotation, detached))| {
             let dead_anchor = annotation
                 .anchored_nodes()
                 .into_iter()
                 .any(|n| anchor_node_to_dto(n).is_none());
-            encode_annotation(
-                i as u32,
-                annotation,
-                *detached || dead_anchor,
-                &anchor_to_dto,
-            )
+            AnnotationDto {
+                tags: data.annotation_tags.get(i).cloned().unwrap_or_default(),
+                sid: sid_for(crate::document::EntityRef::Annotation(*id)),
+                ..encode_annotation(
+                    i as u32,
+                    annotation,
+                    *detached || dead_anchor,
+                    &anchor_to_dto,
+                )
+            }
         })
         .collect();
 
@@ -2679,6 +2893,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             .map(attrs_to_dto)
             .unwrap_or_default(),
         camera: data.camera.map(encode_camera),
+        view_style: data.view_style.map(encode_view_style),
         axes: if data.axes == AxesFrame::IDENTITY {
             None
         } else {
@@ -2767,6 +2982,7 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
             id: rid,
             outer,
             holes,
+            faceless: r.faceless,
         });
     }
 
@@ -2804,6 +3020,8 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         curves: curve_dtos,
         owner: None,
         owner_object: None, // patched by the caller (`encode_document`), like `id`
+        owner_group: None,  // likewise
+        tags: Vec::new(),   // likewise
     }
 }
 
@@ -2826,6 +3044,7 @@ fn encode_annotation(
 ) -> AnnotationDto {
     let base = AnnotationDto {
         id,
+        sid: None,
         kind: String::new(),
         a: AnchorDto {
             node: None,
@@ -2840,6 +3059,7 @@ fn encode_annotation(
         text: None,
         text_override: None,
         detached,
+        tags: Vec::new(),
     };
     match annotation {
         Annotation::LinearDimension {
@@ -2967,13 +3187,23 @@ pub(crate) struct DocLoadRaw {
     /// Each sketch's object owner (manifest v17+): the dense object id, or
     /// `None` — parallel to `sketches`. All `None` for pre-v17 files.
     pub sketch_owner_object: Vec<Option<u32>>,
+    /// Each sketch's group dense id (manifest v19+), parallel to `sketches`.
+    pub sketch_owner_group: Vec<Option<u32>>,
+    /// Each sketch's tag paths (manifest v20+), parallel to `sketches`;
+    /// empty for none.
+    pub sketch_tags: Vec<Vec<Vec<String>>>,
     /// Construction guides (manifest v4+), in manifest dense-id order.
     pub guides: Vec<Guide>,
+    /// Each guide's tag paths (manifest v21+), parallel to `guides`; empty
+    /// for none.
+    pub guide_tags: Vec<Vec<Vec<String>>>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
     /// `detached`. Anchor node references stay dense (`RawAnchor::node`,
     /// unresolved) until `Document::load` maps them to live ids — the same
     /// two-phase resolution `groups`/`roots` already use via `resolve_node`.
     pub annotations: Vec<(RawAnnotation, bool)>,
+    /// Each annotation's tag paths, parallel to `annotations`.
+    pub annotation_tags: Vec<Vec<Vec<String>>>,
     /// Pre-v11 stored consumed pairs (dense sketch id, dense region id),
     /// for the loader's one-time retroactive consumption. Empty for v11+.
     pub consumed: Vec<[u32; 2]>,
@@ -2999,6 +3229,9 @@ pub(crate) struct DocLoadRaw {
     /// The working camera view at last save (manifest v13+; `None` for
     /// older files or a v13+ document that never saved one).
     pub camera: Option<CameraState>,
+    /// How the document asks to be shown (manifest v19+; `None` for older
+    /// files or Hew's own look).
+    pub view_style: Option<crate::style::ViewStyle>,
     /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
     /// older files or a v13+ file that never moved them).
     pub axes: AxesFrame,
@@ -3015,6 +3248,8 @@ pub(crate) struct DocLoadRaw {
     pub sketch_sids: Vec<u64>,
     pub guide_sids: Vec<u64>,
     pub tag_sids: Vec<u64>,
+    /// Annotation sids (manifest v19+), parallel to `annotations`.
+    pub annotation_sids: Vec<u64>,
     /// Attribute dictionaries (manifest v14+), parallel to each entity
     /// collection in dense order (empty dict = none stored), plus the
     /// document's own. All empty for pre-v14 files.
@@ -3110,11 +3345,49 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Object owner (manifest v17+; absent/`None` in older files).
     let sketch_owner_object: Vec<Option<u32>> =
         manifest.sketches.iter().map(|s| s.owner_object).collect();
+    let sketch_owner_group: Vec<Option<u32>> =
+        manifest.sketches.iter().map(|s| s.owner_group).collect();
+    // Sketch tags (manifest v20+; gated and checked in
+    // `validate_manifest_references`).
+    let sketch_tags: Vec<Vec<Vec<String>>> =
+        manifest.sketches.iter().map(|s| s.tags.clone()).collect();
 
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
+    let mut guide_tags: Vec<Vec<Vec<String>>> = Vec::with_capacity(manifest.guides.len());
     for guide_dto in &manifest.guides {
+        // A guide's stretch (manifest v22+): version-gated like its tags.
+        if (guide_dto.from.is_some() || guide_dto.to.is_some())
+            && manifest.format_version < GUIDE_SPAN_MIN_VERSION
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "guide {} carries a stretch in a v{} manifest (introduced at v{})",
+                    guide_dto.id, manifest.format_version, GUIDE_SPAN_MIN_VERSION
+                ),
+            });
+        }
         guides.push(decode_guide(guide_dto)?);
+        // Guide tags (manifest v21+): version-gated like a sketch's, and a
+        // path or segment that is empty names nothing.
+        if !guide_dto.tags.is_empty() && manifest.format_version < GUIDE_TAGS_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "guide {} carries tags in a v{} manifest (introduced at v{})",
+                    guide_dto.id, manifest.format_version, GUIDE_TAGS_MIN_VERSION
+                ),
+            });
+        }
+        if guide_dto
+            .tags
+            .iter()
+            .any(|t| t.is_empty() || t.iter().any(|seg| seg.is_empty()))
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!("guide {} has an empty tag path", guide_dto.id),
+            });
+        }
+        guide_tags.push(guide_dto.tags.clone());
     }
 
     // Decode annotations (manifest v13+; absent in v1-v12 files → empty).
@@ -3139,8 +3412,28 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     }
     let mut annotations: Vec<(RawAnnotation, bool)> =
         Vec::with_capacity(manifest.annotations.len());
+    let mut annotation_tags: Vec<Vec<Vec<String>>> = Vec::with_capacity(manifest.annotations.len());
     for annotation_dto in &manifest.annotations {
         annotations.push(decode_annotation(annotation_dto)?);
+        if !annotation_dto.tags.is_empty() && manifest.format_version < ANNOTATION_TAGS_MIN_VERSION
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{} manifest must not carry annotation tags (introduced at v{})",
+                    manifest.format_version, ANNOTATION_TAGS_MIN_VERSION
+                ),
+            });
+        }
+        if annotation_dto
+            .tags
+            .iter()
+            .any(|t| t.is_empty() || t.iter().any(|seg| seg.is_empty()))
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!("annotation {} has an empty tag path", annotation_dto.id),
+            });
+        }
+        annotation_tags.push(annotation_dto.tags.clone());
     }
 
     // Validate manifest references.
@@ -3149,7 +3442,14 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
 
     // Decode the camera block (manifest v13+; already confirmed absent for
     // older declared versions by `validate_manifest_references`).
-    let camera = manifest.camera.as_ref().map(decode_camera).transpose()?;
+    let camera = manifest
+        .camera
+        .as_ref()
+        .map(|c| decode_camera(c, manifest.format_version))
+        .transpose()?;
+    // The view style (manifest v19+): the version gate ran in
+    // `validate_manifest_references`; the shape is three colors and a flag.
+    let view_style = manifest.view_style.as_ref().map(decode_view_style);
 
     // Section plane + Scenes (manifest v16+; docs/design/scenes.md). The
     // version gate ran in `validate_manifest_references`; shapes decode here,
@@ -3162,7 +3462,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let scenes = manifest
         .scenes
         .iter()
-        .map(decode_scene)
+        .map(|dto| decode_scene(dto, manifest.format_version))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Normalize member shapes against the DECLARED version (nested-
@@ -3326,6 +3626,38 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     for (i, t) in manifest.tags.iter().enumerate() {
         tag_sids.extend(take_sid("tag", i, t.sid)?);
     }
+    // Annotations joined the stable-id table at v19 (HEW_FILE_FORMAT.md
+    // §4.8): the same both-ways gate as every other kind, at its own
+    // version.
+    let mut annotation_sids = Vec::new();
+    for (i, a) in manifest.annotations.iter().enumerate() {
+        match a.sid {
+            Some(_) if manifest.format_version < VIEW_MIN_VERSION => {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "annotation {i} carries a sid in a v{} manifest (introduced at v{VIEW_MIN_VERSION})",
+                        manifest.format_version
+                    ),
+                });
+            }
+            None if manifest.format_version >= VIEW_MIN_VERSION => {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "annotation {i} is missing its sid (required at v{VIEW_MIN_VERSION}+)"
+                    ),
+                });
+            }
+            Some(sid) => {
+                if let Some(other) = seen_sids.insert(sid, format!("annotation {i}")) {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!("duplicate sid {sid} on annotation {i} and {other}"),
+                    });
+                }
+                annotation_sids.push(sid);
+            }
+            None => {}
+        }
+    }
 
     // Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8):
     // smuggled below ATTRS_MIN_VERSION is rejected like every other
@@ -3397,8 +3729,12 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketches,
         sketch_owner,
         sketch_owner_object,
+        sketch_owner_group,
+        sketch_tags,
         guides,
+        guide_tags,
         annotations,
+        annotation_tags,
         consumed: manifest.consumed.clone(),
         obj_names,
         group_names,
@@ -3416,6 +3752,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,
+        view_style,
         axes,
         material_sids,
         obj_sids,
@@ -3425,6 +3762,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketch_sids,
         guide_sids,
         tag_sids,
+        annotation_sids,
         material_attrs,
         obj_attrs,
         group_attrs,
@@ -3571,6 +3909,48 @@ fn validate_manifest_references(
         {
             return Err(LoadError::DanglingReference {
                 what: format!("sketch {} owner object id {} out of range", sk.id, owner),
+            });
+        }
+        if sk.owner_group.is_some() && manifest.format_version < VIEW_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} carries an owner_group in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, VIEW_MIN_VERSION
+                ),
+            });
+        }
+        if let Some(group) = sk.owner_group
+            && group as usize >= manifest.groups.len()
+        {
+            return Err(LoadError::DanglingReference {
+                what: format!("sketch {} owner group id {} out of range", sk.id, group),
+            });
+        }
+        if !sk.tags.is_empty() && manifest.format_version < SKETCH_TAGS_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} carries tags in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, SKETCH_TAGS_MIN_VERSION
+                ),
+            });
+        }
+        if sk
+            .tags
+            .iter()
+            .any(|t| t.is_empty() || t.iter().any(|seg| seg.is_empty()))
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!("sketch {} has an empty tag path", sk.id),
+            });
+        }
+        if manifest.format_version < FACELESS_REGION_MIN_VERSION
+            && let Some(r) = sk.regions.iter().find(|r| r.faceless)
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} region {} is faceless in a v{} manifest (introduced at v{})",
+                    sk.id, r.id, manifest.format_version, FACELESS_REGION_MIN_VERSION
+                ),
             });
         }
     }
@@ -3726,6 +4106,17 @@ fn validate_manifest_references(
             what: format!(
                 "a v{} manifest must not carry section_plane/scenes (introduced at v{})",
                 manifest.format_version, SCENES_MIN_VERSION
+            ),
+        });
+    }
+
+    // `view_style` is a v19+ concept (`style.rs`): a pre-v19 file carrying
+    // one is malformed for its own declared version, never honored.
+    if manifest.format_version < VIEW_MIN_VERSION && manifest.view_style.is_some() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry view_style (introduced at v{})",
+                manifest.format_version, VIEW_MIN_VERSION
             ),
         });
     }
@@ -3944,7 +4335,11 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                     .collect::<Result<_, _>>()
             })
             .collect::<Result<_, _>>()?;
-        sk.insert_region_raw(SketchRegion { outer, holes });
+        sk.insert_region_raw(SketchRegion {
+            outer,
+            holes,
+            faceless: r.faceless,
+        });
     }
 
     // Islands are derived, never serialized — compute them from the
@@ -3992,11 +4387,27 @@ fn decode_guide(dto: &GuideDto) -> Result<Guide, LoadError> {
                     what: format!("guide {} direction is not a unit vector", dto.id),
                 });
             }
+            let span = crate::guide::GuideSpan {
+                from: dto.from,
+                to: dto.to,
+            };
+            if !span.is_valid() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "guide {} has a stretch that is not a number or has no length",
+                        dto.id
+                    ),
+                });
+            }
             Ok(Guide::Line {
                 origin: p,
                 direction,
+                span,
             })
         }
+        "point" if dto.from.is_some() || dto.to.is_some() => Err(LoadError::MalformedManifest {
+            what: format!("guide {} is a point but carries a stretch", dto.id),
+        }),
         "point" => Ok(Guide::Point { position: p }),
         other => Err(LoadError::MalformedManifest {
             what: format!("guide {} has unknown kind '{other}'", dto.id),
@@ -4018,6 +4429,7 @@ fn encode_camera(state: CameraState) -> CameraDto {
     CameraDto {
         projection,
         fov_deg: state.fov_deg,
+        parallel_height: Some(state.parallel_height),
         eye: [state.eye.x, state.eye.y, state.eye.z],
         target: [state.target.x, state.target.y, state.target.z],
         up: [state.up.x, state.up.y, state.up.z],
@@ -4027,7 +4439,7 @@ fn encode_camera(state: CameraState) -> CameraDto {
 /// Decodes a [`CameraDto`] into a [`CameraState`], rejecting (never
 /// repairing) a malformed entry: an unknown `projection` token or a
 /// non-finite coordinate/fov.
-fn decode_camera(dto: &CameraDto) -> Result<CameraState, LoadError> {
+fn decode_camera(dto: &CameraDto, format_version: u32) -> Result<CameraState, LoadError> {
     let projection = match dto.projection.as_str() {
         CAMERA_PROJECTION_PERSPECTIVE => CameraProjection::Perspective,
         CAMERA_PROJECTION_PARALLEL => CameraProjection::Parallel,
@@ -4055,9 +4467,29 @@ fn decode_camera(dto: &CameraDto) -> Result<CameraState, LoadError> {
             what: "camera has a non-finite fov or coordinate".to_string(),
         });
     }
+    // The parallel height (v19+): a smuggled one below its version is
+    // rejected; an older file's camera takes the height its perspective
+    // view spans at the target, which is what the app showed it as.
+    let parallel_height = match dto.parallel_height {
+        Some(_) if format_version < VIEW_MIN_VERSION => {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{format_version} manifest must not carry camera.parallel_height (introduced at v{VIEW_MIN_VERSION})"
+                ),
+            });
+        }
+        Some(h) if !h.is_finite() || h <= 0.0 => {
+            return Err(LoadError::MalformedManifest {
+                what: "camera.parallel_height must be finite and positive".to_string(),
+            });
+        }
+        Some(h) => h,
+        None => CameraState::height_at_target(eye, target, dto.fov_deg),
+    };
     Ok(CameraState {
         projection,
         fov_deg: dto.fov_deg,
+        parallel_height,
         eye,
         target,
         up,
@@ -4146,6 +4578,7 @@ fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
                 axes: d.axes,
                 guides: d.guides,
             }),
+            view_style: scene.view_style.map(encode_view_style),
         })
         .collect()
 }
@@ -4153,18 +4586,32 @@ fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
 /// Decodes one Scene's shape: name non-empty, camera/section well-formed.
 /// Reference resolution (do the sids name live entities? are names/sids
 /// unique?) is `Document::load`'s job.
-fn decode_scene(dto: &SceneDto) -> Result<crate::scenes::Scene, LoadError> {
+fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Scene, LoadError> {
     if dto.name.trim().is_empty() {
         return Err(LoadError::MalformedManifest {
             what: format!("scene {} has an empty name", dto.sid),
         });
     }
-    let camera = dto.camera.as_ref().map(decode_camera).transpose()?;
+    let camera = dto
+        .camera
+        .as_ref()
+        .map(|c| decode_camera(c, format_version))
+        .transpose()?;
     let section = match &dto.section {
         None => None,
         Some(None) => Some(None),
         Some(Some(p)) => Some(Some(decode_section_plane(p)?)),
     };
+    // A scene's view style (v19+): one smuggled in below its version is
+    // rejected like the document's.
+    if dto.view_style.is_some() && format_version < VIEW_MIN_VERSION {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "scene '{}' in a v{format_version} manifest carries view_style (introduced at v{VIEW_MIN_VERSION})",
+                dto.name
+            ),
+        });
+    }
     Ok(crate::scenes::Scene {
         sid: dto.sid,
         name: dto.name.clone(),
@@ -4184,6 +4631,7 @@ fn decode_scene(dto: &SceneDto) -> Result<crate::scenes::Scene, LoadError> {
             axes: d.axes,
             guides: d.guides,
         }),
+        view_style: dto.view_style.as_ref().map(decode_view_style),
     })
 }
 
@@ -4208,6 +4656,7 @@ mod camera_manifest_tests {
             guides: Vec::new(),
             tags: Vec::new(),
             camera,
+            view_style: None,
             axes: None,
             annotations: Vec::new(),
             attrs: BTreeMap::new(),
@@ -4220,6 +4669,7 @@ mod camera_manifest_tests {
         CameraDto {
             projection: CAMERA_PROJECTION_PERSPECTIVE.to_string(),
             fov_deg: 45.0,
+            parallel_height: None,
             eye: [0.0, 0.0, 5.0],
             target: [0.0, 0.0, 0.0],
             up: [0.0, 0.0, 1.0],
@@ -4269,14 +4719,42 @@ mod camera_manifest_tests {
             let state = CameraState {
                 projection,
                 fov_deg: 62.5,
+                parallel_height: 2.5,
                 eye: Point3::new(1.0, 2.0, 3.0),
                 target: Point3::new(-1.0, 0.5, 0.0),
                 up: Vec3::new(0.0, 0.0, 1.0),
             };
             let dto = encode_camera(state);
-            let decoded = decode_camera(&dto).expect("a well-formed CameraDto decodes");
+            let decoded = decode_camera(&dto, MANIFEST_FORMAT_VERSION)
+                .expect("a well-formed CameraDto decodes");
             assert_eq!(decoded, state);
         }
+    }
+
+    /// A camera from before `parallel_height` existed takes the height its
+    /// perspective view spans at the target; a smuggled one is rejected.
+    #[test]
+    fn a_camera_without_a_parallel_height_takes_the_perspective_views() {
+        let dto = a_camera_dto();
+        let decoded = decode_camera(&dto, VIEW_MIN_VERSION - 1).expect("decodes");
+        let expected = CameraState::height_at_target(
+            Point3::new(0.0, 0.0, 5.0),
+            Point3::new(0.0, 0.0, 0.0),
+            45.0,
+        );
+        assert!((decoded.parallel_height - expected).abs() < 1e-12);
+        let mut smuggled = a_camera_dto();
+        smuggled.parallel_height = Some(2.0);
+        assert!(matches!(
+            decode_camera(&smuggled, VIEW_MIN_VERSION - 1),
+            Err(LoadError::MalformedManifest { .. })
+        ));
+        let mut bad = a_camera_dto();
+        bad.parallel_height = Some(0.0);
+        assert!(matches!(
+            decode_camera(&bad, MANIFEST_FORMAT_VERSION),
+            Err(LoadError::MalformedManifest { .. })
+        ));
     }
 
     /// An unknown `projection` token is rejected typed, not defaulted.
@@ -4284,7 +4762,7 @@ mod camera_manifest_tests {
     fn decode_camera_rejects_an_unknown_projection_token() {
         let mut dto = a_camera_dto();
         dto.projection = "isometric".to_string();
-        match decode_camera(&dto) {
+        match decode_camera(&dto, MANIFEST_FORMAT_VERSION) {
             Err(LoadError::MalformedManifest { what }) => {
                 assert!(what.contains("isometric"));
             }
@@ -4298,7 +4776,7 @@ mod camera_manifest_tests {
         let mut dto = a_camera_dto();
         dto.eye[1] = f64::NAN;
         assert!(matches!(
-            decode_camera(&dto),
+            decode_camera(&dto, MANIFEST_FORMAT_VERSION),
             Err(LoadError::MalformedManifest { .. })
         ));
     }

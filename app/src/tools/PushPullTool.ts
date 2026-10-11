@@ -22,6 +22,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { displayedLength } from './displayedValue'
+import { readHealthReport } from '../health/healthReport'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
 import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
@@ -1010,6 +1011,20 @@ export class PushPullTool implements Tool {
     }
   }
 
+  /** Whether `object` is a lone flat face (Model Health verdict `flat_sheet`,
+   *  one face): a pane or a sign. A sheet of several faces (a region drawn on
+   *  it, a triangulated panel) is not, since pulling one of its faces must
+   *  not thicken the others; it gets the kernel's own answer. A failed
+   *  diagnosis just means "not known to be one". */
+  private _isFlatSheet(object: bigint): boolean {
+    try {
+      const rows = readHealthReport(this.wasmScene, 0, [object]).rows
+      return rows.length === 1 && rows[0].verdict.kind === 'flat_sheet' && rows[0].faces === 1
+    } catch {
+      return false
+    }
+  }
+
   /** True when the kernel accepted the commit (false = refused, toasted). */
   private _commit(target: PushPullTarget, distance: number): boolean {
     if (Math.abs(distance) < 1e-6) {
@@ -1049,6 +1064,18 @@ export class PushPullTool implements Tool {
           distance,
         )
         this.onCommit(objectId)
+      } else if (this._isFlatSheet(target.objectHandle)) {
+        // A lone flat surface (Model Health verdict `flat_sheet`) has no
+        // solid to push or pull: pulling it gives a solid (design F7,
+        // SketchUp's "pull a lone face, get a box"), out of the face's front
+        // by the dragged distance. A bent or otherwise open object keeps the
+        // kernel's ordinary refusal below.
+        if (target.instance !== null) {
+          this.wasmScene.thicken_sheet_in_instance(target.instance, target.objectHandle, distance)
+        } else {
+          this.wasmScene.thicken_sheet(target.objectHandle, 0, distance)
+        }
+        this.onCommit(target.objectHandle)
       } else {
         // Route through push_pull_in_component when the face was picked
         // through a component instance — `target.instance` (the instance the

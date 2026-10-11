@@ -39,7 +39,7 @@
 import { isTauri } from '../io/fileHost'
 import type { Scene } from '../wasm/loader'
 import type { StandardView, ViewportApi } from '../viewport/Viewport'
-import { setLengthUnit, type LengthFormat } from '../settings/units'
+import { getLengthUnit, setLengthUnit, type LengthFormat } from '../settings/units'
 
 /** What a webview-side live operation answers (`hew://api-op-reply`'s body
  * beside its `opId`). `refusal` names a typed API refusal the shell turns
@@ -217,6 +217,8 @@ type ViewDirective =
         up?: [number, number, number]
         projection?: 'perspective' | 'parallel'
         fov_deg?: number
+        /** The height the view spans at the target, meters (a parallel view frames it). */
+        parallel_height?: number
       }
       view?: string
     }
@@ -263,13 +265,29 @@ function applyViewDirective(
       if (viewportApi === null) return
       if (directive.camera !== undefined) {
         const c = directive.camera
-        viewportApi.setCamera(
-          c.eye,
-          c.target,
-          c.up ?? DEFAULT_CAMERA_UP,
-          c.fov_deg ?? DEFAULT_CAMERA_FOV_DEG,
-          c.projection ?? DEFAULT_CAMERA_PROJECTION,
-        )
+        if (c.parallel_height !== undefined && Number.isFinite(c.parallel_height) && c.parallel_height > 0) {
+          // A camera that says what it spans at the target is posed whole,
+          // the way a Scene's or a loaded document's camera is.
+          viewportApi.tweenCameraState(
+            {
+              projection: c.projection ?? DEFAULT_CAMERA_PROJECTION,
+              fovDeg: c.fov_deg ?? DEFAULT_CAMERA_FOV_DEG,
+              parallelHeight: c.parallel_height,
+              eye: c.eye,
+              target: c.target,
+              up: c.up ?? DEFAULT_CAMERA_UP,
+            },
+            0,
+          )
+        } else {
+          viewportApi.setCamera(
+            c.eye,
+            c.target,
+            c.up ?? DEFAULT_CAMERA_UP,
+            c.fov_deg ?? DEFAULT_CAMERA_FOV_DEG,
+            c.projection ?? DEFAULT_CAMERA_PROJECTION,
+          )
+        }
       } else if (directive.view !== undefined) {
         viewportApi.setStandardView(directive.view as StandardView)
       }
@@ -462,6 +480,9 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     } catch {
       /* an unparseable frame is answered by the dispatcher below */
     }
+    // A `.skp` the API exports opens in the app's display units, as File
+    // > Export writes it, so the dispatch sees the current preference.
+    scene.set_display_units(getLengthUnit())
     const reply = scene.api_dispatch(wasmId, frame)
     if (reply === undefined) return // a notification: no reply, per §4.1
     emitReply(connId, reply)

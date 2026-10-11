@@ -153,7 +153,7 @@ Hew has no equivalent of the Extension Warehouse, so the honest question is what
 | Fredo6 RoundCorner | Fillets and bevels | No fillet/chamfer tool; edge profiles only via Follow Me |
 | Fredo6 JointPushPull | Push/pull on curved surfaces | Partly built in: drawn circle/arc walls push/pull as one wall; arbitrary curved surfaces don't |
 | Curviloft | Lofting and skinning | No equivalent |
-| Solid Inspector² | Find and fix the holes that keep a group from being solid | Not needed — objects can't stop being solid, and watertight status is shown live |
+| Solid Inspector² | Find and fix the holes that keep a group from being solid | Not needed for what you model, since objects can't stop being solid. For imports it's built in: Make Solid rejoins split shapes, closes the open sides you choose, and shows where and why anything else stays open |
 | CleanUp³ | Purge stray edges, faces, and duplicate geometry | Mostly not needed — there is no loose-geometry soup to clean |
 | Artisan | Subdivision and organic sculpting | No equivalent; Hew isn't for organic modeling |
 | Profile Builder | Parametric profile assemblies | No equivalent |

@@ -20,6 +20,7 @@
  * against the in-memory Storage polyfill provided by src/test/setup.ts.
  */
 
+import { BANNED_RE, readableText } from './health/bannedWords'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 
@@ -56,6 +57,10 @@ const mockScene = {
   node_user_hidden: () => false,
   set_node_user_hidden: vi.fn(),
   object_solid: () => true,
+  // Model Health (status badge / Outliner icons): an all-solid, empty summary.
+  // (The full health_report_json is the panel's, read only while its window is open.)
+  health_summary_json: () =>
+    '{"counts":{"objects":0,"solids":0,"flat_sheets":0,"bent_sheets":0,"cappable":0,"holes":0,"mixed":0,"non_manifold":0},"open":[]}',
   can_scene_undo: () => false,
   can_scene_redo: () => false,
   // Lane C (docs/design/v1.1-cycle.md): this mock is not a real, stateful
@@ -68,6 +73,10 @@ const mockScene = {
   // dirty-state spec, not here — no test in this file exercises Save.
   at_saved_mark: () => false,
   mark_saved: vi.fn(),
+  // `.skp` document source (crash-recovery persistence): none for these tests.
+  skp_source: vi.fn(() => undefined),
+  set_skp_source: vi.fn(),
+  commit_skp_save: vi.fn(),
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
@@ -78,6 +87,8 @@ const mockScene = {
   // default, so load falls back to the pre-existing default framing.
   camera_state: () => undefined,
   set_camera_state: vi.fn(),
+  view_style_json: () => undefined,
+  set_view_style_axes: vi.fn(),
   node_parent: () => undefined as bigint | undefined,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,
@@ -112,16 +123,20 @@ const mockScene = {
   set_object_material: vi.fn(),
   import_skp: vi.fn(() => ({
     objects_created: 0,
+    lines_added: 0,
     watertight: 0,
     leaky: 0,
+    health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
     skipped: [] as { name: string; reason: string }[],
     textures_missing: [] as string[],
     warnings: [] as string[],
   })),
   import_stl: vi.fn(() => ({
     objects_created: 0,
+    lines_added: 0,
     watertight: 0,
     leaky: 0,
+    health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
     skipped: [] as { name: string; reason: string }[],
     textures_missing: [] as string[],
     warnings: [] as string[],
@@ -154,6 +169,14 @@ vi.mock('./io/fileHost', async (importOriginal) => {
   return { ...actual, makeFileHost: vi.fn(actual.makeFileHost) }
 })
 
+// io/savePanel — the desktop's native save panel. Off by default (every
+// other test here runs the browser path); the native-panel block below
+// switches it on and answers for the panel.
+vi.mock('./io/savePanel', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/savePanel')>()
+  return { ...actual, hasNativeSavePanel: vi.fn(() => false), pickSaveTarget: vi.fn() }
+})
+
 // io/recoveryStore — only makeRecoveryStore is mocked (jsdom has no
 // IndexedDB, so the real WebRecoveryStore silently no-ops and could never
 // report a snapshot). Tests seed `recoveryState.listings` to simulate a
@@ -170,6 +193,7 @@ const recoveryState = vi.hoisted(() => ({
   listings: [] as { slot: string; meta: { version: 1; savedAt: number; name: string; path: string | null } }[],
   write: vi.fn(async (_bytes: Uint8Array, _meta: unknown) => {}),
   clear: vi.fn(async () => {}),
+  writeSource: vi.fn(async (_source: Uint8Array | null) => {}),
 }))
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
@@ -181,6 +205,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
       claim: async () => null,
       clear: recoveryState.clear,
       discardAll: async () => {},
+      writeSource: recoveryState.writeSource,
     }),
   }
 })
@@ -201,7 +226,8 @@ import { recordRecent } from './io/recents'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
-import { makeFileHost, type FileHost } from './io/fileHost'
+import { makeFileHost, type DocFormat, type FileHost } from './io/fileHost'
+import * as savePanel from './io/savePanel'
 import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } from './App'
 import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
@@ -289,6 +315,297 @@ describe('App — loaded state', () => {
     // The empty-selection Object Info panel renders nothing at all now — the
     // old "Select an object." prompt was removed as boilerplate.
     expect(screen.queryByText(/select an object/i)).not.toBeInTheDocument()
+  })
+})
+
+describe('App — Model Health badge reads the cheap summary', () => {
+  it('shows the open count from health_summary_json and never reads the full report while the window is closed', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const defaultSummary = m.health_summary_json
+    const report = vi.fn(() => '{"rows":[],"families":[],"counts":{}}')
+    m.health_report_json = report
+    m.health_summary_json = () =>
+      JSON.stringify({
+        counts: { objects: 4, solids: 2, flat_sheets: 1, bent_sheets: 0, cappable: 1, holes: 0, mixed: 0, non_manifold: 0 },
+        open: [['3', 'flat_sheet', false], ['4', 'cappable', false]],
+      })
+    try {
+      await renderAndLoad()
+      const badge = await waitFor(() => {
+        const el = document.querySelector('[data-health-badge]')
+        if (el === null) throw new Error('no badge yet')
+        return el
+      })
+      expect(badge).toHaveAttribute('data-health-badge', 'open')
+      // Neutral, and it counts every object that isn't solid (the panel included).
+      expect(badge.textContent).toBe('4 objects · 2 not solid')
+      expect(badge).toHaveAttribute('title', "List the objects that aren't solid")
+      expect((badge as HTMLElement).style.background).toBe('var(--surface-overlay)')
+      expect(readableText(badge.parentElement as HTMLElement)).not.toMatch(BANNED_RE)
+      expect(screen.queryByRole('dialog', { name: 'Model Health' })).not.toBeInTheDocument()
+      expect(report).not.toHaveBeenCalled()
+    } finally {
+      m.health_summary_json = defaultSummary
+      delete m.health_report_json
+    }
+  })
+})
+
+describe('App — Make Solid entry points', () => {
+  const m = mockScene as unknown as Record<string, unknown>
+  const OPEN_ROW = {
+    object: '4', name: 'Wall', definition: null, definition_name: null, placements: 1, instances: [], accepted: false, family: null,
+    verdict: { kind: 'cappable' }, rims: [{ role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }],
+    branching_vertices: 0, islands: 1,
+  }
+  const report = vi.fn()
+  const lastImport = vi.fn(() => new BigUint64Array([4n]))
+  let fakeFileHost: FileHost
+  const defaultSummary = m.health_summary_json
+  const defaultImportSkp = mockScene.import_skp
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    report.mockImplementation(() =>
+      JSON.stringify({ rows: [OPEN_ROW], families: [], counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 1, holes: 0, mixed: 0, non_manifold: 0 } }),
+    )
+    m.health_report_json = report
+    m.last_import_object_ids = lastImport
+    m.health_summary_json = () =>
+      JSON.stringify({
+        counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 1, holes: 0, mixed: 0, non_manifold: 0 },
+        open: [['4', 'cappable', false]],
+      })
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn().mockResolvedValue({ kind: 'skp', name: 'house.skp', bytes: new Uint8Array() }),
+      openAny: vi.fn(),
+      exportBinary: vi.fn(),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+  })
+
+  afterEach(() => {
+    m.health_summary_json = defaultSummary
+    mockScene.import_skp = defaultImportSkp
+    delete m.health_report_json
+    delete m.last_import_object_ids
+    vi.mocked(makeFileHost).mockReset()
+  })
+
+  it('the status badge is neutral and opens the Model Health window; it never opens the wizard', async () => {
+    await renderAndLoad()
+    expect(screen.queryByRole('dialog', { name: 'Make Solid' })).not.toBeInTheDocument()
+    const badge = await waitFor(() => {
+      const el = document.querySelector('[data-health-badge="open"]')
+      if (el === null) throw new Error('no badge yet')
+      return el as HTMLElement
+    })
+    expect(badge.textContent).toBe('4 objects · 1 not solid')
+    expect(badge).toHaveAttribute('title', "List the objects that aren't solid")
+    expect(badge.style.background).toBe('var(--surface-overlay)')
+    expect(badge.style.color).toBe('var(--text-secondary)')
+    expect(screen.queryByRole('dialog', { name: 'Model Health' })).not.toBeInTheDocument()
+    fireEvent.click(badge)
+    expect(await screen.findByRole('dialog', { name: 'Model Health' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Make Solid' })).not.toBeInTheDocument()
+  })
+
+  it('the badge with every object solid is plain and neutral, not a button', async () => {
+    m.health_summary_json = () =>
+      JSON.stringify({
+        counts: { objects: 4, solids: 4, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0 },
+        open: [],
+      })
+    await renderAndLoad()
+    const label = await screen.findByText('4 objects ✓ solid')
+    expect(label.tagName).toBe('SPAN')
+    expect((label as HTMLElement).style.background).toBe('var(--surface-overlay)')
+  })
+
+  it('Object ▸ Make Solid… with nothing selected opens it on the whole model', async () => {
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(menubar().getByText('Make Solid…'))
+    expect(await screen.findByRole('dialog', { name: 'Make Solid' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Make this model solid' })).toBeInTheDocument()
+    expect(report).toHaveBeenLastCalledWith(null)
+    expect(screen.queryByRole('dialog', { name: 'Model Health' })).not.toBeInTheDocument()
+  })
+
+  describe('the Model Health window', () => {
+    const setFramingInset = vi.fn()
+    const setHealthOverlay = vi.fn()
+    const fakeViewportApi = {
+      setFramingInset,
+      setHealthOverlay,
+      clearIsolation: vi.fn(),
+      isolate: vi.fn(),
+      getEffectiveHiddenIds: () => ({ objects: [], instances: [] }),
+    }
+    beforeEach(() => {
+      vi.mocked(Viewport).mockImplementation(((props: { apiRef?: { current: unknown } }) => {
+        if (props.apiRef !== undefined) props.apiRef.current = fakeViewportApi
+        return null
+      }) as never)
+    })
+    afterEach(() => {
+      vi.mocked(Viewport).mockImplementation((() => null) as never)
+    })
+    const openFromObjectMenu = () => {
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Model Health…'))
+    }
+
+    it('is closed at launch and is not a tray section', async () => {
+      await renderAndLoad()
+      expect(screen.queryByRole('dialog', { name: 'Model Health' })).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: /^model health$/i })).not.toBeInTheDocument()
+      expect(document.querySelector('[data-tray-section-body="Model Health"]')).toBeNull()
+      expect(report).not.toHaveBeenCalled()
+    })
+
+    it('is no longer in the View menu', async () => {
+      await renderAndLoad()
+      fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+      expect(menubar().getByText('Changes')).toBeInTheDocument()
+      expect(menubar().queryByText('Model Health')).not.toBeInTheDocument()
+      expect(menubar().queryByText('Model Health…')).not.toBeInTheDocument()
+    })
+
+    it('Object ▸ Model Health… opens it, and opening again keeps one window', async () => {
+      await renderAndLoad()
+      openFromObjectMenu()
+      const win = await screen.findByRole('dialog', { name: 'Model Health' })
+      expect(win).toHaveAttribute('aria-modal', 'false')
+      expect(win).toHaveAttribute('data-model-health-window')
+      expect(within(win).getByText('Wall')).toBeInTheDocument()
+      // Opening again brings the same window forward: it takes focus back.
+      screen.getByRole('button', { name: /^object$/i }).focus()
+      openFromObjectMenu()
+      expect(screen.getAllByRole('dialog', { name: 'Model Health' })).toHaveLength(1)
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'Model Health' })).toHaveFocus())
+    })
+
+    it('closing it ends only an isolation it made, never one from elsewhere', async () => {
+      await renderAndLoad()
+      // Nothing isolated by the window: closing it leaves isolation alone
+      // (the Make Solid wizard's, say).
+      openFromObjectMenu()
+      let win = await screen.findByRole('dialog', { name: 'Model Health' })
+      fakeViewportApi.clearIsolation.mockClear()
+      fireEvent.click(within(win).getByRole('button', { name: 'Close' }))
+      expect(fakeViewportApi.clearIsolation).not.toHaveBeenCalled()
+      // A row it isolated: closing it ends that isolation.
+      openFromObjectMenu()
+      win = await screen.findByRole('dialog', { name: 'Model Health' })
+      fakeViewportApi.isolate.mockClear()
+      fireEvent.click(within(win).getByText('Wall'))
+      expect(fakeViewportApi.isolate).toHaveBeenCalled()
+      // The row now shows its own Close (cap) button: use the title bar's ✕.
+      fireEvent.click(win.querySelector('[data-floating-window-title] button')!)
+      expect(fakeViewportApi.clearIsolation).toHaveBeenCalledTimes(1)
+    })
+
+    it('the ✕ closes it: the panel unmounts and its overlay clears', async () => {
+      await renderAndLoad()
+      openFromObjectMenu()
+      const win = await screen.findByRole('dialog', { name: 'Model Health' })
+      expect(win.querySelector('[data-model-health]')).not.toBeNull()
+      setHealthOverlay.mockClear()
+      fireEvent.click(within(win).getByRole('button', { name: 'Close' }))
+      expect(screen.queryByRole('dialog', { name: 'Model Health' })).not.toBeInTheDocument()
+      expect(document.querySelector('[data-model-health]')).toBeNull()
+      expect(setHealthOverlay).toHaveBeenLastCalledWith(null)
+    })
+
+    it('reports the side it covers to the camera framing, and clears it on close', async () => {
+      const cw = vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(1000)
+      const ch = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(700)
+      try {
+        window.localStorage.removeItem('hew.ui.modelHealthWindow')
+        await renderAndLoad()
+        setFramingInset.mockClear()
+        openFromObjectMenu()
+        const win = await screen.findByRole('dialog', { name: 'Model Health' })
+        // Default place: 340 wide, 12 px from the right edge of a 1000 px viewport.
+        await waitFor(() => expect(setFramingInset).toHaveBeenLastCalledWith(352, 0))
+        fireEvent.click(within(win).getByRole('button', { name: 'Close' }))
+        await waitFor(() => expect(setFramingInset).toHaveBeenLastCalledWith(0, 0))
+      } finally {
+        cw.mockRestore()
+        ch.mockRestore()
+        window.localStorage.removeItem('hew.ui.modelHealthWindow')
+      }
+    })
+  })
+
+  const importHouse = async () => {
+    mockScene.import_skp = vi.fn(() => ({
+      objects_created: 4,
+      lines_added: 0,
+      watertight: 3,
+      leaky: 1,
+      health: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 1, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
+      skipped: [] as { name: string; reason: string }[],
+      textures_missing: [] as string[],
+      warnings: [] as string[],
+    }))
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Import…'))
+    const dialog = await screen.findByRole('dialog', { name: /import report/i })
+    expect(dialog).toHaveTextContent('Imported 4 objects. 3 are solid. The other one is a panel, a sheet, or an open shape')
+    return dialog
+  }
+
+  it('the import report\'s Make Solid… opens the wizard on the last import', async () => {
+    const dialog = await importHouse()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Make Solid…' }))
+    expect(await screen.findByRole('dialog', { name: 'Make Solid' })).toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: /import report/i })).not.toBeInTheDocument()
+    expect(lastImport).toHaveBeenCalled()
+    expect(report).toHaveBeenLastCalledWith(BigUint64Array.from([4n]))
+    expect(screen.getByRole('heading', { name: 'Make this import solid' })).toBeInTheDocument()
+  })
+
+  it('OK just closes the report; the wizard never opens on its own', async () => {
+    const dialog = await importHouse()
+    const ok = within(dialog).getByRole('button', { name: 'OK' })
+    expect(ok).toHaveFocus()
+    fireEvent.click(ok)
+    expect(screen.queryByRole('dialog', { name: /import report/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('dialog', { name: 'Make Solid' })).not.toBeInTheDocument()
+  })
+
+  it('the STL warning\'s Make Solid… cancels the export and opens the wizard on the offenders', async () => {
+    const defaults = { ids: mockScene.object_ids, solid: mockScene.object_solid, name: mockScene.object_name }
+    mockScene.object_ids = () => new BigUint64Array([4n, 5n])
+    mockScene.object_solid = () => false
+    mockScene.object_name = ((id: bigint) => (id === 4n ? 'Wall' : 'Roof')) as typeof mockScene.object_name
+    try {
+      await renderAndLoad()
+      fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+      fireEvent.mouseDown(menubar().getByText('Export…'))
+      const exportDialog = await screen.findByRole('dialog', { name: 'Export' })
+      fireEvent.change(within(exportDialog).getByLabelText('Format'), { target: { value: 'stl' } })
+      fireEvent.click(within(exportDialog).getByRole('button', { name: 'Export' }))
+      const warning = await screen.findByRole('dialog', { name: /export stl warning/i })
+      expect(warning).toHaveTextContent("These objects aren't solid, so the STL may not print cleanly:")
+      expect(within(warning).getByRole('button', { name: 'Export Anyway' })).toHaveFocus()
+      fireEvent.click(within(warning).getByRole('button', { name: 'Make Solid…' }))
+      expect(await screen.findByRole('dialog', { name: 'Make Solid' })).toBeInTheDocument()
+      expect(screen.queryByRole('dialog', { name: /export stl warning/i })).not.toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Make the selection solid' })).toBeInTheDocument()
+      expect(report).toHaveBeenLastCalledWith(BigUint64Array.from([4n, 5n]))
+    } finally {
+      mockScene.object_ids = defaults.ids
+      mockScene.object_solid = defaults.solid
+      mockScene.object_name = defaults.name
+    }
   })
 })
 
@@ -1033,8 +1350,10 @@ describe('App — import overlay lifecycle', () => {
   const defaultImportSkp = mockScene.import_skp
   const emptyReport = {
     objects_created: 0,
+    lines_added: 0,
     watertight: 0,
     leaky: 0,
+    health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
     skipped: [] as { name: string; reason: string }[],
     textures_missing: [] as string[],
     warnings: [] as string[],
@@ -1143,8 +1462,10 @@ describe('App — STL import units chooser', () => {
   const defaultImportStl = mockScene.import_stl
   const emptyReport = {
     objects_created: 1,
+    lines_added: 0,
     watertight: 1,
     leaky: 0,
+    health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
     skipped: [] as { name: string; reason: string }[],
     textures_missing: [] as string[],
     warnings: [] as string[],
@@ -1278,8 +1599,10 @@ describe('App — unified Open dialog', () => {
   const defaultLoad = mockScene.load
   const emptyReport = {
     objects_created: 1,
+    lines_added: 0,
     watertight: 1,
     leaky: 0,
+    health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
     skipped: [] as { name: string; reason: string }[],
     textures_missing: [] as string[],
     warnings: [] as string[],
@@ -1501,14 +1824,14 @@ describe('isPristineDocument', () => {
   const blankClean: DocSessionState = { currentRef: null, dirty: false, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: new Set() }
   const blankDirty: DocSessionState = { currentRef: null, dirty: true, lastEditAt: 1, lastSavedAt: null, nonUndoableReasons: new Set() }
   const namedClean: DocSessionState = {
-    currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
+    currentRef: { name: 'house.hew', format: 'hew', handle: '/tmp/house.hew' },
     dirty: false,
     lastEditAt: null,
     lastSavedAt: 1,
     nonUndoableReasons: new Set(),
   }
   const namedDirty: DocSessionState = {
-    currentRef: { name: 'house.hew', handle: '/tmp/house.hew' },
+    currentRef: { name: 'house.hew', format: 'hew', handle: '/tmp/house.hew' },
     dirty: true,
     lastEditAt: 1,
     lastSavedAt: 1,
@@ -2653,28 +2976,41 @@ describe('App — confirmDiscard: Save-then-continue (File ▸ New)', () => {
     fireEvent.mouseDown(menubar().getByText('New'))
   }
 
+  // The document has no file yet, so its Save is a Save As: the format is
+  // chosen (the browser's in-app step here) along with the place.
+  const continueSaveAs = async () => {
+    const saveAs = await screen.findByRole('dialog', { name: /^save as$/i })
+    fireEvent.click(within(saveAs).getByRole('button', { name: /^continue$/i }))
+  }
+
   it('a successful Save in the dialog lets File ▸ New proceed', async () => {
     await dirtyTheDocument()
-    vi.mocked(fakeFileHost.save).mockResolvedValue({ name: 'house.hew', handle: '/tmp/house.hew' })
+    vi.mocked(fakeFileHost.saveAs).mockResolvedValue({ name: 'house.hew', format: 'hew', handle: '/tmp/house.hew' })
 
     triggerNew()
     const dialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
     fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+    await continueSaveAs()
 
-    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+    await waitFor(() => expect(fakeFileHost.saveAs).toHaveBeenCalledOnce())
+    expect(fakeFileHost.save).not.toHaveBeenCalled()
     // New proceeded: the blank-document load ran, and the dialog closed.
     await waitFor(() => expect(mockScene.load).toHaveBeenCalledOnce())
     expect(screen.queryByRole('dialog', { name: /unsaved changes/i })).not.toBeInTheDocument()
+    // Written once: the dialog's Save, not again on the way to New.
+    expect(fakeFileHost.saveAs).toHaveBeenCalledOnce()
+    expect(fakeFileHost.save).not.toHaveBeenCalled()
   })
 
   it('a cancelled Save (host returns null — e.g. a dismissed Save As picker) blocks New and keeps the document', async () => {
     await dirtyTheDocument()
-    vi.mocked(fakeFileHost.save).mockResolvedValue(null)
+    vi.mocked(fakeFileHost.saveAs).mockResolvedValue(null)
 
     triggerNew()
     const dialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
     fireEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
-    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+    await continueSaveAs()
+    await waitFor(() => expect(fakeFileHost.saveAs).toHaveBeenCalledOnce())
 
     // The dialog stays up (Save didn't land) — New never ran, nothing was
     // discarded, and the document is exactly as dirty as before.
@@ -2958,5 +3294,104 @@ describe('App — v1.1 assets lane: viewport resync + current-material reset aft
       vi.mocked(Viewport).mock.calls.at(-1)![0].currentMaterialId,
       'a purged material must not stay "current"',
     ).toBe(MATERIAL_SENTINEL)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — the desktop's native save panel: Save As and Export choose the
+// format in the platform's own panel (io/savePanel.ts) and write to the
+// path it picked, never through the in-app format step or Export dialog.
+// ---------------------------------------------------------------------------
+
+describe('App — the native save panel chooses the format', () => {
+  let fakeFileHost: FileHost
+  const written = new Uint8Array([7, 7, 7])
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT)
+    vi.mocked(savePanel.hasNativeSavePanel).mockReturnValue(true)
+    fakeFileHost = {
+      open: vi.fn(),
+      save: vi.fn(),
+      saveAs: vi.fn(),
+      openForImport: vi.fn(),
+      openAny: vi.fn(),
+      exportBinary: vi.fn(),
+      writeTo: vi.fn(async (path: string, _bytes: Uint8Array, format?: DocFormat) => ({
+        name: path.split('/').pop() ?? path,
+        format: format ?? 'hew',
+        handle: path,
+      })),
+    }
+    vi.mocked(makeFileHost).mockReturnValue(fakeFileHost)
+    ;(mockScene as Record<string, unknown>).save_skp = vi.fn(() => ({ bytes: written, simplified: [], writer_notes: [] }))
+    ;(mockScene as Record<string, unknown>).export_skp = vi.fn(() => ({ bytes: written, simplified: [], writer_notes: [] }))
+  })
+
+  afterEach(() => {
+    vi.mocked(savePanel.hasNativeSavePanel).mockReturnValue(false)
+    vi.mocked(makeFileHost).mockReset()
+    delete (mockScene as Record<string, unknown>).save_skp
+    delete (mockScene as Record<string, unknown>).export_skp
+  })
+
+  const fileMenu = (item: string) => {
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText(item))
+  }
+
+  it('Save As writes the format picked in the panel to the path it picked', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp2017', options: {} })
+    await renderAndLoad()
+    fileMenu('Save As…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.SAVE_PANEL_FORMATS, 'hew')
+    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/m.skp', written, 'skp2017')
+    // No in-app format step, no second picker.
+    expect(screen.queryByRole('dialog', { name: /^save as$/i })).not.toBeInTheDocument()
+    expect(fakeFileHost.saveAs).not.toHaveBeenCalled()
+    // Bound to the file it wrote (the mock's saved mark never clears the
+    // dirty dot; documentSession.test.ts covers that).
+    await waitFor(() => expect(document.title).toMatch(/m\.skp — Hew$/))
+  })
+
+  it('Export writes the format picked in the panel to the path it picked', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp2017', options: {} })
+    await renderAndLoad()
+    fileMenu('Export…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    const [title, , formats, initial] = vi.mocked(savePanel.pickSaveTarget).mock.calls[0]
+    expect([title, initial]).toEqual(['Export', 'glb'])
+    expect(formats.map((f) => f.id)).toEqual(savePanel.EXPORT_FORMATS.map((f) => f.format))
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/e.skp', written)
+    expect(screen.queryByRole('dialog', { name: /^export$/i })).not.toBeInTheDocument()
+    expect(fakeFileHost.exportBinary).not.toHaveBeenCalled()
+  })
+
+  it('a panel that could not be shown says so rather than passing for a cancel', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockRejectedValue('the save panel needs the main thread')
+    await renderAndLoad()
+    fileMenu('Save As…')
+    expect(await screen.findByText(/Save As failed: .*main thread/)).toBeInTheDocument()
+    fileMenu('Export…')
+    expect(await screen.findByText(/Export failed: .*main thread/)).toBeInTheDocument()
+    expect(fakeFileHost.writeTo).not.toHaveBeenCalled()
+  })
+
+  it('a canceled panel writes nothing', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue(null)
+    await renderAndLoad()
+    fileMenu('Save As…')
+    await waitFor(() => expect(savePanel.pickSaveTarget).toHaveBeenCalledOnce())
+    fileMenu('Export…')
+    await waitFor(() => expect(savePanel.pickSaveTarget).toHaveBeenCalledTimes(2))
+    expect(fakeFileHost.writeTo).not.toHaveBeenCalled()
+    expect(fakeFileHost.saveAs).not.toHaveBeenCalled()
+    expect(fakeFileHost.exportBinary).not.toHaveBeenCalled()
   })
 })

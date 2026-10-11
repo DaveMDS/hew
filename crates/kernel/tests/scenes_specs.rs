@@ -46,13 +46,13 @@ fn extrude_box(doc: &mut Document, x0: f64, y0: f64, x1: f64, y1: f64, h: f64) -
 }
 
 fn cam(eye: [f64; 3]) -> CameraState {
-    CameraState {
-        projection: CameraProjection::Perspective,
-        fov_deg: 45.0,
-        eye: Point3::new(eye[0], eye[1], eye[2]),
-        target: Point3::new(0.0, 0.0, 0.0),
-        up: Vec3::new(0.0, 0.0, 1.0),
-    }
+    CameraState::framed(
+        CameraProjection::Perspective,
+        45.0,
+        Point3::new(eye[0], eye[1], eye[2]),
+        Point3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 0.0, 1.0),
+    )
 }
 
 fn display(grid: bool) -> DisplayState {
@@ -696,7 +696,7 @@ fn scenes_round_trip_byte_identical_with_every_property_shape() {
 
     let bytes = f.doc.save();
     let m = manifest_json(&bytes);
-    assert_eq!(m["format_version"], 17);
+    assert_eq!(m["format_version"], 22);
     assert_eq!(m["scenes"].as_array().unwrap().len(), 3);
     assert_eq!(m["scenes"][0]["name"], "Cam only");
     assert!(
@@ -793,4 +793,82 @@ fn loaded_scene_sids_advance_the_mint_counter() {
         .add_scene(None, SceneProps::ALL, None, None, None)
         .unwrap();
     assert!(next > sid);
+}
+
+/// A Scene's display property carries the document's view style: the
+/// look a `.skp` scene saved comes back when the Scene is activated, and
+/// a document shown Hew's way captures no look.
+#[test]
+fn a_scene_restores_the_view_style_it_captured() {
+    use kernel::ViewStyle;
+    let mut doc = Document::new();
+    let sid = doc
+        .add_scene(
+            None,
+            SceneProps::ALL,
+            Some(cam([5.0, 0.0, 0.0])),
+            Some(display(true)),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        doc.scene(sid).unwrap().view_style,
+        None,
+        "no look to capture"
+    );
+    let white = ViewStyle {
+        background: [255, 255, 255],
+        sky: None,
+        ground: None,
+        axes: false,
+    };
+    doc.set_view_style(Some(white));
+    let styled = doc
+        .add_scene(
+            None,
+            SceneProps::ALL,
+            Some(cam([5.0, 0.0, 0.0])),
+            Some(display(true)),
+            None,
+        )
+        .unwrap();
+    assert_eq!(doc.scene(styled).unwrap().view_style, Some(white));
+    assert!(doc.scene(styled).unwrap().props().display);
+    // The document moves on; activating the Scene brings the look back,
+    // and the resolution hands it to the app.
+    let blue = ViewStyle {
+        background: [0, 0, 255],
+        sky: Some([10, 20, 30]),
+        ground: None,
+        axes: true,
+    };
+    doc.set_view_style(Some(blue));
+    assert!(
+        doc.scene_drift(styled, None, None).unwrap().props.display,
+        "a changed look is display drift"
+    );
+    let resolved = doc.apply_scene(styled).unwrap();
+    assert_eq!(resolved.view_style, Some(white));
+    assert_eq!(doc.view_style(), Some(white));
+    // The unstyled Scene leaves the look alone.
+    let resolved = doc.apply_scene(sid).unwrap();
+    assert_eq!(resolved.view_style, None);
+    assert_eq!(doc.view_style(), Some(white));
+    // Saved and loaded, each Scene keeps what it captured.
+    let loaded = Document::load(&doc.save()).unwrap();
+    assert_eq!(loaded.scene(styled).unwrap().view_style, Some(white));
+    assert_eq!(loaded.scene(sid).unwrap().view_style, None);
+    // Dropping the display property drops the look with it.
+    doc.set_scene_props(
+        styled,
+        SceneProps {
+            display: false,
+            ..SceneProps::ALL
+        },
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(doc.scene(styled).unwrap().view_style, None);
+    assert!(!doc.scene(styled).unwrap().props().display);
 }

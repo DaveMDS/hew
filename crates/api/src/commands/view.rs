@@ -88,13 +88,6 @@ fn zoom_extents(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
 
 // ----------------------------------------------------------- hew.view.units
 
-/// `app/src/settings/units.ts`'s `LengthFormat` union, mirrored here so an
-/// unrecognized value is refused statically (`-32602`) rather than reach
-/// the host at all — the same posture `hew.doc.export`'s `format` enum
-/// and `hew.view.snapshot`'s `view` name get from their own JSON Schema
-/// `enum` plus this crate's own validation.
-const VALID_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
-
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct UnitsParams {
@@ -103,11 +96,7 @@ struct UnitsParams {
 
 fn units(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     let UnitsParams { format } = parse(params)?;
-    if !VALID_FORMATS.contains(&format.as_str()) {
-        return Err(CmdError::Params(format!(
-            "unknown display unit format \"{format}\" (expected one of {VALID_FORMATS:?})"
-        )));
-    }
+    crate::commands::doc::check_length_format(&format)?;
     ctx.host
         .set_display_units(&format)
         .map_err(CmdError::Refusal)?;

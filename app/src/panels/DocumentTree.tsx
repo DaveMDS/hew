@@ -34,6 +34,8 @@ import {
 } from './treeModel'
 import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '../tools/planeUnits'
 import { isSketchScopedKind } from './treeModel'
+import type { HealthClass } from '../health/healthReport'
+import { OUTLINER_TOOLTIP } from '../health/healthCopy'
 
 interface Props {
   scene: WasmScene
@@ -48,8 +50,15 @@ interface Props {
    *  would force-expand or misrender a node that just happens to reuse that
    *  slot. */
   docGeneration: number
-  /** Per-object watertight state, for the solid/leaky icon state. */
+  /** Per-object watertight state, the icon's fallback when `objectHealth`
+   *  is not supplied. */
   watertightMap: Map<bigint, boolean>
+  /** Per-object Model Health state for the icon: `surface` (a sheet drawn on
+   *  purpose, or one marked as accepted) or `open` (needs attention). An
+   *  object absent from the map is a solid. Comes from the health report, so
+   *  component-definition members are covered too (the tessellation-derived
+   *  `watertightMap` never sees them). */
+  objectHealth?: Map<bigint, HealthClass>
   /** Selected nodes (ordered; index 0 = primary). */
   selectedIds: NodeRef[]
   /** Object-context path: app-only sticky editing of at most one plain
@@ -186,6 +195,7 @@ export function DocumentTree({
   docRev,
   docGeneration,
   watertightMap,
+  objectHealth,
   selectedIds,
   activeContext,
   sessionStack,
@@ -233,6 +243,14 @@ export function DocumentTree({
     [scene, docRev],
   )
   const sketches = drawing.free
+  // A row's number among the sketch rows, looked up rather than searched
+  // for: a search per row is quadratic, and a model of tens of thousands
+  // of stray lines has that many rows.
+  const sketchIndex = useMemo(() => {
+    const m = new Map<string, number>()
+    sketches.forEach((s, i) => m.set(nodeKey(s.ref), i))
+    return m
+  }, [sketches])
 
   const selected = new Set(selectedIds.map((n) => nodeKey(n)))
   // A selected line/curve has no dedicated row beyond its shape's — light up
@@ -823,6 +841,7 @@ export function DocumentTree({
             scene={scene}
             docRev={docRev}
             watertightMap={watertightMap}
+            objectHealth={objectHealth}
             fullPath={fullPath}
             isSelected={isSelected}
             primaryKey={primaryKey}
@@ -869,6 +888,7 @@ export function DocumentTree({
               scene={scene}
               docRev={docRev}
               watertightMap={watertightMap}
+              objectHealth={objectHealth}
               fullPath={fullPath}
               isSelected={isSelected}
               primaryKey={primaryKey}
@@ -891,7 +911,7 @@ export function DocumentTree({
           )
         })}
         {visibleSketches.map(({ ref: node }) => {
-          const index = sketches.findIndex((s) => nodeKey(s.ref) === nodeKey(node))
+          const index = sketchIndex.get(nodeKey(node)) ?? -1
           return (
             <Row
               key={nodeKey(node)}
@@ -1015,6 +1035,7 @@ const NodeRow = memo(function NodeRowInner({
   scene,
   docRev,
   watertightMap,
+  objectHealth,
   fullPath,
   isSelected,
   primaryKey,
@@ -1043,6 +1064,7 @@ const NodeRow = memo(function NodeRowInner({
   /** Where every drawn shape lists (planeUnits.ts `outlinerDrawing`). */
   drawing: OutlinerDrawing
   watertightMap: Map<bigint, boolean>
+  objectHealth?: Map<bigint, HealthClass>
   /** The combined session-stack + object-context path (see the parent
    *  component's `fullPath`) — every entry on it gets the "editing"
    *  treatment (design: not just the deepest), via the same
@@ -1141,7 +1163,12 @@ const NodeRow = memo(function NodeRowInner({
   const rowRef = isPrimary ? selectedRowRef : isSessionRevealTarget ? sessionRevealRowRef : undefined
 
   if (node.kind === 'object') {
-    const watertight = watertightMap.get(node.id) ?? true
+    const health: 'solid' | HealthClass =
+      objectHealth !== undefined
+        ? (objectHealth.get(node.id) ?? 'solid')
+        : watertightMap.get(node.id) === false
+          ? 'open'
+          : 'solid'
     // An object usually carries 0-2 imprints, and objects have no expand
     // chevron of their own, so there is no collapsed state to hide the
     // rows behind.
@@ -1149,7 +1176,7 @@ const NodeRow = memo(function NodeRowInner({
       <>
         <Row
           label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
-          icon={<NodeIcon kind="object" solid={watertight} />}
+          icon={<NodeIcon kind="object" health={health} />}
           selected={selected}
           isPrimary={isPrimary}
           active={active}
@@ -1286,6 +1313,7 @@ const NodeRow = memo(function NodeRowInner({
           scene={scene}
           docRev={docRev}
           watertightMap={watertightMap}
+          objectHealth={objectHealth}
           fullPath={fullPath}
           isSelected={isSelected}
           primaryKey={primaryKey}
@@ -1317,7 +1345,8 @@ const NodeRow = memo(function NodeRowInner({
 // currentColor) while staying quiet: each type gets a subtle theme-aware tint
 // via CSS vars, applied as the SVG's color so `currentColor` picks it up.
 //   object   — isometric cube; solid = solid outline (--status-solid),
-//              leaky = dashed outline (--status-leaky)
+//              surface = thin neutral outline, no dash (a sheet drawn on
+//              purpose, or accepted), open = dashed outline (--status-leaky)
 //   group    — folder outline (--glyph-group)
 //   instance — hexagon with a center definition dot (--glyph-instance)
 //   sketch   — pen curve (--glyph-sketch)
@@ -1336,15 +1365,29 @@ const ICON_SVG_PROPS = {
   style: { flexShrink: 0, display: 'block' } as React.CSSProperties,
 }
 
-export function NodeIcon({ kind, solid }: { kind: NodeKind; solid?: boolean }) {
+export function NodeIcon({ kind, health = 'solid' }: { kind: NodeKind; health?: 'solid' | HealthClass }) {
+  if (kind === 'object' && health === 'surface') {
+    return (
+      <svg
+        {...ICON_SVG_PROPS}
+        data-node-icon="object-surface"
+        style={{ ...ICON_SVG_PROPS.style, color: 'var(--text-muted)' }}
+      >
+        <title>{OUTLINER_TOOLTIP.panel}</title>
+        <path d="M7 1.4 12.1 4.2 12.1 9.8 7 12.6 1.9 9.8 1.9 4.2 Z" strokeWidth={0.9} />
+        <path d="M1.9 4.2 7 7 12.1 4.2 M7 7 7 12.6" strokeWidth={0.9} />
+      </svg>
+    )
+  }
   if (kind === 'object') {
-    const leaky = solid === false
+    const leaky = health === 'open'
     return (
       <svg
         {...ICON_SVG_PROPS}
         data-node-icon={leaky ? 'object-leaky' : 'object-solid'}
         style={{ ...ICON_SVG_PROPS.style, color: leaky ? 'var(--status-leaky)' : 'var(--status-solid)' }}
       >
+        {leaky && <title>{OUTLINER_TOOLTIP.open}</title>}
         <path
           d="M7 1.4 12.1 4.2 12.1 9.8 7 12.6 1.9 9.8 1.9 4.2 Z"
           strokeDasharray={leaky ? '2 1.7' : undefined}

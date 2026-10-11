@@ -41,6 +41,8 @@ import {
 } from '../tools/planeUnits'
 import { invalidatePlaneUnits } from '../tools/planeUnits'
 import { DEPTH_BIAS } from './depthPolicy'
+import type { HealthOverlay } from '../health/healthReport'
+import type { IsolationFade } from './isolation'
 import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
 import { facePlaneBasis, crossV3, normalizeV3, clamp, pushArrowChevron, type V3 } from './geoHelpers'
@@ -49,7 +51,7 @@ import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
 import { GUIDE_COLOR } from './guideColors'
-import { windowFor, guideReach, type GuideWindow } from './guideWindow'
+import { windowFor, guideReach, guideSpanOf, stretchToUse, type GuideWindow } from './guideWindow'
 
 /** What `updateGuideExtents` needs to know about the live camera. */
 export interface GuideView {
@@ -73,6 +75,7 @@ import {
   CENTER_TICK_HALF,
 } from './annotationLayout'
 import { writeFrameUvs, type UvFrameComponents } from '../tools/uvFrameMath'
+import { shownAnnotationIds } from './shownAnnotations'
 
 /** Default neutral face color (matches DEFAULT_MATERIAL_RGBA in tessellate). */
 const FACE_COLOR_DEFAULT = 0xcccccc
@@ -86,6 +89,12 @@ export const EDGE_COLOR_SELECTED = 0xffaa00
 const SKETCH_LINE_COLOR = 0x2266cc
 /** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
 const SKETCH_LINE_WIDTH_PX = 2.2
+/** Section-cut outlines (where the active section passes through a solid):
+ * heavy black lines on the plane, as SketchUp draws a cut profile, so a
+ * post cut through reads as a square instead of vanishing into the floor
+ * it stands on. */
+const SECTION_CUT_COLOR = 0x000000
+const SECTION_CUT_WIDTH_PX = 2.5
 /** Selected-sketch highlight width — deliberately bolder than the base
  * sketch-line width above so the orange overlay reads as clearly on top of
  * it rather than disappearing into (or under) it, worst case in light mode. */
@@ -150,6 +159,13 @@ const CONTEXT_DIM_OPACITY: Record<'light' | 'dark', number> = {
   light: 0.65,
   dark: 0.55,
 }
+/**
+ * Opacity of the context drawn around an isolated item (view-only isolation,
+ * `setIsolationFade`): the rest of the containing group or component instance,
+ * faded so the isolated object reads in place. Multiplies into whatever the
+ * editing-context dim already applies; edges fade with it.
+ */
+export const ISOLATION_FADE_OPACITY = 0.25
 /** Half-length (meters) a line guide is first built with, before the first
  *  frame's `updateGuideExtents` sizes it to the view (see guideWindow.ts). */
 const GUIDE_INITIAL_HALF_LENGTH = 1
@@ -368,6 +384,11 @@ interface DefSketchGroup {
   regionMeshes: Map<string, THREE.Mesh>
 }
 
+/** Whether a member draws any painted back (see `MemberGeometry.groupBacks`). */
+function hasBackPaint(g: MemberGeometry): boolean {
+  return g.groupBacks.some((b) => b === 1)
+}
+
 /** Shared per-member typed arrays pulled once across the wasm boundary. */
 interface MemberGeometry {
   positions: Float32Array
@@ -378,6 +399,8 @@ interface MemberGeometry {
   groupMaterialIds: BigUint64Array
   groupStarts: Uint32Array
   groupCounts: Uint32Array
+  /** Which groups draw painted backs (see `_buildMaterialArray`). */
+  groupBacks: Uint8Array
   edgePositions: Float32Array
   /** Whether the member object encloses a volume — drives double-sided
    * rendering for open (non-watertight) shells (see `_bucketTag`). */
@@ -385,20 +408,24 @@ interface MemberGeometry {
 }
 
 /**
- * Bucket for one instanced batch: 'F' = watertight, normal similarity pose
- * (FrontSide, smooth-capable); 'G' = watertight, normal NON-similarity pose
- * (FrontSide, flat-shaded — see below); 'B' = watertight, reflected pose
+ * Bucket for one instanced batch: 'F' = watertight, normal pose with
+ * orthogonal columns (FrontSide, smooth-capable); 'G' = watertight, normal
+ * SHEARED pose (FrontSide, flat-shaded — see below); 'B' = watertight, reflected pose
  * (det < 0 flips winding, so BackSide); 'D' = non-watertight member
  * (DoubleSide — culling off, so normal and reflected placements share one
- * bucket).
+ * bucket); 'R' = non-watertight member with painted backs under a reflected
+ * pose (DoubleSide too, but its painted backs, drawn one-sided, flip to
+ * BackSide like 'B').
  *
  * Shading rule (the true-curves design, review follow-up): only the 'F'
  * bucket renders the tessellator's per-vertex analytic normals. The
  * InstancedMesh shader transforms normals by `mat3(instanceMatrix)` with a
- * squared-column-norm compensation that is only the true inverse-transpose
- * for matrices with orthogonal columns — three.js's own chunk says "shear
- * transforms in the instance matrix are not supported" — so non-similarity
- * poses ('G') would shade smooth-but-WRONG. And the 'B' bucket's BackSide
+ * squared-column-norm compensation that is the true inverse-transpose
+ * exactly for matrices with orthogonal columns (a rotation times a scale
+ * along the axes, uniform or not: a toilet tank a SketchUp model stretches
+ * by a sixth shades as smooth as an unstretched one) — three.js's own chunk
+ * says "shear transforms in the instance matrix are not supported" — so
+ * sheared poses ('G') would shade smooth-but-WRONG. And the 'B' bucket's BackSide
  * material defines FLIP_SIDED, which negates the transformed normal in the
  * vertex shader: a mirrored batch with attribute normals lights inside-out
  * even though the mirror maps the normals themselves correctly. 'D' mixes
@@ -412,7 +439,7 @@ interface MemberGeometry {
  * matrix, whose CPU-side `normalMatrix` is a true inverse-transpose, so
  * they shade smooth under every pose including mirrors and shears.
  */
-type BucketTag = 'F' | 'G' | 'B' | 'D'
+type BucketTag = 'F' | 'G' | 'B' | 'D' | 'R'
 
 /**
  * One GPU batch: every non-materialized placement of one definition member
@@ -452,7 +479,7 @@ interface MemberBatch {
  * DEF-LOCAL pose (identity for a flat definition; a nested definition's own
  * internal placement otherwise), and the two bucket flags of its EFFECTIVE
  * (composed) pose. The placement's world matrix is `InstanceRecord.matrix ×
- * localMatrix` (module doc), and `reflected`/`similar` are derived from that
+ * localMatrix` (module doc), and `reflected`/`orthogonal` are derived from that
  * SAME composed matrix, not from either factor alone — a nested definition's
  * local pose can independently mirror or shear a placement even when the
  * outer instance pose is a plain identity/translation, so bucketing by the
@@ -464,10 +491,16 @@ interface Placement {
   /** det(linear part of the COMPOSED pose) < 0 — reflected placements land
    * in the 'B' bucket (see `BucketTag`). */
   reflected: boolean
-  /** The COMPOSED pose's linear part is a similarity (orthogonal columns of
-   * equal norm) — only these poses may render smooth per-vertex normals in
-   * a batch (see `BucketTag`). */
-  similar: boolean
+  /** The COMPOSED pose's linear part has orthogonal columns (a rotation
+   * times a scale along the axes, mirrored or not) — only these poses may
+   * render smooth per-vertex normals in a batch (see `BucketTag`). */
+  orthogonal: boolean
+  /** The definition shows this placement: no member on its path is
+   * user-hidden or on a hidden tag (kernel `instance_expanded_shown`; a
+   * hidden member is hidden in every placement of its definition). A
+   * hidden placement keeps its batch slot, suppressed like a hidden
+   * instance's. Re-read on every `setHidden`. */
+  shown: boolean
 }
 
 /** Renderer-side book-keeping for one placement, batched or materialized. */
@@ -477,7 +510,7 @@ interface InstanceRecord {
   /** Every expanded leaf placement of this instance's definition, in the
    * kernel's `instance_expanded_members`/`instance_expanded_local_poses`
    * order — repeats are real (see `Placement`). Bucket flags
-   * (`reflected`/`similar`) live PER PLACEMENT, not here — a repeated member
+   * (`reflected`/`orthogonal`) live PER PLACEMENT, not here — a repeated member
    * can straddle two different buckets under one instance (module doc). */
   placements: Placement[]
   /** Distinct member object ids across `placements`, for call sites that
@@ -513,6 +546,62 @@ export interface PrintPassOptions {
   /** Replace the hidden sets for the pass (a Scene's resolved leaf sets —
    * authoritative, may unhide what the live view hides). */
   hiddenOverride?: { objects: bigint[]; instances: bigint[] } | null
+}
+
+/** Scratch for `cutTrianglesInto`. */
+const _cutA = new THREE.Vector3()
+const _cutB = new THREE.Vector3()
+const _cutC = new THREE.Vector3()
+
+/**
+ * Append the segments where `plane` crosses the triangles of `geometry`
+ * (placed by `matrix`) to `out`, six numbers per segment. A triangle with
+ * vertices on both sides yields the segment between its two crossing
+ * edges; one touching or lying in the plane yields nothing (its neighbors
+ * across the plane draw that line), so a closed solid's cut is its
+ * boundary loops, each edge once per face that crosses.
+ */
+function cutTrianglesInto(
+  out: number[],
+  geometry: THREE.BufferGeometry,
+  matrix: THREE.Matrix4,
+  plane: THREE.Plane,
+): void {
+  const pos = geometry.getAttribute('position')
+  if (pos === undefined) return
+  const index = geometry.getIndex()
+  const count = index !== null ? index.count : pos.count
+  const corner = (k: number): number => (index !== null ? index.getX(k) : k)
+  const pts = [_cutA, _cutB, _cutC]
+  const d = [0, 0, 0]
+  for (let t = 0; t + 2 < count; t += 3) {
+    for (let k = 0; k < 3; k++) {
+      pts[k].fromBufferAttribute(pos, corner(t + k)).applyMatrix4(matrix)
+      d[k] = plane.distanceToPoint(pts[k])
+    }
+    const neg = (d[0] < 0 ? 1 : 0) + (d[1] < 0 ? 1 : 0) + (d[2] < 0 ? 1 : 0)
+    if (neg === 0 || neg === 3) continue
+    let found = 0
+    const seg = [0, 0, 0, 0, 0, 0]
+    for (let k = 0; k < 3; k++) {
+      const j = (k + 1) % 3
+      if (d[k] < 0 === d[j] < 0) continue
+      const s = d[k] / (d[k] - d[j])
+      const a = pts[k]
+      const b = pts[j]
+      seg[found * 3] = a.x + (b.x - a.x) * s
+      seg[found * 3 + 1] = a.y + (b.y - a.y) * s
+      seg[found * 3 + 2] = a.z + (b.z - a.z) * s
+      found++
+      if (found === 2) break
+    }
+    if (found < 2) continue
+    const dx = seg[3] - seg[0]
+    const dy = seg[4] - seg[1]
+    const dz = seg[5] - seg[2]
+    if (dx * dx + dy * dy + dz * dz < 1e-16) continue
+    out.push(seg[0], seg[1], seg[2], seg[3], seg[4], seg[5])
+  }
 }
 
 export class SceneRenderer {
@@ -575,7 +664,7 @@ export class SceneRenderer {
   private guideLines: THREE.LineSegments | null = null
   /** Per line guide, in `guideLines` segment order: its origin, unit
    *  direction, and the stretch of it currently drawn. */
-  private guideDefs: { o: [number, number, number]; d: [number, number, number]; win: GuideWindow | null }[] = []
+  private guideDefs: { o: [number, number, number]; d: [number, number, number]; lo: number; hi: number; win: GuideWindow | null }[] = []
   /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
@@ -630,6 +719,13 @@ export class SceneRenderer {
    *  endpoints, and their bright overlay. */
   private selectedDraftSegments: Float32Array = new Float32Array(0)
   private imprintHighlight: LineSegments2 | null = null
+  /** Model Health's rim overlay (`setHealthOverlay`): the listed rows' rims
+   *  and the current finding's, as fat lines in `sketchGroup`. */
+  private healthOverlay: HealthOverlay | null = null
+  /** (a) every listed rim — rebuilt only when the listed ids / warn ids / rev change. */
+  private healthRimLines: LineSegments2[] = []
+  /** (b) the current finding + Close preview — rebuilt alone on each step / hover. */
+  private healthFocusLines: LineSegments2[] = []
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
   /** Currently selected object ids (ordered; may include non-object entities,
@@ -654,6 +750,13 @@ export class SceneRenderer {
   private hiddenObjectIds: Set<bigint> = new Set()
   /** Instance ids that are hidden (group.visible = false). Session-only. */
   private hiddenInstanceIds: Set<bigint> = new Set()
+  /** View-only isolation's faded context (`setIsolationFade`): hidden for
+   *  interaction (it is in the hidden sets above) yet drawn at
+   *  `ISOLATION_FADE_OPACITY`. Null when nothing is isolated. */
+  private isolationFade: IsolationFade | null = null
+  /** The user's own hidden sets under isolation — what a print pass shows
+   *  instead of the isolated view. */
+  private isolationBaseHidden: { objects: ReadonlySet<bigint>; instances: ReadonlySet<bigint> } | null = null
   /** In-flight opacity tweens started by `setHiddenFaded` (Shop Mode's
    *  isolate fade, design_handoff_shop_mode/README.md §4), keyed by
    *  `` `${kind}:${id}` ``. Advanced once per rendered frame by `tickFades`
@@ -688,6 +791,19 @@ export class SceneRenderer {
    * move/click without re-walking the scene graph, and is always in sync
    * with whatever the widget last resized to. */
   private sectionWidgetCoverageCache: SectionWidgetCoverage | null = null
+  /** Parent group for the section-cut outlines: an overlay like the
+   * widget, never visited by `_forEachSolidMaterial`, so never clipped. */
+  readonly sectionCutGroup: THREE.Group
+  /** The cut outlines for the current active clip, or null when there is
+   * no active clip or it passes through nothing drawn. */
+  private sectionCutLines: LineSegments2 | null = null
+  /** The outlines need rebuilding before the next frame: the plane, the
+   * geometry or what is hidden changed since they were last built. Many
+   * such changes land per frame (a rebuild path hides, resizes and
+   * reasserts in a row), and each rebuild walks every triangle, so the
+   * work is done once, in `tickFades` — the per-frame hook the render loop
+   * already calls before drawing. */
+  private sectionCutDirty = false
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -708,6 +824,10 @@ export class SceneRenderer {
     this.sectionGroup = new THREE.Group()
     this.sectionGroup.name = 'Section'
     threeScene.add(this.sectionGroup)
+
+    this.sectionCutGroup = new THREE.Group()
+    this.sectionCutGroup.name = 'SectionCut'
+    threeScene.add(this.sectionCutGroup)
 
     this.guidesGroup = new THREE.Group()
     this.guidesGroup.name = 'Guides'
@@ -913,7 +1033,7 @@ export class SceneRenderer {
         continue
       }
       // A pose-only change can still flip an individual PLACEMENT's own
-      // bucket: `reflected`/`similar` are derived from the COMPOSED pose
+      // bucket: `reflected`/`orthogonal` are derived from the COMPOSED pose
       // (outer × local — module doc on `Placement`), so a nested
       // definition's local pose can independently mirror a member even when
       // the outer instance pose only translates. Detect any placement whose
@@ -1053,7 +1173,7 @@ export class SceneRenderer {
     // finding: a rebuilt DefSketch group starts visible regardless of its
     // instance's hidden state, mirroring the instanceGroups reassertion here).
     for (const [id, g] of this.instanceGroups) {
-      g.group.visible = !this.hiddenInstanceIds.has(id)
+      g.group.visible = this._instanceDrawn(id)
     }
     for (const [id, g] of this.defSketchGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
@@ -1079,13 +1199,15 @@ export class SceneRenderer {
   }
 
   /**
-   * Whether the linear part of a row-major 3×4 pose is a similarity
-   * (columns mutually orthogonal with equal norms, i.e. rotation × uniform
-   * scale, possibly mirrored). Only similarity poses keep smooth per-vertex
-   * normals in the instanced-batch path (see `BucketTag`); the tolerance is
-   * relative so large uniform scales don't misclassify.
+   * Whether the linear part of a row-major 3×4 pose has mutually orthogonal
+   * columns (rotation × a scale along the axes, uniform or not, possibly
+   * mirrored) — the poses whose instanced normal transform is exact, so
+   * they keep smooth per-vertex normals in the instanced-batch path (see
+   * `BucketTag`); a sheared pose does not. The tolerance is relative so
+   * large scales don't misclassify, and a column of zero length (a
+   * flattened pose) counts as sheared.
    */
-  private _poseIsSimilarity(pose: Float64Array): boolean {
+  private _poseHasOrthogonalColumns(pose: Float64Array): boolean {
     const col = (j: number) => [pose[j], pose[4 + j], pose[8 + j]]
     const dot = (a: number[], b: number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
     const c = [col(0), col(1), col(2)]
@@ -1094,9 +1216,9 @@ export class SceneRenderer {
     const scale = Math.max(n[0], n[1], n[2])
     if (scale === 0) return false
     for (let i = 0; i < 3; i++) {
-      if (Math.abs(n[i] - scale) > eps * scale) return false
+      if (n[i] <= eps * scale) return false
       for (let j = i + 1; j < 3; j++) {
-        if (Math.abs(dot(c[i], c[j])) > eps * scale * scale) return false
+        if (Math.abs(dot(c[i], c[j])) > eps * n[i] * n[j]) return false
       }
     }
     return true
@@ -1106,10 +1228,10 @@ export class SceneRenderer {
    * Compose two poses (each already a THREE.Matrix4 built from a row-major
    * 3×4) and return the result as a row-major 3×4 Float64Array — the same
    * layout `instance_pose` hands back, so the composed EFFECTIVE pose can
-   * reuse `_poseDet`/`_poseIsSimilarity` verbatim instead of duplicating
+   * reuse `_poseDet`/`_poseHasOrthogonalColumns` verbatim instead of duplicating
    * that math against THREE's column-major `Matrix4.elements` layout. Used
    * by `_pullInstanceRecord` to derive each placement's `reflected`/
-   * `similar` from `outer × local`, not from either factor alone.
+   * `orthogonal` from `outer × local`, not from either factor alone.
    */
   private _composeRowMajorPose(outer: THREE.Matrix4, local: THREE.Matrix4): Float64Array {
     _composeScratch.multiplyMatrices(outer, local)
@@ -1145,6 +1267,7 @@ export class SceneRenderer {
     // (row-major 3×4) per entry.
     const expandedMembers = this.wasmScene.instance_expanded_members(instanceId)
     const expandedLocalPoses = this.wasmScene.instance_expanded_local_poses(instanceId)
+    const shown = this._placementsShown(instanceId, expandedMembers.length)
     const placements: Placement[] = []
     for (let i = 0; i < expandedMembers.length; i++) {
       const base = i * 12
@@ -1165,7 +1288,8 @@ export class SceneRenderer {
         // Reflected pose: flips face winding (watertight members only — an
         // open shell renders double-sided regardless of reflection).
         reflected: this._poseDet(composed) < 0,
-        similar: this._poseIsSimilarity(composed),
+        orthogonal: this._poseHasOrthogonalColumns(composed),
+        shown: shown[i],
       })
     }
     const memberIds = [...new Set(placements.map((p) => p.memberId))]
@@ -1199,6 +1323,7 @@ export class SceneRenderer {
           groupMaterialIds: BigUint64Array.from(mesh.group_material_ids()),
           groupStarts: mesh.group_starts(),
           groupCounts: mesh.group_counts(),
+          groupBacks: mesh.group_backs(),
           edgePositions: mesh.edge_positions(),
           watertight: mesh.watertight(),
         }
@@ -1211,10 +1336,15 @@ export class SceneRenderer {
   }
 
   /** Bucket tag for one (member, placement) pair — see `BucketTag`. */
-  private _bucketTag(watertight: boolean, reflected: boolean, similar: boolean): BucketTag {
-    if (!watertight) return 'D'
+  private _bucketTag(
+    watertight: boolean,
+    reflected: boolean,
+    orthogonal: boolean,
+    backPaint = false,
+  ): BucketTag {
+    if (!watertight) return reflected && backPaint ? 'R' : 'D'
     if (reflected) return 'B'
-    return similar ? 'F' : 'G'
+    return orthogonal ? 'F' : 'G'
   }
 
   /** Batch key for one member as rendered by one specific placement of it, or
@@ -1225,7 +1355,7 @@ export class SceneRenderer {
   private _batchKeyFor(memberId: bigint, placement: Placement): string | undefined {
     const cached = this.memberGeometryCache.get(memberId)
     if (cached === undefined) return undefined
-    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.similar)}`
+    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))}`
   }
 
   /** Dispose and rebuild every batch of one definition member from the current
@@ -1250,7 +1380,7 @@ export class SceneRenderer {
     const byTag = new Map<BucketTag, { rec: InstanceRecord; placementIndex: number }[]>()
     for (const e of entries) {
       const placement = e.rec.placements[e.placementIndex]
-      const tag = this._bucketTag(cached.watertight, placement.reflected, placement.similar)
+      const tag = this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))
       const list = byTag.get(tag)
       if (list === undefined) byTag.set(tag, [e])
       else list.push(e)
@@ -1293,6 +1423,8 @@ export class SceneRenderer {
       faceGeo,
       side,
       flatShading,
+      cached.groupBacks,
+      tag === 'R' ? THREE.BackSide : undefined,
     )
     const mesh = new THREE.InstancedMesh(faceGeo, materials, entries.length)
     mesh.name = `InstanceBatch_${memberId}_${tag}`
@@ -1431,7 +1563,7 @@ export class SceneRenderer {
    */
   private _writeSlot(batch: MemberBatch, slot: number, rec: InstanceRecord, placement: Placement): void {
     const suppressed =
-      this.hiddenInstanceIds.has(rec.instanceId) || this.instanceGroups.has(rec.instanceId)
+      !placement.shown || this.hiddenInstanceIds.has(rec.instanceId) || this.instanceGroups.has(rec.instanceId)
     _slotMatrix.multiplyMatrices(rec.matrix, placement.localMatrix)
     if (suppressed) {
       batch.suppressedSlots.add(slot)
@@ -1471,7 +1603,7 @@ export class SceneRenderer {
    * occurrence of a given batch key maps positionally onto the k-th slot.
    * Grouped by the full batch key (not just member id): a repeated member
    * can straddle two different buckets under one instance (`Placement`'s
-   * `reflected`/`similar` are per placement), so its placements belong to
+   * `reflected`/`orthogonal` are per placement), so its placements belong to
    * INDEPENDENT slot sequences, one per bucket. */
   private _refreshSlots(instanceId: bigint): void {
     const rec = this.instanceRecords.get(instanceId)
@@ -1519,6 +1651,12 @@ export class SceneRenderer {
     for (const id of [...this.previewMaterialized]) {
       if (this.instanceRecords.has(id)) desired.add(id)
       else this.previewMaterialized.delete(id)
+    }
+    // Isolation's faded context needs per-instance opacity too.
+    if (this.isolationFade !== null) {
+      for (const id of this.isolationFade.instances.keys()) {
+        if (this.instanceRecords.has(id)) desired.add(id)
+      }
     }
     for (const id of [...this.instanceGroups.keys()]) {
       if (!desired.has(id)) this._restoreToBatch(id)
@@ -1596,6 +1734,8 @@ export class SceneRenderer {
         cached.groupCounts,
         faceGeo,
         side,
+        false,
+        cached.groupBacks,
       )
       const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
       facesMesh.name = `InstanceFace_${instanceId}_${memberId}_${pi}`
@@ -1616,6 +1756,8 @@ export class SceneRenderer {
       edgesLines.matrixWorldNeedsUpdate = true
       group.add(edgesLines)
       edgesLinesList.push(edgesLines)
+      facesMesh.visible = placement.shown
+      edgesLines.visible = placement.shown
     })
 
     this.instancesGroup.add(group)
@@ -1637,7 +1779,7 @@ export class SceneRenderer {
     if (this.selectedMemberInstance === instanceId) {
       this._applyInstanceMemberColors(instanceId)
     }
-    group.visible = !this.hiddenInstanceIds.has(instanceId)
+    group.visible = this._instanceDrawn(instanceId)
     const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
     const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
     const dimmed = anyContextActive && !isLit
@@ -1771,6 +1913,8 @@ export class SceneRenderer {
     geometry: THREE.BufferGeometry,
     side: THREE.Side = THREE.FrontSide,
     flatShading: boolean = false,
+    groupBacks?: Uint8Array,
+    backSide?: THREE.Side,
   ): THREE.MeshPhongMaterial[] {
     const materials: THREE.MeshPhongMaterial[] = []
     const SENTINEL = BigInt('18446744073709551615') // u64::MAX
@@ -1862,6 +2006,17 @@ export class SceneRenderer {
       }
     }
 
+    // A painted back's group lies on its face, wound the other way: drawn
+    // front-side only (the side a reflected batch flips stays flipped) and
+    // just in front of the face's own back side, which an open shell's
+    // double-sided material also draws.
+    materials.forEach((m, i) => {
+      if (groupBacks?.[i] !== 1) return
+      m.side = backSide ?? (side === THREE.DoubleSide ? THREE.FrontSide : side)
+      m.polygonOffsetFactor = DEPTH_BIAS.BACK_PAINT
+      m.polygonOffsetUnits = DEPTH_BIAS.BACK_PAINT
+    })
+
     // If palette is empty for some reason, fall back to a single default mat.
     if (materials.length === 0) {
       geometry.addGroup(0, Infinity, 0)
@@ -1877,12 +2032,17 @@ export class SceneRenderer {
       )
     }
 
-    // Remember the side this context computed (watertight/bucket/reflection
-    // derived) so `_reassertSectionClip` can restore it when the section
-    // plane deactivates — a section forces every solid to DoubleSide while
-    // active (DESIGN §3) and must not just leave it there afterward.
+    // Remember the side each material was given here (watertight/bucket/
+    // reflection derived, and a painted back's one side) so
+    // `_reassertSectionClip` can restore it when the section plane
+    // deactivates — a section forces every solid to DoubleSide while active
+    // (DESIGN §3) and must not just leave it there afterward. The painted
+    // back's own side matters: `_reassertSectionClip` also runs after every
+    // rebuild, and an open shell's back paint restored to the shell's
+    // double side would cover the face's front from the front (a black
+    // button read white, its back paint drawn over its own front).
     for (const m of materials) {
-      m.userData.naturalSide = side
+      m.userData.naturalSide = m.side
     }
 
     return materials
@@ -1915,6 +2075,7 @@ export class SceneRenderer {
       const groupMaterialIds = BigUint64Array.from(mesh.group_material_ids())
       const groupStarts = mesh.group_starts()
       const groupCounts = mesh.group_counts()
+      const groupBacks = mesh.group_backs()
       const edgePositions = mesh.edge_positions()
 
       // Face mesh — multi-material: one BufferGeometry with addGroup per material.
@@ -1937,6 +2098,8 @@ export class SceneRenderer {
         groupCounts,
         faceGeo,
         side,
+        false,
+        groupBacks,
       )
       const facesMesh = new THREE.Mesh(faceGeo, faceMaterials)
 
@@ -2124,6 +2287,96 @@ export class SceneRenderer {
     this._rebuildImprintHighlight()
   }
 
+  /**
+   * Model Health's rim overlay (docs/design/import-health.md §5.3): every
+   * rim of `overlay.ids` in `--status-leaky`, `overlay.warnIds` (non-manifold)
+   * in `--status-warning`, and the current finding's rim brighter and
+   * thicker. Depth-tested with a small bias so a rim reads on its own faces
+   * without showing through the model. `null` clears it; the rim geometry is
+   * read from the live document, so the caller re-sets on every change.
+   */
+  setHealthOverlay(overlay: HealthOverlay | null): void {
+    const prev = this.healthOverlay
+    this.healthOverlay = overlay
+    const sameIds = (a: readonly bigint[], b: readonly bigint[]): boolean =>
+      a === b || (a.length === b.length && a.every((v, i) => v === b[i]))
+    const sameRims =
+      prev !== null &&
+      overlay !== null &&
+      prev.rev === overlay.rev &&
+      sameIds(prev.ids, overlay.ids) &&
+      sameIds(prev.warnIds, overlay.warnIds)
+    // Listed rims: the expensive read (every listed object's rims), kept while
+    // only the current finding / preview moves.
+    if (!sameRims) this._rebuildHealthRims()
+    this._rebuildHealthFocus()
+  }
+
+  private _addHealthLine(
+    into: LineSegments2[],
+    positions: ArrayLike<number>,
+    color: number,
+    widthPx: number,
+    renderOrder: number,
+  ): void {
+    if (positions.length === 0) return
+    const line = makeFatSegments(positions, {
+      color,
+      widthPx,
+      depthTest: true,
+      depthBias: DEPTH_BIAS.PREVIEW,
+      renderOrder,
+    })
+    this.sketchGroup.add(line)
+    into.push(line)
+  }
+
+  private _clearHealthLines(lines: LineSegments2[]): void {
+    for (const line of lines) {
+      disposeFatSegments(line)
+      this.sketchGroup.remove(line)
+    }
+    lines.length = 0
+  }
+
+  private _rebuildHealthRims(): void {
+    this._clearHealthLines(this.healthRimLines)
+    const overlay = this.healthOverlay
+    if (overlay === null) return
+    const dark = getResolvedTheme() === 'dark'
+    // While isolated, only the isolated objects' rims draw.
+    const keep = (ids: readonly bigint[]): bigint[] =>
+      this.isolationFade === null ? [...ids] : ids.filter((id) => !this.hiddenObjectIds.has(id))
+    const ids = keep(overlay.ids)
+    const warnIds = keep(overlay.warnIds)
+    if (ids.length > 0) {
+      this._addHealthLine(this.healthRimLines, this.wasmScene.health_rim_segments(BigUint64Array.from(ids)), dark ? 0xe0714f : 0xc4543f, 2.5, 990)
+    }
+    if (warnIds.length > 0) {
+      this._addHealthLine(this.healthRimLines, this.wasmScene.health_rim_segments(BigUint64Array.from(warnIds)), dark ? 0xe8c84a : 0xb8860b, 2.5, 990)
+    }
+  }
+
+  private _rebuildHealthFocus(): void {
+    this._clearHealthLines(this.healthFocusLines)
+    const overlay = this.healthOverlay
+    if (overlay === null) return
+    const dark = getResolvedTheme() === 'dark'
+    if (overlay.current !== null) {
+      this._addHealthLine(
+        this.healthFocusLines,
+        this.wasmScene.health_rim_highlight(overlay.current.id, overlay.current.rim),
+        dark ? 0xffb199 : 0xff3b14,
+        5,
+        991,
+      )
+    }
+    // Close-button preview: the rims that will gain a face, in the solid color.
+    for (const { id, rim } of overlay.capPreview ?? []) {
+      this._addHealthLine(this.healthFocusLines, this.wasmScene.health_rim_highlight(id, rim), dark ? 0x5fce80 : 0x2f9e57, 4, 992)
+    }
+  }
+
   private _rebuildImprintHighlight(): void {
     if (this.imprintHighlight !== null) {
       disposeFatSegments(this.imprintHighlight)
@@ -2190,6 +2443,9 @@ export class SceneRenderer {
     // every sketch mutation/undo/redo keeps both in sync.
     this._refreshDefSketches()
 
+    // Fresh drafting materials start unclipped; the active cut applies to
+    // them as to any solid (see the section-plane notes below).
+    this._reassertSectionClip()
     // Rebuilt sketch geometry starts at full strength; re-apply the fade.
     this._applySketchIsolation()
     // Rebuilt def-sketch groups also start VISIBLE regardless of their
@@ -2420,8 +2676,10 @@ export class SceneRenderer {
       if (kind === undefined || geometry === undefined) continue
 
       if (kind === 'line') {
-        // [ox, oy, oz, dx, dy, dz]
+        // [ox, oy, oz, dx, dy, dz, from, to]; the span is absent (infinite)
+        // in the 6-element form.
         const [ox, oy, oz, dx, dy, dz] = geometry
+        const { lo, hi } = guideSpanOf(geometry)
         const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
         if (len < 1e-9) continue
         const ux = dx / len
@@ -2434,13 +2692,17 @@ export class SceneRenderer {
         // out. The segment's endpoints and per-vertex `lineDistance` (the
         // dash phase: the signed distance along the guide from its origin)
         // are written by `_writeGuideWindow`.
+        // The initial stretch stays on the guide's span; a span that misses
+        // it collapses to a point until the first extents update.
         const h = GUIDE_INITIAL_HALF_LENGTH
+        const near = Math.min(Math.max(0, lo), hi)
+        const [s0, s1] = stretchToUse(-h, h, lo, hi) ?? [near, near]
         linePositions.push(
-          ox - ux * h, oy - uy * h, oz - uz * h,
-          ox + ux * h, oy + uy * h, oz + uz * h,
+          ox + ux * s0, oy + uy * s0, oz + uz * s0,
+          ox + ux * s1, oy + uy * s1, oz + uz * s1,
         )
-        lineDistances.push(-h, h)
-        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], win: null })
+        lineDistances.push(s0, s1)
+        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], lo, hi, win: null })
       } else if (kind === 'point') {
         // [x, y, z] — a small 3-axis cross marker.
         const [x, y, z] = geometry
@@ -2525,10 +2787,14 @@ export class SceneRenderer {
       const [ox, oy, oz, dx, dy, dz] = geometry
       const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
       if (len < 1e-9) return
-      const nx = (dx / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
-      const ny = (dy / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
-      const nz = (dz / len) * GUIDE_HIGHLIGHT_HALF_LENGTH
-      pts.push(ox - nx, oy - ny, oz - nz, ox + nx, oy + ny, oz + nz)
+      const ux = dx / len
+      const uy = dy / len
+      const uz = dz / len
+      const { lo, hi } = guideSpanOf(geometry)
+      const span = stretchToUse(-GUIDE_HIGHLIGHT_HALF_LENGTH, GUIDE_HIGHLIGHT_HALF_LENGTH, lo, hi)
+      if (span === null) return
+      const [s0, s1] = span
+      pts.push(ox + ux * s0, oy + uy * s0, oz + uz * s0, ox + ux * s1, oy + uy * s1, oz + uz * s1)
     } else if (kind === 'point') {
       const [x, y, z] = geometry
       const k = GUIDE_POINT_MARKER_HALF_SIZE
@@ -2585,7 +2851,9 @@ export class SceneRenderer {
    * per-vertex world-space nudge, it needs no per-frame camera input.
    */
   refreshAnnotations(): void {
-    const liveIds = new Set(this.wasmScene.annotation_ids())
+    // An annotation on a hidden tag is not drawn (nor picked: picking reads
+    // the same shown set).
+    const liveIds = new Set(shownAnnotationIds(this.wasmScene))
     for (const id of [...this.annotationBillboards.keys()]) {
       if (!liveIds.has(id)) {
         const billboard = this.annotationBillboards.get(id)
@@ -3098,9 +3366,13 @@ export class SceneRenderer {
     const geo = this.guideLines!.geometry
     const pos = geo.getAttribute('position').array as Float32Array
     const dist = geo.getAttribute('lineDistance').array as Float32Array
-    const { o, d } = this.guideDefs[i]
-    const t0 = win.center - win.half
-    const t1 = win.center + win.half
+    const { o, d, lo, hi } = this.guideDefs[i]
+    // Never draw past the guide's own ends. A segment is drawn whole, so a
+    // short one off to one side of the focus still shows; a window that
+    // misses a ray collapses to a point on it so nothing shows.
+    const span = stretchToUse(win.center - win.half, win.center + win.half, lo, hi)
+    const t0 = span !== null ? span[0] : Math.min(Math.max(win.center, lo), hi)
+    const t1 = span !== null ? span[1] : t0
     pos.set([o[0] + d[0] * t0, o[1] + d[1] * t0, o[2] + d[2] * t0, o[0] + d[0] * t1, o[1] + d[1] * t1, o[2] + d[2] * t1], i * 6)
     dist[i * 2] = t0
     dist[i * 2 + 1] = t1
@@ -3276,6 +3548,33 @@ export class SceneRenderer {
     this.hiddenObjectIds = new Set(hiddenObjectIds)
     this.hiddenInstanceIds = new Set(hiddenInstanceIds)
     this._applyHidden()
+    // A tag's visibility may have changed under an annotation.
+    this.refreshAnnotations()
+    if (this.isolationFade !== null && this.healthOverlay !== null) this._rebuildHealthRims()
+    this._resizeSectionWidget()
+  }
+
+  /**
+   * View-only isolation's faded context: the objects and instance members that
+   * stay drawn at `ISOLATION_FADE_OPACITY` although they are in the hidden
+   * sets (so they are neither picked nor snapped to). Call it BEFORE the
+   * matching `setHidden`, or after — either order lands in the same state.
+   * `null` ends isolation's fade. Not a document concept.
+   */
+  setIsolationFade(
+    fade: IsolationFade | null,
+    baseHidden?: { objects: Iterable<bigint>; instances: Iterable<bigint> },
+  ): void {
+    this.isolationFade = fade
+    this.isolationBaseHidden =
+      fade === null || baseHidden === undefined
+        ? null
+        : { objects: new Set(baseHidden.objects), instances: new Set(baseHidden.instances) }
+    this._syncMaterialized()
+    this._applyIsolation()
+    this._applyHidden()
+    // The rim overlay skips what isolation hides.
+    if (this.healthOverlay !== null) this._rebuildHealthRims()
     this._resizeSectionWidget()
   }
 
@@ -3384,6 +3683,8 @@ export class SceneRenderer {
    * doesn't otherwise mark the scene dirty).
    */
   tickFades(now: number): boolean {
+    // The per-frame hook: the section-cut profile catches up here too.
+    this._flushSectionCut()
     if (this.fadeTweens.size === 0) return false
     for (const [key, t] of this.fadeTweens) {
       const opacity = this._fadeOpacityAt(t, now)
@@ -3397,6 +3698,8 @@ export class SceneRenderer {
       if (now - t.startMs >= t.durationMs) {
         this.fadeTweens.delete(key)
         if (t.hideOnComplete) {
+          // The solid is gone now; its profile goes with it next frame.
+          this._markSectionCutDirty()
           if (t.kind === 'object') {
             const g = this.objectGroups.get(t.id)
             if (g !== undefined) {
@@ -3416,6 +3719,24 @@ export class SceneRenderer {
     return this.fadeTweens.size > 0
   }
 
+  /** Whether a world object draws: not hidden, or hidden only as isolation's
+   *  faded context. */
+  private _objectDrawn(id: bigint): boolean {
+    return !this.hiddenObjectIds.has(id) || (this.isolationFade?.objects.has(id) ?? false)
+  }
+
+  /** Whether an instance's group draws (see `_objectDrawn`). */
+  private _instanceDrawn(id: bigint): boolean {
+    return !this.hiddenInstanceIds.has(id) || (this.isolationFade?.instances.has(id) ?? false)
+  }
+
+  /** Opacity factor isolation puts on one placed member of one instance. */
+  private _isolationMemberFactor(instanceId: bigint, memberId: bigint): number {
+    const shown = this.isolationFade?.instances.get(instanceId)
+    if (shown === undefined) return 1
+    return shown.has(memberId) ? 1 : ISOLATION_FADE_OPACITY
+  }
+
   /** Re-apply visibility for all objects, instances, and definition-owned
    * sketch groups. Batched instances hide by degenerating their slot
    * matrices (no materialization needed); materialized ones use
@@ -3425,17 +3746,46 @@ export class SceneRenderer {
    * `defSketchGroups` — the fat-line/region-fill geometry hides with the
    * solids it's drawn on top of). */
   private _applyHidden(): void {
+    this._syncPlacementsShown()
     for (const [id, g] of this.objectGroups) {
-      g.group.visible = !this.hiddenObjectIds.has(id)
+      g.group.visible = this._objectDrawn(id)
     }
     for (const [id, g] of this.instanceGroups) {
-      g.group.visible = !this.hiddenInstanceIds.has(id)
+      g.group.visible = this._instanceDrawn(id)
     }
     for (const [id, g] of this.defSketchGroups) {
       g.group.visible = !this.hiddenInstanceIds.has(id)
     }
     for (const id of this.instanceRecords.keys()) {
       this._refreshSlots(id)
+    }
+  }
+
+  /** Which of an instance's `count` expanded placements its definition
+   * shows (see `Placement.shown`); all of them when the kernel's answer
+   * does not line up with the expansion. */
+  private _placementsShown(instanceId: bigint, count: number): boolean[] {
+    const flags = this.wasmScene.instance_expanded_shown(instanceId)
+    return Array.from({ length: count }, (_, i) => flags.length !== count || flags[i] !== 0)
+  }
+
+  /** Re-read every placement's `shown` flag (a member's hidden flag or its
+   * tag's visibility changed) into the records and the materialized
+   * groups; the caller rewrites the batch slots. */
+  private _syncPlacementsShown(): void {
+    for (const [id, rec] of this.instanceRecords) {
+      const shown = this._placementsShown(id, rec.placements.length)
+      rec.placements.forEach((p, i) => {
+        p.shown = shown[i]
+      })
+      const g = this.instanceGroups.get(id)
+      if (g === undefined) continue
+      g.facesMeshes.forEach((m, i) => {
+        m.visible = shown[i]
+      })
+      g.edgesLines.forEach((l, i) => {
+        l.visible = shown[i]
+      })
     }
   }
 
@@ -3474,6 +3824,29 @@ export class SceneRenderer {
       })
     }
 
+    // Isolation is a view aid, never part of a print: the pass shows the
+    // document as the person hid it (no faded context, nothing isolation hid).
+    if (this.isolationFade !== null) {
+      const savedFade = this.isolationFade
+      const savedBase = this.isolationBaseHidden
+      const savedObjects = this.hiddenObjectIds
+      const savedInstances = this.hiddenInstanceIds
+      this.isolationFade = null
+      this.isolationBaseHidden = null
+      this.hiddenObjectIds = new Set(savedBase?.objects ?? [])
+      this.hiddenInstanceIds = new Set(savedBase?.instances ?? [])
+      this._applyIsolation()
+      this._applyHidden()
+      undo.push(() => {
+        this.isolationFade = savedFade
+        this.isolationBaseHidden = savedBase
+        this.hiddenObjectIds = savedObjects
+        this.hiddenInstanceIds = savedInstances
+        this._applyIsolation()
+        this._applyHidden()
+      })
+    }
+
     // A Scene's hidden sets replace the live ones for the pass; a Selection
     // extent then hides every object/instance outside the set — both through
     // the same hidden-set machinery a real hide uses (batch slots included).
@@ -3508,6 +3881,8 @@ export class SceneRenderer {
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
     hideObj(this.imprintHighlight)
+    for (const line of this.healthRimLines) hideObj(line)
+    for (const line of this.healthFocusLines) hideObj(line)
     if (!opts.includeGuides) hideObj(this.guidesGroup)
 
     if (opts.sketchLineWidthPx !== undefined) {
@@ -3623,7 +3998,10 @@ export class SceneRenderer {
     }
     for (const g of this.instanceGroups.values()) {
       if (!g.group.visible) continue
-      for (const e of g.edgesLines) {
+      for (const [i, e] of g.edgesLines.entries()) {
+        // A member its definition hides (the print pass hides every edge
+        // line, so the face mesh tells).
+        if (g.facesMeshes[i]?.visible === false) continue
         const pos = positionsOf(e)
         if (pos !== null) pushTransformed(pos, e.matrixWorld)
       }
@@ -3699,9 +4077,10 @@ export class SceneRenderer {
     // Lines are rebuilt at a fixed long reach, not copied from the live
     // window: a page is rendered from its own camera and zoom.
     const lines = new Float32Array(this.guideDefs.length * 6)
-    this.guideDefs.forEach(({ o, d }, i) => {
+    this.guideDefs.forEach(({ o, d, lo, hi }, i) => {
       const h = GUIDE_PRINT_HALF_LENGTH
-      lines.set([o[0] - d[0] * h, o[1] - d[1] * h, o[2] - d[2] * h, o[0] + d[0] * h, o[1] + d[1] * h, o[2] + d[2] * h], i * 6)
+      const [s0, s1] = stretchToUse(-h, h, lo, hi) ?? [0, 0]
+      lines.set([o[0] + d[0] * s0, o[1] + d[1] * s0, o[2] + d[2] * s0, o[0] + d[0] * s1, o[1] + d[1] * s1, o[2] + d[2] * s1], i * 6)
     })
     return { lines, markers: grab(this.guideMarkers) }
   }
@@ -3730,6 +4109,7 @@ export class SceneRenderer {
     for (const g of this.instanceGroups.values()) {
       if (!g.group.visible) continue
       for (const m of g.facesMeshes) {
+        if (!m.visible) continue // a member its definition hides
         const bb = localBox(m.geometry)
         if (bb === null || bb.isEmpty()) continue
         cb(box.copy(bb).applyMatrix4(m.matrixWorld))
@@ -3799,7 +4179,7 @@ export class SceneRenderer {
     }
     for (const g of this.instanceGroups.values()) {
       if (!g.group.visible) continue
-      for (const m of g.facesMeshes) emit(m.geometry, m.matrixWorld)
+      for (const m of g.facesMeshes) if (m.visible) emit(m.geometry, m.matrixWorld)
     }
     const slotMatrix = new THREE.Matrix4()
     for (const b of this.batches.values()) {
@@ -4008,10 +4388,12 @@ export class SceneRenderer {
   // ── Section plane (DESIGN §3/§4) ─────────────────────────────────────────
   //
   // A section clip is applied as `material.clippingPlanes` on SOLID face AND
-  // edge materials ONLY — object groups, instanced batches, and materialized
-  // instances (`_forEachSolidMaterial`). Overlays (grid, axes, cues,
-  // selection highlights, gizmos, sketches, guides, and the section widget
-  // itself) live in groups `_forEachSolidMaterial` never visits, so they are
+  // edge materials — object groups, instanced batches, and materialized
+  // instances — and on committed drafting (sketch lines and region fills,
+  // world and definition-held), which SketchUp's section planes cut too
+  // (`_forEachSolidMaterial`). Overlays (grid, axes, cues, selection
+  // highlights, gizmos, guides, annotations and the section widget itself)
+  // live in groups `_forEachSolidMaterial` never visits, so they are
   // excluded from clipping BY CONSTRUCTION rather than by an opt-out flag —
   // there is no global `renderer.clippingPlanes` anywhere in this file.
   // `renderer.localClippingEnabled = true` is the Viewport's one-line
@@ -4020,14 +4402,23 @@ export class SceneRenderer {
 
   /**
    * Every material considered "solid" for section-plane purposes: object,
-   * batch, and materialized-instance FACE and EDGE materials. Edges are
-   * included so a cut edge doesn't visually float past the clipped face it
-   * used to outline; overlay/cue/gizmo/sketch/guide materials are never
+   * batch, and materialized-instance FACE and EDGE materials, plus the
+   * committed drafting lines and region fills (world and per instance).
+   * Edges are included so a cut edge doesn't visually float past the
+   * clipped face it used to outline; drafting so a plan cut through a
+   * building does not show every floor's lines at once (SketchUp cuts
+   * them as well). Overlay/cue/gizmo/guide/annotation materials are never
    * visited here, which is what keeps them un-clippable.
    */
   private _forEachSolidMaterial(fn: (m: THREE.Material) => void): void {
     const touch = (mat: THREE.Material | THREE.Material[]) => {
       for (const m of Array.isArray(mat) ? mat : [mat]) fn(m)
+    }
+    if (this.sketchLines !== null) touch(this.sketchLines.material)
+    for (const mesh of this.sketchRegionMeshes.values()) touch(mesh.material)
+    for (const g of this.defSketchGroups.values()) {
+      if (g.lines !== null) touch(g.lines.material)
+      for (const mesh of g.regionMeshes.values()) touch(mesh.material)
     }
     for (const g of this.objectGroups.values()) {
       touch(g.facesMesh.material)
@@ -4066,6 +4457,95 @@ export class SceneRenderer {
     })
   }
 
+  /** Rebuild the cut outlines before the next frame (see `sectionCutDirty`). */
+  private _markSectionCutDirty(): void {
+    this.sectionCutDirty = true
+  }
+
+  /** Rebuild the cut outlines now if anything marked them dirty. */
+  private _flushSectionCut(): void {
+    if (!this.sectionCutDirty) return
+    this.sectionCutDirty = false
+    this._rebuildSectionCut()
+  }
+
+  /**
+   * Draw where the active clip passes through every drawn solid, as heavy
+   * lines on the plane (SketchUp's section-cut profile). Looking down into
+   * a cut post you otherwise see its inside faces in the same color as the
+   * floor it stands on, and it vanishes; the outline is what reads as the
+   * cut. Marked for rebuild by a plane change (`setSectionPlane`,
+   * `updateSectionPlaneOffset`), a geometry rebuild or hide/reveal (every
+   * such path ends in `_resizeSectionWidget`) and a fade's completion
+   * (`tickFades`), and rebuilt once per frame (`_flushSectionCut`). Walks
+   * the same solids the clip lands on: object groups, materialized
+   * instances and batch slots, each through its world matrix. A hidden
+   * solid has no profile, nor does isolation's faded context (its ghost
+   * should not carry heavy black lines), nor a suppressed batch slot.
+   * Drafting, guides and annotations have no cut profile.
+   */
+  private _rebuildSectionCut(): void {
+    this._clearSectionCut()
+    const plane = this.sectionClipPlane
+    if (plane === null) return
+    const out: number[] = []
+    this.objectsGroup.updateWorldMatrix(true, true)
+    this.instancesGroup.updateWorldMatrix(true, true)
+    for (const [id, g] of this.objectGroups) {
+      if (this.hiddenObjectIds.has(id) || !g.group.visible || !g.facesMesh.visible) continue
+      cutTrianglesInto(out, g.facesMesh.geometry, g.facesMesh.matrixWorld, plane)
+    }
+    for (const [id, g] of this.instanceGroups) {
+      if (this.hiddenInstanceIds.has(id) || !g.group.visible) continue
+      for (const mesh of g.facesMeshes) {
+        if (mesh.visible) cutTrianglesInto(out, mesh.geometry, mesh.matrixWorld, plane)
+      }
+    }
+    const slot = new THREE.Matrix4()
+    const world = new THREE.Matrix4()
+    for (const b of this.batches.values()) {
+      if (!b.mesh.visible) continue
+      for (let i = 0; i < b.mesh.count; i++) {
+        if (b.suppressedSlots.has(i)) continue
+        b.mesh.getMatrixAt(i, slot)
+        world.multiplyMatrices(b.mesh.matrixWorld, slot)
+        cutTrianglesInto(out, b.mesh.geometry, world, plane)
+      }
+    }
+    if (out.length === 0) return
+    this.sectionCutLines = makeFatSegments(new Float32Array(out), {
+      color: SECTION_CUT_COLOR,
+      widthPx: SECTION_CUT_WIDTH_PX,
+      // A face lying in the plane on the kept side is coincident with its
+      // neighbors' cut lines; the bias settles that tie for the line.
+      depthBias: DEPTH_BIAS.SKETCH_LINE,
+    })
+    this.sectionCutGroup.add(this.sectionCutLines)
+  }
+
+  private _clearSectionCut(): void {
+    if (this.sectionCutLines !== null) {
+      disposeFatSegments(this.sectionCutLines)
+      this.sectionCutGroup.remove(this.sectionCutLines)
+      this.sectionCutLines = null
+    }
+  }
+
+  /** The section-cut outline segments, as `[ax, ay, az, bx, by, bz]` rows
+   * in world space (empty with no active clip), rebuilt first if a change
+   * is pending. Test/E2E only. */
+  debugSectionCutSegments(): number[][] {
+    this._flushSectionCut()
+    if (this.sectionCutLines === null) return []
+    const start = this.sectionCutLines.geometry.getAttribute('instanceStart') as THREE.InterleavedBufferAttribute
+    const end = this.sectionCutLines.geometry.getAttribute('instanceEnd') as THREE.InterleavedBufferAttribute
+    const rows: number[][] = []
+    for (let i = 0; i < start.count; i++) {
+      rows.push([start.getX(i), start.getY(i), start.getZ(i), end.getX(i), end.getY(i), end.getZ(i)])
+    }
+    return rows
+  }
+
   /**
    * Set (or clear, with null) the active section. Rebuilds the widget
    * overlay (frame + normal arrow — DESIGN §4) and applies/clears the clip
@@ -4101,6 +4581,7 @@ export class SceneRenderer {
       this.sectionClipPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(clipNormal, origin)
     }
     this._reassertSectionClip()
+    this._markSectionCutDirty()
   }
 
   /**
@@ -4131,6 +4612,8 @@ export class SceneRenderer {
       this.sectionClipPlane.constant = -this.sectionClipPlane.normal.dot(
         new THREE.Vector3(plane.origin[0], plane.origin[1], plane.origin[2]),
       )
+      // The profile moves with the plane (the one thing a sweep rebuilds).
+      this._markSectionCutDirty()
     }
   }
 
@@ -4231,6 +4714,9 @@ export class SceneRenderer {
    * line segments — cheap enough that no dirty-flag/debounce is needed.
    */
   private _resizeSectionWidget(): void {
+    // Every geometry rebuild and hide/reveal lands here; the cut profile
+    // follows the same changes.
+    this._markSectionCutDirty()
     if (this.currentSectionPlane === null) return
     this._rebuildSectionWidget(this.currentSectionPlane)
   }
@@ -4529,13 +5015,16 @@ export class SceneRenderer {
   }
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
-    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
-      m.opacity = eff
-      m.transparent = eff < 1
-      m.depthWrite = eff >= 1
-    }
-    for (const mesh of g.facesMeshes) {
+    g.facesMeshes.forEach((mesh, i) => {
+      // Isolation fades the members that are only context.
+      const factor = this._isolationMemberFactor(g.instanceId, g.memberIds[i])
+      const op = opacity * factor
+      const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
+        const eff = op * ((m.userData.baseOpacity as number | undefined) ?? 1)
+        m.opacity = eff
+        m.transparent = eff < 1
+        m.depthWrite = eff >= 1
+      }
       const mat = mesh.material
       if (Array.isArray(mat)) {
         for (const m of mat) {
@@ -4544,15 +5033,14 @@ export class SceneRenderer {
       } else {
         setFaceMatOpacity(mat as THREE.MeshPhongMaterial)
       }
-    }
-    for (const lines of g.edgesLines) {
-      const mat = lines.material as THREE.LineBasicMaterial
-      mat.opacity = opacity
-      mat.transparent = opacity < 1
-    }
+      const edgeMat = g.edgesLines[i].material as THREE.LineBasicMaterial
+      edgeMat.opacity = op
+      edgeMat.transparent = op < 1
+    })
   }
 
-  private _setObjectOpacity(g: ObjectMeshGroup, opacity: number): void {
+  private _setObjectOpacity(g: ObjectMeshGroup, baseOpacity: number): void {
+    const opacity = baseOpacity * (this.isolationFade?.objects.has(g.objectId) ? ISOLATION_FADE_OPACITY : 1)
     const mat = g.facesMesh.material
     const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
       const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
@@ -4754,6 +5242,7 @@ export class SceneRenderer {
 
   /** Dispose all GPU resources */
   dispose(): void {
+    this._clearSectionCut()
     for (const id of [...this.objectGroups.keys()]) {
       this._removeObjectGroup(id)
     }
@@ -4769,6 +5258,7 @@ export class SceneRenderer {
       tex.dispose()
     }
     this.textureCache.clear()
+    this.setHealthOverlay(null)
     this._clearSketchLines()
     this._clearSketchRegions()
     this._clearDefSketchGroups()

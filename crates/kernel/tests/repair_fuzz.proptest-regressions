@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 541881836ffe9a25d506376ff7b63bd7fcbf2740626cfdb590119cbed913e0d9 # shrinks to ops = [Thicken { obj_sel: 13695226765225836467, start: 0.0, end: 0.25074246080936596 }]

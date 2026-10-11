@@ -3,7 +3,8 @@
 Hew's native format, `.hew`, is a documented, open zip container — see
 `docs/dev/HEW_FILE_FORMAT.md`. Save and load through it with no round-trip
 loss. Everything else — COLLADA, SketchUp, glTF, STL, 3MF — is interop:
-bring outside geometry in, or send Hew models out to other tools.
+bring outside geometry in, or send Hew models out to other tools. SketchUp
+`.skp` is both: it opens and saves as a document format, and exports as a copy.
 
 ## Format matrix
 
@@ -11,7 +12,8 @@ bring outside geometry in, or send Hew models out to other tools.
 |---|---|---|---|
 | `.hew` (native) | save / load | Supported | Zip container, JSON manifest, binary geometry buffers. Lossless round-trip; the only format that preserves components/instances, tags, guides, and document metadata. |
 | COLLADA `.dae` | Import | Supported | SketchUp's own COLLADA export, and any COLLADA 1.4 source. Geometry, materials/textures, node hierarchy, and component instancing all map through. |
-| SketchUp `.skp` | Import | Supported | Direct read via OpenSKP (see below) of the 2026 container every current SketchUp saves, and of the 2017 format. Names, materials, textures, tags (from layers), guides, scenes, and component instancing carry over. |
+| SketchUp `.skp` | Import / open | Supported | Direct read via OpenSKP (see below) of the 2026 container every current SketchUp saves, and of the 2017 format. Names, materials, textures, tags (from layers), guides, scenes, and component instancing carry over. File ▸ Open makes the file the document's own; File ▸ Import… adds it to the current document. |
+| SketchUp `.skp` | Save / Save As / Export | Supported | Written in either container: 2026 (`skp2026`) or 2017 (`skp2017`, opens in SketchUp Make 2017 and later). Save writes back in the container the file was opened in; Save As and Export choose one. What a SketchUp file cannot hold exactly is reported as a short list in the app (a one-time notice per document for Save and Save As, every time for Export). |
 | glTF / GLB | Import | Supported | `.gltf` and `.glb`, including Hew's own export output. Geometry, materials, and embedded textures round-trip; see known gaps below. |
 | glTF / GLB | Export | Supported | Binary `.glb`, written by the shared kernel-side writer in `mesh-export`. Y-up, meters. |
 | STL | Export | Supported | Binary STL, Z-up, millimeters (the slicer convention). Export is gated on the model being watertight — a non-solid Object is flagged before writing. |
@@ -121,7 +123,10 @@ every corpus file's 2026 save to its fully decoded 2017 original, and a
   model's own active plane, becomes Hew's section plane, from either
   format. Hew has one section plane, so a deactivated plane and planes
   inside groups and components are not imported.
-- `.skp` write/export does not exist — OpenSKP is a reader only.
+- A `.skp` cannot hold everything a Hew document can (for example, curved
+  surfaces are written as smooth facets, and an object with several tags
+  keeps only its first). Writing reports what it simplified; the `.hew`
+  format remains the lossless one.
 - As with all imports, a mesh that is still non-manifold after healing
   imports as separate open shells with a warning; geometry the kernel
   rejects outright is skipped and reported, not repaired.

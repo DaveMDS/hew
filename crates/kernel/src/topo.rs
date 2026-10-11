@@ -181,6 +181,8 @@ impl SurfaceRef {
 pub struct FaceAttrs {
     /// The face's material (see [`Face::material`]).
     pub material: FaceMaterial,
+    /// The paint on the face's back (see [`Face::back_material`]).
+    pub back_material: FaceMaterial,
     /// The face's UV frame (see [`Face::uv_frame`]).
     pub uv_frame: Option<UvFrame>,
     /// The face's analytic surface reference (see [`Face::surface`]).
@@ -203,6 +205,13 @@ pub struct Face {
     /// boolean's result faces inherit their source face's; freshly extruded
     /// side walls default to `None`.
     pub material: FaceMaterial,
+    /// The paint on the face's back side, or `None` when the back shows
+    /// what the front shows (every face Hew itself makes). A `.skp` face
+    /// can be painted on each side; its back paint is drawn only where the
+    /// back can be seen (an open shell, a cut). Carried with `material`:
+    /// a split's children and a boolean's result faces take their
+    /// parent's or source face's.
+    pub back_material: FaceMaterial,
     /// Per-face affine UV frame (ARCHITECTURE.md extension). When `Some`, the
     /// tessellator uses `frame.apply(p)` instead of the  `world_size`
     /// planar projection. Propagated alongside `material` in face-creating ops
@@ -220,6 +229,7 @@ impl Face {
     pub fn attrs(&self) -> FaceAttrs {
         FaceAttrs {
             material: self.material,
+            back_material: self.back_material,
             uv_frame: self.uv_frame,
             surface: self.surface,
         }
@@ -229,6 +239,7 @@ impl Face {
     /// path; forward ops derive attributes through their own rules instead).
     pub(crate) fn set_attrs(&mut self, attrs: FaceAttrs) {
         self.material = attrs.material;
+        self.back_material = attrs.back_material;
         self.uv_frame = attrs.uv_frame;
         self.surface = attrs.surface;
     }

@@ -95,3 +95,44 @@ export function guideReach(
   }
   return reach
 }
+
+/**
+ * The span of a line guide, as signed distances `lo < hi` along its unit
+ * direction from its origin, read from `guide_geometry`'s
+ * `[ox, oy, oz, dx, dy, dz, from, to]`. `-Infinity` / `+Infinity` mean the
+ * guide runs on forever that way. A 6-element array (an older build, or a
+ * mock) is an infinite guide. A reversed or empty pair is put in order so a
+ * finite span is never inverted.
+ */
+export function guideSpanOf(geometry: ArrayLike<number>): { lo: number; hi: number } {
+  let lo = geometry.length >= 8 ? geometry[6] : -Infinity
+  let hi = geometry.length >= 8 ? geometry[7] : Infinity
+  if (Number.isNaN(lo)) lo = -Infinity
+  if (Number.isNaN(hi)) hi = Infinity
+  if (lo > hi) [lo, hi] = [hi, lo]
+  if (lo === hi) hi = lo + 1e-9
+  return { lo, hi }
+}
+
+/**
+ * Intersect the stretch `t0 … t1` with the guide's span `lo … hi`. Returns
+ * the clamped pair, or null when nothing of the stretch lies on the guide
+ * (for example a window around the focus that misses a short segment or the
+ * far side of a ray's start).
+ */
+export function clampToSpan(t0: number, t1: number, lo: number, hi: number): [number, number] | null {
+  const a = Math.max(t0, lo)
+  const b = Math.min(t1, hi)
+  return a < b ? [a, b] : null
+}
+
+/**
+ * The stretch of a guide to draw, highlight, pick or print, given the
+ * stretch `t0 … t1` a whole line would use: a guide with both ends finite
+ * (a segment) is used whole, wherever it lies along its line, and any
+ * other is that stretch clamped to its span (null when they miss).
+ */
+export function stretchToUse(t0: number, t1: number, lo: number, hi: number): [number, number] | null {
+  if (Number.isFinite(lo) && Number.isFinite(hi)) return [lo, hi]
+  return clampToSpan(t0, t1, lo, hi)
+}

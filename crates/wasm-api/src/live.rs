@@ -12,8 +12,8 @@
 //! kernel::Document`.
 
 use api::{
-    Host, LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget, Refusal,
-    SnapshotProjection, StandardView, ViewCameraSpec,
+    DocFormat, Host, LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget,
+    Refusal, SaveOutcome, SnapshotProjection, StandardView, ViewCameraSpec,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -91,6 +91,10 @@ pub struct CameraJson {
     pub projection: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fov_deg: Option<f64>,
+    /// The height the view spans at the target, meters, when the camera
+    /// says (what a parallel view frames).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parallel_height: Option<f64>,
 }
 
 fn standard_view_name(view: StandardView) -> String {
@@ -119,6 +123,7 @@ impl From<&ViewCameraSpec> for ViewDirective {
                         SnapshotProjection::Parallel => "parallel".to_string(),
                     }),
                     fov_deg: cam.fov_deg,
+                    parallel_height: cam.parallel_height,
                 }),
                 view: None,
             },
@@ -174,6 +179,10 @@ pub struct LiveHost {
     /// constructs a fresh `LiveHost` per dispatch, so this never leaks a
     /// stale directive from an earlier command into a later one.
     pub directive: Option<ViewDirective>,
+    /// The app's display length format (`app/src/settings/units.ts`'s
+    /// `LengthFormat`), which a SketchUp export opens in unless the caller
+    /// names one; `None` writes SketchUp's own defaults.
+    pub display_units: Option<String>,
 }
 
 /// Builds the `host_capability_missing` refusal every method below
@@ -220,12 +229,18 @@ impl Host for LiveHost {
     /// back; whoever asked (a CLI, an MCP client) writes them on the
     /// side that actually has a disk. A `path` is the one part this host
     /// genuinely cannot honor, and it refuses that specifically rather
-    /// than refusing the whole command.
+    /// than refusing the whole command. A `.skp` format is refused too:
+    /// the live document's file belongs to the app (its own Save keeps
+    /// the SketchUp source and container), so an API save only ever
+    /// produces `.hew` bytes; `hew.doc.export` with `skp` / `skp2017`
+    /// hands back a SketchUp file without touching the document's file.
     fn save_document(
         &mut self,
         doc: &kernel::Document,
         path: Option<&str>,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+        format: Option<DocFormat>,
+        _units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
         if path.is_some() {
             return Err(refuse(
                 "write a file",
@@ -233,7 +248,17 @@ impl Host for LiveHost {
                  bytes and write them yourself, or use the app's File > Save.",
             ));
         }
-        Ok(Some(doc.save_for_persistence()))
+        if format.is_some_and(DocFormat::is_skp) {
+            return Err(refuse(
+                "save a SketchUp file",
+                "The live document's file belongs to the app. Use the app's File > Save, or \
+                 hew.doc.export with format \"skp\" / \"skp2017\" to receive a SketchUp file.",
+            ));
+        }
+        Ok(SaveOutcome {
+            format: Some(DocFormat::Hew),
+            ..SaveOutcome::with_bytes(doc.save_for_persistence())
+        })
     }
 
     /// Mirrors [`save_document`](Self::save_document)'s posture exactly:
@@ -248,6 +273,7 @@ impl Host for LiveHost {
         format: &str,
         path: Option<&str>,
         segments_per_turn: u32,
+        units: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         if path.is_some() {
             return Err(refuse(
@@ -262,8 +288,24 @@ impl Host for LiveHost {
         // (crates/mesh-export's module doc, "Non-solid inclusion"). The
         // desktop app's own interactive File > Export goes through
         // `Scene::export` instead, which passes `false`.
-        let bytes =
-            mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?;
+        let bytes = match format {
+            "skp" | "skp2017" => {
+                let target = if format == "skp" {
+                    skp_export::Target::Skp2026
+                } else {
+                    skp_export::Target::Skp2017
+                };
+                let units = units
+                    .or(self.display_units.as_deref())
+                    .and_then(skp_export::DisplayUnits::from_name);
+                skp_export::export_in(doc, target, crate::write_env(), units)
+                    .map_err(|e| Refusal::api("export_failed", &e.to_string()))?
+                    .bytes
+            }
+            _ => {
+                mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?
+            }
+        };
         Ok(Some(bytes))
     }
 
@@ -407,6 +449,7 @@ impl Host for LiveHost {
             "objects_created": report.objects_created,
             "watertight": report.watertight,
             "leaky": report.leaky,
+            "health": api::health_counts_json(&report.health),
             "skipped": report.skipped.iter().map(|s| serde_json::json!({
                 "name": s.name,
                 "reason": s.reason,
@@ -621,6 +664,7 @@ mod tests {
             face_holes: vec![Vec::new(); face_count],
             base_material: kernel::serialize::NO_MATERIAL,
             tags: Vec::new(),
+            extra: Default::default(),
         };
         let mut doc = kernel::Document::new();
         let scene = kernel::ImportScene {
@@ -632,9 +676,71 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
+    }
+
+    /// A live export of the SketchUp formats hands back real files in the
+    /// requested container.
+    #[test]
+    fn export_document_hands_back_both_skp_containers() {
+        let doc = box_document();
+        let mut host = LiveHost::default();
+        for (format, container) in [
+            ("skp", skp_import::openskp::Container::Zip),
+            ("skp2017", skp_import::openskp::Container::Carchive2017),
+        ] {
+            let bytes = host
+                .export_document(&doc, format, None, 0, None)
+                .expect("a box exports as a .skp live")
+                .expect("bytes come back");
+            assert_eq!(skp_import::openskp::detect_container(&bytes), container);
+        }
+    }
+
+    /// A live SketchUp export opens in the app's display units, as File >
+    /// Export writes it, unless the caller names units of its own.
+    #[test]
+    fn a_live_skp_export_takes_the_apps_units_unless_named() {
+        let doc = box_document();
+        let mut host = LiveHost {
+            display_units: Some("mm".to_string()),
+            ..LiveHost::default()
+        };
+        let unit = |host: &mut LiveHost, units: Option<&str>| {
+            let bytes = host
+                .export_document(&doc, "skp", None, 0, units)
+                .unwrap()
+                .unwrap();
+            skp_import::openskp::Model::parse(&bytes)
+                .unwrap()
+                .units
+                .length_unit
+        };
+        assert_eq!(unit(&mut host, None), 2, "mm");
+        assert_eq!(unit(&mut host, Some("cm")), 3, "cm");
+    }
+
+    /// A live save never produces a SketchUp file (the app owns the live
+    /// document's file); it refuses typed, and a plain `.hew` save still
+    /// hands bytes back.
+    #[test]
+    fn save_document_refuses_a_skp_format_but_serves_hew() {
+        let doc = box_document();
+        let mut host = LiveHost::default();
+        for format in [DocFormat::Skp, DocFormat::Skp2017] {
+            let err = host
+                .save_document(&doc, None, Some(format), None)
+                .unwrap_err();
+            assert_eq!(err.name, "host_capability_missing");
+        }
+        let out = host
+            .save_document(&doc, None, Some(DocFormat::Hew), None)
+            .expect("hew saves");
+        assert!(out.bytes.is_some());
     }
 
     /// A live export needs no filesystem to produce bytes, only the write
@@ -648,7 +754,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let bytes = host
-            .export_document(&doc, "stl", None, 0)
+            .export_document(&doc, "stl", None, 0, None)
             .expect("a solid box exports live")
             .expect("bytes come back since there is no filesystem to write to");
         let direct =
@@ -666,7 +772,7 @@ mod tests {
         let doc = box_document();
         let mut host = LiveHost::default();
         let err = host
-            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0)
+            .export_document(&doc, "stl", Some("/tmp/out.stl"), 0, None)
             .unwrap_err();
         assert_eq!(err.name, "host_capability_missing");
     }
@@ -675,7 +781,9 @@ mod tests {
     fn export_document_refuses_nothing_to_export_on_an_empty_document() {
         let doc = kernel::Document::new();
         let mut host = LiveHost::default();
-        let err = host.export_document(&doc, "stl", None, 0).unwrap_err();
+        let err = host
+            .export_document(&doc, "stl", None, 0, None)
+            .unwrap_err();
         assert_eq!(err.name, "nothing_to_export");
     }
 

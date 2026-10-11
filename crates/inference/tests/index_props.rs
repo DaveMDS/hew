@@ -117,6 +117,7 @@ fn arb_guide() -> impl Strategy<Value = Guide> {
             .prop_map(|(origin, axis)| Guide::Line {
                 origin,
                 direction: axis.unit(),
+                span: kernel::GuideSpan::INFINITE
             }),
         arb_point(30.0).prop_map(|position| Guide::Point { position }),
     ]
@@ -194,7 +195,9 @@ fn build_scene(spec: &SceneSpec) -> InferenceScene {
     for guide in &spec.guides {
         let gid = match guide {
             Guide::Point { position } => id_mint.add_guide_point(*position),
-            Guide::Line { origin, direction } => id_mint.add_guide_line(*origin, *direction),
+            Guide::Line {
+                origin, direction, ..
+            } => id_mint.add_guide_line(*origin, *direction),
         }
         .expect("generated guides are finite");
         scene.add_guide(gid, guide);
@@ -445,7 +448,14 @@ fn intersection_snaps_agree_between_indexed_and_linear_paths() {
         let gid = id_mint
             .add_guide_line(origin, direction)
             .expect("finite guide");
-        scene.add_guide(gid, &Guide::Line { origin, direction });
+        scene.add_guide(
+            gid,
+            &Guide::Line {
+                origin,
+                direction,
+                span: kernel::GuideSpan::INFINITE,
+            },
+        );
     };
     add_line(
         &mut scene,

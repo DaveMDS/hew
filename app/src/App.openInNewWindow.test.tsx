@@ -52,6 +52,10 @@ const mockScene = {
   node_user_hidden: () => false,
   set_node_user_hidden: vi.fn(),
   object_solid: () => true,
+  // Model Health (status badge / Outliner icons): an all-solid, empty summary.
+  // (The full health_report_json is the panel's, read only while it is expanded.)
+  health_summary_json: () =>
+    '{"counts":{"objects":0,"solids":0,"flat_sheets":0,"bent_sheets":0,"cappable":0,"holes":0,"mixed":0,"non_manifold":0},"open":[]}',
   can_scene_undo: () => false,
   can_scene_redo: () => false,
   // Lane C (docs/design/v1.1-cycle.md): this mock is not a real, stateful
@@ -70,6 +74,8 @@ const mockScene = {
   load: vi.fn(),
   camera_state: () => undefined,
   set_camera_state: vi.fn(),
+  view_style_json: () => undefined,
+  set_view_style_axes: vi.fn(),
   node_parent: () => undefined as bigint | undefined,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,

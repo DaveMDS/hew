@@ -108,6 +108,29 @@ fn instance_watertight(ctx: &Ctx, def: Option<kernel::ComponentId>) -> Option<bo
     Some(visible.iter().all(|&m| ctx.doc.object_solid(m)))
 }
 
+/// An object's model-health verdict name (`solid`, `flat_sheet`,
+/// `bent_sheet`, `cappable`, `holes`, `mixed`, `non_manifold` —
+/// `hew.doc.health` has the detail). `watertight` keeps its meaning beside
+/// it: a surface is not watertight, but it is not broken either.
+fn object_health(obj: &kernel::Object) -> &'static str {
+    crate::health::verdict_kind(kernel::health::diagnose(obj).verdict)
+}
+
+/// An instance's health: the most serious verdict among the definition's
+/// visible members (nested ones included), `None` exactly when
+/// [`instance_watertight`] is.
+fn instance_health(ctx: &Ctx, def: Option<kernel::ComponentId>) -> Option<&'static str> {
+    let def = def?;
+    ctx.doc.def_member_nodes(def)?;
+    ctx.doc
+        .expanded_def_placements(def)
+        .into_iter()
+        .filter_map(|(m, _)| ctx.doc.object(m))
+        .map(|o| kernel::health::diagnose(o).verdict)
+        .max_by_key(|&v| crate::health::verdict_rank(v))
+        .map(crate::health::verdict_kind)
+}
+
 /// A tree node as `{id, kind}` — used for shallow member lists (group /
 /// component summaries) that do not need a full recursive `NodeSummary`.
 fn node_ref_json(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
@@ -143,6 +166,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "kind": "object",
                 "name": ctx.doc.object_name(id),
                 "watertight": matches!(obj.watertight(), WatertightState::Watertight),
+                "health": object_health(obj),
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
             }))
@@ -159,6 +183,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "kind": "group",
                 "name": ctx.doc.group_name(id),
                 "watertight": Value::Null,
+                "health": Value::Null,
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
                 "members": kids,
@@ -180,6 +205,7 @@ fn node_summary(ctx: &Ctx, node: NodeId) -> Result<Value, CmdError> {
                 "kind": "instance",
                 "name": name,
                 "watertight": instance_watertight(ctx, def),
+                "health": instance_health(ctx, def),
                 "bbox": locate::entity_bbox(ctx, &entity).map(bbox_json),
                 "tags": ctx.doc.node_tags(node),
                 "def": def_id,
@@ -200,11 +226,14 @@ fn sketch_summary(ctx: &Ctx, sketch_id: kernel::SketchId) -> Result<Value, CmdEr
 
     let regions: Vec<Value> = sk
         .regions()
-        .keys()
-        .map(|rid| {
+        .iter()
+        .map(|(rid, r)| {
             json!({
                 "id": ids::region_id(sketch_sid, rid),
                 "area": sk.region_area(rid).ok(),
+                // A loop of edges with no face (`sketch.rs` rule 6) has
+                // nothing to extrude: `hew.solid.extrude` refuses it.
+                "face": !r.faceless,
             })
         })
         .collect();
@@ -273,14 +302,24 @@ fn guide_summary(ctx: &Ctx, id: kernel::GuideId) -> Result<Value, CmdError> {
         .guide(id)
         .ok_or_else(|| CmdError::Internal("dangling guide in scene walk".into()))?;
     let pub_id = public_of_or_internal(ctx, &EntityRef::Guide(id))?;
+    // Tag paths, the way a node's read back; a guide with a hidden tag is
+    // in the document but not drawn or snapped to.
+    let tags = ctx.doc.guide_tags(id);
     Ok(match g {
-        Guide::Line { origin, direction } => json!({
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => json!({
             "id": pub_id, "kind": "line",
             "origin": point_json(origin), "direction": vec3_json(direction),
+            "from": span.from, "to": span.to,
+            "tags": tags,
         }),
         Guide::Point { position } => json!({
             "id": pub_id, "kind": "point",
             "position": point_json(position),
+            "tags": tags,
         }),
     })
 }
@@ -464,6 +503,7 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "id": p.id,
                 "name": ctx.doc.object_name(oid),
                 "watertight": matches!(obj.watertight(), WatertightState::Watertight),
+                "health": object_health(obj),
                 "bbox": bbox,
                 "face_count": obj.faces().len(),
                 "tags": ctx.doc.node_tags(NodeId::Object(oid)),
@@ -543,14 +583,20 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "pose": pose.to_affine().to_vec(),
                 "name": name,
                 "watertight": instance_watertight(ctx, Some(def)),
+                "health": instance_health(ctx, Some(def)),
             }))
         }
         EntityRef::Guide(gid) => {
             let g = *ctx.doc.guide(gid).ok_or_else(|| unknown_entity(&p.id))?;
             Ok(match g {
-                Guide::Line { origin, direction } => json!({
+                Guide::Line {
+                    origin,
+                    direction,
+                    span,
+                } => json!({
                     "kind": "guide", "id": p.id, "guide_kind": "line",
                     "origin": point_json(origin), "direction": vec3_json(direction),
+                    "from": span.from, "to": span.to,
                 }),
                 Guide::Point { position } => json!({
                     "kind": "guide", "id": p.id, "guide_kind": "point",
@@ -580,6 +626,52 @@ fn entity(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
                 "path": path,
                 "hidden": ctx.doc.tag_hidden(&path),
             }))
+        }
+        EntityRef::Annotation(aid) => {
+            let a = ctx
+                .doc
+                .annotation(aid)
+                .ok_or_else(|| unknown_entity(&p.id))?;
+            let anchor = |x: &kernel::Anchor| point_json(x.point);
+            let mut out = match a {
+                kernel::Annotation::LinearDimension {
+                    a,
+                    b,
+                    offset,
+                    text_override,
+                    ..
+                } => json!({
+                    "annotation_kind": "linear",
+                    "a": anchor(a), "b": anchor(b), "offset": vec3_json(*offset),
+                    "text_override": text_override,
+                }),
+                kernel::Annotation::RadialDimension {
+                    anchor: at,
+                    kind,
+                    curve,
+                    text_override,
+                    ..
+                } => json!({
+                    "annotation_kind": "radial",
+                    "a": anchor(at),
+                    "radial_kind": match kind { kernel::RadialKind::Radius => "radius", kernel::RadialKind::Diameter => "diameter" },
+                    "center": point_json(curve.center), "radius": curve.radius,
+                    "text_override": text_override,
+                }),
+                kernel::Annotation::LeaderText {
+                    anchor: at,
+                    offset,
+                    text,
+                } => json!({
+                    "annotation_kind": "leader",
+                    "a": anchor(at), "offset": vec3_json(*offset), "text": text,
+                }),
+            };
+            out["kind"] = json!("annotation");
+            out["id"] = json!(p.id);
+            out["detached"] = json!(ctx.doc.annotation_detached(aid).unwrap_or(false));
+            out["tags"] = json!(ctx.doc.annotation_tags(aid));
+            Ok(out)
         }
     }
 }

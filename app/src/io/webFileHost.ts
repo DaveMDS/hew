@@ -19,7 +19,8 @@
  * isCoarsePointer().
  */
 
-import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 import { isCoarsePointer } from '../platform'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
@@ -28,6 +29,17 @@ const HEW_FILE_TYPES: FilePickerAcceptType[] = [
     accept: { 'application/octet-stream': ['.hew'] },
   },
 ]
+
+/** Save picker filter for a document format: `.hew`, or the SketchUp
+ * container's `.skp` (both SketchUp formats write the same extension). */
+function fileTypesFor(format: DocFormat): FilePickerAcceptType[] {
+  return [
+    {
+      description: formatDescription(format),
+      accept: { 'application/octet-stream': [extensionFor(format)] },
+    },
+  ]
+}
 
 /** The import formats' own accept map (COLLADA/SketchUp/glTF/STL), reused
  * standalone by `openForImport()` and merged with `.hew` by `openAny()`. */
@@ -99,6 +111,14 @@ export function anchorDownload(bytes: Uint8Array, name: string): void {
   URL.revokeObjectURL(url)
 }
 
+/** Anchor-download of a document's bytes under the name the format implies
+ * (`Model.hew` / `Model.skp`) — the no-FSAA fallback of Save and Save As. */
+function anchorDownloadDocument(bytes: Uint8Array, name: string, format: DocFormat): string {
+  const finalName = nameForFormat(name, format)
+  anchorDownloadAs(bytes, finalName, 'application/octet-stream')
+  return finalName
+}
+
 /** Trigger an anchor-download of bytes with an explicit filename + MIME type. */
 export function anchorDownloadAs(bytes: Uint8Array, name: string, mime: string): void {
   const blob = new Blob([new Uint8Array(bytes)], { type: mime })
@@ -148,7 +168,7 @@ export class WebFileHost implements FileHost {
       const file = await handle.getFile()
       const buf = await file.arrayBuffer()
       return {
-        ref: { name: file.name, handle },
+        ref: { name: file.name, format: 'hew', handle },
         bytes: new Uint8Array(buf),
       }
     }
@@ -168,7 +188,7 @@ export class WebFileHost implements FileHost {
         }
         file.arrayBuffer().then((buf) => {
           resolve({
-            ref: { name: file.name, handle: null },
+            ref: { name: file.name, format: 'hew', handle: null },
             bytes: new Uint8Array(buf),
           })
         }).catch(() => resolve(null))
@@ -183,6 +203,7 @@ export class WebFileHost implements FileHost {
     if (ref === null) {
       return this.saveAs(bytes, 'Untitled.hew')
     }
+    const format = ref.format
 
     // FSAA in-place overwrite: ref.handle is a FileSystemFileHandle
     if (hasFSAA() && ref.handle instanceof Object && 'createWritable' in (ref.handle as object)) {
@@ -191,31 +212,40 @@ export class WebFileHost implements FileHost {
       // Brave keeps the handle at 'prompt' and needs an explicit request.
       // If the user denies, fall through to saveAs so the document isn't lost.
       if (!(await ensureWritePermission(handle))) {
-        return this.saveAs(bytes, ref.name)
+        return this.saveAs(bytes, ref.name, format)
       }
       try {
         const writable = await handle.createWritable()
         await writable.write(new Uint8Array(bytes))
         await writable.close()
-        return { name: handle.name, handle }
+        return { name: handle.name, format, handle }
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return null
         throw err
       }
     }
 
+    // A SketchUp file with no handle (opened from the recents shelf or a
+    // drop without a File System Access handle) has nowhere to write in
+    // place: ask where, rather than silently downloading a copy on every
+    // Save. (A `.hew` ref without a handle keeps the long-standing
+    // anchor-download.)
+    if (hasFSAA() && format !== 'hew') {
+      return this.saveAs(bytes, ref.name, format)
+    }
+
     // Fallback: anchor-download (no in-place overwrite possible)
-    anchorDownload(bytes, ref.name)
+    anchorDownloadDocument(bytes, ref.name, format)
     return ref
   }
 
-  async saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null> {
+  async saveAs(bytes: Uint8Array, suggestedName: string, format: DocFormat = 'hew'): Promise<FileRef | null> {
     if (hasFSAA()) {
       let handle: FileSystemFileHandle
       try {
         handle = await showSaveFilePicker({
-          suggestedName: suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew',
-          types: HEW_FILE_TYPES,
+          suggestedName: nameForFormat(suggestedName, format),
+          types: fileTypesFor(format),
           excludeAcceptAllOption: false,
         })
       } catch (err) {
@@ -225,14 +255,13 @@ export class WebFileHost implements FileHost {
       const writable = await handle.createWritable()
       await writable.write(new Uint8Array(bytes))
       await writable.close()
-      return { name: handle.name, handle }
+      return { name: handle.name, format, handle }
     }
 
     // Fallback: anchor-download
-    anchorDownload(bytes, suggestedName)
     // Return a FileRef with no handle — subsequent "Save" will download again.
-    const name = suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew'
-    return { name, handle: null }
+    const name = anchorDownloadDocument(bytes, suggestedName, format)
+    return { name, format, handle: null }
   }
 
   async exportBinary(
@@ -431,7 +460,11 @@ export class WebFileHost implements FileHost {
     if (/\.hew$/i.test(fileName)) {
       return { kind: 'hew', name: fileName, bytes, handle }
     }
-    return this.resolveImportPick(bytes, fileName)
+    const pick = await this.resolveImportPick(bytes, fileName)
+    // A `.skp` Open makes the file the document's own — keep the handle so
+    // Save writes back in place. (Other import kinds never keep one.)
+    if (pick.kind === 'skp' && handle !== null) return { ...pick, handle }
+    return pick
   }
 }
 

@@ -204,6 +204,8 @@ describe('MenuBar', () => {
       ['Union', 'edit-union'],
       ['Subtract', 'edit-subtract'],
       ['Intersect', 'edit-intersect'],
+      ['Make Solid…', 'make-solid'],
+      ['Model Health…', 'model-health'],
     ]
     for (const [label, action] of commands) {
       // Each dispatch closes the dropdown (withClose), so re-open per item.
@@ -212,6 +214,12 @@ describe('MenuBar', () => {
       expect(onEditAction).toHaveBeenLastCalledWith(action)
     }
     expect(onEditAction).toHaveBeenCalledTimes(commands.length)
+  })
+
+  it('Model Health lives under Object, not View', () => {
+    render(<MenuBar {...defaultProps} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.queryByText(/^Model Health/)).toBeNull()
   })
 
   it('does NOT dispatch a gated-off object command (Group with canGroup=false)', () => {

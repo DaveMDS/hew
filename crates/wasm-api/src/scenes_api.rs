@@ -82,12 +82,72 @@ pub(crate) fn camera_from_json(json: &str) -> Result<CameraState, ApiError> {
     let eye = xyz(&v["eye"], "eye")?;
     let target = xyz(&v["target"], "target")?;
     let up = xyz(&v["up"], "up")?;
+    let (eye, target, up) = (
+        Point3::new(eye[0], eye[1], eye[2]),
+        Point3::new(target[0], target[1], target[2]),
+        Vec3::new(up[0], up[1], up[2]),
+    );
+    // The parallel height: as given, else what the perspective view spans
+    // at the target (a camera recorded before the field existed).
+    let parallel_height = match v.get("parallelHeight") {
+        None | Some(serde_json::Value::Null) => CameraState::height_at_target(eye, target, fov_deg),
+        Some(h) => h
+            .as_f64()
+            .filter(|h| h.is_finite() && *h > 0.0)
+            .ok_or_else(|| {
+                ApiError("BadCamera: parallelHeight must be a finite positive number".to_string())
+            })?,
+    };
     Ok(CameraState {
         projection,
         fov_deg,
-        eye: Point3::new(eye[0], eye[1], eye[2]),
-        target: Point3::new(target[0], target[1], target[2]),
-        up: Vec3::new(up[0], up[1], up[2]),
+        parallel_height,
+        eye,
+        target,
+        up,
+    })
+}
+
+/// `{background, sky, ground, axes}` → [`kernel::ViewStyle`].
+pub(crate) fn view_style_from_json(json: &str) -> Result<kernel::ViewStyle, ApiError> {
+    let v: serde_json::Value = serde_json::from_str(json)
+        .map_err(|e| ApiError(format!("BadViewStyle: malformed view style json: {e}")))?;
+    let rgb = |x: &serde_json::Value, what: &str| -> Result<[u8; 3], ApiError> {
+        let a = x
+            .as_array()
+            .filter(|a| a.len() == 3)
+            .ok_or_else(|| ApiError(format!("BadViewStyle: {what} must be [r, g, b]")))?;
+        let mut out = [0u8; 3];
+        for (o, c) in out.iter_mut().zip(a) {
+            *o = c
+                .as_u64()
+                .and_then(|c| u8::try_from(c).ok())
+                .ok_or_else(|| ApiError(format!("BadViewStyle: {what} must be 0..=255 each")))?;
+        }
+        Ok(out)
+    };
+    let opt = |x: &serde_json::Value, what: &str| -> Result<Option<[u8; 3]>, ApiError> {
+        match x {
+            serde_json::Value::Null => Ok(None),
+            x => rgb(x, what).map(Some),
+        }
+    };
+    Ok(kernel::ViewStyle {
+        background: rgb(&v["background"], "background")?,
+        sky: opt(&v["sky"], "sky")?,
+        ground: opt(&v["ground"], "ground")?,
+        axes: v["axes"]
+            .as_bool()
+            .ok_or_else(|| ApiError("BadViewStyle: axes must be a boolean".to_string()))?,
+    })
+}
+
+pub(crate) fn view_style_to_json(v: &kernel::ViewStyle) -> serde_json::Value {
+    serde_json::json!({
+        "background": v.background,
+        "sky": v.sky,
+        "ground": v.ground,
+        "axes": v.axes,
     })
 }
 
@@ -98,6 +158,7 @@ pub(crate) fn camera_to_json(c: &CameraState) -> serde_json::Value {
             CameraProjection::Parallel => "parallel",
         },
         "fovDeg": c.fov_deg,
+        "parallelHeight": c.parallel_height,
         "eye": [c.eye.x, c.eye.y, c.eye.z],
         "target": [c.target.x, c.target.y, c.target.z],
         "up": [c.up.x, c.up.y, c.up.z],
@@ -144,6 +205,9 @@ fn scene_to_json(s: &kernel::Scene) -> serde_json::Value {
     if let Some(d) = &s.display {
         v["display"] = display_to_json(d);
     }
+    if let Some(style) = &s.view_style {
+        v["viewStyle"] = view_style_to_json(style);
+    }
     if let Some(section) = &s.section {
         v["section"] = match section {
             None => serde_json::Value::Null,
@@ -186,6 +250,16 @@ impl ResolvedSceneJs {
             .display
             .as_ref()
             .map(|d| display_to_json(d).to_string())
+    }
+
+    /// The view style to show (`Scene::view_style_json`'s shape), or
+    /// `undefined` when the Scene captures none; the document's own is
+    /// already set to it.
+    pub fn view_style_json(&self) -> Option<String> {
+        self.inner
+            .view_style
+            .as_ref()
+            .map(|v| view_style_to_json(v).to_string())
     }
 
     /// True when the Scene captures either hidden property — the leaf-id
@@ -331,6 +405,45 @@ impl Scene {
         recording::record(recording::RecordedCall::ClearSectionPlane);
     }
 
+    // ----------------------------------------------------------- view style
+
+    /// How the document asks to be shown (`kernel::ViewStyle`, manifest
+    /// v19): `{background: [r, g, b], sky: [r, g, b] | null, ground:
+    /// [r, g, b] | null, axes: bool}` as JSON, or `undefined` for Hew's own
+    /// look. A `.skp` opened from SketchUp carries its style's backdrop
+    /// and axes here; the app applies it on load.
+    pub fn view_style_json(&self) -> Option<String> {
+        self.doc
+            .view_style()
+            .map(|v| view_style_to_json(&v).to_string())
+    }
+
+    /// Sets the document's view style from the JSON `view_style_json`
+    /// returns, or clears it (`undefined`/`null`) for Hew's own look. View
+    /// state, not undoable, like `set_camera_state`.
+    pub fn set_view_style_json(&mut self, json: Option<String>) -> Result<(), ApiError> {
+        let style = json.as_deref().map(view_style_from_json).transpose()?;
+        self.doc.set_view_style(style);
+        recording::record(recording::RecordedCall::SetViewStyle { json });
+        Ok(())
+    }
+
+    /// Records whether the model axes are shown in the document's view
+    /// style, when it has one (View ▸ Axes on a document opened from a
+    /// `.skp`, so a save back writes the choice); a document shown Hew's
+    /// own way keeps none. Not undoable.
+    pub fn set_view_style_axes(&mut self, axes: bool) {
+        if let Some(mut v) = self.doc.view_style()
+            && v.axes != axes
+        {
+            v.axes = axes;
+            self.doc.set_view_style(Some(v));
+            recording::record(recording::RecordedCall::SetViewStyle {
+                json: Some(view_style_to_json(&v).to_string()),
+            });
+        }
+    }
+
     // --------------------------------------------------------------- scenes
 
     /// Every Scene in tab order as a JSON array of
@@ -470,6 +583,9 @@ impl Scene {
     /// [`Scene::set_hidden`] itself, exactly as its hide toggles do.
     pub fn apply_scene(&mut self, sid: u64) -> Result<ResolvedSceneJs, ApiError> {
         let inner = self.doc.apply_scene(sid).map_err(doc_err)?;
+        // A Scene sets tag visibility: a guide hidden or shown by its
+        // tags snaps accordingly at once.
+        self.reregister_guides();
         recording::record(recording::RecordedCall::ApplyScene { sid });
         Ok(ResolvedSceneJs { inner })
     }

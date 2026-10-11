@@ -39,8 +39,7 @@ import {
   parseDriftJson,
   parseScenesJson,
   parseSectionJson,
-  sceneIndex,
-} from './scenesModel'
+  sceneIndex, parseViewStyleJson, type ViewStyleJson, } from './scenesModel'
 import type { CameraStateJson, DisplayStateJson, SceneDrift, SceneEntry } from './scenesModel'
 
 /** Thumbnail pixel box: 4× the row's 24×17 CSS box (SPEC.md §1) for crisp 2×. */
@@ -58,6 +57,8 @@ export interface ScenesControllerDeps {
   display: DisplayStateJson
   /** Apply a Scene's display toggles (App pushes them into the viewport). */
   setDisplay: (d: DisplayStateJson) => void
+  /** Apply a Scene's view style (backdrop and axes; the kernel already holds it as the document's). */
+  setViewStyle: (style: ViewStyleJson) => void
   /** Replace App's hidden-state React sets after an activation (panel eyes). */
   setHiddenState: (next: { hiddenKeys?: Set<string>; hiddenTagPaths?: Set<string> }) => void
   /** Exit every open group/component edit context (root "Model" crumb). */
@@ -127,8 +128,18 @@ function renameErrorText(err: unknown, name: string): string {
 }
 
 export function useScenesController(deps: ScenesControllerDeps): ScenesController {
-  const { scene, viewportApi, docRev, display, setDisplay, setHiddenState, exitAllContexts, markDirty, onToast } =
-    deps
+  const {
+    scene,
+    viewportApi,
+    docRev,
+    display,
+    setDisplay,
+    setViewStyle,
+    setHiddenState,
+    exitAllContexts,
+    markDirty,
+    onToast,
+  } = deps
   const [rev, setRev] = useState(0)
   const [activeSid, setActiveSid] = useState<number | null>(null)
   const [drift, setDrift] = useState<SceneDrift | null>(null)
@@ -143,6 +154,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
   displayRef.current = display
   const setDisplayRef = useRef(setDisplay)
   setDisplayRef.current = setDisplay
+  const setViewStyleRef = useRef(setViewStyle)
+  setViewStyleRef.current = setViewStyle
   const setHiddenStateRef = useRef(setHiddenState)
   setHiddenStateRef.current = setHiddenState
   const exitAllContextsRef = useRef(exitAllContexts)
@@ -231,6 +244,7 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     (sid: number, instant: boolean, resolved: {
       camera_json(): string | undefined
       display_json(): string | undefined
+      view_style_json(): string | undefined
       has_hidden(): boolean
       hidden_object_ids(): BigUint64Array
       hidden_instance_ids(): BigUint64Array
@@ -246,6 +260,10 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       const s = sceneRef.current
       const api = viewportApi.current
       try {
+        // A Scene is a new view: isolation ends first (the viewport tells the
+        // app, which re-pushes the base hidden set to the kernel), then the
+        // Scene applies as usual.
+        api?.clearIsolation?.()
         // Panel state first (cheap), then the renderer/kernel leaf sets.
         const hiddenState: { hiddenKeys?: Set<string>; hiddenTagPaths?: Set<string> } = {}
         if (resolved.has_hidden_tags()) {
@@ -272,12 +290,25 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
           const objectIds = Array.from(resolved.hidden_object_ids())
           const instanceIds = Array.from(resolved.hidden_instance_ids())
           api?.setHidden(objectIds, instanceIds)
-          if (s !== undefined && s !== null) setKernelHidden(s, objectIds, instanceIds)
+          // The kernel gets the effective set (equal to the base now that
+          // isolation has ended).
+          const eff = api?.getEffectiveHiddenIds?.() ?? { objects: objectIds, instances: instanceIds }
+          if (s !== undefined && s !== null) setKernelHidden(s, eff.objects, eff.instances)
         }
+        // Drafting hides with its tags and its group's, which the kernel
+        // just re-decided for this Scene (`apply_scene` sets the tag and
+        // node hidden flags itself); the lines on screen are rebuilt from
+        // that state, or the previous Scene's drafting would stay drawn.
+        api?.refreshSketches()
         const dj = resolved.display_json()
         if (dj !== undefined) {
           const d = parseDisplayJson(JSON.parse(dj))
           if (d !== undefined) setDisplayRef.current(d)
+        }
+        const vj = resolved.view_style_json()
+        if (vj !== undefined) {
+          const style = parseViewStyleJson(JSON.parse(vj))
+          if (style !== null) setViewStyleRef.current(style)
         }
         if (resolved.has_section()) {
           const sj = resolved.section_json()

@@ -57,6 +57,7 @@ function makeFakeCameraState() {
   return {
     projection: () => 'perspective' as const,
     fov_deg: () => 35,
+    parallel_height: () => 4,
     eye_x: () => 1, eye_y: () => 2, eye_z: () => 3,
     target_x: () => 0, target_y: () => 0, target_z: () => 0,
     up_x: () => 0, up_y: () => 0, up_z: () => 1,
@@ -119,6 +120,7 @@ const mockScene = {
   instance_pose: () => undefined as Float64Array | undefined,
   instance_expanded_members: () => new BigUint64Array(),
   instance_expanded_local_poses: () => new Float64Array(),
+  instance_expanded_shown: () => new Uint8Array(),
   load: vi.fn(),
   // vi.fn() (not a plain closure) — task 4b's own saved-camera recents-
   // thumbnail test overrides this via `mockReturnValueOnce`; every other
@@ -354,13 +356,29 @@ describe('ShopApp — open document', () => {
     expect(mockScene.set_axes_snappable).toHaveBeenCalledWith(false)
   })
 
+  it('opens a .skp pick read-only through open_skp, handing the document\'s own .hew bytes to the page', async () => {
+    const skp = new Uint8Array([9, 9, 9])
+    const host = { openAny: vi.fn(async () => ({ kind: 'skp' as const, name: 'Bench.skp', bytes: skp })) }
+    vi.mocked(makeFileHost).mockReturnValue(host as never)
+    const m = mockScene as unknown as Record<string, unknown>
+    m.open_skp = vi.fn(() => ({}))
+    m.save = vi.fn(() => new Uint8Array([7]))
+    m.free = vi.fn()
+
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^open a model…$/i }))
+    await waitFor(() => expect(screen.getByText('Bench.skp')).toBeInTheDocument())
+    expect(m.open_skp).toHaveBeenCalledWith(skp)
+    expect(mockScene.load).toHaveBeenCalled() // the blank document it imports into
+  })
+
   it('refuses a non-.hew pick with a toast instead of importing', async () => {
     const host = { openAny: vi.fn(async () => ({ kind: 'stl' as const, name: 'part.stl', bytes: new Uint8Array([1]) })) }
     vi.mocked(makeFileHost).mockReturnValue(host as never)
 
     await renderAndLoad()
     fireEvent.click(screen.getByRole('button', { name: /^open a model…$/i }))
-    await waitFor(() => expect(screen.getByText(/only open \.hew files/i)).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText(/only open \.hew and \.skp files/i)).toBeInTheDocument())
     // Still no document open — the empty state stays.
     expect(screen.getByRole('button', { name: /^open a model…$/i })).toBeInTheDocument()
   })

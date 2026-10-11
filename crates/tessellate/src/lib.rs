@@ -69,6 +69,12 @@ impl std::error::Error for TessellateError {}
 pub struct MaterialGroup {
     /// The material covering this index range, or `None` = default material.
     pub material: Option<MaterialId>,
+    /// The range draws faces' painted backs ([`kernel::Face::back_material`]):
+    /// a copy of each such face wound the other way, lying on the face. A
+    /// renderer draws it front-side only and in front of the face's own
+    /// back side (which an open shell otherwise shows); exporters of the
+    /// solid's surface skip it.
+    pub back: bool,
     /// First index (into `RenderMesh::indices`) in this run.
     pub start: u32,
     /// Number of indices (always a multiple of 3) in this run.
@@ -115,6 +121,16 @@ pub struct RenderMesh {
     pub face_ranges: Vec<(FaceId, u32, u32)>,
 }
 
+impl RenderMesh {
+    /// The faces' own triangles, three indices each: every group but the
+    /// painted backs ([`MaterialGroup::back`]), which lie on them.
+    pub fn front_triangles(&self) -> impl Iterator<Item = &[u32]> + '_ {
+        self.groups.iter().filter(|g| !g.back).flat_map(|g| {
+            self.indices[g.start as usize..(g.start + g.count) as usize].chunks_exact(3)
+        })
+    }
+}
+
 /// Tessellates an Object into flat-shaded triangle and edge-line buffers.
 ///
 /// `palette` is the document's material palette; it is used to resolve each
@@ -135,6 +151,7 @@ pub fn tessellate(
     // Each entry: (material_id, base_vertex, triangles, vertex_data).
     struct FaceData {
         material: Option<MaterialId>,
+        back: bool,
         base: u32,
         triangles: Vec<[usize; 3]>,
     }
@@ -309,8 +326,49 @@ pub fn tessellate(
         // Run ear clipping (local indices into poly).
         let triangles = ear_clip(&poly);
 
+        // A painted back: the same polygon again, facing the other way,
+        // in the back's color and with its texture's scale.
+        if let Some(back) = face.back_material.filter(|&b| Some(b) != material_id) {
+            let back_base = (mesh.positions.len() / 3) as u32;
+            let (bcolor, bws) = match palette.get(back) {
+                Some(mat) => (
+                    mat.color,
+                    mat.texture
+                        .as_ref()
+                        .map(|t| t.world_size)
+                        .unwrap_or([1.0, 1.0]),
+                ),
+                None => (DEFAULT_MATERIAL_RGBA, [1.0, 1.0]),
+            };
+            let front_normals = mesh.normals[base as usize * 3..].to_vec();
+            for (k, &[x, y, z, u2d, v2d]) in poly.iter().enumerate() {
+                mesh.positions.extend([x as f32, y as f32, z as f32]);
+                mesh.normals
+                    .extend(front_normals[k * 3..k * 3 + 3].iter().map(|c| -c));
+                mesh.colors.extend([
+                    bcolor.r as f32 / 255.0,
+                    bcolor.g as f32 / 255.0,
+                    bcolor.b as f32 / 255.0,
+                ]);
+                let (fu, fv) = if let Some(frame) = face.uv_frame {
+                    let uv = frame.apply(kernel::Point3::new(x, y, z));
+                    (uv[0] as f32, uv[1] as f32)
+                } else {
+                    ((u2d / bws[0]) as f32, (v2d / bws[1]) as f32)
+                };
+                mesh.uvs.extend([fu, fv]);
+            }
+            face_data.push(FaceData {
+                material: Some(back),
+                back: true,
+                base: back_base,
+                triangles: triangles.iter().map(|&[i, j, k]| [i, k, j]).collect(),
+            });
+        }
+
         face_data.push(FaceData {
             material: material_id,
+            back: false,
             base,
             triangles,
         });
@@ -320,16 +378,24 @@ pub fn tessellate(
     // indices are contiguous, then emit one group per bucket. Buckets are kept
     // in first-seen order — distinct materials per object are few, so a
     // linear-scan bucket list is ample and needs no ordering on `MaterialId`.
-    let mut buckets: Vec<(Option<MaterialId>, Vec<u32>)> = Vec::new();
-    for fd in &face_data {
-        let bi = match buckets.iter().position(|(m, _)| *m == fd.material) {
+    // Painted backs bucket apart from fronts, after them.
+    let mut buckets: Vec<(Option<MaterialId>, bool, Vec<u32>)> = Vec::new();
+    for fd in face_data
+        .iter()
+        .filter(|fd| !fd.back)
+        .chain(face_data.iter().filter(|fd| fd.back))
+    {
+        let bi = match buckets
+            .iter()
+            .position(|(m, back, _)| *m == fd.material && *back == fd.back)
+        {
             Some(i) => i,
             None => {
-                buckets.push((fd.material, Vec::new()));
+                buckets.push((fd.material, fd.back, Vec::new()));
                 buckets.len() - 1
             }
         };
-        let run = &mut buckets[bi].1;
+        let run = &mut buckets[bi].2;
         for [i, j, k] in &fd.triangles {
             run.extend([
                 fd.base + *i as u32,
@@ -338,12 +404,13 @@ pub fn tessellate(
             ]);
         }
     }
-    for (material, run) in buckets {
+    for (material, back, run) in buckets {
         let start = mesh.indices.len() as u32;
         let count = run.len() as u32;
         mesh.indices.extend(run);
         mesh.groups.push(MaterialGroup {
             material,
+            back,
             start,
             count,
         });

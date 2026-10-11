@@ -193,6 +193,7 @@ const opsRs = readRust('crates/kernel/src/ops.rs')
 const transformRs = readRust('crates/kernel/src/transform.rs')
 const mathRs = readRust('crates/kernel/src/math.rs')
 const serializeRs = readRust('crates/kernel/src/serialize.rs')
+const repairRs = readRust('crates/kernel/src/repair.rs')
 const wasmApiRs = readRust('crates/wasm-api/src/lib.rs')
 // The Scenes boundary lives in its own module (docs/design/scenes.md §3.3)
 // and mints its own literal codes.
@@ -239,6 +240,7 @@ const LEAF_ENUMS: ReadonlyArray<readonly [string, string]> = [
   ['TransformError', transformRs],
   ['MathError', mathRs],
   ['LoadError', serializeRs],
+  ['RepairError', repairRs],
 ]
 const leafErrorCodes = LEAF_ENUMS.flatMap(([name, source]) => extractEnumVariants(source, name))
 
@@ -334,7 +336,7 @@ describe('kernelErrorMessage — coverage', () => {
   it('every description is plain language: complete sentences, no raw code, no jargon', () => {
     for (const code of describedErrorCodes()) {
       const msg = kernelErrorMessage(code, 'raw detail')
-      expect(msg, code).toMatch(/\.$/)
+      expect(msg, code).toMatch(/[.…]$/)
       expect(msg, code).not.toContain(code)
       expect(msg.toLowerCase(), code).not.toMatch(/\bmanifold\b/)
       expect(msg.toLowerCase(), code).not.toMatch(/\bcoplanar\b/)

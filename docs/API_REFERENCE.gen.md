@@ -651,7 +651,7 @@ Close an open document window (the attached one, or the named `document`). Refus
 - **Class:** solitary
 - **Served:** host
 
-Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.
+Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
 
 **Params schema:**
 
@@ -660,13 +660,15 @@ Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, by
   "additionalProperties": false,
   "properties": {
     "format": {
-      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both",
+      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file",
       "enum": [
         "stl",
         "3mf",
         "glb",
         "gltf",
-        "usdz"
+        "usdz",
+        "skp",
+        "skp2017"
       ],
       "type": "string"
     },
@@ -677,6 +679,18 @@ Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, by
       "maximum": 512,
       "minimum": 8,
       "type": "integer"
+    },
+    "units": {
+      "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless).",
+      "enum": [
+        "m",
+        "cm",
+        "mm",
+        "arch",
+        "frac_in",
+        "dec_in"
+      ],
+      "type": "string"
     }
   },
   "required": [
@@ -790,6 +804,217 @@ Raise a document's window to the front. Every other command leaves the user's fo
 - `host_capability_missing`
 - `unknown_document`
 - `ambiguous_document`
+
+### `hew.doc.health`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+
+Model health: every open object (world or component member) with its verdict, open rims and seam family, and counts by kind.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "objects": {
+      "description": "obj_ ids to diagnose; omitted = every live object, component members included",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "counts": {
+      "description": "objects, solids, flat_sheets, bent_sheets, cappable, holes, mixed, non_manifold, seam_families",
+      "type": "object"
+    },
+    "families": {
+      "description": "objects an importer split from one shape, joined by shared rims",
+      "items": {
+        "properties": {
+          "members": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "shared_rims": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "rows": {
+      "description": "one per open (non-solid) object; a component member is one row however often it is placed",
+      "items": {
+        "properties": {
+          "accepted": {
+            "description": "marked as a surface with hew.solid.mark_surface",
+            "type": "boolean"
+          },
+          "branching_vertices": {
+            "type": "integer"
+          },
+          "definition": {
+            "description": "cmp_ id when the object is a component member",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "definition_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "faces": {
+            "description": "how many faces the object has",
+            "type": "integer"
+          },
+          "family": {
+            "description": "index into families",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "instances": {
+            "description": "outermost ins_ ids that place the member",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "islands": {
+            "type": "integer"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "object": {
+            "type": "string"
+          },
+          "placements": {
+            "type": "integer"
+          },
+          "rims": {
+            "description": "open rims; their order is what hew.solid.cap's rims index",
+            "items": {
+              "properties": {
+                "cappable": {
+                  "description": "a face can close it: closed, planar, not the edge of a flat part of the surface, no branching vertex",
+                  "type": "boolean"
+                },
+                "closed": {
+                  "type": "boolean"
+                },
+                "edges": {
+                  "type": "integer"
+                },
+                "extent": {
+                  "type": "number"
+                },
+                "perimeter": {
+                  "type": "number"
+                },
+                "planar": {
+                  "type": "boolean"
+                },
+                "role": {
+                  "enum": [
+                    "outer",
+                    "hole"
+                  ],
+                  "type": "string"
+                },
+                "shared": {
+                  "description": "another row's rim coincides with it: a seam between pieces of one shape the importer split (see family)",
+                  "type": "boolean"
+                },
+                "sheet_edge": {
+                  "description": "planar, but runs along the edge of a flat part of the surface on its plane (a basin's lip), so a face there would lie on that part's back",
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "verdict": {
+            "properties": {
+              "holes": {
+                "description": "flat_sheet: holes in the sheet",
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "flat_sheet",
+                  "bent_sheet",
+                  "cappable",
+                  "holes",
+                  "mixed",
+                  "non_manifold"
+                ],
+                "type": "string"
+              },
+              "planar": {
+                "description": "holes: how many are flat (a face can close each)",
+                "type": "integer"
+              },
+              "warped": {
+                "description": "holes: how many are not flat",
+                "type": "integer"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "object",
+          "verdict",
+          "rims",
+          "accepted",
+          "placements"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "rows",
+    "families",
+    "counts"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
 
 ### `hew.doc.import`
 
@@ -954,7 +1179,7 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 - **Class:** solitary
 - **Served:** host
 
-Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
+Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
 
 **Params schema:**
 
@@ -975,6 +1200,7 @@ Open a .hew document. The desktop app opens it in a new window (or attaches to t
       "type": "string"
     },
     "path": {
+      "description": "a .hew file, or a SketchUp .skp file (either container) when the extension is .skp; a later hew.doc.save with no format writes the same container back",
       "type": "string"
     }
   },
@@ -1094,7 +1320,7 @@ Delete every unused material and component definition, as one undo entry.
 - **Class:** solitary
 - **Served:** host
 
-Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
+Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
 
 **Params schema:**
 
@@ -1106,12 +1332,33 @@ Save the attached document (Save / Save As): the file is written, the unsaved ma
       "description": "write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path`",
       "type": "boolean"
     },
+    "format": {
+      "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch).",
+      "enum": [
+        "hew",
+        "skp",
+        "skp2017"
+      ],
+      "type": "string"
+    },
     "path": {
       "type": "string"
     },
     "return_bytes": {
       "description": "hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path`",
       "type": "boolean"
+    },
+    "units": {
+      "description": "The display units a SketchUp file opens in (hew.view.units's formats), a save back over a .skp included. Absent: a save back keeps the file's own units and a new file takes the host's display units (the app's preference live; meters headless). A .hew ignores it.",
+      "enum": [
+        "m",
+        "cm",
+        "mm",
+        "arch",
+        "frac_in",
+        "dec_in"
+      ],
+      "type": "string"
     }
   },
   "type": "object"
@@ -1126,6 +1373,29 @@ Save the attached document (Save / Save As): the file is written, the unsaved ma
   "properties": {
     "bytes_base64": {
       "type": "string"
+    },
+    "format": {
+      "description": "the format the document was saved in",
+      "enum": [
+        "hew",
+        "skp",
+        "skp2017"
+      ],
+      "type": "string"
+    },
+    "simplified": {
+      "description": "present for a .skp: what the file could not hold exactly",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "writer_notes": {
+      "description": "present for a .skp: what the 2017 writer dropped",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "type": "object"
@@ -1134,10 +1404,11 @@ Save the attached document (Save / Save As): the file is written, the unsaved ma
 
 **Refusals:**
 
+- `file_open_elsewhere`
+- `format_mismatch`
 - `host_capability_missing`
 - `path_required`
 - `save_failed`
-- `file_open_elsewhere`
 
 ### `hew.doc.transact`
 
@@ -3907,6 +4178,10 @@ Add a Scene capturing the document's current view state. Records no undo entry (
           "description": "perspective only; defaults to 35",
           "type": "number"
         },
+        "parallel_height": {
+          "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there",
+          "type": "number"
+        },
         "projection": {
           "enum": [
             "perspective",
@@ -4067,6 +4342,10 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
         "fov_deg": {
           "type": "number"
         },
+        "parallel_height": {
+          "description": "the height the view spans at the target, meters",
+          "type": "number"
+        },
         "projection": {
           "enum": [
             "perspective",
@@ -4096,7 +4375,8 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
         "target",
         "up",
         "projection",
-        "fov_deg"
+        "fov_deg",
+        "parallel_height"
       ],
       "type": "object"
     },
@@ -4243,6 +4523,10 @@ Every Scene, in tab order.
               "fov_deg": {
                 "type": "number"
               },
+              "parallel_height": {
+                "description": "the height the view spans at the target, meters",
+                "type": "number"
+              },
               "projection": {
                 "enum": [
                   "perspective",
@@ -4272,7 +4556,8 @@ Every Scene, in tab order.
               "target",
               "up",
               "projection",
-              "fov_deg"
+              "fov_deg",
+              "parallel_height"
             ],
             "type": "object"
           },
@@ -4372,6 +4657,59 @@ Every Scene, in tab order.
           },
           "sid": {
             "type": "integer"
+          },
+          "view_style": {
+            "description": "the look the Scene restores with its display property: backdrop (sRGB background, sky and ground or null) and whether the model axes are drawn; captured from the document's own view style, so absent for a document shown Hew's way",
+            "properties": {
+              "axes": {
+                "type": "boolean"
+              },
+              "background": {
+                "items": {
+                  "type": "integer"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "ground": {
+                "oneOf": [
+                  {
+                    "items": {
+                      "type": "integer"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "sky": {
+                "oneOf": [
+                  {
+                    "items": {
+                      "type": "integer"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "background",
+              "sky",
+              "ground",
+              "axes"
+            ],
+            "type": "object"
           }
         },
         "required": [
@@ -4557,6 +4895,10 @@ Re-capture a Scene's properties from the document's current state. Records no un
         },
         "fov_deg": {
           "description": "perspective only; defaults to 35",
+          "type": "number"
+        },
+        "parallel_height": {
+          "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there",
           "type": "number"
         },
         "projection": {
@@ -6377,6 +6719,164 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 
 ## hew.solid
 
+### `hew.solid.cap`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Close an open object's flat openings with faces; an object closed all round becomes a solid.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "object": {
+      "description": "obj_ id (a world object or a component member)",
+      "type": "string"
+    },
+    "rims": {
+      "description": "indices into the object's hew.doc.health rims; omitted = every cappable rim (when none is, all of them, so the refusal says why)",
+      "items": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "closed": {
+      "description": "the object is now a solid",
+      "type": "boolean"
+    },
+    "faces": {
+      "description": "faces added (face tokens cap.1, cap.2, ... in a transaction)",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "reversed": {
+      "description": "an island the caps closed was inside out, so that island's faces were turned over (a cavity inside another island is left as is)",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "object_id",
+    "faces",
+    "closed",
+    "reversed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `unknown_rim` — That opening is already closed. Check the list again for what is left.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Draw faces across it by hand.
+- `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
+- `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
+- `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
+- `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+
+### `hew.solid.delete_faces`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Remove faces from an open object; islands cut loose become objects of their own. Solids refuse.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "faces": {
+      "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)",
+      "items": {
+        "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "object": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "deleted": {
+      "description": "every face went, so the object was deleted",
+      "type": "boolean"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "object_ids": {
+      "description": "islands cut loose, now objects of their own",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "object_id",
+    "deleted",
+    "object_ids"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `last_definition_member` — This is the component's only member — deleting it would leave every instance empty. Delete the instances instead, or add another member first.
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+
 ### `hew.solid.delete_imprint`
 
 - **Version:** 1
@@ -6491,6 +6991,7 @@ Extrude a region into a new Object, consuming the profile.
 - `distance_too_small` — That distance is too small to build anything. Drag further, or type an exact length.
 - `degenerate_geometry` — This profile can't be extruded into a valid solid. Simplify the shape and try again.
 - `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
+- `region_has_no_face` — This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face.
 - `unknown_entity`
 - `unknown_unit`
 - `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
@@ -6812,13 +7313,69 @@ Boolean intersection of two solids.
 **Refusals:**
 
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
-- `boolean_operand_not_solid` — Something in that selection is not a watertight solid, so it can't be combined. Check each object's solid badge in Object Info and fix or remove the leaky one.
+- `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
 - `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+
+### `hew.solid.mark_surface`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Mark an open object as a surface on purpose (or clear the mark); hew.doc.health keeps listing it, flagged accepted.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "accepted": {
+      "default": true,
+      "description": "false clears the mark",
+      "type": "boolean"
+    },
+    "object": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "accepted": {
+      "type": "boolean"
+    },
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id",
+    "accepted"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
 - `unknown_entity`
 
 ### `hew.solid.move_imprint`
@@ -6938,7 +7495,7 @@ Push/pull a face of a solid with the tool's full semantics.
 
 **Refusals:**
 
-- `object_not_solid` — This object isn't a watertight solid, so it can't be pushed or pulled. Check its solid status in the Object Info panel.
+- `object_not_solid` — This object isn't solid, so it can't be pushed or pulled. To make it solid, select it and choose Object ▸ Make Solid…
 - `distance_too_small` — That distance is too small to build anything. Drag further, or type an exact length.
 - `would_vanish` — Pushing that far would remove the whole object. Push a shorter distance, or delete the object instead.
 - `non_manifold_result` — The walls this would create run into the object's other geometry. Try a different distance, or reshape the surrounding faces first.
@@ -7199,7 +7756,7 @@ Slice a solid by a plane into two solids.
 
 **Refusals:**
 
-- `not_solid` — Only a watertight solid can be sliced. Check its solid status in the Object Info panel.
+- `not_solid` — Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…
 - `plane_misses_solid` — The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.
 - `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
@@ -7255,7 +7812,7 @@ Boolean subtraction of two solids.
 **Refusals:**
 
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
-- `boolean_operand_not_solid` — Something in that selection is not a watertight solid, so it can't be combined. Check each object's solid badge in Object Info and fix or remove the leaky one.
+- `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
 - `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
@@ -7263,6 +7820,77 @@ Boolean subtraction of two solids.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+
+### `hew.solid.thicken`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+
+Pull a flat surface into a solid of the given thickness.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "centered": {
+      "default": false,
+      "description": "split the thickness evenly on both sides of the surface",
+      "type": "boolean"
+    },
+    "distance": {
+      "description": "meters along each face's front normal (negative: behind it)",
+      "type": "number"
+    },
+    "object": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "distance"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "description": "the surface, now a solid",
+      "type": "string"
+    },
+    "object_ids": {
+      "description": "further separate pieces of the surface, each now a solid of its own",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "object_id",
+    "object_ids"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `not_a_flat_sheet` — Only flat panels can get a thickness this way. Close the openings of this shape instead.
+- `thickness_too_small` — That thickness is too small. Enter at least 0.001 mm.
 
 ### `hew.solid.union`
 
@@ -7314,7 +7942,7 @@ Boolean union of two solids.
 **Refusals:**
 
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
-- `boolean_operand_not_solid` — Something in that selection is not a watertight solid, so it can't be combined. Check each object's solid badge in Object Info and fix or remove the leaky one.
+- `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
 - `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
@@ -7608,6 +8236,10 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
           "description": "perspective only; defaults to 35",
           "type": "number"
         },
+        "parallel_height": {
+          "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there",
+          "type": "number"
+        },
         "projection": {
           "enum": [
             "perspective",
@@ -7837,6 +8469,10 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
         },
         "fov_deg": {
           "description": "perspective only; defaults to 35",
+          "type": "number"
+        },
+        "parallel_height": {
+          "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there",
           "type": "number"
         },
         "projection": {

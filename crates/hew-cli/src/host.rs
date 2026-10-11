@@ -6,9 +6,10 @@
 //! other side of it.
 
 use api::{
-    Host, LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
+    DocFormat, Host, LibraryItemEntry, LibraryListing, LibraryReadResult, LibraryWriteResult,
     LibraryWriteTarget, LineDrawingParams, LineDrawingResult, PrintPdfParams, PrintPdfResult,
-    Refusal, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
+    Refusal, SaveOutcome, SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult,
+    StandardView,
 };
 use kernel::{Document, EntityRef, Point3};
 use std::collections::BTreeMap;
@@ -24,6 +25,15 @@ pub struct CliHost {
     /// `hew.doc.save` with no `path` re-saves here (§7's "path required on
     /// first save" semantics).
     working_path: Option<PathBuf>,
+    /// The format the working document is in: what a bare `hew.doc.save`
+    /// writes back, and which `.skp` container a `.skp` path takes when no
+    /// `format` is given.
+    working_format: DocFormat,
+    /// The `.skp` the working document was opened from or last saved as,
+    /// which the next `.skp` save builds on so unchanged content stays as
+    /// SketchUp wrote it. `None` for a document that did not come from a
+    /// `.skp` (a `.hew`, or a new one).
+    skp_source: Option<skp_export::SkpSource>,
 }
 
 impl CliHost {
@@ -31,16 +41,19 @@ impl CliHost {
         CliHost::default()
     }
 
-    /// The path a prior open/save recorded, if any. Exposed for the CLI's
-    /// `run --out` step, which wants to know whether a bare `save` (no
-    /// path) is even possible before trying.
     /// A host that already knows which file its document came from — the
     /// live client's render fallback, which renders a copy of the app's
     /// document and wants the title block to name the file the app does.
     pub fn with_working_path(path: Option<PathBuf>) -> CliHost {
-        CliHost { working_path: path }
+        CliHost {
+            working_path: path,
+            ..CliHost::default()
+        }
     }
 
+    /// The path a prior open/save recorded, if any. Exposed for the CLI's
+    /// `run --out` step, which wants to know whether a bare `save` (no
+    /// path) is even possible before trying.
     pub fn working_path(&self) -> Option<&Path> {
         self.working_path.as_deref()
     }
@@ -50,15 +63,26 @@ impl Host for CliHost {
     fn new_document(&mut self, doc: &mut Document) -> Result<(), Refusal> {
         *doc = Document::new();
         self.working_path = None;
+        self.working_format = DocFormat::Hew;
+        self.skp_source = None;
         Ok(())
     }
 
     fn open_document(&mut self, doc: &mut Document, path: &str) -> Result<(), Refusal> {
         let bytes = std::fs::read(path)
             .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-        let loaded = Document::load(&bytes)
-            .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
-        *doc = loaded;
+        if has_skp_extension(Path::new(path)) {
+            let (loaded, format, source) = open_skp(&bytes, path)?;
+            *doc = loaded;
+            self.working_format = format;
+            self.skp_source = Some(source);
+        } else {
+            let loaded = Document::load(&bytes)
+                .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+            *doc = loaded;
+            self.working_format = DocFormat::Hew;
+            self.skp_source = None;
+        }
         self.working_path = Some(PathBuf::from(path));
         Ok(())
     }
@@ -67,13 +91,11 @@ impl Host for CliHost {
         &mut self,
         doc: &Document,
         path: Option<&str>,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+        format: Option<DocFormat>,
+        units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
         let target = match path {
-            Some(p) => {
-                let target = PathBuf::from(p);
-                self.working_path = Some(target.clone());
-                target
-            }
+            Some(p) => PathBuf::from(p),
             None => self.working_path.clone().ok_or_else(|| {
                 Refusal::api(
                     "path_required",
@@ -81,17 +103,86 @@ impl Host for CliHost {
                 )
             })?,
         };
-        let bytes = doc.save_for_persistence();
-        std::fs::write(&target, bytes)
-            .map_err(|e| Refusal::api("save_failed", &format!("{}: {e}", target.display())))?;
-        // This host has a filesystem and used it, so there is nothing to
+        let format = resolve_save_format(&target, format, self.working_format)?;
+        let mut outcome = SaveOutcome {
+            format: Some(format),
+            ..SaveOutcome::default()
+        };
+        // Write first and record the new state only once the bytes landed,
+        // so a failed write leaves the working path, format and source as
+        // they were.
+        let new_source = match format {
+            DocFormat::Hew => {
+                write_file(&target, &doc.save_for_persistence())?;
+                None
+            }
+            DocFormat::Skp | DocFormat::Skp2017 => {
+                // Asked for by name, the units go over the file's own too;
+                // otherwise a save back keeps them and a new file takes
+                // this host's display units, as the app's File > Save does.
+                let units = match units {
+                    Some(u) => skp_export::SaveUnits::Set(display_units(Some(u))),
+                    None => skp_export::SaveUnits::New(display_units(None)),
+                };
+                let saved = skp_export::save_in(
+                    doc,
+                    skp_target(format),
+                    skp_export::WriteEnv::system(),
+                    self.skp_source.as_ref(),
+                    units,
+                )
+                .map_err(|e| Refusal::api("save_failed", &format!("{}: {e}", target.display())))?;
+                write_file(&target, &saved.export.bytes)?;
+                outcome.simplified = saved.export.simplified;
+                outcome.writer_notes = saved.export.writer_notes;
+                Some(saved.source)
+            }
+        };
+        self.skp_source = new_source;
+        self.working_format = format;
+        self.working_path = Some(target);
+        // This host has a filesystem and used it, so there are no bytes to
         // hand back — the file IS the result.
-        Ok(None)
+        Ok(outcome)
     }
 
-    fn save_copy(&mut self, doc: &Document, path: &str) -> Result<(), Refusal> {
-        std::fs::write(path, doc.save_for_persistence())
-            .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))
+    fn save_copy(
+        &mut self,
+        doc: &Document,
+        path: &str,
+        format: Option<DocFormat>,
+        units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
+        let target = Path::new(path);
+        let format = resolve_save_format(target, format, self.working_format)?;
+        let mut outcome = SaveOutcome {
+            format: Some(format),
+            ..SaveOutcome::default()
+        };
+        match format {
+            DocFormat::Hew => write_file(target, &doc.save_for_persistence())?,
+            DocFormat::Skp | DocFormat::Skp2017 => {
+                // Built on the working document's source, as a save is, so
+                // unchanged content keeps SketchUp's records; a copy never
+                // becomes the source itself.
+                let units = match units {
+                    Some(u) => skp_export::SaveUnits::Set(display_units(Some(u))),
+                    None => skp_export::SaveUnits::New(display_units(None)),
+                };
+                let saved = skp_export::save_in(
+                    doc,
+                    skp_target(format),
+                    skp_export::WriteEnv::system(),
+                    self.skp_source.as_ref(),
+                    units,
+                )
+                .map_err(|e| Refusal::api("save_failed", &format!("{path}: {e}")))?;
+                write_file(target, &saved.export.bytes)?;
+                outcome.simplified = saved.export.simplified;
+                outcome.writer_notes = saved.export.writer_notes;
+            }
+        }
+        Ok(outcome)
     }
 
     fn export_document(
@@ -100,13 +191,32 @@ impl Host for CliHost {
         format: &str,
         path: Option<&str>,
         segments_per_turn: u32,
+        units: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Refusal> {
         // `true`: a headless dispatch has no dialog of its own to warn about
         // non-solid objects first, so a leaky object is dropped rather than
         // silently handed back in a file no human reviewed
         // (crates/mesh-export's module doc, "Non-solid inclusion").
-        let bytes =
-            mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?;
+        let bytes = match format {
+            "skp" | "skp2017" => {
+                let target = skp_target(if format == "skp" {
+                    DocFormat::Skp
+                } else {
+                    DocFormat::Skp2017
+                });
+                skp_export::export_in(
+                    doc,
+                    target,
+                    skp_export::WriteEnv::system(),
+                    Some(display_units(units)),
+                )
+                .map_err(|e| Refusal::api("export_failed", &e.to_string()))?
+                .bytes
+            }
+            _ => {
+                mesh_export::export(doc, format, segments_per_turn, true).map_err(export_refusal)?
+            }
+        };
         match path {
             Some(p) => {
                 std::fs::write(p, &bytes)
@@ -441,10 +551,16 @@ fn build_camera(cam: &SnapshotCamera) -> softrender::Camera {
         SnapshotProjection::Perspective => {
             softrender::Projection::Perspective { fov_y_deg: fov_deg }
         }
+        // The height the view spans at the target when the camera says,
+        // else what the perspective view spans there.
         SnapshotProjection::Parallel => {
             let distance = (target - eye).length();
+            let height = cam
+                .parallel_height
+                .filter(|h| h.is_finite() && *h > 0.0)
+                .unwrap_or_else(|| 2.0 * distance * (fov_deg.to_radians() * 0.5).tan());
             softrender::Projection::Parallel {
-                half_height: distance * (fov_deg.to_radians() * 0.5).tan(),
+                half_height: height * 0.5,
             }
         }
     };
@@ -546,6 +662,91 @@ fn read_input_file(path: &str, cap: u64, limit: &str) -> Result<Vec<u8>, Refusal
         return Err(too_big(bytes.len() as u64));
     }
     Ok(bytes)
+}
+
+// -------------------------------------------------------------- .skp files
+
+fn has_skp_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("skp"))
+}
+
+/// A length format by name (already validated by `crates/api`), or this
+/// host's display units when none is given: meters, a new app's default
+/// (`app/src/settings/units.ts`). A headless session has no display
+/// preference of its own to read.
+fn display_units(name: Option<&str>) -> skp_export::DisplayUnits {
+    name.and_then(skp_export::DisplayUnits::from_name)
+        .unwrap_or(skp_export::DisplayUnits::Meters)
+}
+
+fn skp_target(format: DocFormat) -> skp_export::Target {
+    match format {
+        DocFormat::Skp2017 => skp_export::Target::Skp2017,
+        _ => skp_export::Target::Skp2026,
+    }
+}
+
+fn write_file(target: &Path, bytes: &[u8]) -> Result<(), Refusal> {
+    std::fs::write(target, bytes)
+        .map_err(|e| Refusal::api("save_failed", &format!("{}: {e}", target.display())))
+}
+
+/// Opens a `.skp` as a working document: imports it, makes opening not an
+/// undo step, and keeps the file as the source the next save builds on.
+/// Returns the format its own container is in.
+fn open_skp(
+    bytes: &[u8],
+    path: &str,
+) -> Result<(Document, DocFormat, skp_export::SkpSource), Refusal> {
+    let load_failed =
+        |e: &dyn std::fmt::Display| Refusal::api("load_failed", &format!("{path}: {e}"));
+    let parsed = skp_import::import(bytes).map_err(|e| load_failed(&e))?;
+    let mut doc = Document::new();
+    let (report, _change) = doc
+        .ingest(parsed.scene, parsed.textures_missing)
+        .map_err(|e| load_failed(&e))?;
+    doc.forget_history().map_err(|e| load_failed(&e))?;
+    let source =
+        skp_export::SkpSource::after_open(bytes.to_vec(), &doc, &parsed.provenance, &report);
+    let format = match skp_import::openskp::detect_container(bytes) {
+        skp_import::openskp::Container::Carchive2017 => DocFormat::Skp2017,
+        _ => DocFormat::Skp,
+    };
+    Ok((doc, format, source))
+}
+
+/// The format a save writes. An explicit `format` must agree with the
+/// path: a `.skp` path takes only a SketchUp format, and a SketchUp format
+/// takes only a `.skp` path, so one format's bytes never land in the
+/// other's file. Without one, a `.skp` path keeps the working document's
+/// own `.skp` container (the 2026 one when it did not come from a `.skp`)
+/// and any other path writes `.hew`.
+fn resolve_save_format(
+    target: &Path,
+    explicit: Option<DocFormat>,
+    working: DocFormat,
+) -> Result<DocFormat, Refusal> {
+    let skp_path = has_skp_extension(target);
+    match explicit {
+        Some(f) if f.is_skp() != skp_path => Err(Refusal::api(
+            "format_mismatch",
+            &format!(
+                "format \"{}\" contradicts the path \"{}\": a .skp path takes format \"skp\" or \"skp2017\", \
+                 any other path takes \"hew\". Change the extension or drop the format.",
+                f.as_str(),
+                target.display()
+            ),
+        )),
+        Some(f) => Ok(f),
+        None if skp_path => Ok(if working.is_skp() {
+            working
+        } else {
+            DocFormat::Skp
+        }),
+        None => Ok(DocFormat::Hew),
+    }
 }
 
 // ------------------------------------------------------------------ import
@@ -721,6 +922,7 @@ fn report_to_json(report: &kernel::ImportReport, warnings: &[String]) -> serde_j
         "objects_created": report.objects_created,
         "watertight": report.watertight,
         "leaky": report.leaky,
+            "health": api::health_counts_json(&report.health),
         "skipped": report.skipped.iter().map(|s| serde_json::json!({
             "name": s.name,
             "reason": s.reason,
@@ -785,7 +987,8 @@ mod tests {
         let mut host = CliHost::new();
         let doc = Document::new();
         let target = dir.join("copy.hew");
-        host.save_copy(&doc, target.to_str().unwrap()).unwrap();
+        host.save_copy(&doc, target.to_str().unwrap(), None, None)
+            .unwrap();
         assert!(target.exists());
         assert_eq!(
             host.working_path(),

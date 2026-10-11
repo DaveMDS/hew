@@ -133,6 +133,7 @@ EXAMPLES
     hew-cli dispatch hew.entity.move '{"ids":["obj_1"],"translation":[0,0,0.5]}' --file chair.hew
     hew-cli dispatch hew.doc.export '{"format":"stl","path":"chair.stl"}' --live
     hew-cli dispatch hew.query.scene --live --document "524 E Tremaine Ave"
+    hew-cli dispatch hew.doc.export '{"format":"skp","path":"chair.skp","units":"mm"}' --file chair.hew
 
 OPTIONS
     --file <model.hew>  Open this file. A command that changes it saves

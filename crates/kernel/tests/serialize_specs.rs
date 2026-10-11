@@ -395,6 +395,9 @@ fn a_camera_state() -> CameraState {
     CameraState {
         projection: CameraProjection::Parallel,
         fov_deg: 62.5,
+        // Not what the eye distance and fov would give: the field must
+        // round-trip on its own.
+        parallel_height: 2.5,
         eye: Point3::new(1.0, 2.0, 3.0),
         target: Point3::new(-1.0, 0.5, 0.0),
         up: Vec3::new(0.0, 0.0, 1.0),
@@ -787,6 +790,7 @@ fn box_recipe_with_tags(name: &str, tags: Vec<Vec<String>>) -> MeshRecipe {
         face_holes: vec![Vec::new(); 6],
         base_material: kernel::NO_MATERIAL,
         tags,
+        extra: Default::default(),
     }
 }
 
@@ -812,6 +816,8 @@ fn tags_round_trip_through_save_load() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (_, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -891,6 +897,8 @@ fn tag_metadata_round_trips_through_save_load() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(doc.tag_hidden(&mock));
@@ -936,6 +944,8 @@ fn import_tag_registration_is_undone_and_never_clobbers() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, vec![]).unwrap();
     assert!(
@@ -1000,6 +1010,8 @@ fn import_hidden_nodes_arrive_user_hidden() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 1, "hidden content still imports");
@@ -1442,7 +1454,9 @@ fn guides_round_trip_through_save_load() {
     let mut saw_point = false;
     for id in ids {
         match loaded.guide(id).unwrap() {
-            Guide::Line { origin, direction } => {
+            Guide::Line {
+                origin, direction, ..
+            } => {
                 saw_line = true;
                 assert!(origin.approx_eq(line_origin, 1e-9));
                 assert!(direction.approx_eq(line_dir, 1e-9));
@@ -2605,4 +2619,420 @@ fn non_orthonormal_axes_field_is_rejected() {
         ),
         "a non-orthonormal axes field is malformed, not repaired"
     );
+}
+
+#[test]
+fn annotation_tags_are_gated_at_v18() {
+    use kernel::{Anchor, Annotation, ImportSceneExtra};
+    let text = Annotation::LeaderText {
+        anchor: Anchor {
+            node: None,
+            point: kernel::Point3::new(0.0, 0.0, 0.0),
+        },
+        offset: kernel::Vec3::new(0.0, 0.0, 1.0),
+        text: "note".into(),
+    };
+    let scene = |tags: Vec<Vec<Vec<String>>>| ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: Vec::new(),
+        tags: vec![kernel::ImportTag {
+            path: vec!["Notes".into()],
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: ImportSceneExtra {
+            annotations: vec![text.clone()],
+            annotation_tags: tags,
+            ..Default::default()
+        },
+    };
+    let version = |bytes: &[u8]| {
+        let mut v = 0;
+        let _ = patch_manifest(bytes, |m| v = m["format_version"].as_u64().unwrap());
+        v
+    };
+    // An untagged annotation writes no `tags` field.
+    let mut plain = Document::new();
+    plain.ingest(scene(Vec::new()), Vec::new()).unwrap();
+    let mut has_tags = true;
+    let _ = patch_manifest(&plain.save(), |m| {
+        has_tags = m["annotations"][0].get("tags").is_some()
+    });
+    assert!(!has_tags);
+    // A tag: v18, and a file claiming v17 with one is refused.
+    let mut tagged = Document::new();
+    tagged
+        .ingest(scene(vec![vec![vec!["Notes".into()]]]), Vec::new())
+        .unwrap();
+    let bytes = tagged.save();
+    assert_eq!(version(&bytes), 22);
+    assert!(Document::load(&bytes).is_ok());
+    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(17));
+    assert!(Document::load(&smuggled).is_err());
+    let empty = patch_manifest(&bytes, |m| {
+        m["annotations"][0]["tags"] = serde_json::json!([[]])
+    });
+    assert!(Document::load(&empty).is_err());
+}
+
+/// `sketches[].tags` came at v20: an untagged sketch writes no field, a
+/// tagged one loads back, a v19 file carrying one is refused, and so is an
+/// empty tag path.
+#[test]
+fn sketch_tags_are_gated_at_v20() {
+    use kernel::{ImportSceneExtra, ImportSketch};
+    let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    let scene = |tags: Vec<Vec<String>>| ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: Vec::new(),
+        tags: vec![kernel::ImportTag {
+            path: vec!["Site".into()],
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: ImportSceneExtra {
+            sketches: vec![ImportSketch {
+                plane: ground,
+                def: None,
+                group: None,
+                segments: vec![[Point3::ORIGIN, Point3::new(1.0, 0.0, 0.0)]],
+                curves: Vec::new(),
+                tags,
+            }],
+            ..Default::default()
+        },
+    };
+    let version = |bytes: &[u8]| {
+        let mut v = 0;
+        let _ = patch_manifest(bytes, |m| v = m["format_version"].as_u64().unwrap());
+        v
+    };
+    // An untagged sketch writes no `tags` field.
+    let mut plain = Document::new();
+    plain.ingest(scene(Vec::new()), Vec::new()).unwrap();
+    let mut has_tags = true;
+    let _ = patch_manifest(&plain.save(), |m| {
+        has_tags = m["sketches"][0].get("tags").is_some()
+    });
+    assert!(!has_tags);
+    // A tag: v20, loads back, and a file claiming v19 with one is refused.
+    let mut tagged = Document::new();
+    tagged
+        .ingest(scene(vec![vec!["Site".into()]]), Vec::new())
+        .unwrap();
+    let bytes = tagged.save();
+    assert_eq!(version(&bytes), 22);
+    let loaded = Document::load(&bytes).unwrap();
+    let s = loaded.sketch_ids()[0];
+    assert_eq!(loaded.sketch_tags(s), [vec!["Site".to_string()]]);
+    let smuggled = patch_manifest(&bytes, |m| m["format_version"] = serde_json::json!(19));
+    assert!(Document::load(&smuggled).is_err());
+    let empty = patch_manifest(&bytes, |m| {
+        m["sketches"][0]["tags"] = serde_json::json!([[]])
+    });
+    assert!(Document::load(&empty).is_err());
+}
+
+/// A v14–v18 manifest records every entity's stable id but the
+/// annotations' (theirs came at v19): loading one mints those past the
+/// ids in use, never at 0, 1, 2… where recorded ids already sit.
+#[test]
+fn a_v18_file_mints_annotation_ids_past_the_recorded_ones() {
+    use kernel::{Anchor, EntityRef};
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    doc.sketch_mut(s)
+        .unwrap()
+        .add_segment(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let a = doc
+        .add_leader_text(
+            Anchor {
+                node: None,
+                point: Point3::new(0.5, 0.0, 0.0),
+            },
+            Vec3::new(0.0, 0.0, 1.0),
+            "note".into(),
+        )
+        .unwrap();
+    let _ = a;
+    let bytes = patch_manifest(&doc.save(), |m| {
+        m["format_version"] = serde_json::json!(18);
+        for ann in m["annotations"].as_array_mut().unwrap() {
+            ann.as_object_mut().unwrap().remove("sid");
+        }
+    });
+    let loaded = Document::load(&bytes).unwrap();
+    let sketch_sid = loaded.sid_of(&EntityRef::Sketch(loaded.sketch_ids()[0]));
+    let ann_sid = loaded.sid_of(&EntityRef::Annotation(loaded.annotation_ids()[0]));
+    assert!(sketch_sid.is_some() && ann_sid.is_some());
+    assert_ne!(sketch_sid, ann_sid, "the minted id is not a recorded one");
+}
+
+/// A camera whose eye sits on its target, or whose field of view spans
+/// nothing, still carries a height a view can span: what is saved loads.
+#[test]
+fn a_camera_spanning_nothing_saves_a_height_that_loads() {
+    use kernel::{CameraProjection, CameraState};
+    let mut doc = Document::new();
+    let eye = Point3::new(1.0, 2.0, 3.0);
+    doc.set_camera_state(CameraState::framed(
+        CameraProjection::Perspective,
+        35.0,
+        eye,
+        eye,
+        Vec3::new(0.0, 0.0, 1.0),
+    ));
+    let h = doc.camera_state().unwrap().parallel_height;
+    assert!(h.is_finite() && h > 0.0, "{h}");
+    let loaded = Document::load(&doc.save()).unwrap();
+    assert_eq!(loaded.camera_state(), doc.camera_state());
+    // A height given as nothing is replaced the same way.
+    doc.set_camera_state(CameraState {
+        parallel_height: 0.0,
+        ..doc.camera_state().unwrap()
+    });
+    assert_eq!(doc.camera_state().unwrap().parallel_height, h);
+    assert!(Document::load(&doc.save()).is_ok());
+}
+
+// ------------------------------------------- faceless loops and guide tags (v21)
+
+/// A loop with no face and a guide's tags round-trip through save and load
+/// (manifest v21), and a manifest declaring an older version that carries
+/// either is malformed, not repaired.
+#[test]
+fn faceless_loops_and_guide_tags_round_trip_and_are_gated_at_v21() {
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)),
+            (Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)),
+            (Point3::new(1.0, 1.0, 0.0), Point3::new(0.0, 1.0, 0.0)),
+            (Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+        sk.make_regions_faceless();
+    }
+    doc.add_guide_line(Point3::ORIGIN, kernel::Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let bytes = doc.save();
+
+    let loaded = Document::load(&bytes).expect("load");
+    let s2 = loaded.sketch_ids()[0];
+    assert!(
+        loaded
+            .sketch(s2)
+            .unwrap()
+            .regions()
+            .values()
+            .all(|r| r.faceless),
+        "the loop stays faceless across a save"
+    );
+
+    // The field is written only when set, and only at v21+.
+    let downgraded = patch_manifest(&bytes, |m| {
+        m["format_version"] = serde_json::json!(20);
+        strip_sids(m);
+    });
+    assert!(
+        matches!(
+            Document::load(&downgraded),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v20 file carrying a faceless loop is malformed"
+    );
+    let tagged = patch_manifest(&bytes, |m| {
+        m["sketches"][0]["regions"][0]["faceless"] = serde_json::json!(false);
+        m["guides"][0]["tags"] = serde_json::json!([["Rig"]]);
+    });
+    let loaded = Document::load(&tagged).expect("v21 guide tags load");
+    let g = loaded.guide_ids()[0];
+    assert_eq!(loaded.guide_tags(g), &[vec!["Rig".to_string()]]);
+    assert!(loaded.guide_shown(g), "a tag nothing hides shows the guide");
+    let smuggled = patch_manifest(&bytes, |m| {
+        m["sketches"][0]["regions"][0]["faceless"] = serde_json::json!(false);
+        m["guides"][0]["tags"] = serde_json::json!([["Rig"]]);
+        m["format_version"] = serde_json::json!(20);
+        strip_sids(m);
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a v20 file carrying guide tags is malformed"
+    );
+    let empty_path = patch_manifest(&bytes, |m| {
+        m["guides"][0]["tags"] = serde_json::json!([[""]]);
+    });
+    assert!(matches!(
+        Document::load(&empty_path),
+        Err(kernel::LoadError::MalformedManifest { .. })
+    ));
+}
+
+// --------------------------------------------------- guide stretches (v22)
+
+/// A scene of one guide segment, one ray and one whole line.
+fn guide_span_scene() -> ImportScene {
+    let line = |span: kernel::GuideSpan| kernel::ImportGuide::Line {
+        origin: Point3::new(1.0, 2.0, 0.0),
+        direction: kernel::Vec3::new(0.0, 2.0, 0.0),
+        span,
+        tags: Vec::new(),
+    };
+    ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![],
+        guides: vec![
+            line(kernel::GuideSpan {
+                from: Some(0.0),
+                to: Some(0.0127),
+            }),
+            line(kernel::GuideSpan {
+                from: Some(-0.5),
+                to: None,
+            }),
+            line(kernel::GuideSpan::INFINITE),
+        ],
+        tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    }
+}
+
+/// A guide segment and a ray keep their stretch through save and load
+/// (manifest v22), a whole line writes no stretch at all, and a manifest
+/// declaring v21 with one, a point with one, or a stretch of no length is
+/// malformed, not repaired.
+#[test]
+fn guide_stretches_round_trip_and_are_gated_at_v22() {
+    let mut doc = Document::new();
+    doc.ingest(guide_span_scene(), Vec::new()).unwrap();
+    let spans = |d: &Document| -> Vec<kernel::GuideSpan> {
+        d.guide_ids()
+            .iter()
+            .filter_map(|&g| match *d.guide(g)? {
+                kernel::Guide::Line { span, .. } => Some(span),
+                kernel::Guide::Point { .. } => None,
+            })
+            .collect()
+    };
+    let before = spans(&doc);
+    assert_eq!(before.len(), 3);
+    let bytes = doc.save();
+    let m = manifest_json(&bytes);
+    assert_eq!(m["format_version"], 22);
+    let written: Vec<(serde_json::Value, serde_json::Value)> = m["guides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| (g["from"].clone(), g["to"].clone()))
+        .collect();
+    assert!(
+        written.contains(&(serde_json::Value::Null, serde_json::Value::Null)),
+        "a whole line writes neither end: {written:?}"
+    );
+    let loaded = Document::load(&bytes).expect("load");
+    assert_eq!(spans(&loaded), before, "the stretches load back exactly");
+    assert_eq!(
+        loaded.state_hash(),
+        Document::load(&bytes).unwrap().state_hash()
+    );
+
+    let seg = m["guides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|g| g["to"].is_number())
+        .expect("a segment is written");
+    let refused = |patch: &dyn Fn(&mut serde_json::Value)| {
+        let bytes = patch_manifest(&bytes, |m| patch(m));
+        matches!(
+            Document::load(&bytes),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        )
+    };
+    assert!(
+        refused(&|m| m["format_version"] = serde_json::json!(21)),
+        "a v21 file carrying a stretch is malformed"
+    );
+    assert!(
+        refused(&|m| m["guides"][seg]["to"] = m["guides"][seg]["from"].clone()),
+        "a stretch of no length is malformed"
+    );
+    assert!(
+        refused(&|m| m["guides"][seg]["to"] = serde_json::json!(-1.0)),
+        "a stretch that ends before it starts is malformed"
+    );
+    let mut with_point = Document::new();
+    with_point.add_guide_point(Point3::ORIGIN).unwrap();
+    let point_bytes = with_point.save();
+    let smuggled = patch_manifest(&point_bytes, |m| {
+        m["guides"][0]["from"] = serde_json::json!(0.0)
+    });
+    assert!(
+        matches!(
+            Document::load(&smuggled),
+            Err(kernel::LoadError::MalformedManifest { .. })
+        ),
+        "a point carries no stretch"
+    );
+}
+
+/// An import's guide of no length is skipped and reported, and a
+/// rescale stretches a guide's span with it.
+#[test]
+fn a_guide_of_no_length_is_skipped_and_a_rescale_stretches_the_span() {
+    let mut scene = guide_span_scene();
+    scene.guides.push(kernel::ImportGuide::Line {
+        origin: Point3::ORIGIN,
+        direction: kernel::Vec3::new(1.0, 0.0, 0.0),
+        span: kernel::GuideSpan {
+            from: Some(0.3),
+            to: Some(0.3),
+        },
+        tags: Vec::new(),
+    });
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    assert_eq!(doc.guide_ids().len(), 3);
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|s| s.name == "construction guide"),
+        "the guide of no length is reported"
+    );
+    doc.rescale_document(2.0).unwrap();
+    let segment = doc
+        .guide_ids()
+        .iter()
+        .find_map(|&g| match *doc.guide(g)? {
+            kernel::Guide::Line { span, .. } if span.to.is_some() && span.from.is_some() => {
+                Some(span)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!((segment.to.unwrap() - 0.0254).abs() < 1e-12, "{segment:?}");
+    assert_eq!(segment.from, Some(0.0));
 }

@@ -53,6 +53,9 @@ export type PrintCameraSpec =
       target: [number, number, number]
       up: [number, number, number]
       fovDeg: number
+      /** The height the view spans at `target` (a saved parallel view's
+       * own frame height); absent, the perspective view's stands in. */
+      parallelHeight?: number
       /** Re-frame the visible model to fill the page (Standard's Zoom: Fit). */
       fit?: boolean
     }
@@ -352,8 +355,9 @@ function buildCamera(h: PrintPassHandles, spec: PrintCameraSpec, W: number, H: n
       cam.updateMatrixWorld(true)
       return cam
     }
-    // Parallel from a pose: the rig's own rule — half-height = dist·tan(fov/2).
-    const halfH = dist * Math.tan((spec.fovDeg * Math.PI) / 360)
+    // Parallel from a pose: the saved frame height, else the rig's own
+    // rule — half-height = dist·tan(fov/2).
+    const halfH = spec.parallelHeight !== undefined && spec.parallelHeight > 0 ? spec.parallelHeight / 2 : dist * Math.tan((spec.fovDeg * Math.PI) / 360)
     const halfW = halfH * (W / H)
     const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, near, far)
     orientCamera(cam, eye, dir, up)

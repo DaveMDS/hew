@@ -56,6 +56,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "MalformedRegion" => {
             "This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug."
         }
+        "RegionHasNoFace" => {
+            "This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face."
+        }
         "DegenerateCurve" => {
             "That circle or arc is too small to keep. Drag a larger radius, or type an exact one."
         }
@@ -132,7 +135,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "This profile can't be extruded into a valid solid. Simplify the shape and try again."
         }
         "ObjectNotSolid" => {
-            "This object isn't a watertight solid, so it can't be pushed or pulled. Check its solid status in the Object Info panel."
+            "This object isn't solid, so it can't be pushed or pulled. To make it solid, select it and choose Object ▸ Make Solid…"
         }
         "WouldVanish" => {
             "Pushing that far would remove the whole object. Push a shorter distance, or delete the object instead."
@@ -236,7 +239,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again."
         }
         "OperandNotSolid" => {
-            "Combining needs watertight solids on both sides. Check each object's solid status in the Object Info panel."
+            "Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…"
         }
         "EmptyResult" => {
             "The result would be empty — the objects don't overlap that way. Check that the solids actually intersect."
@@ -248,7 +251,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
         }
         "NotSolid" => {
-            "Only a watertight solid can be sliced. Check its solid status in the Object Info panel."
+            "Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…"
         }
         "PlaneMissesSolid" => {
             "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid."
@@ -303,7 +306,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first."
         }
         "BooleanOperandNotSolid" => {
-            "Something in that selection is not a watertight solid, so it can't be combined. Check each object's solid badge in Object Info and fix or remove the leaky one."
+            "Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…"
         }
         "BooleanOperandEmpty" => {
             "That selection has no solids to combine. Pick a solid object or a group of solids."
@@ -316,6 +319,36 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "AmbiguousInstanceScale" => {
             "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length."
+        }
+        "ObjectIsSolid" => {
+            "This is already solid, so there's nothing to close. Use Push/Pull to change its shape."
+        }
+        "UnknownRim" => "That opening is already closed. Check the list again for what is left.",
+        "RimNotPlanar" => {
+            "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+        }
+        "RimSelfIntersecting" => {
+            "The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand."
+        }
+        "CapWouldBeCoplanar" => {
+            "This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid."
+        }
+        "NonManifoldRim" => {
+            "The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first."
+        }
+        "CapsOverlap" => {
+            "A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand."
+        }
+        "RemovesEverything" => "That would delete every face. Delete the object instead.",
+        "Invalid" => {
+            "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug."
+        }
+        "NotAFlatSheet" => {
+            "Only flat panels can get a thickness this way. Close the openings of this shape instead."
+        }
+        "ThicknessTooSmall" => "That thickness is too small. Enter at least 0.001 mm.",
+        "UnjoinedSeam" => {
+            "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
         }
         "ExplodeSessionOpen" => {
             "This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving."
@@ -386,6 +419,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "UnknownAnnotation" => {
             "That dimension or label is no longer there — the model changed since it was picked. Click it again."
         }
+        "AnnotationHasNoAttrs" => {
+            "A dimension or label can't carry attributes. Put them on the object it measures instead."
+        }
         "DegenerateAnnotation" => {
             "That dimension or label doesn't have a usable placement — its two points are on top of each other, or the circle it measures has no size. Drag to points with more room between them, or a bigger circle, and try again."
         }
@@ -409,6 +445,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "BadCamera" => {
             "Hew's own request to the model kernel carried a malformed camera. If this keeps happening, use Report Bug."
+        }
+        "BadViewStyle" => {
+            "Hew's own request to the model kernel carried a malformed view style. If this keeps happening, use Report Bug."
         }
         "BadDisplay" => {
             "Hew's own request to the model kernel carried malformed display settings. If this keeps happening, use Report Bug."

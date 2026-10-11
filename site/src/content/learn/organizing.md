@@ -20,7 +20,7 @@ The Outliner (View ▸ Model Info, `⇧⌘I` / `Ctrl+Shift+I`) lists the documen
 - **The dot at the row's right edge** toggles visibility: ● shown, ○ hidden. Hiding a group hides everything inside it — a child of a hidden group shows a fainter ○ to say "hidden because its parent is."
 - **Filter** the list with the search field above it: type a few letters and only matches (plus the collapsed groups standing between them and the top, shown dimmed) stay visible. Clear it to get everything back, including whatever you'd expanded or collapsed by hand.
 - **Hide or show everything at once** from the Model row's own eye, or hover a group row for a second, stacked-eye button that hides or shows every one of its members in one click, reaching into nested groups too.
-- Icons carry meaning: a cube is an object (drawn with a **dashed outline if the object is leaky**), a folder is a group, a hexagon is a component instance, a pen curve is a sketch.
+- Icons carry meaning: a cube is an object (a flat panel or curved sheet has a thin outline, and any other open shape has a dashed one), a folder is a group, a hexagon is a component instance, a pen curve is a sketch.
 
 ## Object Info: names and tags
 
@@ -28,7 +28,7 @@ Object Info (View ▸ Object Info, `⇧⌘O` / `Ctrl+Shift+O`) shows the single 
 
 - **Name**: type a new one and press `Enter`. Clear the field to fall back to the automatic label ("Object 1", "Group 2", …). Sketches can't be renamed.
 - **Type**: Object, Group, Component, or Sketch.
-- **Geometry**, for objects: **Solid** (green) or **Leaky** (red). [Core concepts](/learn/core-concepts/) explains why this matters.
+- **Geometry**, for objects: **Solid**, **Flat panel**, **Curved sheet**, or what's open ("Open: 2 openings", "Open edges branch"). An object that isn't solid also gets the buttons that apply: **Close**, **Add thickness…**, **Keep as is**, and **Show in list**. [Core concepts](/learn/core-concepts/) explains why solids matter.
 - **Dimensions**: the selection's overall size — `X × Y × Z` in your current units — as a world, axis-aligned bounding box. A rotated part's box is bigger than its own footprint, same as SketchUp's; it's the number that tells you whether the thing fits your print bed or stock, not its true local size.
 - **Tags**: the item's tag chips. Click **+** to add a tag; click a chip's **×** to remove it.
 
@@ -50,4 +50,4 @@ Tags are labels for slicing a model into toggleable categories — Structure, Ha
 
 - Name objects as soon as a model has more than a few — future you (and the command palette, which searches model names) will thank you.
 - Prefer **groups** for things that move together, **tags** for things that show/hide together, and **components** for repeated parts ([Groups and components](/learn/groups-and-components/)).
-- The watertightness badge in the status bar tells you *whether* something is leaky; the Outliner's dashed icons and Object Info tell you *what*.
+- The badge in the status bar tells you *whether* anything isn't solid; the Outliner's icons, Object Info, and **Object ▸ Model Health…** tell you *what*.

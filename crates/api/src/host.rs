@@ -72,6 +72,9 @@ pub struct SnapshotCamera {
     pub up: Option<[f64; 3]>,
     pub projection: Option<SnapshotProjection>,
     pub fov_deg: Option<f64>,
+    /// The height the view spans at `target`, meters (what a parallel
+    /// view frames); `None` takes what the perspective view spans there.
+    pub parallel_height: Option<f64>,
 }
 
 /// Typed, validated parameters for `hew.view.snapshot`
@@ -426,6 +429,72 @@ pub struct ImportImage {
     pub format: Option<String>,
 }
 
+/// The display length formats (`app/src/settings/units.ts`'s
+/// `LengthFormat`): metric `m`, `cm`, `mm`; imperial `arch` (feet and
+/// inches), `frac_in`, `dec_in`. `hew.view.units` sets the app's, and
+/// `hew.doc.save`/`hew.doc.export` write a SketchUp file in one.
+pub const LENGTH_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
+
+/// The file format of a document (`hew.doc.save`'s `format`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize)]
+pub enum DocFormat {
+    /// The native `.hew` format.
+    #[default]
+    #[serde(rename = "hew")]
+    Hew,
+    /// A SketchUp file in the 2026 container, what current SketchUp saves.
+    #[serde(rename = "skp")]
+    Skp,
+    /// A SketchUp file in the 2017 format, which opens in SketchUp Make
+    /// 2017 and every later release.
+    #[serde(rename = "skp2017")]
+    Skp2017,
+}
+
+impl DocFormat {
+    /// The wire name: `"hew"`, `"skp"` or `"skp2017"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DocFormat::Hew => "hew",
+            DocFormat::Skp => "skp",
+            DocFormat::Skp2017 => "skp2017",
+        }
+    }
+
+    /// Whether this is one of the SketchUp containers.
+    pub fn is_skp(self) -> bool {
+        !matches!(self, DocFormat::Hew)
+    }
+}
+
+/// What [`Host::save_document`] did.
+#[derive(Debug, Clone, Default)]
+pub struct SaveOutcome {
+    /// The file's bytes, when the host did not write it itself.
+    pub bytes: Option<Vec<u8>>,
+    /// The format the host resolved and saved in, when it reports one.
+    pub format: Option<DocFormat>,
+    /// What a SketchUp file could not hold exactly (empty for a `.hew`).
+    pub simplified: Vec<String>,
+    /// What the 2017 writer dropped (empty otherwise).
+    pub writer_notes: Vec<String>,
+}
+
+impl SaveOutcome {
+    /// The host wrote the file itself.
+    pub fn written() -> SaveOutcome {
+        SaveOutcome::default()
+    }
+
+    /// The host has no filesystem and hands the bytes back.
+    pub fn with_bytes(bytes: Vec<u8>) -> SaveOutcome {
+        SaveOutcome {
+            bytes: Some(bytes),
+            ..SaveOutcome::default()
+        }
+    }
+}
+
 /// What a host can do for the dispatcher. Every method has a refusing
 /// default, so a host implements exactly what it supports and the
 /// dispatcher's contract never depends on which host is behind it.
@@ -442,21 +511,35 @@ pub trait Host {
         Err(unsupported("open files"))
     }
 
-    /// Persist the working document (`hew.doc.save`). `path` is required
-    /// on the first save of a fresh document; `None` re-saves in place.
-    /// Save the document (`hew.doc.save`): returns the `.hew` bytes
-    /// (base64-encoded by the command) unless `path` was given and the
-    /// host wrote it directly — the shape [`Host::export_document`]
-    /// already had, for the same reason. A host with no filesystem of
-    /// its own (the live WASM boundary) can still serve a save by
-    /// handing the bytes back for whoever asked to write, rather than
-    /// refusing an operation it can perform all but the last step of.
+    /// Save the document (`hew.doc.save`). `path` is required on the first
+    /// save of a fresh document; `None` re-saves in place. `format` is the
+    /// caller's explicit choice, `None` when the caller left it to the
+    /// path's extension and the working file's own format — the host
+    /// resolves it (a `.skp` path saves a SketchUp file, anything else a
+    /// `.hew`) and refuses one that contradicts the path rather than write
+    /// one format's bytes to the other's file.
+    ///
+    /// The outcome's `bytes` carry the file (base64-encoded by the
+    /// command) unless the host wrote it directly — the shape
+    /// [`Host::export_document`] already had, for the same reason. A host
+    /// with no filesystem of its own (the live WASM boundary) can still
+    /// serve a save by handing the bytes back for whoever asked to write,
+    /// rather than refusing an operation it can perform all but the last
+    /// step of.
+    ///
+    /// `units` is one of [`LENGTH_FORMATS`], asked for by name: a SketchUp
+    /// file opens in it, a save back over a `.skp` included. `None` leaves
+    /// the choice to the host, as the app's File > Save does: a save back
+    /// keeps the file's own units, a new file takes the display units. A
+    /// `.hew` has no display units and ignores it.
     fn save_document(
         &mut self,
         doc: &kernel::Document,
         path: Option<&str>,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
-        let _ = (doc, path);
+        format: Option<DocFormat>,
+        units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
+        let _ = (doc, path, format, units);
         Err(unsupported("save files"))
     }
 
@@ -465,8 +548,18 @@ pub trait Host {
     /// marked saved — the working document's file association and unsaved
     /// mark stay exactly as they were. The safe way to snapshot someone
     /// else's open document to disk.
-    fn save_copy(&mut self, doc: &kernel::Document, path: &str) -> Result<(), Refusal> {
-        let _ = (doc, path);
+    ///
+    /// `format` and `units` resolve as [`Host::save_document`]'s do: a
+    /// `.skp` path writes a SketchUp file, anything else a `.hew`, and a
+    /// copy never moves the working document's SketchUp source.
+    fn save_copy(
+        &mut self,
+        doc: &kernel::Document,
+        path: &str,
+        format: Option<DocFormat>,
+        units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
+        let _ = (doc, path, format, units);
         Err(unsupported("save a copy of a document"))
     }
 
@@ -475,15 +568,18 @@ pub trait Host {
     /// host wrote it directly. `segments_per_turn` is the STL curve
     /// re-facet resolution (0 = stored facets, tessellate::export_triangles's
     /// own convention); hosts exporting formats with no curve resolution
-    /// concept ignore it.
+    /// concept ignore it. `units` (one of [`LENGTH_FORMATS`], SketchUp
+    /// formats only) is the display units a `.skp` opens in; `None` means
+    /// the host's display units.
     fn export_document(
         &mut self,
         doc: &kernel::Document,
         format: &str,
         path: Option<&str>,
         segments_per_turn: u32,
+        units: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Refusal> {
-        let _ = (doc, format, path, segments_per_turn);
+        let _ = (doc, format, path, segments_per_turn, units);
         Err(unsupported("export"))
     }
 

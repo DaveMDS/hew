@@ -20,11 +20,13 @@
  * fails that test, not a user.
  */
 
+import { MAKE_SOLID_HINT } from './health/healthCopy'
+
 /** Stale-handle copy: the model changed underneath a tool's cached pick. */
 const stale = (what: string): string =>
   `That ${what} is no longer there — the model changed since it was picked. Click it again.`
 
-const checkSolid = 'Check its solid status in the Object Info panel.'
+const checkSolid = MAKE_SOLID_HINT
 
 /**
  * Second-sentence copy for a boundary-minted request-shape error (a
@@ -66,6 +68,8 @@ const DESCRIPTIONS: Record<string, string> = {
     'Moving this point would make lines cross or merge. Move it somewhere clear, or delete and redraw the lines instead.',
   MalformedRegion:
     "This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug.",
+  RegionHasNoFace:
+    'This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face.',
   DegenerateCurve:
     'That circle or arc is too small to keep. Drag a larger radius, or type an exact one.',
   UnknownCurve: stale('curve'),
@@ -121,7 +125,7 @@ const DESCRIPTIONS: Record<string, string> = {
     'That distance is too small to build anything. Drag further, or type an exact length.',
   DegenerateGeometry:
     "This profile can't be extruded into a valid solid. Simplify the shape and try again.",
-  ObjectNotSolid: `This object isn't a watertight solid, so it can't be pushed or pulled. ${checkSolid}`,
+  ObjectNotSolid: `This object isn't solid, so it can't be pushed or pulled. ${checkSolid}`,
   WouldVanish:
     'Pushing that far would remove the whole object. Push a shorter distance, or delete the object instead.',
   NonManifoldResult:
@@ -195,7 +199,7 @@ const DESCRIPTIONS: Record<string, string> = {
     'That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.',
 
   // -------------------------------------------------------- booleans
-  OperandNotSolid: `Combining needs watertight solids on both sides. ${checkSolid.replace('its', "each object's")}`,
+  OperandNotSolid: `Combining needs a solid on both sides. ${checkSolid}`,
   EmptyResult:
     "The result would be empty — the objects don't overlap that way. Check that the solids actually intersect.",
   SingularTransform:
@@ -204,7 +208,7 @@ const DESCRIPTIONS: Record<string, string> = {
     'The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.',
 
   // ----------------------------------------------------------- slice
-  NotSolid: `Only a watertight solid can be sliced. ${checkSolid}`,
+  NotSolid: `Only a solid can be sliced. ${checkSolid}`,
   PlaneMissesSolid:
     "The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.",
   Degenerate:
@@ -253,7 +257,7 @@ const DESCRIPTIONS: Record<string, string> = {
   BooleanOperandHasInstance:
     "Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.",
   BooleanOperandNotSolid:
-    'Something in that selection is not a watertight solid, so it can\'t be combined. Check each object\'s solid badge in Object Info and fix or remove the leaky one.',
+    `Something in that selection isn't solid, so it can't be combined. ${checkSolid}`,
   BooleanOperandEmpty:
     'That selection has no solids to combine. Pick a solid object or a group of solids.',
 
@@ -264,6 +268,32 @@ const DESCRIPTIONS: Record<string, string> = {
     "This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component.",
   AmbiguousInstanceScale:
     "This instance is scaled unevenly across its axes, so a single typed distance can't map onto it without ambiguity. Drag to the exact size instead of typing a length.",
+
+  // ------------------------------------------------ Model Health repairs
+  ObjectIsSolid:
+    "This is already solid, so there's nothing to close. Use Push/Pull to change its shape.",
+  UnknownRim:
+    'That opening is already closed. Check the list again for what is left.',
+  RimNotPlanar:
+    "This opening isn't flat, so one face can't close it. Draw faces across it by hand.",
+  RimSelfIntersecting:
+    "The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.",
+  CapWouldBeCoplanar:
+    'This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.',
+  NonManifoldRim:
+    "The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.",
+  CapsOverlap:
+    "A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.",
+  RemovesEverything:
+    "That would delete every face. Delete the object instead.",
+  Invalid:
+    "Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.",
+  NotAFlatSheet:
+    'Only flat panels can get a thickness this way. Close the openings of this shape instead.',
+  ThicknessTooSmall:
+    'That thickness is too small. Enter at least 0.001 mm.',
+  UnjoinedSeam:
+    'Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again.',
 
   // ---------------------------------------------------------- explode session
   ExplodeSessionOpen:
@@ -341,6 +371,8 @@ const DESCRIPTIONS: Record<string, string> = {
 
   // -------------------------------------------------------- annotations
   UnknownAnnotation: stale('dimension or label'),
+  AnnotationHasNoAttrs:
+    "A dimension or label can't carry attributes. Put them on the object it measures instead.",
   DegenerateAnnotation:
     "That dimension or label doesn't have a usable placement — its two " +
     "points are on top of each other, or the circle it measures has no " +
@@ -361,6 +393,7 @@ const DESCRIPTIONS: Record<string, string> = {
   BadVector: `Hew's own request to the model kernel carried a malformed xyz value. ${internalRequest}`,
   BadProjection: `Hew's own request to the model kernel named a camera projection it doesn't recognize. ${internalRequest}`,
   BadCamera: `Hew's own request to the model kernel carried a malformed camera. ${internalRequest}`,
+  BadViewStyle: `Hew's own request to the model kernel carried a malformed view style. ${internalRequest}`,
   BadDisplay: `Hew's own request to the model kernel carried malformed display settings. ${internalRequest}`,
   BadPlane: `Hew's own request to the model kernel carried a malformed plane. ${internalRequest}`,
   BadRadialKind: `Hew's own request to the model kernel asked for a dimension style it doesn't recognize. ${internalRequest}`,

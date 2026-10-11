@@ -40,6 +40,7 @@ fn box_recipe(name: &str) -> MeshRecipe {
         face_holes: vec![Vec::new(); 6],
         base_material: kernel::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -63,6 +64,7 @@ fn degenerate_recipe(name: &str) -> MeshRecipe {
         face_holes: vec![Vec::new()],
         base_material: kernel::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -76,6 +78,8 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     }
 }
 
@@ -152,6 +156,8 @@ fn ingest_is_atomic_undo_hides_all() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -244,6 +250,8 @@ fn ingest_instance_shares_one_def() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -307,6 +315,8 @@ fn ingest_then_save_load_preserves_names() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -362,19 +372,26 @@ fn ingest_guides_are_atomic_with_the_import() {
             ImportGuide::Line {
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 3.0), // non-unit: ingest normalizes
+                tags: Vec::new(),
+                span: kernel::GuideSpan::INFINITE,
             },
             ImportGuide::Point {
                 position: Point3::new(1.0, 2.0, 3.0),
+                tags: Vec::new(),
             },
             ImportGuide::Line {
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 0.0), // degenerate: skipped + reported
+                tags: Vec::new(),
+                span: kernel::GuideSpan::INFINITE,
             },
         ],
         tags: Vec::new(),
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
 
@@ -437,6 +454,8 @@ fn ingest_instance_own_name_wins_over_def_name() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -497,6 +516,8 @@ fn ingest_builds_nested_definitions() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -555,6 +576,8 @@ fn ingest_refuses_cyclic_definition_recipes() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     assert!(matches!(
         doc.ingest(scene, vec![]),
@@ -603,6 +626,8 @@ fn ingest_skips_nested_instances_of_failed_defs() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.skipped.len(), 1);
@@ -642,6 +667,8 @@ fn ingest_refuses_over_wide_definition_recipes() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let mut doc = Document::new();
     assert!(matches!(
@@ -659,12 +686,14 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         CameraProjection, CameraState, ImportSceneRecipe, ImportTag, Point3, SectionPlaneState,
         Vec3,
     };
-    let camera = |x: f64| CameraState {
-        projection: CameraProjection::Perspective,
-        fov_deg: 35.0,
-        eye: Point3::new(x, -5.0, 3.0),
-        target: Point3::new(0.0, 0.0, 0.0),
-        up: Vec3::new(0.0, 0.0, 1.0),
+    let camera = |x: f64| {
+        CameraState::framed(
+            CameraProjection::Perspective,
+            35.0,
+            Point3::new(x, -5.0, 3.0),
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        )
     };
     let section = SectionPlaneState {
         origin: Point3::new(0.0, 0.0, 0.5),
@@ -692,6 +721,7 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         camera: Some(camera(10.0)),
         scenes: vec![
             ImportSceneRecipe {
+                view_style: None,
                 name: "Plan".into(),
                 description: "cut".into(),
                 camera: Some(camera(1.0)),
@@ -699,29 +729,34 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
                 hidden_keys: Some(vec![7, 99]),
                 hidden_tags: Some(vec![vec!["Trees".into()], vec!["Missing".into()]]),
                 section: Some(Some(section)),
+                display: None,
             },
             ImportSceneRecipe {
+                view_style: None,
                 name: "Plan".into(),
                 description: String::new(),
                 camera: None,
                 hidden_keys: None,
                 hidden_tags: None,
                 section: None,
+                display: None,
             },
         ],
         section: Some(section),
+        view_style: None,
+        extra: Default::default(),
     };
 
     let mut doc = Document::new();
     doc.ingest(make(), vec![]).unwrap();
     // The saved view and its section cut land in the empty document.
-    assert_eq!(doc.camera_state(), Some(camera(10.0)));
+    assert!(same_view(doc.camera_state(), camera(10.0)));
     let scenes = doc.scenes();
     assert_eq!(scenes.len(), 2);
     let plan = &scenes[0];
     assert_eq!(plan.name, "Plan");
     assert_eq!(plan.description, "cut");
-    assert_eq!(plan.camera, Some(camera(1.0)));
+    assert!(same_view(plan.camera, camera(1.0)));
     assert_eq!(plan.section, Some(Some(section)));
     let hidden = plan.hidden_nodes.as_ref().expect("captured");
     assert_eq!(
@@ -754,7 +789,266 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
 
     // A second import into the now non-empty document keeps the camera.
     doc.ingest(make(), vec![]).unwrap();
-    assert_eq!(doc.camera_state(), Some(camera(10.0)));
+    assert!(same_view(doc.camera_state(), camera(10.0)));
     assert_eq!(doc.scenes().len(), 4);
     assert_eq!(doc.scenes()[2].name, "Plan (3)");
+}
+
+/// A SketchUp camera's target says only where it looks: the file's may sit
+/// a hand's width from the eye or in mid-air. Ingest moves it to where the
+/// view line meets the model (the file camera and every scene's), keeping
+/// the eye and direction and re-measuring a perspective view's height
+/// there; with nothing on the view line it lands at the depth of the
+/// model's center, and with no model at all it stays.
+#[test]
+fn ingest_puts_a_file_cameras_target_on_the_model() {
+    use kernel::{CameraProjection, CameraState, ImportSceneRecipe, ImportTag, Point3, Vec3};
+    // Looking straight down at the unit box from 10 m up, target 0.2 m away.
+    let down = CameraState::framed(
+        CameraProjection::Perspective,
+        35.0,
+        Point3::new(0.5, 0.5, 10.0),
+        Point3::new(0.5, 0.5, 9.8),
+        Vec3::new(0.0, 1.0, 0.0),
+    );
+    // Looking past the box: nothing on the line, the center's depth it is.
+    let past = CameraState::framed(
+        CameraProjection::Parallel,
+        35.0,
+        Point3::new(-5.0, 0.5, 0.5),
+        Point3::new(-4.0, 0.5, 2.5),
+        Vec3::new(0.0, 0.0, 1.0),
+    );
+    let recipe = |cam: CameraState, name: &str| ImportSceneRecipe {
+        view_style: None,
+        name: name.into(),
+        description: String::new(),
+        camera: Some(cam),
+        hidden_keys: None,
+        hidden_tags: None,
+        section: None,
+        display: None,
+    };
+    // A second box, hidden by its tag, sits right above the first on the
+    // way down: what is not on view is not what the camera looks at.
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![kernel::DefRecipe {
+            name: Some("hidden box".into()),
+            children: vec![ImportNode::Mesh(box_recipe("hidden"))],
+        }],
+        roots: vec![
+            ImportNode::Mesh(box_recipe("box")),
+            ImportNode::Instance {
+                def: 0,
+                pose: kernel::Transform::translation(Vec3::new(0.0, 0.0, 2.0)),
+                name: None,
+                tags: vec![vec!["Hidden".into()]],
+                hidden: false,
+                key: None,
+            },
+        ],
+        guides: vec![],
+        tags: vec![ImportTag {
+            path: vec!["Hidden".into()],
+            hidden: true,
+        }],
+        camera: Some(down),
+        scenes: vec![recipe(down, "Down"), recipe(past, "Past")],
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    let mut doc = Document::new();
+    doc.ingest(scene, vec![]).unwrap();
+    let cam = doc.camera_state().expect("adopted");
+    assert!((cam.eye - down.eye).length() < 1e-9, "the eye stays");
+    assert!(
+        (cam.target.z - 1.0).abs() < 1e-9,
+        "on the box's top: {:?}",
+        cam.target
+    );
+    assert!(
+        (cam.parallel_height - CameraState::height_at_target(cam.eye, cam.target, 35.0)).abs()
+            < 1e-9,
+        "the height is re-measured at the new target"
+    );
+    let scenes = doc.scenes();
+    let s_down = scenes
+        .iter()
+        .find(|s| s.name == "Down")
+        .unwrap()
+        .camera
+        .unwrap();
+    assert!((s_down.target.z - 1.0).abs() < 1e-9);
+    let s_past = scenes
+        .iter()
+        .find(|s| s.name == "Past")
+        .unwrap()
+        .camera
+        .unwrap();
+    let dir = (past.target - past.eye).normalized().unwrap();
+    // (The hidden box is not among the model the center is taken from.)
+    let expect = (Point3::new(0.5, 0.5, 0.5) - past.eye).dot(dir);
+    assert!(
+        ((s_past.target - s_past.eye).length() - expect).abs() < 1e-9,
+        "the center's depth: {:?}",
+        s_past.target
+    );
+    assert!(
+        (s_past.parallel_height - past.parallel_height).abs() < 1e-12,
+        "a parallel view keeps its height"
+    );
+
+    // No model: the camera is left as the file has it.
+    let empty = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![],
+        guides: vec![],
+        tags: vec![],
+        camera: Some(down),
+        scenes: vec![],
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    let mut doc = Document::new();
+    doc.ingest(empty, vec![]).unwrap();
+    assert_eq!(doc.camera_state().unwrap().target, down.target);
+}
+
+/// The view `a` is the file's `b`: same eye, direction, up and lens. (The
+/// target's depth is Hew's own — ingest moves it onto the model.)
+fn same_view(a: Option<kernel::CameraState>, b: kernel::CameraState) -> bool {
+    let Some(a) = a else { return false };
+    let da = (a.target - a.eye).normalized().unwrap();
+    let db = (b.target - b.eye).normalized().unwrap();
+    a.projection == b.projection
+        && a.fov_deg == b.fov_deg
+        && (a.eye - b.eye).length() < 1e-9
+        && (a.up - b.up).length() < 1e-9
+        && (da - db).length() < 1e-9
+}
+
+// ───────────────────────────────────────────── an import built in steps ──────
+
+/// An import built a few items at a time is the import built at once, and
+/// says how far it has come: the definitions first (a definition that
+/// places another builds after it), then the top-level nodes. Undo takes
+/// the stepped import out whole, as it does the one built at once.
+#[test]
+fn an_import_built_in_steps_is_the_import_built_at_once() {
+    use kernel::{DefRecipe, IngestProgress, Vec3};
+    let scene = || ImportScene {
+        materials: vec![],
+        defs: vec![
+            DefRecipe {
+                name: Some("table".into()),
+                children: vec![
+                    ImportNode::Mesh(box_recipe("top")),
+                    ImportNode::Instance {
+                        def: 1,
+                        pose: Transform::translation(Vec3::new(0.0, 0.0, -1.0)),
+                        name: None,
+                        tags: Vec::new(),
+                        hidden: false,
+                        key: None,
+                    },
+                ],
+            },
+            DefRecipe {
+                name: Some("leg".into()),
+                children: vec![ImportNode::Mesh(box_recipe("leg"))],
+            },
+        ],
+        roots: vec![
+            ImportNode::Mesh(box_recipe("floor")),
+            ImportNode::Group {
+                name: "shelf".into(),
+                children: vec![ImportNode::Mesh(box_recipe("board"))],
+                tags: Vec::new(),
+                hidden: false,
+                key: None,
+            },
+            ImportNode::Instance {
+                def: 0,
+                pose: Transform::translation(Vec3::new(3.0, 0.0, 1.0)),
+                name: None,
+                tags: Vec::new(),
+                hidden: false,
+                key: None,
+            },
+        ],
+        guides: Vec::new(),
+        tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    let mut at_once = Document::new();
+    let (report_once, _) = at_once.ingest(scene(), vec![]).unwrap();
+
+    let mut stepped = Document::new();
+    let mut job = stepped.ingest_begin(scene(), vec![]).unwrap();
+    assert_eq!(job.progress(), IngestProgress { done: 0, total: 5 });
+    assert!(!job.progress().finished());
+    let mut seen = Vec::new();
+    loop {
+        let p = stepped.ingest_step(&mut job, 1);
+        seen.push(p.done);
+        assert_eq!(p.total, 5);
+        if p.finished() {
+            break;
+        }
+    }
+    assert_eq!(
+        seen,
+        vec![1, 2, 3, 4, 5],
+        "one item per step, every step counted"
+    );
+    // A step past the end builds nothing more.
+    assert_eq!(
+        stepped.ingest_step(&mut job, 1),
+        IngestProgress { done: 5, total: 5 }
+    );
+    let (report_stepped, _) = stepped.ingest_finish(job);
+
+    assert_eq!(report_stepped.objects_created, report_once.objects_created);
+    assert_eq!(
+        report_stepped.objects_created, 4,
+        "floor, board, and the table's own two"
+    );
+    assert_eq!(stepped.state_hash(), at_once.state_hash());
+    stepped.undo().expect("undo the import");
+    assert_eq!(stepped.visible_object_ids().len(), 0);
+    stepped.redo().expect("redo the import");
+    assert_eq!(stepped.state_hash(), at_once.state_hash());
+}
+
+/// Finishing an import that was never stepped builds everything first.
+#[test]
+fn finishing_an_unstepped_import_builds_it_whole() {
+    let scene = ImportScene {
+        materials: vec![],
+        defs: vec![],
+        roots: vec![
+            ImportNode::Mesh(box_recipe("a")),
+            ImportNode::Mesh(box_recipe("b")),
+        ],
+        guides: Vec::new(),
+        tags: Vec::new(),
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    let mut doc = Document::new();
+    let job = doc.ingest_begin(scene, vec![]).unwrap();
+    let (report, _) = doc.ingest_finish(job);
+    assert_eq!(report.objects_created, 2);
+    assert_eq!(doc.visible_object_ids().len(), 2);
 }

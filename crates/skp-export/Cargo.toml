@@ -1,0 +1,27 @@
+# skp-export — Hew Document -> SketchUp `.skp` (2026 container or 2017),
+# via the clean-room OpenSKP writer. The mirror of skp-import: the mapping
+# here is the one skp-import reads back as the same document.
+[package]
+name = "skp-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+kernel = { workspace = true }
+openskp = { workspace = true }
+# The tessellator's plane basis: Hew's own texture placement on a face
+# without a UV frame, written out as an explicit placement.
+tessellate = { workspace = true }
+# The importer's provenance types: a save back to a .skp builds on where
+# each node came from in it.
+skp-import = { workspace = true }
+# The provenance's recovery blob.
+serde_json = { workspace = true }
+# Annotation handles in the provenance, as numbers.
+slotmap = { workspace = true }
+# A texture's average color, from its image.
+png = { workspace = true }
+jpeg-decoder = { workspace = true }
+
+[dev-dependencies]

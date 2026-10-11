@@ -20,10 +20,18 @@
  * resolve empty. This module must never throw.
  */
 
+import { normalizeRecoveryMeta } from './recoveryStore'
 import type { RecoveryListing, RecoveryMeta, RecoverySnapshot, RecoveryStore } from './recoveryStore'
 
 const DB_NAME = 'hew-recovery'
 const STORE_NAME = 'snapshot'
+/** The `.skp` source of a snapshot's document is its own record in the same
+ * store, keyed `<slot id>#src` — a separate record (not a field on the
+ * snapshot) so the source, up to 100+ MB, is written only when it changes
+ * rather than on every autosave, and so `list()` can skip it without
+ * reading it. (No schema bump: the database stays at version 1.) */
+const SOURCE_SUFFIX = '#src'
+const sourceKey = (slot: string): string => slot + SOURCE_SUFFIX
 const TAB_ID_KEY = 'hew.recovery.tab'
 const PRESENCE_CHANNEL = 'hew-recovery-presence'
 /** How long `list()` waits for live tabs to answer a presence ping. */
@@ -132,6 +140,23 @@ export class WebRecoveryStore implements RecoveryStore {
     }
   }
 
+  async writeSource(source: Uint8Array | null): Promise<void> {
+    if (!hasIndexedDB()) return
+    try {
+      const db = await openDb()
+      try {
+        const tx = db.transaction(STORE_NAME, 'readwrite')
+        if (source === null) tx.objectStore(STORE_NAME).delete(sourceKey(tabId()))
+        else tx.objectStore(STORE_NAME).put(source, sourceKey(tabId()))
+        await txDone(tx)
+      } finally {
+        db.close()
+      }
+    } catch {
+      // Best-effort — never throw.
+    }
+  }
+
   async list(): Promise<RecoveryListing[]> {
     if (!hasIndexedDB()) return []
     let entries: { slot: string; meta: RecoveryMeta }[] = []
@@ -142,7 +167,13 @@ export class WebRecoveryStore implements RecoveryStore {
         const store = tx.objectStore(STORE_NAME)
         const keys = await requestToPromise<IDBValidKey[]>(store.getAllKeys())
         const records = await requestToPromise<StoredRecord[]>(store.getAll())
-        entries = keys.map((k, i) => ({ slot: String(k), meta: records[i].meta }))
+        entries = keys.flatMap((k, i) => {
+          const key = String(k)
+          const record = records[i]
+          // A source record (`<slot>#src`) is not a snapshot.
+          if (key.endsWith(SOURCE_SUFFIX) || record?.meta === undefined) return []
+          return [{ slot: key, meta: normalizeRecoveryMeta(record.meta) }]
+        })
       } finally {
         db.close()
       }
@@ -194,11 +225,14 @@ export class WebRecoveryStore implements RecoveryStore {
         const store = tx.objectStore(STORE_NAME)
         const record = await requestToPromise<StoredRecord | undefined>(store.get(slot))
         if (record == null) return null
+        const source = await requestToPromise<Uint8Array | undefined>(store.get(sourceKey(slot)))
         // Re-home: delete the adopted slot so it is never re-offered — this
-        // tab's own future autosaves write under its own id.
+        // tab's own future autosaves write under its own id (the caller
+        // re-writes the source under it too).
         store.delete(slot)
+        store.delete(sourceKey(slot))
         await txDone(tx)
-        return { bytes: record.bytes, meta: record.meta }
+        return { bytes: record.bytes, meta: normalizeRecoveryMeta(record.meta), source: source ?? null }
       } finally {
         db.close()
       }
@@ -214,6 +248,7 @@ export class WebRecoveryStore implements RecoveryStore {
       try {
         const tx = db.transaction(STORE_NAME, 'readwrite')
         tx.objectStore(STORE_NAME).delete(tabId())
+        tx.objectStore(STORE_NAME).delete(sourceKey(tabId()))
         await txDone(tx)
       } finally {
         db.close()

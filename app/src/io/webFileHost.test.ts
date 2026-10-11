@@ -155,3 +155,40 @@ describe('anchorDownload', () => {
     revoke.mockRestore()
   })
 })
+
+describe('WebFileHost save/saveAs without the File System Access API (format-aware fallback)', () => {
+  const captured: Array<{ download: string }> = []
+
+  afterEach(() => {
+    delete (HTMLAnchorElement.prototype as { click?: unknown }).click
+    captured.length = 0
+  })
+
+  function captureClicks(): void {
+    ;(HTMLAnchorElement.prototype as { click?: unknown }).click = function (this: HTMLAnchorElement) {
+      captured.push({ download: this.download })
+    }
+  }
+
+  it('saveAs downloads a SketchUp file as .skp, never .hew', async () => {
+    captureClicks()
+    const ref = await new WebFileHost().saveAs(new Uint8Array([1]), 'Model', 'skp2026')
+    expect(captured.map((c) => c.download)).toEqual(['Model.skp'])
+    expect(ref).toEqual({ name: 'Model.skp', format: 'skp2026', handle: null })
+  })
+
+  it('saveAs swaps a known extension rather than stacking it', async () => {
+    captureClicks()
+    const ref = await new WebFileHost().saveAs(new Uint8Array([1]), 'Model.skp', 'hew')
+    expect(captured.map((c) => c.download)).toEqual(['Model.hew'])
+    expect(ref?.format).toBe('hew')
+  })
+
+  it('save of a .skp ref without a handle downloads .skp and keeps the ref', async () => {
+    captureClicks()
+    const ref = { name: 'Model.skp', format: 'skp2017' as const, handle: null }
+    const out = await new WebFileHost().save(new Uint8Array([1]), ref)
+    expect(captured.map((c) => c.download)).toEqual(['Model.skp'])
+    expect(out).toBe(ref)
+  })
+})

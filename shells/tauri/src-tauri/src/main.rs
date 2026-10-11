@@ -41,6 +41,8 @@ mod live_router;
 // webview — see qr.rs's own doc comment).
 mod print;
 mod qr;
+// The native save panel with the format list (and its options) in it.
+mod save_panel;
 // The "Open on Phone" relay client + the server setting it is bound to
 // (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
 // live in Rust rather than behind an HTTP plugin scope.
@@ -1422,6 +1424,14 @@ fn slot_paths(config_dir: &Path, slot: &str) -> (PathBuf, PathBuf) {
     }
 }
 
+/// The `.skpsrc` companion of a snapshot slot: the `.skp` source bytes a
+/// SketchUp document saves back onto (see the `Scene` source in wasm-api).
+/// Written only when it changes, so unlike the pair it is not part of every
+/// autosave. Pure path mapping, derived from the slot's `.hew` path.
+fn slot_source_path(hew_path: &Path) -> PathBuf {
+    hew_path.with_extension("skpsrc")
+}
+
 /// The slot name for a snapshot `.hew` filename, or None for non-snapshots.
 /// Pure (unit-tested below).
 fn slot_of_filename(name: &str) -> Option<String> {
@@ -1519,6 +1529,67 @@ fn recovery_write(
     Ok(())
 }
 
+/// Persist the `.skp` source of the calling window's document beside its
+/// snapshot (raw IPC body, atomic). Sources are tens to hundreds of MB, so
+/// this is called only when the source changes, never per autosave.
+#[tauri::command]
+fn recovery_source_write(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("recovery_source_write expects a raw byte body".to_owned());
+        }
+    };
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Err("could not resolve app config dir".into());
+    };
+    std::fs::create_dir_all(&config_dir).map_err(|e| e.to_string())?;
+    let slot = effective_own_slot(&app, window.label());
+    let (hew_path, _) = slot_paths(&config_dir, &slot);
+    write_atomic(&slot_source_path(&hew_path), bytes).map_err(|e| e.to_string())
+}
+
+/// Remove the calling window's `.skp` source companion (no-op if none).
+#[tauri::command]
+fn recovery_source_clear(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+) -> Result<(), String> {
+    let Some(config_dir) = app.path().app_config_dir().ok() else {
+        return Ok(());
+    };
+    let slot = effective_own_slot(&app, window.label());
+    let (hew_path, _) = slot_paths(&config_dir, &slot);
+    let _ = std::fs::remove_file(slot_source_path(&hew_path));
+    Ok(())
+}
+
+/// Read the `.skp` source companion of `slot` as a raw response. Errors when
+/// there is none (the caller treats that as "no source"). Called before
+/// `recovery_claim`, which re-homes the slot's files.
+#[tauri::command]
+fn recovery_source_read(
+    app: tauri::AppHandle,
+    slot: String,
+) -> Result<tauri::ipc::Response, String> {
+    if slot.is_empty() || slot.contains(['/', '\\']) || slot.contains("..") {
+        return Err(format!("recovery_source_read: invalid slot {slot:?}"));
+    }
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|_| "could not resolve app config dir".to_owned())?;
+    let (hew_path, _) = slot_paths(&config_dir, &slot);
+    let path = slot_source_path(&hew_path);
+    let bytes =
+        std::fs::read(&path).map_err(|e| format!("no recovery source for {slot:?}: {e}"))?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Enumerate every stored recovery snapshot (all window labels + legacy),
 /// newest first. Called by the `main` window at startup to offer recovery of
 /// every crashed document, not just the newest one.
@@ -1612,8 +1683,10 @@ fn recovery_claim(
         } else {
             let _ = std::fs::remove_file(&dst_hew);
             let _ = std::fs::remove_file(&dst_json);
+            let _ = std::fs::remove_file(slot_source_path(&dst_hew));
             if std::fs::rename(&src_hew, &dst_hew).is_ok() {
                 let _ = std::fs::rename(&src_json, &dst_json);
+                let _ = std::fs::rename(slot_source_path(&src_hew), slot_source_path(&dst_hew));
             }
         }
     }
@@ -1660,6 +1733,7 @@ fn clear_recovery_for_label(app: &tauri::AppHandle, label: &str) {
     };
     let slot = effective_own_slot(app, label);
     let (hew_path, json_path) = slot_paths(&config_dir, &slot);
+    let _ = std::fs::remove_file(slot_source_path(&hew_path));
     let _ = std::fs::remove_file(hew_path);
     let _ = std::fs::remove_file(json_path);
 }
@@ -1684,7 +1758,9 @@ fn recovery_discard_all(app: tauri::AppHandle) -> Result<(), String> {
         let is_recovery = name == "recovery.hew"
             || name == "recovery.json"
             || (name.starts_with("recovery-")
-                && (name.ends_with(".hew") || name.ends_with(".json")));
+                && (name.ends_with(".hew")
+                    || name.ends_with(".json")
+                    || name.ends_with(".skpsrc")));
         if is_recovery {
             let _ = std::fs::remove_file(&path);
         }
@@ -2076,6 +2152,37 @@ async fn pick_save_path(
     Some(path.to_string_lossy().into_owned())
 }
 
+/// Show the platform's save panel with the format list in it (and the
+/// chosen format's options), and record write approval for the path the
+/// user confirmed. `None` when canceled; an error when the panel could
+/// not be shown, so the webview says so rather than treating it as a
+/// cancel. The webview writes the bytes afterwards, since they depend on
+/// the format picked.
+#[tauri::command]
+async fn pick_save_target(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    title: String,
+    default_name: String,
+    formats: Vec<save_panel::PanelFormat>,
+    initial: String,
+) -> Result<Option<save_panel::PanelResult>, String> {
+    let initial = formats.iter().position(|f| f.id == initial).unwrap_or(0);
+    let request = save_panel::PanelRequest {
+        title,
+        default_name,
+        formats,
+        initial,
+    };
+    let picked = tauri::async_runtime::spawn_blocking(move || save_panel::run(&window, request))
+        .await
+        .map_err(|e| e.to_string())??;
+    if let Some(p) = &picked {
+        approve_file(&app, Path::new(&p.path), true);
+    }
+    Ok(picked)
+}
+
 /// Take the pending-open path (cold-start file association) — returns Some once,
 /// then None on subsequent calls.
 #[tauri::command]
@@ -2333,31 +2440,40 @@ async fn library_confirm(
         .map_err(|e| e.to_string())
 }
 
-/// True only for an existing regular file whose name ends `.hew` (case-
-/// insensitive), with symlinks resolved. Gate for what may enter or stay in
-/// the recents list: recents are auto-approved (read+write) at launch, and
-/// their path — unlike every other `ApprovedPaths` input — originates from
-/// persisted state / a JS `push_recent` argument, not a native picker. This
-/// keeps a compromised webview from persisting an arbitrary path (a launch
-/// agent, `~/.zshrc`, `/etc/...`) that the next launch would then approve.
-fn is_recentable_hew_file(path: &str) -> bool {
+/// True when `name` is a path Hew opens as a document: `.hew` or SketchUp's
+/// `.skp` (case-insensitive). Pure; the extension test every open route
+/// (argv, single-instance, macOS Open With) and the recents gate share.
+fn is_document_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.ends_with(".hew") || lower.ends_with(".skp")
+}
+
+/// True only for an existing regular file whose name ends `.hew` or `.skp`
+/// (case-insensitive), with symlinks resolved. Gate for what may enter or
+/// stay in the recents list: recents are auto-approved (read+write) at
+/// launch, and their path — unlike every other `ApprovedPaths` input —
+/// originates from persisted state / a JS `push_recent` argument, not a
+/// native picker. This keeps a compromised webview from persisting an
+/// arbitrary path (a launch agent, `~/.zshrc`, `/etc/...`) that the next
+/// launch would then approve.
+fn is_recentable_document_file(path: &str) -> bool {
     let Ok(canon) = std::fs::canonicalize(path) else {
         return false;
     };
     canon.is_file()
         && canon
             .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("hew"))
+            .is_some_and(|e| e.eq_ignore_ascii_case("hew") || e.eq_ignore_ascii_case("skp"))
 }
 
 #[tauri::command]
 fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
-    // A recent must be a real .hew document — never an arbitrary path a
+    // A recent must be a real .hew or .skp document — never an arbitrary path a
     // compromised webview could plant for the launch-time auto-approval to
     // pick up (audit sec-desktop). Silently ignore anything else: a genuine
     // just-opened/just-saved .hew always qualifies, so this never rejects a
     // legitimate call.
-    if !is_recentable_hew_file(&path) {
+    if !is_recentable_document_file(&path) {
         return Ok(());
     }
     let state = app.state::<Mutex<RecentState>>();
@@ -2641,14 +2757,12 @@ fn rebuild_recent_submenu(
 // ---------------------------------------------------------------------------
 
 fn main() {
-    // Check argv for a .hew path on Windows/Linux (best-effort, first launch).
+    // Check argv for a .hew or .skp path on Windows/Linux (best-effort, first launch).
     // macOS uses RunEvent::Opened (Apple event), so we skip argv there.
     let argv_path: Option<String> = {
         #[cfg(not(target_os = "macos"))]
         {
-            std::env::args()
-                .skip(1)
-                .find(|a| a.to_lowercase().ends_with(".hew"))
+            std::env::args().skip(1).find(|a| is_document_name(a))
         }
         #[cfg(target_os = "macos")]
         {
@@ -2663,11 +2777,7 @@ fn main() {
         // whose "main" window would fight this one over recovery-main.hew
         // and window-state.json.
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
-            if let Some(path) = args
-                .iter()
-                .skip(1)
-                .find(|a| a.to_lowercase().ends_with(".hew"))
-            {
+            if let Some(path) = args.iter().skip(1).find(|a| is_document_name(a)) {
                 deliver_open(app, path);
             }
             if let Some(w) = active_document_window(app) {
@@ -2697,6 +2807,7 @@ fn main() {
             list_dir,
             pick_open_path,
             pick_save_path,
+            pick_save_target,
             take_pending_open,
             take_pending_recovery,
             frontend_ready,
@@ -2736,6 +2847,9 @@ fn main() {
             recovery_list,
             recovery_claim,
             recovery_clear,
+            recovery_source_write,
+            recovery_source_clear,
+            recovery_source_read,
             recovery_discard_all,
             log_append,
             log_rotate,
@@ -3084,6 +3198,14 @@ fn main() {
             // wire ids shared with the dispatch switch, sync_menu_state, and
             // the palette, not user-visible text.
             // ----------------------------------------------------------------
+            // Make Solid… — always enabled (it works on the selection, or the whole
+            // model when nothing is selected), so a plain item rather than `gated_item`.
+            let object_make_solid =
+                MenuItemBuilder::with_id("object-make-solid", "Make Solid…").build(handle)?;
+            // Model Health… opens the floating window (docs/design/import-health.md),
+            // or brings it forward; also always enabled, so a plain item.
+            let object_model_health =
+                MenuItemBuilder::with_id("object-model-health", "Model Health…").build(handle)?;
             let object_menu = SubmenuBuilder::new(handle, "Object")
                 .item(&edit_group)
                 .item(&edit_ungroup)
@@ -3097,6 +3219,9 @@ fn main() {
                 .item(&edit_union)
                 .item(&edit_subtract)
                 .item(&edit_intersect)
+                .separator()
+                .item(&object_make_solid)
+                .item(&object_model_health)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -3768,7 +3893,7 @@ fn main() {
             // covering a non-document path (a launch agent, a shell rc file),
             // even if recents.json was hand-edited on disk (audit sec-desktop).
             for path in &recents {
-                if is_recentable_hew_file(path) {
+                if is_recentable_document_file(path) {
                     approve_file(handle, Path::new(path), true);
                 }
             }
@@ -4060,6 +4185,8 @@ fn main() {
                 "edit-union" => "edit-union",
                 "edit-subtract" => "edit-subtract",
                 "edit-intersect" => "edit-intersect",
+                "object-make-solid" => "make-solid",
+                "object-model-health" => "model-health",
                 "view-axes" => "toggle-axes",
                 "view-reset-axes" => "reset-axes",
                 "view-grid" => "toggle-grid",
@@ -4173,7 +4300,7 @@ fn main() {
                             continue;
                         };
                         let path_str = path.to_string_lossy().to_string();
-                        if !path_str.to_lowercase().ends_with(".hew") {
+                        if !is_document_name(&path_str) {
                             continue;
                         }
                         deliver_open(app, &path_str);
@@ -4243,6 +4370,25 @@ mod tests {
         let (hew, json) = slot_paths(dir, LEGACY_SLOT);
         assert_eq!(hew, Path::new("/cfg/recovery.hew"));
         assert_eq!(json, Path::new("/cfg/recovery.json"));
+    }
+
+    #[test]
+    fn slot_source_path_sits_beside_the_snapshot() {
+        let (hew, _) = slot_paths(Path::new("/cfg"), "main-3");
+        assert_eq!(
+            slot_source_path(&hew),
+            Path::new("/cfg/recovery-main-3.skpsrc")
+        );
+        // The companion is never mistaken for a snapshot.
+        assert_eq!(slot_of_filename("recovery-main-3.skpsrc"), None);
+    }
+
+    #[test]
+    fn document_names_are_hew_or_skp() {
+        assert!(is_document_name("/a/b/Model.hew"));
+        assert!(is_document_name("C:\\x\\House.SKP"));
+        assert!(!is_document_name("/a/b/Model.skb"));
+        assert!(!is_document_name("/a/b/Model.skp.bak"));
     }
 
     #[test]

@@ -176,6 +176,7 @@ fn camera_to_json(cam: &kernel::CameraState) -> Value {
             kernel::CameraProjection::Parallel => "parallel",
         },
         "fov_deg": cam.fov_deg,
+        "parallel_height": cam.parallel_height,
     })
 }
 
@@ -206,6 +207,14 @@ fn scene_to_json(scene: &kernel::Scene) -> Value {
     }
     if let Some(d) = scene.display {
         out["display"] = display_to_json(d);
+    }
+    if let Some(v) = scene.view_style {
+        out["view_style"] = json!({
+            "background": v.background,
+            "sky": v.sky,
+            "ground": v.ground,
+            "axes": v.axes,
+        });
     }
     out
 }

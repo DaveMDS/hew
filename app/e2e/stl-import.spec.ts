@@ -211,7 +211,7 @@ test('a non-manifold part imports without any piece silently vanishing', async (
   expect(report.objects_created).toBeGreaterThanOrEqual(1)
   expect(report.skipped).toHaveLength(0)
   // A split is loud, never silent.
-  expect(report.warnings.some((w) => w.includes('non-manifold'))).toBe(true)
+  expect(report.warnings.some((w) => w.includes('separate pieces'))).toBe(true)
 })
 
 test('a hollow/nested part reconstructs as ONE watertight Object with a cavity', async ({
@@ -320,7 +320,7 @@ for (const variant of [
   })
 }
 
-test('import UI: a leaky STL reports the leaky count honestly', async ({ page }) => {
+test('import UI: an open STL reports it as an open shape, honestly and neutrally', async ({ page }) => {
   await armFilePicker(page, 'cube_open.stl', fixture('cube_open.stl'))
   await page.getByTestId('menu-bar').getByRole('button', { name: 'File' }).click()
   await page.getByText('Import…', { exact: true }).click()
@@ -331,7 +331,12 @@ test('import UI: a leaky STL reports the leaky count honestly', async ({ page })
 
   const report = page.getByRole('dialog', { name: /import report/i })
   await expect(report).toBeVisible()
-  await expect(report).toContainText(/leaky/i) // the open cube is flagged leaky
+  // The open cube is stated as normal, in plain words (never "leaky"), and
+  // Make Solid… is offered beside the primary OK.
+  await expect(report).toContainText('It works as it is.')
+  await expect(report.getByRole('button', { name: 'OK' })).toBeVisible()
+  await expect(report.getByRole('button', { name: 'Make Solid…' })).toBeVisible()
+  await expect(report).not.toContainText(/leaky|manifold|\brim\b|fix/i)
 })
 
 // ── 4. Re-entrancy guard in the real browser ─────────────────────────────────

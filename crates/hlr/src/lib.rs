@@ -607,7 +607,7 @@ pub fn line_drawing(
         };
         // Triangles (before section clipping) with facing, for silhouettes.
         let mut item_tris: Vec<Tri> = Vec::with_capacity(m.indices.len() / 3);
-        for t in m.indices.chunks_exact(3) {
+        for t in m.front_triangles() {
             item_tris.push(Tri {
                 a: pos(t[0] as usize),
                 b: pos(t[1] as usize),
@@ -630,7 +630,7 @@ pub fn line_drawing(
                     m.positions[i * 3 + 2].to_bits(),
                 ]
             };
-            for (ti, t) in m.indices.chunks_exact(3).enumerate() {
+            for (ti, t) in m.front_triangles().enumerate() {
                 let tri = &item_tris[ti];
                 let n = tri_normal(tri);
                 let facing = if frame.perspective {

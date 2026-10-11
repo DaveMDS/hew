@@ -284,7 +284,7 @@ impl Registry {
             S,
             Host,
             Req,
-            "Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.",
+            "Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.",
         );
         add(
             "hew.doc.close",
@@ -306,7 +306,7 @@ impl Registry {
             S,
             Host,
             Req,
-            "Export the attached document (STL/3MF/glTF/USDZ); bytes base64, or a path on hosts with filesystem access.",
+            "Export the attached document (STL/3MF/glTF/USDZ, or SketchUp skp/skp2017); bytes base64, or a path on hosts with filesystem access.",
         );
         add(
             "hew.doc.import",
@@ -321,6 +321,13 @@ impl Registry {
             Kernel,
             Std,
             "Delete every unused material and component definition, as one undo entry.",
+        );
+        add(
+            "hew.doc.health",
+            R,
+            Kernel,
+            Std,
+            "Model health: every open object (world or component member) with its verdict, open rims and seam family, and counts by kind.",
         );
         // hew.query — the read surface.
         add(
@@ -465,6 +472,34 @@ impl Registry {
             Kernel,
             Req,
             "Push/pull a face of a solid with the tool's full semantics.",
+        );
+        add(
+            "hew.solid.cap",
+            M,
+            Kernel,
+            Std,
+            "Close an open object's flat openings with faces; an object closed all round becomes a solid.",
+        );
+        add(
+            "hew.solid.delete_faces",
+            M,
+            Kernel,
+            Std,
+            "Remove faces from an open object; islands cut loose become objects of their own. Solids refuse.",
+        );
+        add(
+            "hew.solid.mark_surface",
+            M,
+            Kernel,
+            Std,
+            "Mark an open object as a surface on purpose (or clear the mark); hew.doc.health keeps listing it, flagged accepted.",
+        );
+        add(
+            "hew.solid.thicken",
+            M,
+            Kernel,
+            Std,
+            "Pull a flat surface into a solid of the given thickness.",
         );
         add(
             "hew.solid.union",
@@ -1274,7 +1309,10 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string" },
+                    "path": {
+                        "type": "string",
+                        "description": "a .hew file, or a SketchUp .skp file (either container) when the extension is .skp; a later hew.doc.save with no format writes the same container back"
+                    },
                     "focus": window_focus_schema(),
                     "label": window_label_schema()
                 },
@@ -1340,7 +1378,7 @@ impl Registry {
         {
             let cmd = commands.get_mut("hew.doc.save").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.";
+            cmd.summary = "Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1352,36 +1390,57 @@ impl Registry {
                     "return_bytes": {
                         "type": "boolean",
                         "description": "hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path`"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["hew", "skp", "skp2017"],
+                        "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch)."
+                    },
+                    "units": {
+                        "type": "string",
+                        "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"],
+                        "description": "The display units a SketchUp file opens in (hew.view.units's formats), a save back over a .skp included. Absent: a save back keeps the file's own units and a new file takes the host's display units (the app's preference live; meters headless). A .hew ignores it."
                     }
                 },
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "bytes_base64": { "type": "string" } },
+                "properties": {
+                    "bytes_base64": { "type": "string" },
+                    "format": { "type": "string", "enum": ["hew", "skp", "skp2017"], "description": "the format the document was saved in" },
+                    "simplified": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the file could not hold exactly" },
+                    "writer_notes": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the 2017 writer dropped" }
+                },
                 "additionalProperties": false
             });
             cmd.refusals = vec![
+                "file_open_elsewhere",
+                "format_mismatch",
                 "host_capability_missing",
                 "path_required",
                 "save_failed",
-                "file_open_elsewhere",
             ];
         }
         {
             let cmd = commands.get_mut("hew.doc.export").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.";
+            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp (\"skp\", 2026 container; \"skp2017\") — bytes base64, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "format": {
                         "type": "string",
-                        "enum": ["stl", "3mf", "glb", "gltf", "usdz"],
-                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both"
+                        "enum": ["stl", "3mf", "glb", "gltf", "usdz", "skp", "skp2017"],
+                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file"
                     },
                     "path": { "type": "string" },
-                    "segments_per_turn": { "type": "integer", "minimum": 8, "maximum": 512 }
+                    "segments_per_turn": { "type": "integer", "minimum": 8, "maximum": 512 },
+                    "units": {
+                        "type": "string",
+                        "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"],
+                        "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless)."
+                    }
                 },
                 "required": ["format"],
                 "additionalProperties": false
@@ -1435,6 +1494,210 @@ impl Registry {
             ];
         }
         {
+            let verdict = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["flat_sheet", "bent_sheet", "cappable", "holes", "mixed", "non_manifold"] },
+                    "holes": { "type": "integer", "description": "flat_sheet: holes in the sheet" },
+                    "planar": { "type": "integer", "description": "holes: how many are flat (a face can close each)" },
+                    "warped": { "type": "integer", "description": "holes: how many are not flat" }
+                },
+                "required": ["kind"]
+            });
+            let cmd = commands.get_mut("hew.doc.health").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "objects": { "type": "array", "items": { "type": "string" }, "description": "obj_ ids to diagnose; omitted = every live object, component members included" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "rows": {
+                        "type": "array",
+                        "description": "one per open (non-solid) object; a component member is one row however often it is placed",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "object": { "type": "string" },
+                                "name": { "type": ["string", "null"] },
+                                "definition": { "type": ["string", "null"], "description": "cmp_ id when the object is a component member" },
+                                "definition_name": { "type": ["string", "null"] },
+                                "placements": { "type": "integer" },
+                                "instances": { "type": "array", "items": { "type": "string" }, "description": "outermost ins_ ids that place the member" },
+                                "accepted": { "type": "boolean", "description": "marked as a surface with hew.solid.mark_surface" },
+                                "family": { "type": ["integer", "null"], "description": "index into families" },
+                                "verdict": verdict,
+                                "rims": {
+                                    "type": "array",
+                                    "description": "open rims; their order is what hew.solid.cap's rims index",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "role": { "type": "string", "enum": ["outer", "hole"] },
+                                            "planar": { "type": "boolean" },
+                                            "cappable": { "type": "boolean", "description": "a face can close it: closed, planar, not the edge of a flat part of the surface, no branching vertex" },
+                                            "closed": { "type": "boolean" },
+                                            "sheet_edge": { "type": "boolean", "description": "planar, but runs along the edge of a flat part of the surface on its plane (a basin's lip), so a face there would lie on that part's back" },
+                                            "shared": { "type": "boolean", "description": "another row's rim coincides with it: a seam between pieces of one shape the importer split (see family)" },
+                                            "perimeter": { "type": "number" },
+                                            "extent": { "type": "number" },
+                                            "edges": { "type": "integer" }
+                                        }
+                                    }
+                                },
+                                "branching_vertices": { "type": "integer" },
+                                "islands": { "type": "integer" },
+                                "faces": { "type": "integer", "description": "how many faces the object has" }
+                            },
+                            "required": ["object", "verdict", "rims", "accepted", "placements"]
+                        }
+                    },
+                    "families": {
+                        "type": "array",
+                        "description": "objects an importer split from one shape, joined by shared rims",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "members": { "type": "array", "items": { "type": "string" } },
+                                "shared_rims": { "type": "integer" }
+                            }
+                        }
+                    },
+                    "counts": { "type": "object", "description": "objects, solids, flat_sheets, bent_sheets, cappable, holes, mixed, non_manifold, seam_families" }
+                },
+                "required": ["rows", "families", "counts"]
+            });
+            cmd.refusals = vec!["unknown_entity"];
+
+            let repair_refusals = |extra: &[&'static str]| {
+                let mut v = vec![
+                    "object_is_solid",
+                    "unknown_component",
+                    "unknown_entity",
+                    "explode_session_scope",
+                    "invalid",
+                ];
+                v.extend_from_slice(extra);
+                v
+            };
+            let cmd = commands.get_mut("hew.solid.cap").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id (a world object or a component member)" },
+                    "rims": { "type": "array", "items": { "type": "integer", "minimum": 0 }, "description": "indices into the object's hew.doc.health rims; omitted = every cappable rim (when none is, all of them, so the refusal says why)" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "faces": { "type": "integer", "description": "faces added (face tokens cap.1, cap.2, ... in a transaction)" },
+                    "closed": { "type": "boolean", "description": "the object is now a solid" },
+                    "reversed": { "type": "boolean", "description": "an island the caps closed was inside out, so that island's faces were turned over (a cavity inside another island is left as is)" }
+                },
+                "required": ["object_id", "faces", "closed", "reversed"]
+            });
+            cmd.refusals = repair_refusals(&[
+                "unknown_rim",
+                "rim_not_planar",
+                "rim_self_intersecting",
+                "cap_would_be_coplanar",
+                "non_manifold_rim",
+                "caps_overlap",
+            ]);
+
+            let cmd = commands
+                .get_mut("hew.solid.delete_faces")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string" },
+                    "faces": {
+                        "type": "array",
+                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}" },
+                        "minItems": 1,
+                        "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)"
+                    }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "deleted": { "type": "boolean", "description": "every face went, so the object was deleted" },
+                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "islands cut loose, now objects of their own" }
+                },
+                "required": ["object_id", "deleted", "object_ids"]
+            });
+            cmd.refusals = repair_refusals(&[
+                "unknown_face",
+                "last_definition_member",
+                "locator_missed",
+                "ambiguous_locator",
+                "face_token_unknown",
+                "face_token_stale",
+            ]);
+
+            let cmd = commands
+                .get_mut("hew.solid.mark_surface")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string" },
+                    "accepted": { "type": "boolean", "default": true, "description": "false clears the mark" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "accepted": { "type": "boolean" }
+                },
+                "required": ["object_id", "accepted"]
+            });
+            cmd.refusals = vec!["object_is_solid", "unknown_entity"];
+
+            let cmd = commands
+                .get_mut("hew.solid.thicken")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string" },
+                    "distance": { "type": "number", "description": "meters along each face's front normal (negative: behind it)" },
+                    "centered": { "type": "boolean", "default": false, "description": "split the thickness evenly on both sides of the surface" }
+                },
+                "required": ["object", "distance"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string", "description": "the surface, now a solid" },
+                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "further separate pieces of the surface, each now a solid of its own" }
+                },
+                "required": ["object_id", "object_ids"]
+            });
+            cmd.refusals = repair_refusals(&["not_a_flat_sheet", "thickness_too_small"]);
+        }
+        {
             let cmd = commands
                 .get_mut("hew.doc.purge_unused")
                 .expect("declared above");
@@ -1483,7 +1746,8 @@ impl Registry {
                             "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                             "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                             "projection": { "type": "string", "enum": ["perspective", "parallel"] },
-                            "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" }
+                            "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" },
+                            "parallel_height": { "type": "number", "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there" }
                         },
                         "required": ["eye", "target"],
                         "additionalProperties": false,
@@ -1868,7 +2132,8 @@ impl Registry {
                             "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                             "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                             "projection": { "type": "string", "enum": ["perspective", "parallel"] },
-                            "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" }
+                            "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" },
+                            "parallel_height": { "type": "number", "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there" }
                         },
                         "required": ["eye", "target"],
                         "additionalProperties": false,
@@ -2718,7 +2983,8 @@ impl Registry {
                     "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "projection": { "type": "string", "enum": ["perspective", "parallel"] },
-                    "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" }
+                    "fov_deg": { "type": "number", "description": "perspective only; defaults to 35" },
+                    "parallel_height": { "type": "number", "description": "the height the view spans at the target, meters (what a parallel view frames); defaults to what the perspective view spans there" }
                 },
                 "required": ["eye", "target"],
                 "additionalProperties": false,
@@ -2754,9 +3020,10 @@ impl Registry {
                     "target": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "up": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "projection": { "type": "string", "enum": ["perspective", "parallel"] },
-                    "fov_deg": { "type": "number" }
+                    "fov_deg": { "type": "number" },
+                    "parallel_height": { "type": "number", "description": "the height the view spans at the target, meters" }
                 },
-                "required": ["eye", "target", "up", "projection", "fov_deg"]
+                "required": ["eye", "target", "up", "projection", "fov_deg", "parallel_height"]
             });
             let section_result_schema = serde_json::json!({
                 "oneOf": [
@@ -2793,7 +3060,18 @@ impl Registry {
                     },
                     "camera": camera_result_schema.clone(),
                     "section": section_result_schema.clone(),
-                    "display": display_schema.clone()
+                    "display": display_schema.clone(),
+                    "view_style": {
+                        "type": "object",
+                        "properties": {
+                            "background": { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 },
+                            "sky": { "oneOf": [{ "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 }, { "type": "null" }] },
+                            "ground": { "oneOf": [{ "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 }, { "type": "null" }] },
+                            "axes": { "type": "boolean" }
+                        },
+                        "required": ["background", "sky", "ground", "axes"],
+                        "description": "the look the Scene restores with its display property: backdrop (sRGB background, sky and ground or null) and whether the model axes are drawn; captured from the document's own view style, so absent for a document shown Hew's way"
+                    }
                 },
                 "required": ["id", "sid", "name", "description", "props"],
                 "description": "camera/display are present only when that property is captured AND has something to report; section is present (possibly null) whenever the section property is captured"
@@ -3642,6 +3920,7 @@ impl Registry {
                 "distance_too_small",
                 "degenerate_geometry",
                 "unknown_region",
+                "region_has_no_face",
                 "unknown_entity",
                 "unknown_unit",
                 "region_not_pushable",

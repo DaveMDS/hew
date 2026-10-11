@@ -133,6 +133,8 @@ pub fn build_scene(
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         },
         mat_table.missing,
         warnings,
@@ -298,8 +300,8 @@ impl SplitWarnings {
             return;
         }
         self.degenerate_messages.push(format!(
-            "'{}': {} degenerate sliver face{} (too thin to build) {} removed; \
-             the mesh may arrive leaky",
+            "'{}': {} face{} too thin to build {} left out, so the mesh may have \
+             small gaps",
             if name.is_empty() {
                 "unnamed mesh"
             } else {
@@ -317,8 +319,8 @@ fn cap_split_warnings(warnings: &mut Vec<String>) {
         let extra = warnings.len() - SPLIT_DETAIL_CAP;
         warnings.truncate(SPLIT_DETAIL_CAP);
         warnings.push(format!(
-            "{extra} more non-manifold mesh{} imported as open shells \
-             (split at non-manifold edges, geometry unchanged)",
+            "{extra} more mesh{} came in as separate pieces for the same \
+             reason",
             if extra == 1 { "" } else { "es" },
         ));
     }
@@ -382,8 +384,8 @@ fn build_recipes(
         // [`SplitWarnings`]).
         if warnings.warned_meshes.insert(mesh_index) {
             warnings.messages.push(format!(
-                "'{}' is non-manifold; imported as {} open shell{} \
-                 (split at non-manifold edges, geometry unchanged)",
+                "'{}' came in as {} separate piece{} because some of its edges \
+                 are shared by more than two faces; the shape itself is unchanged",
                 if name.is_empty() {
                     "unnamed mesh"
                 } else {
@@ -450,6 +452,7 @@ fn recipe_from_arrays(
         face_holes,
         base_material: NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 

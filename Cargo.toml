@@ -14,6 +14,7 @@ members = [
     "crates/dae-import",
     "crates/gltf-import",
     "crates/skp-import",
+    "crates/skp-export",
     "crates/stl-import",
     "crates/library",
     "crates/hew-cli",
@@ -51,13 +52,14 @@ mesh-export = { path = "crates/mesh-export" }
 dae-import = { path = "crates/dae-import" }
 gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
+skp-export = { path = "crates/skp-export" }
 stl-import = { path = "crates/stl-import" }
 library = { path = "crates/library" }
 # Clean-room SketchUp .skp reader (the 2026 container and the 2017 format):
 # a crates.io semver pin on the hosted OpenSKP releases, so CI resolves it
 # like any other dependency. No Trimble SDK material anywhere in its chain
 # (rule 7 admissibility test). Local dev clone: ../openskp.
-openskp = "0.4.1"
+openskp = "0.5.0"
 
 slotmap = "1"
 proptest = "1"
@@ -78,6 +80,11 @@ sha2 = "0.10"
 # macro we don't use, keeping the WASM bundle lean.
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 dae-parser = { path = "crates/vendor/dae-parser" }
+# Texture image decoding in skp-export: a textured material's average color
+# (what SketchUp draws with textures off) comes from its image. Pure Rust,
+# no default features, so the WASM bundle takes only the decoders.
+png = { version = "0.18", default-features = false }
+jpeg-decoder = { version = "0.3", default-features = false }
 
 [profile.release]
 # WASM payload size matters for the web shell.

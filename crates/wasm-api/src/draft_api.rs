@@ -967,6 +967,28 @@ impl Scene {
         Ok(self.plane_units_value(&ctx)?.0.to_string())
     }
 
+    /// Every plane the document's free world drawing lies on, with that
+    /// plane's listing, as one JSON array `[{plane: [px,py,pz,nx,ny,nz],
+    /// units: <the plane_units_json value>}]` ([`Document::free_plane_units`]).
+    /// The Outliner reads the whole document's drawing through this in one
+    /// call rather than one `plane_units_json` per plane, which on a model
+    /// of tens of thousands of small sketches took minutes.
+    pub fn plane_units_all_json(&self) -> Result<String, ApiError> {
+        let mut out = Vec::new();
+        for (plane, units) in self
+            .doc
+            .free_plane_units(None, &self.hidden_objects.iter().copied().collect())
+        {
+            let n = plane.normal();
+            let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
+            out.push(serde_json::json!({
+                "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
+                "units": Self::units_value(None, &units)?,
+            }));
+        }
+        Ok(serde_json::Value::Array(out).to_string())
+    }
+
     /// The exact live preview of offsetting the region `region_key` of a
     /// context's drawing by `distance` (positive grows it), read without
     /// opening a draft: the kernel's offset loops in the legacy
@@ -1094,11 +1116,21 @@ impl Scene {
             .doc
             .plane_units(ctx.plane, ctx.frame, &ctx.objects)
             .map_err(doc_err)?;
-        let w = |p: Point3| world_json(ctx.pose, p);
+        let value = Self::units_value(ctx.pose, &units)?;
+        Ok((value, units))
+    }
+
+    /// The JSON of one plane's listing, points through `pose` when the
+    /// plane is a definition's seen through a placement.
+    fn units_value(
+        pose: Option<Pose>,
+        units: &kernel::PlaneUnits,
+    ) -> Result<serde_json::Value, ApiError> {
+        let w = |p: Point3| world_json(pose, p);
         // A radius in the world: scaled by a similarity pose; a stretched
         // instance turns the circle into an ellipse, which has none (null).
         let scale = |r: f64| -> Result<serde_json::Value, ApiError> {
-            Ok(match ctx.pose {
+            Ok(match pose {
                 Some(p) => p
                     .scale()
                     .ok()
@@ -1184,10 +1216,7 @@ impl Scene {
                 })
             })
             .collect();
-        Ok((
-            serde_json::json!({"units": unit_vals, "regions": regions}),
-            units,
-        ))
+        Ok(serde_json::json!({"units": unit_vals, "regions": regions}))
     }
 
     /// Replay support: the next `draft_begin_*` mints exactly `handle`.

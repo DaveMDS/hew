@@ -231,6 +231,10 @@ export const DEPTH_BIAS = {
    * a modest polygonOffset) too aggressively for one requirement or the
    * other. */
   ANNOTATION: 0,
+  /** A face's painted back (an imported `.skp` face painted on each side):
+   * a copy lying on the face, wound the other way, drawn in front of the
+   * face's own back side, which an open shell shows. */
+  BACK_PAINT: 1,
   /** Face fills — behind their own edge overlay (the shipped shimmer fix)
    * and behind the origin axes. */
   FACE: 2,

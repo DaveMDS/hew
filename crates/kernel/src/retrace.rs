@@ -752,6 +752,7 @@ impl Object {
                     inner_loops: Vec::new(),
                     plane: template.plane,
                     material: template.material,
+                    back_material: template.back_material,
                     uv_frame: template.uv_frame,
                     surface: template.surface,
                 });
@@ -784,6 +785,7 @@ impl Object {
             f.inner_loops = inner;
             f.plane = template.plane;
             f.material = template.material;
+            f.back_material = template.back_material;
             f.uv_frame = template.uv_frame;
             f.surface = surface;
             result_faces.push(fid);

@@ -31,6 +31,7 @@
 
 import type { FileRef } from './fileHost'
 import { formatRelativeTime } from './relativeTime'
+import { stripKnownExtension } from './docFormat'
 
 /** Snapshot of document session state. */
 export interface DocSessionState {
@@ -101,6 +102,13 @@ export const INITIAL_SESSION: DocSessionState = {
  * pre-formatted string. */
 export function documentName(state: DocSessionState): string {
   return state.currentRef?.name ?? state.importedName ?? 'Untitled'
+}
+
+/** The document name without its file extension (`Model.skp` -> `Model`) —
+ * the base the Save As suggestion and every export name build on, so a
+ * `.skp`-bound document never suggests `Model.skp.hew`. */
+export function documentBaseName(state: DocSessionState): string {
+  return stripKnownExtension(documentName(state))
 }
 
 /**
@@ -218,6 +226,8 @@ export function afterSave(ref: FileRef, now: number, atSavedMark: boolean): DocS
  * the kernel state this lands on is unconditionally at its own saved mark.
  */
 export function afterOpen(ref: FileRef | null, now: number): DocSessionState {
+  // `ref.format` rides along: a `.skp` document stays bound to its container
+  // (Save writes it back in that format; see App.tsx's saveDocument).
   return { currentRef: ref, dirty: false, lastEditAt: null, lastSavedAt: now, nonUndoableReasons: EMPTY_REASONS }
 }
 
@@ -225,8 +235,8 @@ export function afterOpen(ref: FileRef | null, now: number): DocSessionState {
  * Return the state after replacing the document with an imported foreign
  * file (.dae/.stl/.gltf/.skp/a Library item's Open-as-Document).
  *
- * `name` is the basename of the imported file (e.g. "Kitchen.dae").  The
- * ".dae" extension is stripped for display.
+ * `name` is the basename of the imported file (e.g. "Kitchen.dae").  Its
+ * known extension (.dae/.stl/.glb/.gltf/.skp/.hew) is stripped for display.
  *
  * Safety contract: currentRef is null so saveDocument() will call
  * save(bytes, null) → both WebFileHost and TauriFileHost treat a null ref as
@@ -243,8 +253,7 @@ export function afterOpen(ref: FileRef | null, now: number): DocSessionState {
  * `.hew` file behind this content) exactly like the non-empty case.
  */
 export function afterImport(name: string, now: number): DocSessionState {
-  // Strip the .dae extension (case-insensitive) for the display name.
-  const displayName = name.replace(/\.dae$/i, '')
+  const displayName = stripKnownExtension(name)
   return {
     currentRef: null,
     dirty: true,

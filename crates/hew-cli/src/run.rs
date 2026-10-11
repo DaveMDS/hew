@@ -147,7 +147,7 @@ fn run_script_embedded(
                 responses,
             };
         };
-        if let Err(refusal) = host.save_document(&doc, Some(out_str)) {
+        if let Err(refusal) = host.save_document(&doc, Some(out_str), None, None) {
             eprintln!(
                 "{}",
                 serde_json::to_string(&refusal_data(&refusal)).unwrap()
@@ -434,7 +434,7 @@ pub fn dispatch_file(file: &Path, method: &str, params: serde_json::Value) -> Di
         };
     }
 
-    if !read_only && let Err(refusal) = host.save_document(&doc, None) {
+    if !read_only && let Err(refusal) = host.save_document(&doc, None, None, None) {
         eprintln!(
             "{}",
             serde_json::to_string(&refusal_data(&refusal)).unwrap()
@@ -1021,6 +1021,27 @@ mod save_roundtrip_tests {
 
     /// Only the one-command form is the same command. A multi-command
     /// transaction, or one wrapping something else, is left alone.
+    #[test]
+    fn a_live_save_is_never_written_client_side_whatever_its_format() {
+        // The app saves through its own Save (it writes the file and binds
+        // the document), so hew-cli never takes a save's path to write the
+        // bytes itself: not for a .skp, not with a format, not in a
+        // one-command transaction.
+        for params in [
+            json!({ "path": "/m/m.SKP" }),
+            json!({ "path": "/m/m.skp", "format": "skp2017", "units": "mm" }),
+            json!({ "path": "/m/m.hew" }),
+        ] {
+            let (out, path) = take_client_write_path("hew.doc.save", params.clone());
+            assert_eq!(path, None, "{params}");
+            assert_eq!(out, params);
+            let envelope = json!({ "commands": [{ "method": "hew.doc.save", "params": params }] });
+            let (out, path) = take_client_write_path("hew.doc.transact", envelope.clone());
+            assert_eq!(path, None);
+            assert_eq!(out, envelope);
+        }
+    }
+
     #[test]
     fn take_client_write_path_leaves_other_envelopes_untouched() {
         for envelope in [

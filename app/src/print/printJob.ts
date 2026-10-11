@@ -206,7 +206,7 @@ export function jobTitleFor(ctx: PrintPlanContext, opts: PrintOptions, viewName:
 export interface SceneSource {
   sid: number
   name: string
-  camera: { projection: 'perspective' | 'parallel'; eye: [number, number, number]; target: [number, number, number]; up: [number, number, number]; fovDeg: number } | null
+  camera: { projection: 'perspective' | 'parallel'; eye: [number, number, number]; target: [number, number, number]; up: [number, number, number]; fovDeg: number; parallelHeight?: number } | null
   hidden: { objects: bigint[]; instances: bigint[] } | null
   /** `undefined` = not captured (live plane applies); `null` = captured with no plane. */
   section: { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null | undefined
@@ -232,7 +232,7 @@ export function planPrint(opts: PrintOptions, source: ViewportPrintSource, ctx: 
         const l = Math.hypot(d[0], d[1], d[2]) || 1
         const dir: [number, number, number] = [d[0] / l, d[1] / l, d[2] / l]
         const dist = Math.max(l, 1e-6)
-        const h = 2 * dist * Math.tan((c.fovDeg * Math.PI) / 360)
+        const h = c.parallelHeight !== undefined && c.parallelHeight > 0 ? c.parallelHeight : 2 * dist * Math.tan((c.fovDeg * Math.PI) / 360)
         return { dir, up: c.up, target: c.target, projection: c.projection, orthoSize: { w: h * liveView.aspect, h }, aspect: liveView.aspect }
       })()
     : liveView
@@ -309,7 +309,7 @@ export function planPrint(opts: PrintOptions, source: ViewportPrintSource, ctx: 
         {
           tile,
           request: {
-            camera: scene?.camera ? { kind: 'pose', projection: scene.camera.projection, eye: scene.camera.eye, target: scene.camera.target, up: scene.camera.up, fovDeg: scene.camera.fovDeg, fit } : { kind: 'live', fit },
+            camera: scene?.camera ? { kind: 'pose', projection: scene.camera.projection, eye: scene.camera.eye, target: scene.camera.target, up: scene.camera.up, fovDeg: scene.camera.fovDeg, parallelHeight: scene.camera.parallelHeight, fit } : { kind: 'live', fit },
             widthPx: tile.imagePx.w,
             heightPx: tile.imagePx.h,
           },

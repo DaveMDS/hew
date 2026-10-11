@@ -25,6 +25,7 @@ import { RecoveryDialog } from './RecoveryDialog'
 import { ImportingOverlay } from './ImportingOverlay'
 import { ImportReportDialog } from './ImportReportDialog'
 import { StlExportDialog } from './StlExportDialog'
+import { BANNED_RE, readableText } from '../health/bannedWords'
 import { StlUnitsDialog } from './StlUnitsDialog'
 import { ExportDialog } from './ExportDialog'
 import { RescaleConfirmDialog } from './RescaleConfirmDialog'
@@ -89,6 +90,7 @@ describe('RecoveryDialog', () => {
       name,
       savedAt: Date.now() - ageMs,
       path: null,
+      format: 'hew',
     },
   })
   const single = [listing('bridge.hew', 120_000)] // 2 minutes ago
@@ -244,43 +246,165 @@ describe('ImportingOverlay', () => {
     render(<ImportingOverlay fileName="model.glb" />)
     expect(screen.getByText(/large files/i)).toBeInTheDocument()
   })
+
+  it('shows how far an open has come, as a bar and a line with the counts', () => {
+    const { rerender } = render(
+      <ImportingOverlay fileName="house.skp" opening progress={{ phase: 'read', done: 0, total: 0, bytes: 395_000_000 }} />,
+    )
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Reading the file (395 MB)')
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0')
+    expect(screen.queryByText(/large files/i)).not.toBeInTheDocument()
+    rerender(
+      <ImportingOverlay fileName="house.skp" opening progress={{ phase: 'shapes', done: 36, total: 72, shapes: 1234 }} />,
+    )
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Reading placements: 36 of 72, 1,234 shapes so far')
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '38')
+    rerender(
+      <ImportingOverlay fileName="house.skp" opening progress={{ phase: 'objects', done: 1386, total: 1386 }} />,
+    )
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Building objects: 1,386 of 1,386')
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '68')
+    rerender(<ImportingOverlay fileName="house.skp" opening progress={{ phase: 'finishing', done: 0, total: 1 }} />)
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Checking the objects')
+    rerender(<ImportingOverlay fileName="house.skp" opening progress={{ phase: 'source', done: 0, total: 1 }} />)
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Getting ready to save back to the file')
+    expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '78')
+    rerender(<ImportingOverlay fileName="house.skp" opening progress={{ phase: 'view', done: 0, total: 1 }} />)
+    expect(screen.getByTestId('open-progress')).toHaveTextContent('Getting the view ready')
+  })
+
+  it('says Importing for an import and Opening for a file opened as the document', () => {
+    const { unmount } = render(<ImportingOverlay fileName="model.glb" />)
+    expect(screen.getByRole('status')).toHaveTextContent(/^Importing/)
+    unmount()
+    render(<ImportingOverlay fileName="house.skp" opening />)
+    expect(screen.getByRole('status')).toHaveTextContent(/^Opening/)
+    expect(screen.getByLabelText('Opening model')).toBeInTheDocument()
+  })
 })
 
 // ---------------------------------------------------------------------------
 // ImportReportDialog
 // ---------------------------------------------------------------------------
 
+const ALL_SOLID_HEALTH = {
+  objects: 0,
+  solids: 0,
+  flat_sheets: 0,
+  bent_sheets: 0,
+  cappable: 0,
+  holes: 0,
+  mixed: 0,
+  non_manifold: 0,
+  seam_families: 0,
+}
+
 describe('ImportReportDialog', () => {
   const baseReport: ImportReport = {
     objects_created: 5,
+    lines_added: 0,
     watertight: 4,
     leaky: 1,
+    health: { ...ALL_SOLID_HEALTH, objects: 5, solids: 4, cappable: 1 },
     skipped: [],
     textures_missing: [],
     warnings: [],
   }
 
-  it('shows the object count summary', () => {
+  it('states open objects as normal, in neutral words', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
-    expect(screen.getByText('5')).toBeInTheDocument()
-    expect(screen.getByText(/objects imported/i)).toBeInTheDocument()
-    expect(screen.getByText(/4 solid/i)).toBeInTheDocument()
-    expect(screen.getByText(/1 leaky/i)).toBeInTheDocument()
+    const headline = screen.getByText(/^Imported 5 objects\./)
+    expect(headline).toHaveTextContent(
+      'Imported 5 objects. 4 are solid. The other one is a panel, a sheet, or an open shape, like glass, terrain, or a pipe, which SketchUp models often have. It works as it is. To push, pull, combine, or 3D print one, make it solid first with Make Solid.',
+    )
+    expect(screen.queryByText(/leaky|fix/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(BANNED_RE)).not.toBeInTheDocument()
+  })
+
+  it('words a mixed report: how many are solid and that the rest work as they are', () => {
+    const mixed: ImportReport = {
+      ...baseReport,
+      objects_created: 1491,
+      lines_added: 0,
+      health: {
+        ...ALL_SOLID_HEALTH,
+        objects: 1491,
+        solids: 992,
+        flat_sheets: 800,
+        bent_sheets: 138,
+        cappable: 96,
+        holes: 47,
+        mixed: 231,
+        non_manifold: 29,
+      },
+    }
+    render(<ImportReportDialog report={mixed} onClose={vi.fn()} />)
+    const headline = screen.getByText(/^Imported 1491 objects\./)
+    expect(headline).toHaveTextContent('992 are solid.')
+    expect(headline).toHaveTextContent('The other 499 are panels, sheets, and open shapes')
+    expect(headline).toHaveTextContent('They work as they are.')
+    expect(readableText(document.body)).not.toMatch(BANNED_RE)
+  })
+
+  it('"Opened" for a .skp', () => {
+    render(<ImportReportDialog report={baseReport} opened onClose={vi.fn()} />)
+    expect(screen.getByText(/^Opened 5 objects\./)).toBeInTheDocument()
+  })
+
+  it('an all-solid import says so and shows a single OK', () => {
+    const solid: ImportReport = { ...baseReport, watertight: 5, leaky: 0, health: { ...ALL_SOLID_HEALTH, objects: 5, solids: 5 } }
+    render(<ImportReportDialog report={solid} onClose={vi.fn()} onMakeSolid={vi.fn()} />)
+    expect(screen.getByText(/^Imported 5 objects\./)).toHaveTextContent('Imported 5 objects. All of them are solid.')
+    expect(screen.queryByRole('button', { name: /make solid/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'OK' })).toBeInTheDocument()
+  })
+
+  it('OK is the primary button and Make Solid… the secondary one when something is not solid; Make Solid… calls onMakeSolid', () => {
+    const onMakeSolid = vi.fn()
+    const onClose = vi.fn()
+    render(<ImportReportDialog report={baseReport} onClose={onClose} onMakeSolid={onMakeSolid} />)
+    const ok = screen.getByRole('button', { name: 'OK' })
+    expect(ok).toHaveFocus()
+    expect(screen.queryByRole('button', { name: 'Not now' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Make Solid…' }))
+    expect(onMakeSolid).toHaveBeenCalledOnce()
+    // The App's handler closes the dialog; the dialog itself only reports.
+    expect(onClose).not.toHaveBeenCalled()
+    fireEvent.click(ok)
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('a panels-only import still offers Make Solid…, with neutral text', () => {
+    const panels: ImportReport = {
+      ...baseReport,
+      health: { ...ALL_SOLID_HEALTH, objects: 3, flat_sheets: 3 },
+    }
+    render(<ImportReportDialog report={panels} onClose={vi.fn()} onMakeSolid={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Make Solid…' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'OK' })).toBeInTheDocument()
+    expect(screen.getByText(/^Imported 5 objects\./)).toHaveTextContent('They work as they are.')
+    expect(screen.queryByText(/needs? fixing/i)).not.toBeInTheDocument()
+  })
+
+  it('without an onMakeSolid handler there is only OK', () => {
+    render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: /make solid/i })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button')).toHaveLength(1)
   })
 
   it('shows "No objects" message when nothing was imported', () => {
-    const emptyReport: ImportReport = { ...baseReport, objects_created: 0, watertight: 0, leaky: 0 }
+    const emptyReport: ImportReport = { ...baseReport, objects_created: 0, watertight: 0, leaky: 0, health: ALL_SOLID_HEALTH }
     render(<ImportReportDialog report={emptyReport} onClose={vi.fn()} />)
     expect(screen.getByText(/no objects were created/i)).toBeInTheDocument()
   })
 
-  it('does not show the leaky section when leaky = 0', () => {
-    const noLeaky: ImportReport = { ...baseReport, watertight: 5, leaky: 0 }
-    render(<ImportReportDialog report={noLeaky} onClose={vi.fn()} />)
-    expect(screen.queryByText(/leaky/i)).not.toBeInTheDocument()
+  it('says how many lines of drawing came in when nothing solid did', () => {
+    const linesOnly: ImportReport = { ...baseReport, objects_created: 0, lines_added: 12, watertight: 0, leaky: 0, health: ALL_SOLID_HEALTH }
+    render(<ImportReportDialog report={linesOnly} onClose={vi.fn()} />)
+    expect(screen.getByText(/no objects were created\. 12 lines of drawing came in\./i)).toBeInTheDocument()
   })
 
-  it('shows the skipped-meshes section when skipped is non-empty', () => {
+  it('shows Parts left out when something was skipped', () => {
     const withSkipped: ImportReport = {
       ...baseReport,
       skipped: [{ name: 'BadMesh', reason: 'zero-area triangles' }],
@@ -288,7 +412,7 @@ describe('ImportReportDialog', () => {
     render(<ImportReportDialog report={withSkipped} onClose={vi.fn()} />)
     expect(screen.getByText('BadMesh')).toBeInTheDocument()
     expect(screen.getByText('zero-area triangles')).toBeInTheDocument()
-    expect(screen.getByText(/skipped meshes \(1\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/parts left out \(1\)/i)).toBeInTheDocument()
   })
 
   it('shows the missing-textures section when textures_missing is non-empty', () => {
@@ -301,13 +425,13 @@ describe('ImportReportDialog', () => {
     expect(screen.getByText(/missing textures \(1\)/i)).toBeInTheDocument()
   })
 
-  it('shows a SketchUp recovery note in the warnings section', () => {
+  it('shows a SketchUp recovery note under Details', () => {
     const withWarnings: ImportReport = {
       ...baseReport,
       warnings: ['parser recovered from a malformed section: Desync { offset: 0x4a10 }'],
     }
     render(<ImportReportDialog report={withWarnings} onClose={vi.fn()} />)
-    expect(screen.getByText(/warnings \(1\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/details \(1\)/i)).toBeInTheDocument()
     expect(
       screen.getByText('parser recovered from a malformed section: Desync { offset: 0x4a10 }'),
     ).toBeInTheDocument()
@@ -320,30 +444,30 @@ describe('ImportReportDialog', () => {
     const withSplit: ImportReport = {
       ...baseReport,
       warnings: [
-        "'Roof' is non-manifold; imported as 2 open shells (split at non-manifold edges, geometry unchanged)",
+        "'Roof' came in as 2 separate pieces because some of its edges are shared by more than two faces; the shape itself is unchanged",
       ],
     }
     render(<ImportReportDialog report={withSplit} onClose={vi.fn()} />)
-    expect(screen.getByText(/warnings \(1\)/i)).toBeInTheDocument()
-    expect(screen.getByText(/geometry unchanged/)).toBeInTheDocument()
+    expect(screen.getByText(/details \(1\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/the shape itself is unchanged/)).toBeInTheDocument()
     expect(screen.queryByText(/some content may be missing/i)).not.toBeInTheDocument()
   })
 
-  it('counts every warning in the section header', () => {
+  it('counts every note in the Details header', () => {
     const withBoth: ImportReport = {
       ...baseReport,
       warnings: [
-        "'Roof' is non-manifold; imported as 2 open shells (split at non-manifold edges, geometry unchanged)",
+        "'Roof' came in as 2 separate pieces because some of its edges are shared by more than two faces; the shape itself is unchanged",
         'parser recovered from a malformed section: Desync { offset: 0x4a10 }',
       ],
     }
     render(<ImportReportDialog report={withBoth} onClose={vi.fn()} />)
-    expect(screen.getByText(/warnings \(2\)/i)).toBeInTheDocument()
+    expect(screen.getByText(/details \(2\)/i)).toBeInTheDocument()
   })
 
-  it('does not show the warnings section when warnings is empty', () => {
+  it('does not show Details when there are no notes', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
-    expect(screen.queryByText(/warnings \(\d+\)/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/details \(\d+\)/i)).not.toBeInTheDocument()
   })
 
   it('calls onClose when the OK button is clicked', () => {
@@ -369,6 +493,13 @@ describe('ImportReportDialog', () => {
     render(<ImportReportDialog report={baseReport} onClose={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /import report/i })).toBeInTheDocument()
   })
+
+  it('says Open, not Import, for a file opened as the document\'s own', () => {
+    render(<ImportReportDialog report={baseReport} opened onClose={vi.fn()} />)
+    const dialog = screen.getByRole('dialog', { name: /open report/i })
+    expect(dialog).toHaveTextContent('Open Complete')
+    expect(dialog).not.toHaveTextContent(/import/i)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -379,24 +510,34 @@ describe('StlExportDialog', () => {
   const offenders = ['Roof', 'Object 7']
 
   it('shows the non-manifold warning and names every offender', () => {
-    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
-    expect(
-      screen.getByText(/not watertight solids; the STL may not be manifold/i),
-    ).toBeInTheDocument()
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onMakeSolid={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText("These objects aren't solid, so the STL may not print cleanly:")).toBeInTheDocument()
     expect(screen.getByText('Roof')).toBeInTheDocument()
     expect(screen.getByText('Object 7')).toBeInTheDocument()
+    expect(screen.getByText('Make Solid can close what can be closed.')).toBeInTheDocument()
+    expect(readableText(document.body)).not.toMatch(BANNED_RE)
+  })
+
+  it('Make Solid… calls onMakeSolid, and Export Anyway stays the focused button', () => {
+    const onMakeSolid = vi.fn()
+    const onExport = vi.fn()
+    render(<StlExportDialog offenders={offenders} onExport={onExport} onMakeSolid={onMakeSolid} onCancel={vi.fn()} />)
+    expect(screen.getByRole('button', { name: 'Export Anyway' })).toHaveFocus()
+    fireEvent.click(screen.getByRole('button', { name: 'Make Solid…' }))
+    expect(onMakeSolid).toHaveBeenCalledOnce()
+    expect(onExport).not.toHaveBeenCalled()
   })
 
   it('calls onExport when "Export Anyway" is clicked', () => {
     const onExport = vi.fn()
-    render(<StlExportDialog offenders={offenders} onExport={onExport} onCancel={vi.fn()} />)
+    render(<StlExportDialog offenders={offenders} onExport={onExport} onMakeSolid={vi.fn()} onCancel={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: /export anyway/i }))
     expect(onExport).toHaveBeenCalledOnce()
   })
 
   it('calls onCancel when Cancel is clicked', () => {
     const onCancel = vi.fn()
-    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={onCancel} />)
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onMakeSolid={vi.fn()} onCancel={onCancel} />)
     fireEvent.click(screen.getByRole('button', { name: /cancel/i }))
     expect(onCancel).toHaveBeenCalledOnce()
   })
@@ -404,19 +545,19 @@ describe('StlExportDialog', () => {
   it('calls onCancel — never onExport — when Escape is pressed', () => {
     const onExport = vi.fn()
     const onCancel = vi.fn()
-    render(<StlExportDialog offenders={offenders} onExport={onExport} onCancel={onCancel} />)
+    render(<StlExportDialog offenders={offenders} onExport={onExport} onMakeSolid={vi.fn()} onCancel={onCancel} />)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onCancel).toHaveBeenCalledOnce()
     expect(onExport).not.toHaveBeenCalled()
   })
 
   it('stops Escape from bubbling to window (so it does not also fire the Viewport handler)', () => {
-    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onMakeSolid={vi.fn()} onCancel={vi.fn()} />)
     expectEscapeStopsPropagationToWindow()
   })
 
   it('has the expected ARIA dialog role and label', () => {
-    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onCancel={vi.fn()} />)
+    render(<StlExportDialog offenders={offenders} onExport={vi.fn()} onMakeSolid={vi.fn()} onCancel={vi.fn()} />)
     expect(screen.getByRole('dialog', { name: /export stl warning/i })).toBeInTheDocument()
   })
 
@@ -426,14 +567,13 @@ describe('StlExportDialog', () => {
         offenders={offenders}
         formatLabel="3MF"
         onExport={vi.fn()}
+        onMakeSolid={vi.fn()}
         onCancel={vi.fn()}
       />,
     )
     expect(screen.getByRole('dialog', { name: /export 3mf warning/i })).toBeInTheDocument()
     expect(screen.getByText('Export 3MF Anyway?')).toBeInTheDocument()
-    expect(
-      screen.getByText(/not watertight solids; the 3MF may not be manifold/i),
-    ).toBeInTheDocument()
+    expect(screen.getByText("These objects aren't solid, so the 3MF may not print cleanly:")).toBeInTheDocument()
   })
 })
 

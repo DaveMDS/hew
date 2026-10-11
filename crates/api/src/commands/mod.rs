@@ -107,6 +107,7 @@ mod camera;
 pub mod doc;
 pub mod draft;
 pub mod entity;
+pub mod health;
 pub mod history;
 pub mod library;
 pub mod print;
@@ -125,6 +126,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| sketch::handler(name))
         .or_else(|| draft::handler(name))
         .or_else(|| solid::handler(name))
+        .or_else(|| health::handler(name))
         .or_else(|| entity::handler(name))
         .or_else(|| structure::handler(name))
         .or_else(|| style::handler(name))

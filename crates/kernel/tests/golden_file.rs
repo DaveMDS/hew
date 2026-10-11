@@ -371,7 +371,9 @@ fn golden_file_save_load_and_determinism() {
     let mut saw_point = false;
     for gid in guide_ids {
         match loaded.guide(gid).unwrap() {
-            kernel::Guide::Line { origin, direction } => {
+            kernel::Guide::Line {
+                origin, direction, ..
+            } => {
                 saw_line = true;
                 assert!(origin.approx_eq(Point3::new(0.0, 0.0, 0.0), 1e-9));
                 assert!(direction.approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-9));

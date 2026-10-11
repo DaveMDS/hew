@@ -1,10 +1,12 @@
 /**
  * StlExportDialog — pre-export confirmation shown when the model contains
- * objects that are not watertight solids ( solid gating). Shared by every
- * slicer-bound format (STL, 3MF) via the `formatLabel` prop.
+ * objects that aren't solid (solid gating). Shared by every slicer-bound
+ * format (STL, 3MF) via the `formatLabel` prop.
  *
- * Slicers expect manifold geometry; Hew never repairs geometry silently
- * (rule 4), so the user chooses: Export Anyway or Cancel. Escape cancels.
+ * Slicers expect solid geometry; Hew never repairs geometry silently
+ * (rule 4), so the user chooses: Export Anyway, Make Solid… (which cancels
+ * the export and opens the Make Solid wizard on the offenders), or Cancel.
+ * Escape cancels.
  * Not shown at all when every object is solid.
  *
  * Styling follows the RecoveryDialog / ImportReportDialog family, but on the
@@ -13,12 +15,15 @@
  */
 
 import { useEffect, useCallback } from 'react'
+import { EXPORT_NOT_SOLID } from '../health/healthCopy'
 
 interface StlExportDialogProps {
   /** Display names of the non-solid objects that would be exported. */
   offenders: string[]
   /** Proceed with the export despite the non-solid objects. */
   onExport: () => void
+  /** Cancel the export and open Make Solid on the offenders. */
+  onMakeSolid: () => void
   /** Abort the export (also triggered by Escape). */
   onCancel: () => void
   /** Format name shown in the heading/body ("STL", "3MF"). */
@@ -62,7 +67,7 @@ const BODY_STYLE: React.CSSProperties = {
 }
 
 const LIST_STYLE: React.CSSProperties = {
-  margin: '0 0 20px 0',
+  margin: '0 0 12px 0',
   padding: '0 0 0 16px',
   fontSize: 'var(--font-size-body, 12px)',
   color: 'var(--text-secondary, #ccc)',
@@ -103,6 +108,7 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
 export function StlExportDialog({
   offenders,
   onExport,
+  onMakeSolid,
   onCancel,
   formatLabel = 'STL',
 }: StlExportDialogProps) {
@@ -131,21 +137,25 @@ export function StlExportDialog({
         aria-modal="true"
         aria-label={`Export ${formatLabel} warning`}
       >
-        <div style={HEADING_STYLE}>Export {formatLabel} Anyway?</div>
-        <div style={BODY_STYLE}>
-          These objects are not watertight solids; the {formatLabel} may not be manifold:
-        </div>
+        <div style={HEADING_STYLE}>{EXPORT_NOT_SOLID.title(formatLabel)}</div>
+        <div style={BODY_STYLE}>{EXPORT_NOT_SOLID.body(formatLabel)}</div>
         <ul style={LIST_STYLE}>
           {offenders.map((name, i) => (
             <li key={i}>{name}</li>
           ))}
         </ul>
+        <div data-export-hint style={{ ...BODY_STYLE, marginBottom: '20px' }}>
+          {EXPORT_NOT_SOLID.hint}
+        </div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            {EXPORT_NOT_SOLID.cancel}
+          </button>
+          <button style={CANCEL_BUTTON_STYLE} onClick={onMakeSolid}>
+            {EXPORT_NOT_SOLID.makeSolid}
           </button>
           <button style={EXPORT_BUTTON_STYLE} onClick={onExport} autoFocus>
-            Export Anyway
+            {EXPORT_NOT_SOLID.exportAnyway}
           </button>
         </div>
       </div>

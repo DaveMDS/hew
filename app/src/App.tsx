@@ -21,6 +21,20 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
+
+/** How long one step of a `.skp` open works before the overlay repaints:
+ * long enough that the paint between steps costs little, short enough
+ * that the bar moves several times a second. */
+const OPEN_STEP_BUDGET_MS = 160
+
+/** What `Scene.open_skp_begin`/`open_skp_step` hand back. */
+interface OpenStepProgress {
+  phase: 'shapes' | 'objects' | 'finishing' | 'source' | 'done'
+  done: number
+  total: number
+  shapes: number
+  report?: unknown
+}
 import { TagsPanel } from './panels/TagsPanel'
 import { ComponentsPanel, PurgeUnusedButton } from './panels/ComponentsPanel'
 import { ConfirmDialog } from './panels/ConfirmDialog'
@@ -28,6 +42,13 @@ import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/Scen
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ChangesPanel } from './panels/ChangesPanel'
+import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
+import { FloatingWindow } from './panels/FloatingWindow'
+import { MakeSolidWizard } from './panels/MakeSolidWizard'
+import { BADGE_TOOLTIP_LIST, MENU, badgeText, importLogSplit, type WizardScope } from './health/healthCopy'
+import { IsolationBar } from './viewport/IsolationBar'
+import type { IsolationTarget } from './viewport/isolation'
+import { EMPTY_SUMMARY, objectHealthStates, readHealthSummary, summarize, type HealthOverlay, type HealthScope } from './health/healthReport'
 import { UnsavedChangesDialog, type UnsavedChangesDecision } from './panels/UnsavedChangesDialog'
 import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
@@ -42,11 +63,22 @@ import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { setKernelHidden } from './tools/planeUnits'
-import { makeFileHost, isTauri, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import { makeFileHost, isTauri, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import {
+  SAVE_PANEL_FORMATS,
+  exportChoiceFrom,
+  exportPanelFormats,
+  hasNativeSavePanel,
+  pickSaveTarget,
+  saveFormatFrom,
+  type ExportFormat as PanelExportFormat,
+} from './io/savePanel'
+import { isSkpFormat, nameForFormat, normalizeDocFormat, saveFormatForPath, skpTarget } from './io/docFormat'
 import {
   INITIAL_SESSION,
   deriveTitle,
   documentName,
+  documentBaseName,
   saveStateLabel,
   afterMutation,
   markNonUndoableDirty,
@@ -63,7 +95,9 @@ import { loadHewBytes, isPanicError, isSceneEmpty, seedHiddenKeysFromRegistry, s
 import { writeShellModeOverride } from './shop/shellMode'
 import { listRecents, recordRecent, type RecentEntry } from './io/recents'
 import { ImportReportDialog } from './panels/ImportReportDialog'
-import { ImportingOverlay, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
+import { SaveFormatDialog } from './panels/SaveFormatDialog'
+import { SkpLossNotice, type SkpLossNoticeData } from './panels/SkpLossNotice'
+import { ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
@@ -110,7 +144,7 @@ import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugM
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { useScenesController } from './scenes/useScenesController'
-import { parseCameraJson, parseSectionJson } from './scenes/scenesModel'
+import { parseCameraJson, parseSectionJson, parseViewStyleJson, type ViewStyleJson } from './scenes/scenesModel'
 import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
@@ -224,6 +258,27 @@ export function isPristineDocument(session: DocSessionState, scene: Scene): bool
   return session.currentRef === null && !session.dirty && isSceneEmpty(scene)
 }
 
+
+/**
+ * Write an export's bytes: to the path the native save panel already
+ * picked (`target`, consumed here), else through the host's own export
+ * picker (the browser, and the PDF print path).
+ */
+async function writeExport(
+  host: FileHost,
+  target: { current: string | null },
+  bytes: Uint8Array,
+  name: string,
+  fileType: ExportFileType,
+): Promise<string | null> {
+  const path = target.current
+  target.current = null
+  if (path !== null && host.writeTo !== undefined) {
+    await host.writeTo(path, bytes)
+    return path
+  }
+  return host.exportBinary(bytes, name, fileType)
+}
 /** Calls `scene.mark_saved()` ONLY when the document's undo depth hasn't
  * moved since `undoDepthAtCapture` — every save flow here grabs the bytes
  * to write, then awaits a host write that can take a while (Tauri fs,
@@ -235,6 +290,14 @@ export function isPristineDocument(session: DocSessionState, scene: Scene): bool
 function markSavedIfUnmoved(scene: Scene, undoDepthAtCapture: number): boolean {
   if (scene.undo_depth() === undoDepthAtCapture) scene.mark_saved()
   return scene.at_saved_mark()
+}
+
+/** What `Scene.save_skp` / `export_skp` return. */
+interface SkpWrite {
+  bytes: Uint8Array
+  /** What the file could not hold exactly, as short phrases. */
+  simplified: string[]
+  writer_notes: string[]
 }
 
 /** "Undo Push/Pull" / "Redo Move" — the Edit menu's Lane C labels (docs/
@@ -416,6 +479,12 @@ export default function App() {
   const componentFrameOpen = innermostSessionNode?.kind === 'instance'
   /** Bumped on any document change so the tree re-queries entity lists. */
   const [docRev, setDocRev] = useState(0)
+  /** View-only isolation (ViewportApi.isolate): how many objects are shown, or
+   *  null when everything is. The viewport owns the targets; this feeds the bar. */
+  const [isolatedCount, setIsolatedCount] = useState<number | null>(null)
+  /** Width of the open Make Solid wizard (it covers the viewport's right side),
+   *  so the isolation bar centers in the part left uncovered. */
+  const [fixWizardWidth, setFixWizardWidth] = useState(0)
   // Bumped once per document LOAD (open/new/recover/library-open — every
   // path funnels through applyLoadedBytes), never on an in-document edit.
   // Panels that cache blob URLs keyed by a wasm handle use this to drop the
@@ -457,6 +526,35 @@ export default function App() {
   const [showScenes, setShowScenes] = useState(() => getTrayLayout().scenes)
   /** Pane visibility: Changes (Lane C, docs/design/v1.1-cycle.md) */
   const [showChanges, setShowChanges] = useState(() => getTrayLayout().changes)
+  /** Model Health's floating window (docs/design/import-health.md §5). Not
+   * part of the persisted tray layout: it draws a viewport overlay, so it
+   * starts closed every launch and is opened by the Object menu, Object
+   * Info's Show link, or the status badge. */
+  const [showModelHealth, setShowModelHealth] = useState(false)
+  const showModelHealthRef = useRef(showModelHealth)
+  showModelHealthRef.current = showModelHealth
+  /** Model Health's scope select and its one-object filter (Object Info's
+   * Show link) — lifted here so the entry points can set them. */
+  const [healthScope, setHealthScope] = useState<HealthScope>('document')
+  const [healthObjectFilter, setHealthObjectFilter] = useState<bigint | null>(null)
+  /** The Make Solid wizard: null when closed, else where it was opened from
+   *  (the last import, the selection with its object ids, or the whole model). */
+  const [makeSolid, setMakeSolid] = useState<{ scope: WizardScope; objectIds: bigint[]; nonce: number } | null>(null)
+  /** The sides of the viewport the Model Health window covers (zeros while
+   *  it is closed). */
+  const [healthCover, setHealthCover] = useState({ left: 0, right: 0 })
+  // Framing an isolated item fits it beside the wizard and the Model Health
+  // window, not under them.
+  useEffect(() => {
+    const wizard = makeSolid !== null ? fixWizardWidth : 0
+    viewportApi.current?.setFramingInset?.(Math.max(wizard, healthCover.right), healthCover.left)
+  }, [makeSolid, fixWizardWidth, healthCover])
+  const openMakeSolid = useCallback((scope: WizardScope, objectIds: bigint[] = []) => {
+    setMakeSolid((prev) => ({ scope, objectIds, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  /** Bumped on every request to open Model Health, to bring its window
+   * forward (the window takes focus). */
+  const [healthFocusNonce, setHealthFocusNonce] = useState(0)
   /** Pane visibility: Object Info */
   const [showObjectInfo, setShowObjectInfo] = useState(() => getTrayLayout().objectInfo)
   /** Debug Log panel visibility (default hidden — opt-in via Window menu only). */
@@ -515,8 +613,20 @@ export default function App() {
   const [hiddenTagPaths, setHiddenTagPaths] = useState<Set<string>>(new Set())
   /** Import report to display (null = no dialog). */
   const [importReport, setImportReport] = useState<ImportReport | null>(null)
+  // Whether the report (and the busy overlay) belong to File ▸ Open of a
+  // .skp — the document's own file, "Opening" — or to an import.
+  const [reportOpened, setReportOpened] = useState(false)
+  /** Result of a `.skp` write that could not hold everything exactly (a
+   * Save / Save As / Export notice); null = none showing. */
+  const [skpNotice, setSkpNotice] = useState<SkpLossNoticeData | null>(null)
+  /** Save As format dialog: the format pre-selected, plus the resolver of
+   * the promise `promptSaveFormat` hands the Save As flow; null = closed. */
+  const [saveFormatPrompt, setSaveFormatPrompt] = useState<{ initial: DocFormat } | null>(null)
   /** True while import_dae is running (blocks main thread). */
   const [isImporting, setIsImporting] = useState(false)
+  /** How far a `.skp` open has come (the overlay's bar); null while an
+   * import gives no progress. */
+  const [openProgress, setOpenProgress] = useState<OpenProgress | null>(null)
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
   /** STL units-chooser modal: the picked file's name, or null when closed. */
@@ -676,6 +786,11 @@ export default function App() {
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
   const fileHostRef = useRef(makeFileHost())
+  // The path the native save panel picked for the export under way, which
+  // the export writes to instead of asking again (`writeExport`); the last
+  // format exported, which the next Export opens on.
+  const exportTargetRef = useRef<string | null>(null)
+  const lastExportFormatRef = useRef<PanelExportFormat>('glb')
   const printHostRef = useRef(makePrintHost())
   // Test-only recording print host (harness.ts `setPrintRecorder`).
   const printRecorderRef = useRef<PrintRecorder | null>(null)
@@ -689,6 +804,25 @@ export default function App() {
   // post-pick import steps (runImportPick) and must not race each other. A
   // ref (not state) so the guard is synchronous, before the first await.
   const openInFlightRef = useRef(false)
+  /** A `.skp` open is stepping between paints (see runOpenSkp): nothing
+   * else may replace the document until it lands. A ref, so the check is
+   * synchronous. */
+  const skpOpenStepsRef = useRef(false)
+  // The one-time `.skp` loss notice has been shown for the current document
+  // (reset on every document load — Open / New — never on save).
+  const skpNoticeShownRef = useRef(false)
+  // Resolver for the Save As format dialog's promise (see promptSaveFormat).
+  const saveFormatResolveRef = useRef<((format: DocFormat | null) => void) | null>(null)
+  // `.skp` source persistence for crash recovery: the source (100+ MB) is
+  // written to the recovery store only when it changes, tracked by a
+  // generation counter bumped wherever `Scene` replaces it (a load clears it,
+  // open_skp / save_skp set it, adoptSnapshot restores it).
+  const skpSourceGenRef = useRef(0)
+  const persistedSourceGenRef = useRef(-1)
+  // Starts true: a crashed or dismissed earlier session may have left a
+  // source beside this window's recovery slot, and a document without one
+  // must clear it on its first autosave rather than inherit it.
+  const sourceOnDiskRef = useRef(true)
   // Mirror of docSession kept up-to-date so callbacks can read current state
   // without capturing stale closures or causing impure updater functions.
   const docSessionRef = useRef<DocSessionState>(INITIAL_SESSION)
@@ -866,6 +1000,7 @@ export default function App() {
     scene.set_camera_state(
       state.projection,
       state.fovDeg,
+      state.parallelHeight,
       new Float64Array(state.eye),
       new Float64Array(state.target),
       new Float64Array(state.up),
@@ -894,13 +1029,36 @@ export default function App() {
       version: 1,
       name: session.currentRef?.name ?? session.importedName ?? 'Untitled',
       path: typeof session.currentRef?.handle === 'string' ? session.currentRef.handle : null,
+      format: session.currentRef?.format ?? 'hew',
       savedAt: Date.now(),
+    }
+    // The `.skp` source rides beside the snapshot, but only when it CHANGED
+    // (after an open or a save) — never rewritten per tick (100+ MB). Read
+    // here, before the async write, so the generation matches the bytes.
+    const sourceGen = skpSourceGenRef.current
+    let sourceToWrite: { source: Uint8Array | null } | null = null
+    if (sourceGen !== persistedSourceGenRef.current) {
+      const source = scene.skp_source() ?? null
+      // Nothing stored and nothing to store (a plain .hew document): just
+      // record the generation as handled.
+      sourceToWrite = source === null && !sourceOnDiskRef.current ? null : { source }
+      if (sourceToWrite === null) persistedSourceGenRef.current = sourceGen
     }
     // Keep the in-flight write observable so clearRecoverySnapshot can
     // wait it out — the shell does not order recovery_write against
     // recovery_clear, so a clear overlapping a write can leave the
     // snapshot (or half of it) on disk. The stored promise never rejects.
-    const write = recoveryStoreRef.current.write(bytes, meta).then(() => {
+    // Source first, snapshot second: a crash between the two leaves a stale
+    // source beside an older snapshot (still a valid base), never a new
+    // snapshot with no source where one is due.
+    const write = (async () => {
+      if (sourceToWrite !== null) {
+        await recoveryStoreRef.current.writeSource(sourceToWrite.source)
+        persistedSourceGenRef.current = sourceGen
+        sourceOnDiskRef.current = sourceToWrite.source !== null
+      }
+      await recoveryStoreRef.current.write(bytes, meta)
+    })().then(() => {
       // Only mark clean while this write is still the latest — a stale
       // disarm could suppress the re-write that follows a superseding
       // edit-plus-clear interleave.
@@ -1094,6 +1252,124 @@ export default function App() {
   const handleReplaceSelection = useCallback(
     (nodes: NodeRef[]) => handleSelectMany(nodes, 'replace'),
     [handleSelectMany],
+  )
+
+  /** Open the Model Health window, or bring it forward if it is already
+   *  open. With no `view` an open window keeps its scope and filter; a
+   *  closed one (or any call with a `view`) starts from the whole document
+   *  unless told otherwise — Object Info's Show link asks for one object. */
+  const openModelHealth = useCallback((view?: { scope?: HealthScope; objectFilter?: bigint | null }) => {
+    if (view !== undefined || !showModelHealthRef.current) {
+      setHealthScope(view?.scope ?? 'document')
+      setHealthObjectFilter(view?.objectFilter ?? null)
+    }
+    setShowModelHealth(true)
+    setHealthFocusNonce((n) => n + 1)
+  }, [])
+
+  // The viewport draws ONE health overlay. The Model Health panel and the
+  // Make Solid wizard both ask for one; while the wizard has something
+  // isolated its overlay wins, and when that ends the panel's comes back.
+  // This pair of handlers is the only place the arbitration lives.
+  const panelOverlayRef = useRef<HealthOverlay | null>(null)
+  const wizardOverlayRef = useRef<HealthOverlay | null>(null)
+  /** Bumped when the wizard's isolation ends or is replaced from outside it. */
+  const [wizardIsolationLost, setWizardIsolationLost] = useState(0)
+  const handleHealthOverlay = useCallback((overlay: HealthOverlay | null) => {
+    panelOverlayRef.current = overlay
+    if (wizardOverlayRef.current === null) viewportApi.current?.setHealthOverlay(overlay)
+  }, [])
+  const handleWizardOverlay = useCallback((overlay: HealthOverlay | null) => {
+    wizardOverlayRef.current = overlay
+    viewportApi.current?.setHealthOverlay(overlay ?? panelOverlayRef.current)
+  }, [])
+  const handleHealthFrame = useCallback(
+    (min: [number, number, number], max: [number, number, number]) => {
+      viewportApi.current?.zoomToWorldBounds(min, max)
+    },
+    [],
+  )
+  /** Isolate the targets (view only) and push the merged hidden sets to the
+   *  kernel's snap/pick registration, which the viewport cannot reach. */
+  const syncKernelHidden = useCallback(() => {
+    const scene = sceneRef.current
+    const api = viewportApi.current
+    if (scene === null || api === null) return
+    const eff = api.getEffectiveHiddenIds()
+    setKernelHidden(scene, eff.objects, eff.instances)
+  }, [])
+  /** Whether the isolation on screen is Model Health's own (a row it
+   *  isolated). Its window closing or its scope changing ends only that one,
+   *  never the wizard's. */
+  const panelOwnsIsolationRef = useRef(false)
+  /** The viewport's isolation changed (Escape, a document change, the API). */
+  const handleIsolationChange = useCallback(
+    (shown: number | null) => {
+      setIsolatedCount(shown)
+      // Isolation ended (Show everything, Escape, a click on nothing): the
+      // wizard's open-edge overlay and its selection go with it.
+      if (shown === null) {
+        panelOwnsIsolationRef.current = false
+        if (wizardOverlayRef.current !== null) handleWizardOverlay(null)
+        setWizardIsolationLost((n) => n + 1)
+      }
+      syncKernelHidden()
+    },
+    [syncKernelHidden, handleWizardOverlay],
+  )
+  const handleIsolate = useCallback(
+    (targets: IsolationTarget[], opts?: { frame?: boolean }) => {
+      panelOwnsIsolationRef.current = false
+      viewportApi.current?.isolate(targets, opts)
+      syncKernelHidden()
+    },
+    [syncKernelHidden],
+  )
+  /** Model Health isolates its own row: the wizard's overlay and selection
+   *  give way, and the panel's overlay draws. */
+  const handlePanelIsolate = useCallback(
+    (targets: IsolationTarget[], opts?: { frame?: boolean }) => {
+      if (wizardOverlayRef.current !== null) {
+        wizardOverlayRef.current = null
+        viewportApi.current?.setHealthOverlay(panelOverlayRef.current)
+        setWizardIsolationLost((n) => n + 1)
+      }
+      handleIsolate(targets, opts)
+      panelOwnsIsolationRef.current = true
+    },
+    [handleIsolate],
+  )
+  /** Escape belongs to an armed viewport gesture or an open modal dialog
+   *  before it closes the Make Solid wizard. */
+  const wizardEscapeBusy = useCallback((): boolean => {
+    const api = viewportApi.current
+    if (api?.hasArmedGesture?.() === true || api?.isCapturingInput?.() === true) return true
+    return document.querySelector('[role="dialog"][aria-modal="true"]') !== null
+  }, [])
+  const handleClearIsolation = useCallback(() => {
+    viewportApi.current?.clearIsolation()
+    syncKernelHidden()
+  }, [syncKernelHidden])
+  /** Model Health ends its own isolation only (see panelOwnsIsolationRef). */
+  const handlePanelClearIsolation = useCallback(() => {
+    if (panelOwnsIsolationRef.current) handleClearIsolation()
+  }, [handleClearIsolation])
+  // A document change while isolated keeps the targets that still exist and
+  // drops the rest (the viewport clears isolation when none are left).
+  useEffect(() => {
+    const api = viewportApi.current
+    if (api === null || (api.getIsolation?.() ?? null) === null) return
+    // Nothing resolved differently: skip the kernel's whole-registry rebuild.
+    if (api.refreshIsolation() === false) return
+    syncKernelHidden()
+  }, [docRev, syncKernelHidden])
+  const handleHealthSelectNode = useCallback(
+    (node: NodeRef) => handleSelectMany([node], 'replace'),
+    [handleSelectMany],
+  )
+  const handleShowObjectHealth = useCallback(
+    (id: bigint) => openModelHealth({ scope: 'document', objectFilter: id }),
+    [openModelHealth],
   )
 
   /** Lift a guide pick from the viewport; clears node/annotation selection. */
@@ -1410,12 +1686,19 @@ export default function App() {
     armAutosaveTick()
   }, [armAutosaveTick])
   const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
+  // A Scene's view style lands in the viewport the way a loaded
+  // document's does (the kernel already made it the document's own).
+  const scenesSetViewStyle = useCallback((style: ViewStyleJson) => {
+    viewportApi.current?.setViewStyle(style)
+    setShowAxes(style.axes)
+  }, [])
   const scenes = useScenesController({
     scene: state?.scene ?? null,
     viewportApi,
     docRev,
     display: scenesDisplay,
     setDisplay: scenesSetDisplay,
+    setViewStyle: scenesSetViewStyle,
     setHiddenState: scenesSetHiddenState,
     exitAllContexts: handleExitToModel,
     markDirty: scenesMarkDirty,
@@ -1590,6 +1873,13 @@ export default function App() {
     return installTestHarness({
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
+      isolate: (targets) => {
+        panelOwnsIsolationRef.current = false
+        const n = viewportApi.current?.isolate(targets) ?? 0
+        syncKernelHidden()
+        return n
+      },
+      clearIsolation: () => handleClearIsolation(),
       reconcile: () => reconcileRef.current(),
       getSelection: () => selectedIdsRef.current,
       setSelectedObjects: (ids) =>
@@ -2002,6 +2292,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, docRev])
 
+  // Model Health's cheap whole-document summary, once per document change —
+  // the status badge and the Outliner icons read it (component-definition
+  // members included, which the tessellation-derived watertight map never
+  // sees). The full report is the panel's, read only while its window is open.
+  const documentHealth = useMemo(
+    () => (state === null ? EMPTY_SUMMARY : readHealthSummary(state.scene)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state, docRev],
+  )
+  const objectHealth = useMemo(() => objectHealthStates(documentHealth), [documentHealth])
+  const healthSummary = useMemo(() => summarize(documentHealth), [documentHealth])
+
   /** Active Tags-panel reveal (palette jump); cleared after a short flash. */
   const [revealTag, setRevealTag] = useState<TagReveal | null>(null)
   const revealNonceRef = useRef(0)
@@ -2025,6 +2327,11 @@ export default function App() {
     // is still awaiting its recovery check must also veto the offer it makes
     // at the end (the state setters alone can't — the later one wins).
     documentLoadedRef.current = true
+    // `Scene.load` cleared the `.skp` source, and this is a new document:
+    // the one-time `.skp` loss notice is due again (never reset on save).
+    skpSourceGenRef.current += 1
+    skpNoticeShownRef.current = false
+    setSkpNotice(null)
     setDocGeneration((g) => g + 1)
     setWelcomeOpen(false)
     setSelectedIds([])
@@ -2073,6 +2380,12 @@ export default function App() {
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
     pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    // The document's view style (kernel `ViewStyle`): a `.skp`'s backdrop
+    // and axes follow the file; a document without one is shown Hew's way.
+    const styleJson = scene.view_style_json()
+    const style = styleJson === undefined ? null : parseViewStyleJson(JSON.parse(styleJson))
+    viewportApi.current?.setViewStyle(style)
+    if (style !== null) setShowAxes(style.axes)
     // Restore the saved camera view (docs/design/camera.md §5) if the
     // document carries one; absent (every pre-v13 file, or a v13+ document
     // that never saved a view — File ▸ New's blank bytes always land here)
@@ -2084,6 +2397,7 @@ export default function App() {
         const applyState = {
           projection: savedCamera.projection() as 'perspective' | 'parallel',
           fovDeg: savedCamera.fov_deg(),
+          parallelHeight: savedCamera.parallel_height(),
           eye: [savedCamera.eye_x(), savedCamera.eye_y(), savedCamera.eye_z()] as [number, number, number],
           target: [savedCamera.target_x(), savedCamera.target_y(), savedCamera.target_z()] as [number, number, number],
           up: [savedCamera.up_x(), savedCamera.up_y(), savedCamera.up_z()] as [number, number, number],
@@ -2164,12 +2478,10 @@ export default function App() {
   const confirmDiscard = useCallback(async (): Promise<boolean> => {
     if (!docSessionRef.current.dirty) return true
     const decision = await requestUnsavedChangesDecision()
-    if (decision === 'cancel') return false
-    if (decision === 'save') {
-      const ok = await saveDocumentRef.current()
-      if (!ok) return false // save failed or was cancelled — don't discard
-    }
-    return true
+    // 'save' arrives only once the dialog's own Save has written the file
+    // (UnsavedChangesDialog's onSave below) — saving again here would write
+    // it twice, and a document with no file yet would ask where twice.
+    return decision !== 'cancel'
   }, [requestUnsavedChangesDecision])
 
   // Drop this window's autosave snapshot once its document has actually been
@@ -2205,6 +2517,10 @@ export default function App() {
     // the slot no longer holds the discarded document, so leave it alone.
     if (autosaveWriteRef.current !== inFlight) return
     await recoveryStoreRef.current.clear().catch(() => { /* best effort */ })
+    // The slot's `.skp` source went with the snapshot: the next autosave of
+    // a `.skp` document must write it again.
+    persistedSourceGenRef.current = -1
+    sourceOnDiskRef.current = false
   }, [])
 
   // Drop this window's autosave/recovery snapshot the moment the session
@@ -2344,6 +2660,7 @@ export default function App() {
     // to the WASM module).
     flushSync(() => {
       setImportingName(pick.name)
+      setReportOpened(false)
       setIsImporting(true)
     })
     await nextPaint()
@@ -2432,9 +2749,132 @@ export default function App() {
     setImportReport(report)
     const fmt =
       pick.kind === 'gltf' ? 'glTF' : pick.kind === 'skp' ? 'SKP' : pick.kind === 'stl' ? 'STL' : 'DAE'
-    LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${report.watertight} solid, ${report.leaky} leaky)`)
+    LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
   }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
+
+  // The ONE open-skp path: every route that opens a `.skp` as the document's
+  // OWN file (File ▸ Open, Open Recent, drag-drop, argv / single-instance /
+  // Open With, the web recents shelf) lands here. It loads blank bytes the
+  // way runImportPick does, then `Scene.open_skp` (which imports AND keeps
+  // the bytes as the source a later save builds on), runs the same post-import
+  // UI steps (notify loaded, seed hidden keys/tags, scenes, the report), and
+  // commits `afterOpen` with the container's format — NOT `afterImport`. The
+  // result is a clean document titled `Model.skp` whose Save writes the file
+  // back in its own container. File ▸ Import… stays runImportPick: additive
+  // semantics, no rebinding. Resolves true when the document landed.
+  const runOpenSkp = useCallback(async (
+    scene: Scene,
+    pick: { name: string; bytes: Uint8Array; handle: unknown },
+  ): Promise<boolean> => {
+    // The open yields to the event loop between steps, so a second open
+    // (a drop, a recent, a path from the shell) could land while the
+    // document is half built; refuse it. Every way out of here settles
+    // the overlay and the guard.
+    if (skpOpenStepsRef.current) return false
+    skpOpenStepsRef.current = true
+    const settle = () => {
+      skpOpenStepsRef.current = false
+      setIsImporting(false)
+      setOpenProgress(null)
+    }
+    flushSync(() => {
+      setImportingName(pick.name)
+      setReportOpened(true)
+      setIsImporting(true)
+      setOpenProgress({ phase: 'read', done: 0, total: 0, bytes: pick.bytes.byteLength })
+    })
+    await nextPaint()
+
+    const blank = blankBytesRef.current
+    if (blank === null) {
+      settle()
+      return false
+    }
+    // The open runs in steps between paints, so the overlay can say how
+    // far it has come: reading the file is the one step that cannot be
+    // split; the placements and then the objects come a budget of work
+    // at a time (see `Scene.open_skp_step`). The file is read before the
+    // blank load, so one the reader refuses (a SketchUp version it does
+    // not read, a damaged file) leaves the open document as it was.
+    let step: OpenStepProgress
+    try {
+      step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
+    } catch (err: unknown) {
+      handleToast(`Open failed: ${friendlyErrorText(err)}`)
+      settle()
+      return false
+    }
+
+    let report: ImportReport & { container: string }
+    try {
+      const discardsUnsaved = docSessionRef.current.dirty
+      if (!applyLoadedBytes(blank)) {
+        settle()
+        return false
+      }
+      // The previous document is gone as of the blank load (even if the open
+      // below fails) — drop its autosave snapshot with it.
+      if (discardsUnsaved) void clearRecoverySnapshot()
+      while (step.phase !== 'done') {
+        flushSync(() => setOpenProgress({ phase: step.phase as OpenProgress['phase'], done: step.done, total: step.total, shapes: step.shapes }))
+        await nextPaint()
+        step = scene.open_skp_step(OPEN_STEP_BUDGET_MS) as OpenStepProgress
+      }
+      report = step.report as ImportReport & { container: string }
+      flushSync(() => setOpenProgress({ phase: 'view', done: 0, total: 1 }))
+      await nextPaint()
+      // The file IS this state: its import actions are on the undo stack, but
+      // nothing is unsaved. Without the mark the document would read dirty
+      // (and Undo-to-clean would never land) right after opening.
+      scene.mark_saved()
+      skpSourceGenRef.current += 1
+    } catch (err: unknown) {
+      handleToast(`Open failed: ${friendlyErrorText(err)}`)
+      // The blank load committed even though the open failed: reflect a fresh
+      // untitled document so the next Save can never write to a stale file
+      // (same reasoning as runImportPick's catch).
+      setDocSession(afterOpen(null, Date.now()))
+      settle()
+      return false
+    }
+
+    // Tessellate and re-seed hidden state — the blank load seeded from an
+    // empty registry. The dirty mark is suppressed: afterOpen owns it.
+    // The overlay stays up (its last phase) until the view is ready.
+    suppressDirtyRef.current = true
+    try {
+      viewportApi.current?.notifyLoaded()
+    } finally {
+      suppressDirtyRef.current = false
+      settle()
+    }
+    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
+    setHiddenKeys(seededHiddenKeys)
+    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
+    setHiddenTagPaths(seededHiddenTagPaths)
+    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+
+    const format = normalizeDocFormat(report.container)
+    setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
+    setImportReport(report)
+    LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
+    requestAnimationFrame(() => {
+      viewportApi.current?.zoomExtents()
+      // A document with Scenes opens on its first Scene — after the framing
+      // above so the Scene's camera wins (view state; never dirties).
+      scenesRef.current.activateFirstOnLoad()
+    })
+    if (isTauri && typeof pick.handle === 'string') {
+      const path = pick.handle
+      import('@tauri-apps/api/core').then(({ invoke }) =>
+        invoke('push_recent', { path })
+      ).catch(() => { /* ignore */ })
+    } else if (!isTauri) {
+      void recordRecent(pick.bytes, pick.name, 'open', undefined, undefined, undefined, format)
+    }
+    return true
+  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot])
 
   // The unified Open dialog: ONE picker accepting `.hew` plus every import
   // format, dispatching on the extension the user picked (see
@@ -2448,7 +2888,7 @@ export default function App() {
     // a second gesture started while this one is mid-flight (e.g. Ctrl+K
     // behind the STL units modal) would otherwise orphan it. A ref (not
     // state) so the check is synchronous, before the first await.
-    if (openInFlightRef.current) return
+    if (openInFlightRef.current || skpOpenStepsRef.current) return
     openInFlightRef.current = true
     try {
       // Reuse THIS window only when it's pristine (see isPristineDocument);
@@ -2474,9 +2914,13 @@ export default function App() {
       if (pick === null) return // user cancelled — current document unchanged
 
       // Already open in another window? Focus it and stop — never a second
-      // window on the same file (a `.hew` pick only; an import lands as a
-      // new untitled document and has no window to be "already open" in).
-      if (pick.kind === 'hew' && typeof pick.handle === 'string' && (await focusExistingWindowFor(pick.handle))) return
+      // window on the same file (a `.hew` or `.skp` pick; an import lands as
+      // a new untitled document and has no window to be "already open" in).
+      if (
+        (pick.kind === 'hew' || pick.kind === 'skp') &&
+        typeof pick.handle === 'string' &&
+        (await focusExistingWindowFor(pick.handle))
+      ) return
 
       if (opensNewWindow) {
         // Every Tauri pick (hew or import) carries a real filesystem path —
@@ -2499,7 +2943,7 @@ export default function App() {
         const discardsUnsaved = docSessionRef.current.dirty
         const ok = applyLoadedBytes(pick.bytes)
         if (!ok) return
-        setDocSession(afterOpen({ name: pick.name, handle: pick.handle }, Date.now()))
+        setDocSession(afterOpen({ name: pick.name, format: 'hew', handle: pick.handle }, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
         if (isTauri && typeof pick.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
@@ -2515,11 +2959,17 @@ export default function App() {
         return
       }
 
+      // A `.skp` picked through Open becomes the document's own file.
+      if (pick.kind === 'skp') {
+        await runOpenSkp(scene, { name: pick.name, bytes: pick.bytes, handle: pick.handle ?? null })
+        return
+      }
+
       await runImportPick(scene, pick)
     } finally {
       openInFlightRef.current = false
     }
-  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runImportPick])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runImportPick, runOpenSkp])
 
   // File ▸ Import…'s explicit, import-only dialog (no `.hew` in its filter) —
   // kept alongside the unified Open dialog above for users who specifically
@@ -2546,7 +2996,7 @@ export default function App() {
     // "import" ▸ Enter behind the units modal) would otherwise orphan it,
     // hanging it forever and silently discarding its work. Refuse it. A ref
     // (not state) so the check is synchronous, before the first await.
-    if (openInFlightRef.current) return
+    if (openInFlightRef.current || skpOpenStepsRef.current) return
     openInFlightRef.current = true
     try {
       // Same pristine-else-new-window rule as openDocument (see
@@ -2618,6 +3068,15 @@ export default function App() {
     })()
   }, [])
 
+  /** Show the non-blocking "the SketchUp file can't hold everything exactly"
+   * notice for a Save / Save As — at most once per document (the flag resets
+   * on every document load, never on save; later saves are silent). */
+  const noteSkpSimplified = useCallback((simplified: string[]) => {
+    if (simplified.length === 0 || skpNoticeShownRef.current) return
+    skpNoticeShownRef.current = true
+    setSkpNotice({ simplified, offerHewCopy: true })
+  }, [])
+
   // Both return a promise resolving `true` iff the write actually landed —
   // false for a user cancel OR a failure (already toasted) — so the
   // unsaved-changes dialog's Save button can await one and only continue
@@ -2627,23 +3086,46 @@ export default function App() {
   /** Why the last `saveToRef` failed — the live API reports it to its client. */
   const lastSaveErrorRef = useRef('the document could not be saved')
 
-  /** Writes the document to `ref` (or prompts for a location when `ref` is
-   * null) and commits the post-save session state. The one save path: Save
-   * is this with the document's own ref; the live API's `hew.doc.save` is
-   * this with a ref for the path the client named. */
+  /** Writes the document to `ref`, in `ref.format`, and commits the post-save
+   * session state. The one save path: Save is this with the document's own
+   * ref; the live API's `hew.doc.save` is this with a ref for the path the
+   * client named. A document with no file yet saves as Save As does, the
+   * format chosen along with the place (SketchUp's File ▸ Save the same).
+   * `units` names the display units a SketchUp file opens in, over the
+   * file's own (the API's `units`); absent, a save back keeps the file's
+   * units and a new file takes the app's. */
   const saveToRef = useCallback(
-    async (ref: FileRef | null): Promise<boolean> => {
+    async (ref: FileRef | null, units?: string): Promise<boolean> => {
       const scene = sceneRef.current
       if (scene === null) return false
+      if (ref === null) return saveAsDocumentRef.current()
       // `Scene.save()` is transparent to an open explode session — it
       // serializes as-if-closed, so saving mid-session needs no special
       // handling here (the session, and its dimming/scoping, is untouched).
       pushCameraStateToScene(scene)
       const undoDepthAtSave = scene.undo_depth()
-      const bytes = new Uint8Array(scene.save())
       try {
+        // A `.skp` file saves in its own container — NEVER the `.hew` bytes
+        // (they would corrupt the file). `save_skp` builds on the file the
+        // document came from; the written file becomes the source of the
+        // next save only once it is on disk (`commit_skp_save` below).
+        let bytes: Uint8Array
+        let simplified: string[] = []
+        const skp = isSkpFormat(ref.format)
+        if (skp) {
+          const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite
+          bytes = out.bytes
+          simplified = out.simplified
+        } else {
+          bytes = new Uint8Array(scene.save())
+        }
         const newRef = await fileHostRef.current.save(bytes, ref)
         if (newRef === null) return false // user cancelled
+        // The document is now bound to `newRef`: a `.skp` takes the written
+        // file as the source of its next save; a `.hew` has none.
+        if (skp) scene.commit_skp_save()
+        else scene.set_skp_source(undefined)
+        skpSourceGenRef.current += 1
         // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
         // saved mark when nothing has edited the document since the bytes
         // above were grabbed.
@@ -2657,7 +3139,8 @@ export default function App() {
             invoke('push_recent', { path: newRef.handle as string })
           ).catch(() => { /* ignore */ })
         }
-        persistSceneThumbnails(bytes)
+        if (newRef.format === 'hew') persistSceneThumbnails(bytes)
+        noteSkpSimplified(simplified)
         return true
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
@@ -2665,7 +3148,7 @@ export default function App() {
         return false
       }
     },
-    [handleToast, clearRecoverySnapshot, pushCameraStateToScene],
+    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified],
   )
 
   const saveDocument = useCallback(
@@ -2673,20 +3156,79 @@ export default function App() {
     [docSession.currentRef, saveToRef],
   )
 
+  // Save As's in-app format choice (the native picker follows it). Resolves
+  // with the chosen format, or null when the dialog is canceled.
+  const promptSaveFormat = useCallback((initial: DocFormat): Promise<DocFormat | null> => {
+    return new Promise((resolve) => {
+      // Defense in depth: fail a still-open prompt cleanly before taking
+      // over the resolver slot.
+      if (saveFormatResolveRef.current !== null) saveFormatResolveRef.current(null)
+      saveFormatResolveRef.current = resolve
+      setSaveFormatPrompt({ initial })
+    })
+  }, [])
+  const settleSaveFormat = useCallback((format: DocFormat | null) => {
+    const resolve = saveFormatResolveRef.current
+    saveFormatResolveRef.current = null
+    setSaveFormatPrompt(null)
+    resolve?.(format)
+  }, [])
+
   const saveAsDocument = useCallback(async (): Promise<boolean> => {
     const scene = sceneRef.current
     if (scene === null) return false
+    // The format comes from the platform's save panel on the desktop (its
+    // format list, with the path), from the in-app step in the browser.
+    const initial = docSession.currentRef?.format ?? 'hew'
+    let format: DocFormat
+    let target: string | null = null
+    if (hasNativeSavePanel() && fileHostRef.current.writeTo !== undefined) {
+      try {
+        const name = nameForFormat(documentName(docSessionRef.current), initial)
+        const pick = await pickSaveTarget('Save As', name, SAVE_PANEL_FORMATS, initial)
+        if (pick === null) return false // panel canceled
+        format = saveFormatFrom(pick)
+        target = pick.path
+      } catch (err: unknown) {
+        handleToast(`Save As failed: ${friendlyErrorText(err)}`)
+        return false
+      }
+    } else {
+      const chosen = await promptSaveFormat(initial)
+      if (chosen === null) return false // dialog canceled
+      format = chosen
+    }
     pushCameraStateToScene(scene)
     const undoDepthAtSave = scene.undo_depth()
-    const bytes = new Uint8Array(scene.save())
     // When saving an imported model (currentRef=null, importedName set), suggest
-    // the imported filename with a .hew extension so the user sees a sensible
-    // default in the Save As dialog.
-    const baseName = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const suggestedName = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
+    // the imported filename so the user sees a sensible default in the Save As
+    // dialog — its known extension (.skp/.dae/…) swapped for the chosen
+    // format's, never stacked (`Model.skp` suggests `Model.hew`).
+    const suggestedName = nameForFormat(documentName(docSessionRef.current), format)
     try {
-      const newRef = await fileHostRef.current.saveAs(bytes, suggestedName)
+      // `save_skp` builds on the document's source (if any) and stages the
+      // written file as the next source; a canceled picker or failed write
+      // never commits it, so the source moves only once the write landed.
+      let bytes: Uint8Array
+      let simplified: string[] = []
+      if (isSkpFormat(format)) {
+        const out = scene.save_skp(skpTarget(format), getLengthUnit()) as SkpWrite
+        bytes = out.bytes
+        simplified = out.simplified
+      } else {
+        bytes = new Uint8Array(scene.save())
+      }
+      const host = fileHostRef.current
+      const newRef =
+        target !== null && host.writeTo !== undefined
+          ? await host.writeTo(target, bytes, format)
+          : await host.saveAs(bytes, suggestedName, format)
       if (newRef === null) return false // user cancelled
+      // The document is now bound to `newRef`: a `.skp` takes the written
+      // file as the source of its next save; a `.hew` has none.
+      if (isSkpFormat(format)) scene.commit_skp_save()
+      else scene.set_skp_source(undefined)
+      skpSourceGenRef.current += 1
       const atSavedMark = markSavedIfUnmoved(scene, undoDepthAtSave)
       setDocSession(afterSave(newRef, Date.now(), atSavedMark))
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
@@ -2697,13 +3239,35 @@ export default function App() {
           invoke('push_recent', { path: newRef.handle as string })
         ).catch(() => { /* ignore */ })
       }
-      persistSceneThumbnails(bytes)
+      if (format === 'hew') persistSceneThumbnails(bytes)
+      noteSkpSimplified(simplified)
       return true
     } catch (err: unknown) {
       handleToast(`Save As failed: ${friendlyErrorText(err)}`)
       return false
     }
-  }, [docSession.currentRef, docSession.importedName, handleToast, clearRecoverySnapshot, pushCameraStateToScene])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified])
+
+  // The loss notice's "Save a .hew copy": write the document as `.hew`
+  // through the Save As picker WITHOUT rebinding — `currentRef` (and the
+  // `.skp` source) stay exactly as they are.
+  const saveHewCopy = useCallback(async () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    pushCameraStateToScene(scene)
+    const bytes = new Uint8Array(scene.save())
+    const suggestedName = nameForFormat(documentName(docSessionRef.current), 'hew')
+    try {
+      const copy = await fileHostRef.current.saveAs(bytes, suggestedName, 'hew')
+      if (copy !== null) {
+        setSkpNotice(null)
+        handleToast('Saved a .hew copy.')
+        LogStore.log.info('app', `Saved a .hew copy: ${copy.name}`)
+      }
+    } catch (err: unknown) {
+      handleToast(`Save a .hew copy failed: ${friendlyErrorText(err)}`)
+    }
+  }, [handleToast, pushCameraStateToScene])
 
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
@@ -2712,8 +3276,8 @@ export default function App() {
   // new-window branch) after confirming pristine-ness or an explicit discard,
   // or the guaranteed-fresh window a queued open_in_new_window/take_pending_open
   // delivery lands in. Drag-drop, recents, and file-association/second-instance
-  // opens only ever hand openPath `.hew` paths (each filters/records only that
-  // extension upstream), but a pick delivered to a new window can be any
+  // opens hand openPath `.hew` or `.skp` paths (each filters/records only those
+  // extensions upstream), but a pick delivered to a new window can be any
   // format the unified Open dialog accepts, so this dispatches on extension
   // the same way openDocument does.
   const openPathInPlace = useCallback(async (path: string): Promise<boolean> => {
@@ -2735,10 +3299,28 @@ export default function App() {
         const discardsUnsaved = docSessionRef.current.dirty
         if (applyLoadedBytes(bytes)) {
           landed = true
-          setDocSession(afterOpen({ name: basenameOf(path), handle: path }, Date.now()))
+          setDocSession(afterOpen({ name: basenameOf(path), format: 'hew', handle: path }, Date.now()))
           if (discardsUnsaved) void clearRecoverySnapshot()
           invoke('push_recent', { path }).catch(() => { /* ignore */ })
         }
+      } finally {
+        if (!landed) {
+          lastReportedPathRef.current = null
+          invoke('set_document_path', { path: null }).catch(() => { /* ignore */ })
+        }
+      }
+      return landed
+    }
+    if (/\.skp$/i.test(path)) {
+      // A `.skp` path opens as the document's own file (Open Recent, drag-
+      // drop, argv, Open With, a File ▸ Open pick delivered to a new
+      // window): claim the path like `.hew`, release it if the open fails.
+      invoke('set_document_path', { path }).catch(() => { /* older shell — ignore */ })
+      lastReportedPathRef.current = path
+      let landed = false
+      try {
+        const buf = await invoke<ArrayBuffer>('read_file', { path })
+        landed = await runOpenSkp(scene, { name: basenameOf(path), bytes: new Uint8Array(buf), handle: path })
       } finally {
         if (!landed) {
           lastReportedPathRef.current = null
@@ -2753,7 +3335,7 @@ export default function App() {
     const pick = await resolveImportPickFromPath(path, bytes)
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -2882,6 +3464,13 @@ export default function App() {
   }, [welcomeOpen])
 
   const openWebRecent = useCallback((entry: RecentEntry) => {
+    // A recorded `.skp` re-opens through the open-skp path (no handle: the
+    // shelf stores bytes, so Save asks where to write).
+    if (entry.format !== undefined && entry.format !== 'hew') {
+      const scene = sceneRef.current
+      if (scene !== null) void runOpenSkp(scene, { name: entry.name, bytes: entry.bytes, handle: null })
+      return
+    }
     if (applyLoadedBytes(entry.bytes)) {
       setDocSession(afterImport(entry.name, Date.now()))
       // Bumps the entry back to most-recently-used — the LRU behavior a
@@ -2889,7 +3478,7 @@ export default function App() {
       // identical re-record-on-reopen choice.
       void recordRecent(entry.bytes, entry.name)
     }
-  }, [applyLoadedBytes])
+  }, [applyLoadedBytes, runOpenSkp])
 
   // ---------------------------------------------------------------- recovery prompt actions
 
@@ -2899,14 +3488,22 @@ export default function App() {
   const adoptSnapshot = useCallback((snapshot: RecoverySnapshot): boolean => {
     const ok = applyLoadedBytes(snapshot.bytes)
     if (!ok) return false
+    const scene = sceneRef.current
+    if (scene === null) return false
     const { meta } = snapshot
     // meta.savedAt is when the autosave snapshot was written — the best
     // available lower bound for "edits existed as of here". Always dirty
     // via the 'Recovered document' reason, not `at_saved_mark()`: `Scene.
     // load` is clean-at-depth-0 by kernel default, but this content was
     // never written to the real file, only to the recovery slot.
+    // A `.skp` document recovers with the source it persisted beside the
+    // snapshot (Scene.load, above, cleared it), so a Save still builds on the
+    // original file; bumping the generation re-writes it under this window's
+    // own slot on the next autosave.
+    scene.set_skp_source(snapshot.source ?? undefined)
+    skpSourceGenRef.current += 1
     setDocSession(afterRecovery(
-      meta.path !== null ? { name: meta.name, handle: meta.path } : null,
+      meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null,
       meta.path !== null ? undefined : meta.name,
       meta.savedAt,
     ))
@@ -3016,11 +3613,10 @@ export default function App() {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
-    // Suggest a name derived from the current document, dropping any .hew suffix.
-    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const base = rawBase.replace(/\.hew$/i, '')
+    // Suggest a name derived from the current document, dropping its file extension.
+    const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
         description: 'glTF Binary',
         ext: 'glb',
         mime: 'model/gltf-binary',
@@ -3057,11 +3653,10 @@ export default function App() {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
-    // Suggest a name derived from the current document, dropping any .hew suffix.
-    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const base = rawBase.replace(/\.hew$/i, '')
+    // Suggest a name derived from the current document, dropping its file extension.
+    const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
         description: 'USDZ',
         ext: 'usdz',
         mime: 'model/vnd.usdz+zip',
@@ -3081,7 +3676,7 @@ export default function App() {
   // slicers, so both warn — never repair (rule 4) — when any exported object
   // is not a watertight solid.
   const [solidWarning, setSolidWarning] = useState<
-    { format: 'stl' | '3mf'; names: string[] } | null
+    { format: 'stl' | '3mf'; names: string[]; ids: bigint[] } | null
   >(null)
 
   /** Curve resolution (segments per full turn; 0 = stored facets) chosen in
@@ -3107,11 +3702,10 @@ export default function App() {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
-    // Suggest a name derived from the current document, dropping any .hew suffix.
-    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const base = rawBase.replace(/\.hew$/i, '')
+    // Suggest a name derived from the current document, dropping its file extension.
+    const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
         description: 'STL (Binary)',
         ext: 'stl',
         mime: 'model/stl',
@@ -3144,11 +3738,10 @@ export default function App() {
       handleToast('Nothing to export — the model has no solids.')
       return
     }
-    // Suggest a name derived from the current document, dropping any .hew suffix.
-    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const base = rawBase.replace(/\.hew$/i, '')
+    // Suggest a name derived from the current document, dropping its file extension.
+    const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, {
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
         description: '3MF',
         ext: '3mf',
         mime: 'model/3mf',
@@ -3170,7 +3763,7 @@ export default function App() {
     const scene = sceneRef.current
     const offenders = scene !== null ? collectNonSolidObjects(scene) : []
     if (offenders.length > 0) {
-      setSolidWarning({ format, names: offenders.map((o) => o.name) })
+      setSolidWarning({ format, names: offenders.map((o) => o.name), ids: offenders.map((o) => o.id) })
       return
     }
     await (format === 'stl' ? doExportStl() : doExport3mf())
@@ -3189,17 +3782,17 @@ export default function App() {
   // The bytes+name PhoneShareDialog serializes and sends to the shell,
   // read once when the dialog mounts — the exact same `pushCameraStateToScene`
   // + `scene.save()` pair `saveDocument`/`saveAsDocument` use, and the same
-  // baseName-plus-`.hew`-suffix name derivation `saveAsDocument` suggests,
+  // base-name-plus-`.hew` derivation `saveAsDocument` suggests for `.hew`,
   // so the phone receives precisely what a real Save would have written.
   const getPhoneShareDocument = useCallback((): PhoneShareDocument | null => {
     const scene = sceneRef.current
     if (scene === null) return null
     pushCameraStateToScene(scene)
     const bytes = new Uint8Array(scene.save())
-    const baseName = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const name = baseName.endsWith('.hew') ? baseName : baseName + '.hew'
+    // Always `.hew` bytes (a `.skp` document included), named `<base>.hew`.
+    const name = nameForFormat(documentName(docSessionRef.current), 'hew')
     return { bytes, name }
-  }, [docSession.currentRef, docSession.importedName, pushCameraStateToScene])
+  }, [pushCameraStateToScene])
 
   // File ▸ Open on Phone… is disabled on an empty document (nothing worth
   // sharing) — re-derived on every `docRev` bump (the same "something in
@@ -3520,10 +4113,16 @@ export default function App() {
             // permission prompt or Save-As picker and rebind the
             // document), a handle-less session — stay on the ordinary
             // path: mark dirty, the user's next save carries the stamp.
+            // `ref.format === 'hew'` is data-safety critical: this path
+            // writes `scene.save()` — `.hew` bytes — straight to the file,
+            // which for a `.skp`-bound document would replace the SketchUp
+            // file with the wrong format. A `.skp` takes the ordinary path
+            // (dirty; the user's next save writes the right container).
             const writeThrough =
               wasClean &&
               isTauri &&
               typeof ref?.handle === 'string' &&
+              ref.format === 'hew' &&
               docSessionRef.current === sessionAtSave
             if (writeThrough) {
               // Camera-state parity with every other save path.
@@ -3810,10 +4409,9 @@ export default function App() {
     const annotations = svg.includeDimensions ? projectAnnotationOverlay(api.collectAnnotationDrawing(), camera) : null
     const text = lineArtSvgDocument(res.drawing, scaleRatio(svg.scale), { hiddenDashed: svg.hiddenDashed, annotations })
     const bytes = new TextEncoder().encode(text)
-    const rawBase = docSession.currentRef?.name ?? docSession.importedName ?? 'Untitled'
-    const base = rawBase.replace(/\.hew$/i, '')
+    const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await fileHostRef.current.exportBinary(bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
       if (exportedTo !== null) {
         handleToast('Exported SVG.')
         LogStore.log.info('app', `Exported SVG line drawing (${bytes.length} bytes, ${res.drawing.kinds.length} segments)`)
@@ -3823,9 +4421,48 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
+  // SketchUp export (`.skp`, the 2026 container or the 2017 format): a copy
+  // written out through `Scene.export_skp`, which leaves the document's own
+  // `.skp` source alone. Whatever the file could not hold exactly is listed
+  // in the same notice a `.skp` Save shows — every time (an export is a
+  // deliberate act, not a recurring save), and with no "Save a .hew copy".
+  const exportSkp = useCallback(async (format: 'skp' | 'skp2017') => {
+    const scene = sceneRef.current
+    if (scene === null) {
+      handleToast('Export failed: viewport not ready.')
+      return
+    }
+    let out: SkpWrite
+    try {
+      pushCameraStateToScene(scene)
+      // The dialog's `skp` is the 2026 container (the wasm target's name).
+      out = scene.export_skp(format === 'skp2017' ? 'skp2017' : 'skp2026', getLengthUnit()) as SkpWrite
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    const base = documentBaseName(docSessionRef.current)
+    try {
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, out.bytes, base + '.skp', {
+        description: 'SketchUp model',
+        ext: 'skp',
+        mime: 'application/vnd.sketchup.skp',
+      })
+      if (exportedTo !== null) {
+        handleToast('Exported SketchUp file.')
+        LogStore.log.info('app', `Exported ${format} (${out.bytes.length} bytes)`)
+        if (out.simplified.length > 0) setSkpNotice({ simplified: out.simplified, offerHewCopy: false })
+      }
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+    }
+  }, [handleToast, pushCameraStateToScene])
+
   const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => {
     setExportDialogOpen(false)
-    if (format === 'glb') {
+    if (format === 'skp' || format === 'skp2017') {
+      void exportSkp(format)
+    } else if (format === 'glb') {
       void exportGltf()
     } else if (format === 'usdz') {
       void exportUsdz()
@@ -3834,7 +4471,33 @@ export default function App() {
     } else {
       void exportSolidGated(format, format === 'stl' ? stlSegmentsPerTurn : undefined)
     }
-  }, [exportGltf, exportUsdz, exportSolidGated, exportSvg])
+  }, [exportGltf, exportUsdz, exportSolidGated, exportSvg, exportSkp])
+
+  // File ▸ Export…: on the desktop, the platform's own save panel with the
+  // format list and the chosen format's options in it (io/savePanel.ts);
+  // in the browser, which has no such panel, the in-app Export dialog.
+  const openExport = useCallback(async () => {
+    if (!hasNativeSavePanel() || fileHostRef.current.writeTo === undefined) {
+      setExportDialogOpen(true)
+      return
+    }
+    exportTargetRef.current = null
+    const unit = getLengthUnit()
+    const initial = lastExportFormatRef.current
+    const extension = initial === 'skp2017' ? 'skp' : initial
+    const name = `${documentBaseName(docSessionRef.current)}.${extension}`
+    try {
+      const pick = await pickSaveTarget('Export', name, exportPanelFormats(unit), initial)
+      if (pick === null) return
+      const choice = exportChoiceFrom(pick, unit)
+      if (choice === null) return
+      lastExportFormatRef.current = choice.format
+      exportTargetRef.current = pick.path
+      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg)
+    } catch (err: unknown) {
+      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+    }
+  }, [handleExportFormat, handleToast])
 
   // ---------------------------------------------------------------- settings window
   // Per-platform settings surface:
@@ -3897,19 +4560,42 @@ export default function App() {
       if (op === 'save') {
         // `hew.doc.save`: a named path saves (and rebinds) there; none
         // re-saves in place (the shell only asks when the document has a file).
+        // A path saves in the format its extension (or `format`) says; none
+        // re-saves the document's own file in its own format.
         const path = typeof args.path === 'string' ? args.path : null
-        const ref = path !== null ? { name: basenameOf(path), handle: path } : docSession.currentRef
+        const current = docSession.currentRef
+        const units = typeof args.units === 'string' ? args.units : undefined
+        let ref: FileRef | null = current
+        if (path !== null || args.format !== undefined) {
+          const target = path ?? (typeof current?.handle === 'string' ? current.handle : null)
+          if (target === null) {
+            return { ok: false, refusal: 'save_failed', message: 'the document has no file to save to' }
+          }
+          const format = saveFormatForPath(target, args.format, current?.format)
+          if (format === null) {
+            return {
+              ok: false,
+              refusal: 'format_mismatch',
+              message: `${String(args.format)} contradicts the extension of ${basenameOf(target)}`,
+            }
+          }
+          ref = { name: basenameOf(target), format, handle: target }
+        }
         if (ref === null) {
           return { ok: false, refusal: 'save_failed', message: 'the document has no file to save to' }
         }
         if (args.copy === true) {
           // Save a copy: write the bytes, change nothing about this document
-          // (no rebinding to the file, no clean mark).
+          // (no rebinding to the file, no clean mark, no new SketchUp source:
+          // `save_skp` only stages one, and nothing commits it).
           const scene = sceneRef.current
           if (scene === null) return { ok: false, refusal: 'save_failed', message: 'not ready' }
           pushCameraStateToScene(scene)
           try {
-            await fileHostRef.current.save(new Uint8Array(scene.save()), ref)
+            const bytes = isSkpFormat(ref.format)
+              ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite).bytes
+              : new Uint8Array(scene.save())
+            await fileHostRef.current.save(bytes, ref)
             return { ok: true }
           } catch (err) {
             return {
@@ -3920,7 +4606,7 @@ export default function App() {
           }
         }
         lastSaveErrorRef.current = 'the document could not be saved'
-        const saved = await saveToRef(ref)
+        const saved = await saveToRef(ref, units)
         return saved
           ? { ok: true }
           : { ok: false, refusal: 'save_failed', message: lastSaveErrorRef.current }
@@ -4241,7 +4927,7 @@ export default function App() {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
-      case 'export':   setExportDialogOpen(true); break
+      case 'export':   void openExport(); break
       case 'print':    setPrintDialogOpen(true); break
       // macOS native "Open on Phone…" — always enabled natively (macOS has
       // no live disabled-state push for it, same posture as
@@ -4379,6 +5065,16 @@ export default function App() {
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
       case 'purge-unused': requestPurgeUnused(); break
+      case 'make-solid': {
+        // Object ▸ Make Solid…: the selected objects when anything is
+        // selected, else the whole model.
+        const scene = sceneRef.current
+        const ids = scene === null ? [] : selectionObjectIds(scene, selectedIds)
+        if (ids.length > 0) openMakeSolid('selection', ids)
+        else openMakeSolid('model')
+        break
+      }
+      case 'model-health': openModelHealth(); break
       // Contextual dock only (needs a single selected object/group/instance)
       // — same posture as 'enter-context' above: excused from the palette
       // in registry.ts rather than registered, since it needs a picked node.
@@ -4768,15 +5464,11 @@ export default function App() {
         event.preventDefault()
         if (docSessionRef.current.dirty) {
           // In-app UnsavedChangesDialog (Lane C) replaces the native `ask`
-          // — Save runs the current save flow (via requestUnsavedChangesDecision
-          // → confirmDiscard's own machinery) and only resolves 'save' on
-          // an actual successful write.
+          // — its Save runs the current save flow and only resolves 'save'
+          // on an actual successful write.
           const decision = await requestUnsavedChangesDecision()
           if (decision === 'cancel') return // keep the window open
-          if (decision === 'save') {
-            const ok = await saveDocumentRef.current()
-            if (!ok) return // save failed/cancelled — keep the window open
-          }
+          // 'save' means the dialog's Save already wrote the file.
         }
         // Whether the document was already clean (no prompt needed) or
         // just got saved/discarded above, the close is proceeding
@@ -4804,7 +5496,7 @@ export default function App() {
   // The OS delivers file drops to Tauri's webview event bus rather than the
   // browser's dataTransfer API, so React onDrop never fires in the desktop build.
   // This effect subscribes to the Tauri webview drag-drop event and forwards
-  // the first .hew path to openPath.  The existing React onDrop handlers are
+  // the first .hew or .skp path to openPath.  The existing React onDrop handlers are
   // kept for the web build and remain unchanged.
   useEffect(() => {
     if (!isTauri) return
@@ -4814,8 +5506,8 @@ export default function App() {
       .then(({ getCurrentWebview }) =>
         getCurrentWebview().onDragDropEvent((event) => {
           if (event.payload.type === 'drop') {
-            const hew = event.payload.paths.find((p) => p.toLowerCase().endsWith('.hew'))
-            if (hew) openPathRef.current(hew)
+            const doc = event.payload.paths.find((p) => /\.(hew|skp)$/i.test(p))
+            if (doc) openPathRef.current(doc)
           }
         }),
       )
@@ -5116,7 +5808,12 @@ export default function App() {
   // Mirror the View ▸ Axes / Grid / Guides toggles into the viewport. The
   // viewport API ref is populated once the viewport mounts; all default to
   // visible so an early run before the ref is ready is a harmless no-op.
-  useEffect(() => { viewportApi.current?.setAxesVisible(showAxes) }, [showAxes])
+  useEffect(() => {
+    viewportApi.current?.setAxesVisible(showAxes)
+    // A document with a view style records the choice (a save back to its
+    // `.skp` writes it); one without keeps none.
+    sceneRef.current?.set_view_style_axes(showAxes)
+  }, [showAxes])
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
@@ -5260,19 +5957,42 @@ export default function App() {
   const handleDrop = useCallback(async (ev: React.DragEvent) => {
     ev.preventDefault()
     const file = ev.dataTransfer.files[0]
-    if (file == null || !file.name.endsWith('.hew')) return
+    if (file == null) return
+    if (/\.skp$/i.test(file.name)) {
+      // A dropped `.skp` opens as the document's own file. The File System
+      // Access handle (Chromium) must be requested synchronously — a
+      // DataTransferItem is dead after the first await — so Save can write
+      // back in place; without one, Save asks where to write.
+      const item = ev.dataTransfer.items?.[0] as
+        | (DataTransferItem & { getAsFileSystemHandle?: () => Promise<FileSystemHandle | null> })
+        | undefined
+      const handlePromise = item?.getAsFileSystemHandle?.() ?? Promise.resolve(null)
+      if (!(await confirmDiscard())) return
+      const scene = sceneRef.current
+      if (scene === null) return
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer())
+        const dropped = await handlePromise.catch(() => null)
+        const handle = dropped !== null && dropped.kind === 'file' ? dropped : null
+        await runOpenSkp(scene, { name: file.name, bytes, handle })
+      } catch (err: unknown) {
+        handleToast(`Drop open failed: ${friendlyErrorText(err)}`)
+      }
+      return
+    }
+    if (!file.name.endsWith('.hew')) return
     if (!(await confirmDiscard())) return
     file.arrayBuffer().then((buf) => {
       const discardsUnsaved = docSessionRef.current.dirty
       const ok = applyLoadedBytes(new Uint8Array(buf))
       if (ok) {
-        setDocSession(afterOpen({ name: file.name, handle: null }, Date.now()))
+        setDocSession(afterOpen({ name: file.name, format: 'hew', handle: null }, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
       }
     }).catch((err: unknown) => {
       handleToast(`Drop open failed: ${friendlyErrorText(err)}`)
     })
-  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp])
 
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
@@ -5295,12 +6015,19 @@ export default function App() {
       // snap/pick registration, too costly to pay after every mutation that
       // merely MIGHT have moved something in or out of hiding.
       const shown = opts?.onlyIfChanged === true ? viewportApi.current?.getHiddenIds() : undefined
+      // Drafting hides with its own tags and its group's (the kernel's
+      // `sketch_shown`), which the hidden leaf ids above do not cover: an
+      // explicit visibility change rebuilds the sketch lines too.
+      if (shown === undefined) viewportApi.current?.refreshSketches()
       if (shown !== undefined && sameIds(shown.objects, objectIds) && sameIds(shown.instances, instanceIds)) return
       // (1) Renderer: hide the meshes. (2) Kernel inference: drop the hidden
       // geometry so snap/pick_face skip it — otherwise you'd still snap to and
       // be unable to click past a hidden solid's edges/faces.
       viewportApi.current?.setHidden(objectIds, instanceIds)
-      setKernelHidden(scene, objectIds, instanceIds)
+      // While isolated, the kernel hides everything outside the isolated set
+      // as well (the viewport merges it into its own hidden sets).
+      const eff = viewportApi.current?.getEffectiveHiddenIds?.() ?? { objects: objectIds, instances: instanceIds }
+      setKernelHidden(scene, eff.objects, eff.instances)
     },
     // state?.scene changes on every render; we capture it fresh via the closure.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -5320,13 +6047,14 @@ export default function App() {
     } else {
       next.add(key)
     }
-    setHiddenKeys(next)
-    pushUnionHidden(next, hiddenTagPaths)
     // Persist the choice in the document's USER-hidden registry (view state,
     // not undoable) so it survives save/load, mirroring how
-    // handleToggleTagPath persists via set_tag_hidden.
+    // handleToggleTagPath persists via set_tag_hidden — first, since the
+    // renderer reads a definition member's hidden state from it.
     const kindNum = nodeKindToNumber(node.kind)
     if (kindNum >= 0) sceneRef.current?.set_node_user_hidden(kindNum, node.id, nowHidden)
+    setHiddenKeys(next)
+    pushUnionHidden(next, hiddenTagPaths)
   }
   handleToggleHiddenRef.current = handleToggleHidden
 
@@ -5345,8 +6073,6 @@ export default function App() {
       if (hidden) next.add(k)
       else next.delete(k)
     }
-    setHiddenKeys(next)
-    pushUnionHidden(next, hiddenTagPaths)
     const scene = sceneRef.current
     if (scene !== null) {
       for (const n of nodes) {
@@ -5354,6 +6080,8 @@ export default function App() {
         if (kindNum >= 0) scene.set_node_user_hidden(kindNum, n.id, hidden)
       }
     }
+    setHiddenKeys(next)
+    pushUnionHidden(next, hiddenTagPaths)
   }, [hiddenKeys, hiddenTagPaths, pushUnionHidden])
 
   const handleToggleTagPath = useCallback((path: string[]) => {
@@ -5365,12 +6093,13 @@ export default function App() {
     } else {
       next.add(key)
     }
-    setHiddenTagPaths(next)
-    pushUnionHidden(hiddenKeys, next)
     // Persist the choice in the document's tag registry (view state, not
     // undoable) so it survives save/load, in addition to the session-only
-    // hiddenTagPaths set above (which drives this render's UI immediately).
+    // hiddenTagPaths set below (which drives this render's UI immediately)
+    // — first, since the renderer reads a definition member's tags from it.
     sceneRef.current?.set_tag_hidden(path.join('/'), nowHidden)
+    setHiddenTagPaths(next)
+    pushUnionHidden(hiddenKeys, next)
   }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
   toggleTagPathRef.current = handleToggleTagPath
 
@@ -5613,10 +6342,11 @@ export default function App() {
     )
   }
 
-  // Compute watertight summary for badge display
-  const objectCount = watertightMap.size
-  const allWatertight = objectCount === 0 || Array.from(watertightMap.values()).every(Boolean)
-  const leakyCount = Array.from(watertightMap.values()).filter((v) => !v).length
+  // Status badge summary, from the cheap whole-document health summary.
+  // Not being solid is normal, so every object that isn't solid (panels and
+  // sheets and kept ones included) counts, and the badge is neutral.
+  const objectCount = healthSummary.objects
+  const notSolidCount = healthSummary.open + healthSummary.surfaces
 
   // Selection-gated command availability — see the menuGates memo above.
   const booleanOperands = menuGates?.booleanOperands ?? []
@@ -5769,7 +6499,7 @@ export default function App() {
         onSave={saveDocument}
         onSaveAs={saveAsDocument}
         onImport={importDocument}
-        onExport={() => setExportDialogOpen(true)}
+        onExport={() => void openExport()}
         onPrint={() => setPrintDialogOpen(true)}
         onSaveToLibrary={() => menuActionRef.current('save-to-library-doc')}
         saveToLibraryDisabled={!libraryStore().available()}
@@ -5988,6 +6718,7 @@ export default function App() {
             onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
+            onIsolationChange={handleIsolationChange}
             onExitAllContexts={handleExitAllContexts}
             onSessionChange={handleSessionChange}
             onDocumentChanged={handleDocumentChanged}
@@ -6074,6 +6805,68 @@ export default function App() {
             >
               Editing {sessionStack[sessionStack.length - 1].label}
             </div>
+          )}
+
+          {/* Make Solid wizard: over the viewport's right side, non-modal. */}
+          {makeSolid !== null && state !== null && (
+            <MakeSolidWizard
+              key={makeSolid.nonce}
+              scene={state.scene}
+              scope={makeSolid.scope}
+              objectIds={makeSolid.objectIds}
+              docRev={docRev}
+              docGeneration={docGeneration}
+              onClose={() => setMakeSolid(null)}
+              onIsolate={handleIsolate}
+              onClearIsolation={handleClearIsolation}
+              onHealthOverlay={handleWizardOverlay}
+              isolationLost={wizardIsolationLost}
+              escapeBusy={wizardEscapeBusy}
+              onGeometryChanged={refreshAfterPanelMutation}
+              onToast={handleToast}
+              onWidthChange={setFixWizardWidth}
+            />
+          )}
+
+          {/* Model Health: a floating, non-modal window over the viewport,
+              closed at every launch. The panel unmounts with it, which clears
+              its overlay and its isolation. */}
+          {showModelHealth && state !== null && (
+            <FloatingWindow
+              title={MENU.modelHealth}
+              storageKey="hew.ui.modelHealthWindow"
+              onClose={() => setShowModelHealth(false)}
+              reservedRight={makeSolid !== null ? fixWizardWidth : 0}
+              onCoverChange={setHealthCover}
+              focusNonce={healthFocusNonce}
+              data-model-health-window
+            >
+              <ModelHealthPanel
+                scene={state.scene}
+                docRev={docRev}
+                selectedIds={selectedIds}
+                scope={healthScope}
+                onScopeChange={setHealthScope}
+                objectFilter={healthObjectFilter}
+                onClearObjectFilter={() => setHealthObjectFilter(null)}
+                onSelectNode={handleHealthSelectNode}
+                onIsolate={handlePanelIsolate}
+                onClearIsolation={handlePanelClearIsolation}
+                onFrameBounds={handleHealthFrame}
+                onOverlayChange={handleHealthOverlay}
+                onGeometryChanged={refreshAfterPanelMutation}
+                onToast={handleToast}
+              />
+            </FloatingWindow>
+          )}
+
+          {/* View-only isolation (Model Health): what is shown, and the way back. */}
+          {isolatedCount !== null && (
+            <IsolationBar
+              count={isolatedCount}
+              onShowEverything={handleClearIsolation}
+              rightInset={makeSolid !== null ? fixWizardWidth : 0}
+            />
           )}
 
           {/* Library placement pill (frame 1c): shown for the one-shot
@@ -6312,6 +7105,8 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
+              selectedAnnotation={selectedAnnotation}
+              selectedGuide={selectedGuide}
               // Segments rebuilds a circle's chords, so it needs the repaint
               // path like every other tray panel that edits geometry; names
               // change nothing drawn and skip the re-tessellation.
@@ -6319,6 +7114,7 @@ export default function App() {
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
               onSelectMany={handleReplaceSelection}
+              onShowHealth={handleShowObjectHealth}
               onToast={handleToast}
             />
           </TraySection>
@@ -6328,6 +7124,7 @@ export default function App() {
               docRev={docRev}
               docGeneration={docGeneration}
               watertightMap={watertightMap}
+              objectHealth={objectHealth}
               selectedIds={selectedIds}
               activeContext={activeContext}
               sessionStack={sessionStack}
@@ -6486,34 +7283,56 @@ export default function App() {
             </span>
           </>
         )}
-        {/* Watertight badge — aggregate solids feedback; no other single-glance
-            home (per-object status lives in the Outliner). Right-aligned. */}
-        {objectCount > 0 && (
+        {/* Model health badge — aggregate solids feedback; no other single-glance
+            home (per-object status lives in the Outliner). Right-aligned and
+            neutral: not being solid is normal for a SketchUp model. All solid:
+            the plain "N objects ✓ solid". Otherwise "N objects · M not solid",
+            and clicking it opens the Model Health window. */}
+        {objectCount > 0 && (notSolidCount === 0 ? (
           <span
             style={{
               marginLeft: 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               borderRadius: 4,
-              background: allWatertight ? 'var(--status-solid-bg)' : 'var(--status-leaky-bg)',
-              color: '#fff',
+              background: 'var(--surface-overlay)',
+              color: 'var(--text-secondary)',
             }}
           >
-            {allWatertight
-              ? `${objectCount} object${objectCount !== 1 ? 's' : ''} ✓ solid`
-              : `${leakyCount} leaky`}
+            {badgeText(objectCount, 0)}
           </span>
-        )}
+        ) : (
+          <button
+            type="button"
+            data-health-badge="open"
+            onClick={() => openModelHealth()}
+            title={BADGE_TOOLTIP_LIST}
+            style={{
+              marginLeft: 'auto',
+              padding: '2px 8px',
+              fontSize: 'var(--font-size-dock-chip, 11px)',
+              fontFamily: 'inherit',
+              borderRadius: 4,
+              border: 'none',
+              cursor: 'pointer',
+              background: 'var(--surface-overlay)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            {badgeText(objectCount, notSolidCount)}
+          </button>
+        ))}
       </div>
 
       {/* Debug Log panel — opt-in via Window menu, default hidden. */}
       {showDebugLog && <LogPanel panelHeight={160} />}
 
-      {/* Importing overlay — shown while import_dae blocks the main thread.
+      {/* Importing overlay — shown while an import blocks the main thread,
+          and while a .skp open steps between paints (with its progress).
           The overlay is painted before the blocking call via a double rAF in
-          importDocument.  isImporting is always cleared in a finally block,
-          so a thrown import error can never leave the overlay stuck. */}
-      {isImporting && <ImportingOverlay fileName={importingName} />}
+          importDocument; runOpenSkp settles it on every way out, so a
+          thrown error or a refused blank load never leaves it stuck. */}
+      {isImporting && <ImportingOverlay fileName={importingName} opening={reportOpened} progress={openProgress} />}
 
       {/* STL units-chooser — shown before the overlay above, since STL
           carries no unit information (see promptStlUnits). */}
@@ -6676,7 +7495,33 @@ export default function App() {
       {importReport !== null && (
         <ImportReportDialog
           report={importReport}
+          opened={reportOpened}
           onClose={() => setImportReport(null)}
+          onMakeSolid={() => {
+            setImportReport(null)
+            openMakeSolid('import')
+          }}
+        />
+      )}
+
+      {/* Save As format choice (Hew / SketchUp / SketchUp 2017) — shown
+          before the native save picker, which follows the choice. */}
+      {saveFormatPrompt !== null && (
+        <SaveFormatDialog
+          initial={saveFormatPrompt.initial}
+          onChoose={settleSaveFormat}
+          onCancel={() => settleSaveFormat(null)}
+        />
+      )}
+
+      {/* Non-blocking notice: the SketchUp file could not hold everything
+          exactly (a `.skp` Save / Save As, shown once per document, or an
+          Export). */}
+      {skpNotice !== null && (
+        <SkpLossNotice
+          notice={skpNotice}
+          onSaveHewCopy={() => { void saveHewCopy() }}
+          onDismiss={() => setSkpNotice(null)}
         />
       )}
 
@@ -6724,7 +7569,7 @@ export default function App() {
                 out.push({
                   sid: e.sid,
                   name: e.name,
-                  camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg },
+                  camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg, parallelHeight: cam.parallelHeight },
                   hidden,
                   section,
                 })
@@ -6800,7 +7645,18 @@ export default function App() {
             setSolidWarning(null)
             void (format === 'stl' ? doExportStl() : doExport3mf())
           }}
-          onCancel={() => setSolidWarning(null)}
+          onMakeSolid={() => {
+            // Cancels the export and opens Make Solid on the offenders
+            // (component members are objects too, so their ids work as is).
+            const ids = solidWarning.ids
+            exportTargetRef.current = null
+            setSolidWarning(null)
+            openMakeSolid('selection', ids)
+          }}
+          onCancel={() => {
+            exportTargetRef.current = null
+            setSolidWarning(null)
+          }}
         />
       )}
 

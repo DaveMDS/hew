@@ -736,6 +736,19 @@ pub fn entity_bbox(ctx: &Ctx, entity: &EntityRef) -> Option<(Point3, Point3)> {
                 .collect();
             merge_boxes(boxes)
         }
+        EntityRef::Annotation(id) => {
+            let a = ctx.doc.annotation(*id)?;
+            let points: Vec<Point3> = match a {
+                kernel::Annotation::LinearDimension { a, b, .. } => vec![a.point, b.point],
+                kernel::Annotation::RadialDimension { anchor, curve, .. } => {
+                    vec![anchor.point, curve.center]
+                }
+                kernel::Annotation::LeaderText { anchor, offset, .. } => {
+                    vec![anchor.point, anchor.point + *offset]
+                }
+            };
+            geom::bbox(points.into_iter())
+        }
         EntityRef::Material(_) | EntityRef::Tag(_) => None,
     }
 }

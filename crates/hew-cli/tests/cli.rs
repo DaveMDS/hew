@@ -93,6 +93,7 @@ fn unit_box_mesh(name: &str) -> MeshRecipe {
         face_holes: vec![Vec::new(); face_count],
         base_material: kernel::serialize::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -111,6 +112,8 @@ fn box_document() -> Document {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
     doc
@@ -330,7 +333,7 @@ fn cli_host_exports_a_box_to_well_formed_binary_stl() {
     let doc = box_document();
     let mut host = CliHost::new();
     let bytes = host
-        .export_document(&doc, "stl", None, 0)
+        .export_document(&doc, "stl", None, 0, None)
         .expect("a solid box exports")
         .expect("no path given — bytes come back inline");
 
@@ -357,7 +360,7 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
     let mut host = CliHost::new();
 
     let result = host
-        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0)
+        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None)
         .expect("export succeeds");
     assert!(
         result.is_none(),
@@ -375,7 +378,9 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
 fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
     let doc = Document::new();
     let mut host = CliHost::new();
-    let err = host.export_document(&doc, "stl", None, 0).unwrap_err();
+    let err = host
+        .export_document(&doc, "stl", None, 0, None)
+        .unwrap_err();
     assert_eq!(err.name, "nothing_to_export");
 }
 
@@ -412,7 +417,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
         let reloaded = Document::load(&std::fs::read(&path).unwrap()).expect("reloads");
         let mut host = CliHost::new();
         let direct_bytes = host
-            .export_document(&reloaded, format, None, 0)
+            .export_document(&reloaded, format, None, 0, None)
             .unwrap_or_else(|e| panic!("{format}: direct export succeeds: {e:?}"))
             .unwrap_or_else(|| panic!("{format}: bytes returned inline"));
 
@@ -893,6 +898,8 @@ fn snapshot_respects_user_hidden_state() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -950,6 +957,8 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -959,13 +968,13 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
     // live — the snapshot must still honor the Scene's own captured
     // state, not the document's current one.
     doc.set_node_user_hidden(kernel::NodeId::Object(b), true);
-    let camera = kernel::CameraState {
-        projection: kernel::CameraProjection::Perspective,
-        fov_deg: 40.0,
-        eye: kernel::Point3::new(5.0, 0.0, 0.0),
-        target: kernel::Point3::ORIGIN,
-        up: kernel::Vec3::new(0.0, 0.0, 1.0),
-    };
+    let camera = kernel::CameraState::framed(
+        kernel::CameraProjection::Perspective,
+        40.0,
+        kernel::Point3::new(5.0, 0.0, 0.0),
+        kernel::Point3::ORIGIN,
+        kernel::Vec3::new(0.0, 0.0, 1.0),
+    );
     let sid = doc
         .add_scene(
             Some("Snap".to_string()),
@@ -1025,17 +1034,19 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
     let (a, b) = (ids[0], ids[1]);
-    let camera = kernel::CameraState {
-        projection: kernel::CameraProjection::Perspective,
-        fov_deg: 40.0,
-        eye: kernel::Point3::new(5.0, 0.0, 0.0),
-        target: kernel::Point3::ORIGIN,
-        up: kernel::Vec3::new(0.0, 0.0, 1.0),
-    };
+    let camera = kernel::CameraState::framed(
+        kernel::CameraProjection::Perspective,
+        40.0,
+        kernel::Point3::new(5.0, 0.0, 0.0),
+        kernel::Point3::ORIGIN,
+        kernel::Vec3::new(0.0, 0.0, 1.0),
+    );
     let props = kernel::SceneProps {
         camera: true,
         ..kernel::SceneProps::NONE
@@ -1087,6 +1098,8 @@ fn snapshot_scene_refuses_unknown_scene() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(import, Vec::new()).expect("ingest a box");
 
@@ -1505,4 +1518,394 @@ fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
         assert_eq!(r.error.expect("invalid").code, api::codes::INVALID_PARAMS);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ------------------------------------------------------- .skp documents
+
+/// Runs `calls` (method, params) as one script after a hello, headless,
+/// and returns every response. Panics if any frame refuses unless
+/// `expect_ok` is false.
+fn run_calls(dir: &std::path::Path, calls: &[(&str, serde_json::Value)]) -> Vec<serde_json::Value> {
+    let mut frames = vec![serde_json::json!(
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } }
+    )];
+    for (i, (method, params)) in calls.iter().enumerate() {
+        frames.push(serde_json::json!(
+            { "jsonrpc": "2.0", "id": i + 2, "method": method, "params": params }
+        ));
+    }
+    let script_path = dir.join(format!(
+        "script-{}.json",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&script_path, serde_json::to_vec(&frames).unwrap()).unwrap();
+    hew_cli::run::run_script(&script_path, None, None).responses
+}
+
+/// The refusal name of the last response, if it refused.
+fn last_refusal(responses: &[serde_json::Value]) -> Option<String> {
+    responses
+        .last()?
+        .get("error")?
+        .get("data")?
+        .get("refusal")?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn add_a_far_box() -> (&'static str, serde_json::Value) {
+    (
+        "hew.doc.transact",
+        serde_json::json!({
+            "label": "far box",
+            "commands": [
+                {
+                    "method": "hew.sketch.draw_rect",
+                    "as": "rect",
+                    "params": {
+                        "plane": { "ground": true },
+                        "corner_a": [40.0, 40.0, 0.0],
+                        "corner_b": [41.0, 41.0, 0.0],
+                    },
+                },
+                {
+                    "method": "hew.solid.extrude",
+                    "params": { "region": { "$ref": "rect#/region_id" }, "distance": 0.5 },
+                },
+            ],
+        }),
+    )
+}
+
+fn skp_fixture(rel: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../skp-import/tests/fixtures")
+        .join(rel)
+}
+
+fn skp_object_count(bytes: &[u8]) -> usize {
+    let out = skp_import::import(bytes).expect("the .skp reads back");
+    let mut doc = Document::new();
+    doc.ingest(out.scene, out.textures_missing)
+        .expect("ingest the .skp");
+    doc.visible_object_ids().len()
+}
+
+fn container_of(bytes: &[u8]) -> skp_import::openskp::Container {
+    skp_import::openskp::detect_container(bytes)
+}
+
+/// Open a `.skp`, edit, save back to the same path, reopen: the edit is
+/// there and the file is still in the container it came in.
+fn open_edit_save_reopen(fixture: &str, tag: &str) {
+    let dir = scratch_dir(tag);
+    let path = dir.join("model.skp");
+    std::fs::copy(skp_fixture(fixture), &path).unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let before = skp_object_count(&original);
+    let p = path.to_str().unwrap();
+
+    let responses = run_calls(
+        &dir,
+        &[
+            ("hew.doc.open", serde_json::json!({ "path": p })),
+            add_a_far_box(),
+            ("hew.doc.save", serde_json::json!({})),
+        ],
+    );
+    assert!(
+        responses.iter().all(|r| r.get("error").is_none()),
+        "{responses:?}"
+    );
+    let save = &responses.last().unwrap()["result"];
+    assert!(
+        save.get("bytes_base64").is_none(),
+        "the host wrote the file"
+    );
+    assert!(save["simplified"].is_array(), "{save}");
+    assert!(save["writer_notes"].is_array(), "{save}");
+
+    let saved = std::fs::read(&path).unwrap();
+    assert_ne!(saved, original, "the edit changed the file");
+    assert_eq!(
+        container_of(&saved),
+        container_of(&original),
+        "the container is unchanged"
+    );
+    assert_eq!(
+        skp_object_count(&saved),
+        before + 1,
+        "the edit is in the file"
+    );
+
+    // And through the API once more: reopen, count.
+    let responses = run_calls(
+        &dir,
+        &[
+            ("hew.doc.open", serde_json::json!({ "path": p })),
+            ("hew.query.scene", serde_json::json!({})),
+        ],
+    );
+    assert!(responses.iter().all(|r| r.get("error").is_none()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn open_edit_save_reopen_a_2017_skp() {
+    open_edit_save_reopen("box.skp", "skp17");
+}
+
+#[test]
+fn open_edit_save_reopen_a_2026_skp() {
+    open_edit_save_reopen("2026/box.skp", "skp26");
+}
+
+/// Saving an opened `.skp` to a new `.hew` path writes real `.hew` bytes
+/// and leaves the `.skp` as it was.
+#[test]
+fn save_a_skp_as_hew_to_a_new_path() {
+    let dir = scratch_dir("skp-as-hew");
+    let skp = dir.join("model.skp");
+    std::fs::copy(skp_fixture("box.skp"), &skp).unwrap();
+    let original = std::fs::read(&skp).unwrap();
+    let hew = dir.join("copy.hew");
+
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": skp.to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": hew.to_str().unwrap() }),
+            ),
+        ],
+    );
+    assert!(
+        responses.iter().all(|r| r.get("error").is_none()),
+        "{responses:?}"
+    );
+    assert_eq!(responses.last().unwrap()["result"]["format"], "hew");
+    let reloaded = Document::load(&std::fs::read(&hew).unwrap()).expect("real .hew bytes");
+    assert_eq!(
+        reloaded.visible_object_ids().len(),
+        skp_object_count(&original)
+    );
+    assert_eq!(
+        std::fs::read(&skp).unwrap(),
+        original,
+        "the .skp is untouched"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A `.hew` document saved to a `.skp` path writes the 2026 container; an
+/// explicit `skp2017` writes the 2017 one.
+#[test]
+fn save_a_hew_document_as_each_skp_container() {
+    let dir = scratch_dir("hew-as-skp");
+    let hew = dir.join("model.hew");
+    std::fs::write(&hew, box_document().save()).unwrap();
+    let a = dir.join("a.skp");
+    let b = dir.join("b.skp");
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": hew.to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": a.to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": b.to_str().unwrap(), "format": "skp2017" }),
+            ),
+        ],
+    );
+    assert!(
+        responses.iter().all(|r| r.get("error").is_none()),
+        "{responses:?}"
+    );
+    use skp_import::openskp::Container;
+    assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
+    assert_eq!(
+        container_of(&std::fs::read(&b).unwrap()),
+        Container::Carchive2017
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A format that contradicts the path's extension is refused
+/// (`format_mismatch`) and writes nothing, in both directions: one
+/// format's bytes never land in the other's file.
+#[test]
+fn save_with_a_format_that_contradicts_the_extension_refuses() {
+    let dir = scratch_dir("mismatch");
+    let skp = dir.join("model.skp");
+    let hew = dir.join("model.hew");
+    std::fs::copy(skp_fixture("box.skp"), &skp).unwrap();
+    let original = std::fs::read(&skp).unwrap();
+
+    for (path, format) in [(&skp, "hew"), (&hew, "skp"), (&hew, "skp2017")] {
+        let responses = run_calls(
+            &dir,
+            &[
+                (
+                    "hew.doc.open",
+                    serde_json::json!({ "path": skp.to_str().unwrap() }),
+                ),
+                (
+                    "hew.doc.save",
+                    serde_json::json!({ "path": path.to_str().unwrap(), "format": format }),
+                ),
+            ],
+        );
+        assert_eq!(
+            last_refusal(&responses).as_deref(),
+            Some("format_mismatch"),
+            "{path:?} + {format}: {responses:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&skp).unwrap(),
+        original,
+        "the .skp is untouched"
+    );
+    assert!(!hew.exists(), "nothing was written to the .hew path");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `hew.doc.export` writes both SketchUp containers and never makes the
+/// export the document's file: a following bare save still refuses
+/// `path_required`.
+#[test]
+fn export_writes_both_skp_formats_without_changing_the_working_file() {
+    let dir = scratch_dir("export-skp");
+    let hew = dir.join("model.hew");
+    std::fs::write(&hew, box_document().save()).unwrap();
+    let a = dir.join("a.skp");
+    let b = dir.join("b.skp");
+    let responses = run_calls(
+        &dir,
+        &[
+            ("hew.doc.new", serde_json::json!({})),
+            (
+                "hew.doc.import",
+                serde_json::json!({ "path": skp_fixture("box.skp").to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.export",
+                serde_json::json!({ "format": "skp", "path": a.to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.export",
+                serde_json::json!({ "format": "skp2017", "path": b.to_str().unwrap() }),
+            ),
+            ("hew.doc.save", serde_json::json!({})),
+        ],
+    );
+    use skp_import::openskp::Container;
+    assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
+    assert_eq!(
+        container_of(&std::fs::read(&b).unwrap()),
+        Container::Carchive2017
+    );
+    assert_eq!(last_refusal(&responses).as_deref(), Some("path_required"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `hew.doc.import` of a `.skp` stays additive and now carries the
+/// importer's `warnings`.
+#[test]
+fn import_of_a_skp_is_additive_and_reports_warnings() {
+    let mut doc = box_document();
+    let before = doc.visible_object_ids().len();
+    let mut host = CliHost::new();
+    let report = host
+        .import_document(
+            &mut doc,
+            skp_fixture("box.skp").to_str().unwrap(),
+            &api::ImportOptions::default(),
+        )
+        .expect("imports");
+    assert!(report["warnings"].is_array(), "{report}");
+    assert!(doc.visible_object_ids().len() > before, "additive");
+}
+
+/// A failed `.skp` open is a typed `load_failed`, not a panic, and leaves
+/// the document alone.
+#[test]
+fn open_of_a_broken_skp_refuses_load_failed() {
+    let dir = scratch_dir("bad-skp");
+    let bad = dir.join("bad.skp");
+    std::fs::write(&bad, b"not a sketchup file").unwrap();
+    let responses = run_calls(
+        &dir,
+        &[(
+            "hew.doc.open",
+            serde_json::json!({ "path": bad.to_str().unwrap() }),
+        )],
+    );
+    assert_eq!(last_refusal(&responses).as_deref(), Some("load_failed"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The units a `.skp` opens in: `units` by name, else the save back keeps
+/// the file's own and a new file or an export takes meters (a new app's
+/// display units — a headless session has no preference of its own).
+#[test]
+fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
+    let dir = scratch_dir("skp-units");
+    let model = dir.join("model.skp");
+    std::fs::copy(skp_fixture("box.skp"), &model).unwrap();
+    let unit = |p: &std::path::Path| {
+        skp_import::openskp::Model::parse(&std::fs::read(p).unwrap())
+            .unwrap()
+            .units
+            .length_unit
+    };
+    let own = unit(&model);
+    assert_ne!(own, 4, "the fixture is not in meters");
+    let (m, p) = (model.to_str().unwrap(), |n: &str| dir.join(n));
+    let out = |n: &str| p(n).to_str().unwrap().to_string();
+    let r = run_calls(
+        &dir,
+        &[
+            ("hew.doc.open", serde_json::json!({ "path": m })),
+            (
+                "hew.doc.export",
+                serde_json::json!({ "format": "skp", "path": out("export.skp") }),
+            ),
+            (
+                "hew.doc.export",
+                serde_json::json!({ "format": "skp2017", "path": out("export-mm.skp"), "units": "mm" }),
+            ),
+            add_a_far_box(),
+            ("hew.doc.save", serde_json::json!({})),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": out("named.skp"), "units": "cm" }),
+            ),
+            ("hew.doc.new", serde_json::json!({})),
+            add_a_far_box(),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": out("new.skp") }),
+            ),
+        ],
+    );
+    assert!(r.iter().all(|x| x.get("error").is_none()), "{r:#?}");
+    assert_eq!(unit(&p("export.skp")), 4, "an export: meters");
+    assert_eq!(unit(&p("export-mm.skp")), 2, "named: mm");
+    assert_eq!(unit(&model), own, "a save back keeps the file's own");
+    assert_eq!(unit(&p("named.skp")), 3, "named over the file's own: cm");
+    assert_eq!(unit(&p("new.skp")), 4, "a new file: meters");
 }

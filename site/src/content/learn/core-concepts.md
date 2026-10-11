@@ -14,15 +14,13 @@ An **Object** is Hew's unit of "a solid thing." Extruding a closed 2D profile cr
 
 ## Watertightness is tracked, not assumed
 
-Every Object knows whether it is a closed, manifold solid. Hew surfaces this constantly:
+Every Object knows whether it is solid: closed all around, with no gaps.
 
-- The **status bar badge** (bottom right) shows "N objects ✓ solid" in green, or "N leaky" in red, for the whole model.
-- The **Object Info** panel reports the selected object's geometry as **Solid** or **Leaky**.
-- The **Outliner** draws a leaky object's icon with a dashed outline.
+- The **status bar badge** (bottom right) reads "N objects ✓ solid" when everything is solid, and "N objects · 3 not solid" otherwise; click it to list the ones that aren't.
+- **Object Info** shows the selected object's geometry: **Solid**, **Flat panel**, **Curved sheet**, or **Open** with what's open ("Open: 2 openings").
+- The **Outliner** draws a flat panel or curved sheet with a thin outline icon, and any other open shape with a dashed one.
 
-![A selected box with Object Info showing Geometry: Solid and the green solid badge in the status bar](/docs/box-selected.webp)
-
-Nothing gets silently patched or "healed" behind your back. An operation that would produce invalid geometry fails with a clear error instead, and what you see is what you'll get when you export.
+Everything you model is solid. Only an import can bring in something that isn't, and that's normal: SketchUp uses single faces for glass, signs and terrain, and open shapes for ducts, pipe fittings and boxes without lids. Hew keeps them as they are, and they work for everything except Push/Pull, combining, slicing and 3D printing. For those, **Object ▸ Make Solid…** closes what can be closed. See [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
 ## Combining Objects is always explicit
 

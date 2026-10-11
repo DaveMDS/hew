@@ -3,6 +3,7 @@ import {
   INITIAL_SESSION,
   deriveTitle,
   documentName,
+  documentBaseName,
   saveStateLabel,
   afterMutation,
   markNonUndoableDirty,
@@ -17,7 +18,7 @@ import {
 } from './documentSession'
 import type { FileRef } from './fileHost'
 
-const mockRef = (name: string): FileRef => ({ name, handle: null })
+const mockRef = (name: string): FileRef => ({ name, format: 'hew', handle: null })
 const NOW = 1_700_000_000_000
 const NO_REASONS = new Set<string>()
 
@@ -268,6 +269,18 @@ describe('documentSession', () => {
       expect(next.importedName).toBe('Model')
     })
 
+    it('strips every known extension from importedName, not just .dae', () => {
+      expect(afterImport('Part.stl', NOW).importedName).toBe('Part')
+      expect(afterImport('House.skp', NOW).importedName).toBe('House')
+      expect(afterImport('Scan.GLB', NOW).importedName).toBe('Scan')
+      expect(afterImport('Chair.hew', NOW).importedName).toBe('Chair')
+    })
+
+    it('keeps an unknown extension and an inner dot', () => {
+      expect(afterImport('v1.2 plan.txt', NOW).importedName).toBe('v1.2 plan.txt')
+      expect(afterImport('a.skp.dae', NOW).importedName).toBe('a.skp')
+    })
+
     it('title uses importedName when currentRef is null', () => {
       const next = afterImport('Guest House Countertops.dae', NOW)
       expect(deriveTitle(next)).toBe('• Guest House Countertops — Hew')
@@ -316,7 +329,7 @@ describe('documentSession', () => {
 })
 
 describe('applyWriteThroughSave (library stamp write-through)', () => {
-  const ref = { name: 'model.hew', handle: '/tmp/model.hew' }
+  const ref = { name: 'model.hew', format: 'hew' as const, handle: '/tmp/model.hew' }
 
   it('applies afterSave when the session is untouched since capture', () => {
     const captured = afterSave(ref, 1000, true)
@@ -345,5 +358,56 @@ describe('applyWriteThroughSave (library stamp write-through)', () => {
     const captured = afterSave(ref, 1000, true)
     const next = applyWriteThroughSave(captured, captured, ref, 2000, false)
     expect(next.dirty).toBe(true)
+  })
+})
+
+describe('afterOpen with a document format', () => {
+  const skpRef = (format: 'skp2026' | 'skp2017', handle: unknown = '/tmp/Model.skp') => ({
+    name: 'Model.skp',
+    format,
+    handle,
+  })
+
+  it('binds the ref (and its format) as a clean document', () => {
+    const next = afterOpen(skpRef('skp2026'), NOW)
+    expect(next.dirty).toBe(false)
+    expect(next.currentRef?.format).toBe('skp2026')
+    expect(next.currentRef?.handle).toBe('/tmp/Model.skp')
+    expect(next.importedName).toBeUndefined()
+    expect(next.nonUndoableReasons.size).toBe(0)
+    expect(next.lastSavedAt).toBe(NOW)
+  })
+
+  it('titles the document with the .skp file name', () => {
+    expect(deriveTitle(afterOpen(skpRef('skp2017'), NOW))).toBe('Model.skp — Hew')
+    expect(documentName(afterOpen(skpRef('skp2017'), NOW))).toBe('Model.skp')
+  })
+
+  it('a save keeps the format of the ref it is handed', () => {
+    const next = afterSave(skpRef('skp2017'), NOW, true)
+    expect(next.currentRef?.format).toBe('skp2017')
+    expect(next.dirty).toBe(false)
+  })
+
+  it('a recovered skp document keeps its format on the ref', () => {
+    const next = afterRecovery(skpRef('skp2026'), undefined, NOW)
+    expect(next.currentRef?.format).toBe('skp2026')
+    expect(next.dirty).toBe(true)
+  })
+})
+
+describe('documentBaseName', () => {
+  it('drops the extension of an opened .skp (never Model.skp.hew)', () => {
+    const state = afterOpen({ name: 'Model.skp', format: 'skp2026', handle: null }, NOW)
+    expect(documentBaseName(state)).toBe('Model')
+  })
+
+  it('drops the extension of an imported name and of a .hew ref', () => {
+    expect(documentBaseName(afterImport('Kitchen.dae', NOW))).toBe('Kitchen')
+    expect(documentBaseName(afterOpen({ name: 'house.hew', format: 'hew', handle: null }, NOW))).toBe('house')
+  })
+
+  it('is Untitled for a blank document', () => {
+    expect(documentBaseName(INITIAL_SESSION)).toBe('Untitled')
   })
 })

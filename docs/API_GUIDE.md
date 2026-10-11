@@ -292,6 +292,15 @@ same result as headless:
   starts from what the user is looking at (the viewport camera at the
   moment of the request).
 
+One thing a SketchUp file carries that the others don't is its display
+units. A `.skp` export opens in the app's display units live and in
+meters headless, so pass `units` (`"m"`, `"cm"`, `"mm"`, `"arch"`,
+`"frac_in"`, `"dec_in"`) when the file should be the same either way:
+
+```sh
+hew-cli dispatch hew.doc.export '{"format":"skp","path":"chair.skp","units":"mm"}' --file chair.hew
+```
+
 HEW_API.md §12.2 lists the few things that legitimately differ between the
 two modes and why they cannot be made to agree.
 
@@ -490,13 +499,15 @@ envelope.
 ## Look at what you built
 
 `hew.query.scene` returns the document tree with a summary per entity —
-kind, name, bounding box, watertightness, tags, group membership:
+kind, name, bounding box, watertightness and health, tags, group
+membership:
 
 ```json
 {"document": {"objects": 5, "groups": 1, "sketches": 0, "components": 0,
               "instances": 0, "materials": 0, "guides": 0},
  "tree": [
   {"id": "obj_7", "kind": "object", "name": "Top", "watertight": true,
+   "health": "solid",
    "bbox": {"min": [0.0, 0.0, 0.72], "max": [1.2, 0.8, 0.76]}, "tags": []},
   {"id": "grp_5", "kind": "group", "name": "Legs", "watertight": null,
    "bbox": {"min": [0.03, 0.03, 0.0], "max": [1.17, 0.77, 0.72]},
@@ -546,6 +557,62 @@ metres so a pixel value converts back to a distance (HEW_API.md §7 has the
 formula). With `path`, each lands beside the snapshot as
 `<path>.depth.png` and `<path>.normals.png`. They come from the same render
 and camera as the color image, so the three line up pixel for pixel.
+
+## Repair an imported model
+
+Everything you build through the API is a solid. An imported model
+often is not: SketchUp lets people draw single faces, leave a box
+without its lid, or split one shape into pieces that only meet edge to
+edge. `hew.doc.health` lists every object that is not a solid, and what
+kind of open it is:
+
+```json
+{"rows": [
+  {"object": "obj_41", "name": "Tank", "definition": "cmp_12",
+   "definition_name": "Tank", "placements": 2, "instances": ["ins_13", "ins_19"],
+   "accepted": false, "family": null,
+   "verdict": {"kind": "cappable"},
+   "rims": [{"role": "outer", "planar": true, "cappable": true, "closed": true,
+             "sheet_edge": false, "shared": false,
+             "perimeter": 1.62, "extent": 0.58, "edges": 32}],
+   "branching_vertices": 0, "islands": 1, "faces": 5}],
+ "families": [],
+ "counts": {"objects": 214, "solids": 198, "flat_sheets": 12, "bent_sheets": 1,
+            "cappable": 2, "holes": 1, "mixed": 0, "non_manifold": 0,
+            "seam_families": 0}}
+```
+
+`flat_sheet` and `bent_sheet` are surfaces: drawn that way on purpose,
+not broken. `hew.solid.thicken` pulls a flat one into a solid, and
+`hew.solid.mark_surface` records that it is meant to stay a surface.
+`cappable` (one flat opening around the object) and `holes` with
+`planar` openings close with `hew.solid.cap`. `mixed` and
+`non_manifold` need a person. Each rim says whether a face can close
+it (`cappable`), and `shared` marks a seam between pieces of one shape
+the importer split (rows with the same `family`): capping only the
+shared rims rejoins the shape without closing openings it was drawn
+with. A component's member is one row, however
+many instances place it, and repairing it repairs every instance.
+
+To close every opening a face can close in a file, cap each object on
+its own, so one refusal skips that object instead of stopping the rest.
+`dispatch --file` saves the file back after each repair:
+
+```sh
+cp house.hew fixed.hew
+hew-cli dispatch hew.doc.health --file fixed.hew \
+  | jq -r '.result.rows[] | select(any(.rims[]; .cappable)) | .object' \
+  | while read -r id; do
+      hew-cli dispatch hew.solid.cap "{\"object\": \"$id\"}" --file fixed.hew \
+        || echo "left $id open" >&2
+    done
+```
+
+A cap that cannot be made answers with a refusal that says why
+(`rim_not_planar`, `caps_overlap`, …), and the object stays as it was.
+Inside one transaction, `hew.solid.cap` names its new faces `cap.1`,
+`cap.2`, …, so a following `hew.solid.push_pull` can work on the lid it
+just made: `{"face": {"$face": "lid#cap.1"}, "distance": 0.02}`.
 
 ## Undo carefully in a live session
 

@@ -13,6 +13,7 @@
  * build — see recoveryStore.ts's makeRecoveryStore().
  */
 
+import { normalizeRecoveryMeta } from './recoveryStore'
 import type { RecoveryListing, RecoveryMeta, RecoverySnapshot, RecoveryStore } from './recoveryStore'
 
 interface RecoveryEntry {
@@ -35,12 +36,12 @@ interface RecoveryPayload {
 function parseMeta(raw: string | null, modifiedMs: number): RecoveryMeta {
   if (raw !== null) {
     try {
-      return JSON.parse(raw) as RecoveryMeta
+      return normalizeRecoveryMeta(JSON.parse(raw))
     } catch {
       /* fall through to the synthesized meta */
     }
   }
-  return { version: 1, savedAt: modifiedMs, name: 'Untitled', path: null }
+  return { version: 1, savedAt: modifiedMs, name: 'Untitled', path: null, format: 'hew' }
 }
 
 export class TauriRecoveryStore implements RecoveryStore {
@@ -50,6 +51,16 @@ export class TauriRecoveryStore implements RecoveryStore {
       contents: Array.from(bytes),
       meta: JSON.stringify(meta),
     })
+  }
+
+  async writeSource(source: Uint8Array | null): Promise<void> {
+    const { invoke } = await import('@tauri-apps/api/core')
+    if (source === null) {
+      await invoke('recovery_source_clear')
+      return
+    }
+    // Raw-body IPC: a source is tens to hundreds of MB, so no JSON array.
+    await invoke('recovery_source_write', source as never)
   }
 
   async list(): Promise<RecoveryListing[]> {
@@ -63,11 +74,20 @@ export class TauriRecoveryStore implements RecoveryStore {
 
   async claim(slot: string): Promise<RecoverySnapshot | null> {
     const { invoke } = await import('@tauri-apps/api/core')
+    // Read the source companion BEFORE claiming: claim re-homes the file
+    // pair, after which the claimed slot's companion no longer lives there.
+    let source: Uint8Array | null = null
+    try {
+      source = new Uint8Array(await invoke<ArrayBuffer>('recovery_source_read', { slot }))
+    } catch {
+      source = null // none stored
+    }
     const result = await invoke<RecoveryPayload | null>('recovery_claim', { slot })
     if (result == null) return null
     return {
       bytes: new Uint8Array(result.contents),
       meta: parseMeta(result.meta, result.modified_ms),
+      source,
     }
   }
 

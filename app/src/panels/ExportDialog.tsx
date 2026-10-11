@@ -21,27 +21,19 @@
 
 import { useEffect, useCallback, useState } from 'react'
 import { VIEW_LABEL, type PrintViewKind } from '../print/printJob'
-import { scaleDisplay, scaleHint, scalePresetsFor, type PrintScale } from '../print/scale'
+import { scalePresetsFor, type PrintScale } from '../print/scale'
+import {
+  DEFAULT_STL_SEGMENTS,
+  EXPORT_FORMATS,
+  STL_RESOLUTIONS,
+  defaultSvgScaleIndex,
+  svgScaleLabel,
+  type ExportFormat,
+  type SvgExportOptions,
+} from '../io/savePanel'
 import { getLengthUnit } from '../settings/units'
 
-export type ExportFormat = 'glb' | 'stl' | '3mf' | 'usdz' | 'svg'
-
-/** SVG line-drawing options (docs/design/printing.md §7b). */
-export interface SvgExportOptions {
-  view: PrintViewKind
-  scale: PrintScale
-  hiddenDashed: boolean
-  includeDimensions: boolean
-}
-
-/** STL curve-resolution choices: segments per full turn (0 = stored facets). */
-const STL_RESOLUTIONS: { value: number; label: string }[] = [
-  { value: 0, label: 'As modeled (stored facets)' },
-  { value: 24, label: 'Draft (24 segments per turn)' },
-  { value: 48, label: 'Standard (48 segments per turn)' },
-  { value: 96, label: 'Fine (96 segments per turn)' },
-  { value: 192, label: 'Ultra (192 segments per turn)' },
-]
+export type { ExportFormat, SvgExportOptions } from '../io/savePanel'
 
 interface ExportDialogProps {
   /**
@@ -132,14 +124,14 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
 
 export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
   const [format, setFormat] = useState<ExportFormat>('glb')
-  const [stlSegments, setStlSegments] = useState(48)
+  const [stlSegments, setStlSegments] = useState(DEFAULT_STL_SEGMENTS)
   // SVG line-drawing options (docs/design/printing.md §7b): a view, a
   // drawing scale from the unit family's ladder (1:1 default — laser/CNC
   // software reads the file at true size), dashed hidden lines, dimensions.
   const unitFormat = getLengthUnit()
   const svgPresets = scalePresetsFor(unitFormat)
   const [svgView, setSvgView] = useState<PrintViewKind>('current')
-  const [svgScaleIndex, setSvgScaleIndex] = useState<number>(() => Math.max(0, svgPresets.findIndex((p) => Math.abs(p.paperMeters / p.modelMeters - 1) < 1e-9)))
+  const [svgScaleIndex, setSvgScaleIndex] = useState<number>(() => defaultSvgScaleIndex(svgPresets))
   const [svgHidden, setSvgHidden] = useState(false)
   const [svgDimensions, setSvgDimensions] = useState(true)
   const svgOptions = (): SvgExportOptions => ({ view: svgView, scale: svgPresets[svgScaleIndex] as PrintScale, hiddenDashed: svgHidden, includeDimensions: svgDimensions })
@@ -181,11 +173,11 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           onChange={(e) => setFormat(e.target.value as ExportFormat)}
           autoFocus
         >
-          <option value="glb">glTF binary (.glb) — Y-up, meters</option>
-          <option value="stl">STL binary (.stl) — Z-up, millimeters, for 3D printing</option>
-          <option value="3mf">3MF (.3mf) — Z-up, millimeters, keeps part names and colors</option>
-          <option value="usdz">USDZ (.usdz) — Y-up, meters, for AR Quick Look and USD pipelines</option>
-          <option value="svg">SVG line drawing (.svg) — hidden lines removed, true size at a drawing scale</option>
+          {EXPORT_FORMATS.map((f) => (
+            <option key={f.format} value={f.format}>
+              {f.hint === '' ? f.label : `${f.label} — ${f.hint}`}
+            </option>
+          ))}
         </select>
 
         {format === 'svg' && (
@@ -198,12 +190,9 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
             </select>
             <label style={LABEL_STYLE} htmlFor="export-svg-scale-select">Scale</label>
             <select id="export-svg-scale-select" style={SELECT_STYLE} value={svgScaleIndex} onChange={(e) => setSvgScaleIndex(Number(e.target.value))}>
-              {svgPresets.map((p, i) => {
-                const hint = scaleHint(p, unitFormat)
-                return (
-                  <option key={p.label} value={i}>{hint === null ? scaleDisplay(p) : `${p.label}  (${hint})`}</option>
-                )
-              })}
+              {svgPresets.map((p, i) => (
+                <option key={p.label} value={i}>{svgScaleLabel(p, unitFormat)}</option>
+              ))}
             </select>
             <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px' }}>
               <input type="checkbox" checked={svgHidden} onChange={(e) => setSvgHidden(e.target.checked)} /> Hidden lines dashed

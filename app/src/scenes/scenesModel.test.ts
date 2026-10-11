@@ -17,7 +17,7 @@ const CAM = { projection: 'perspective', fovDeg: 45, eye: [4, -6, 3], target: [0
 describe('parseScenesJson', () => {
   it('parses the wasm shape, keeping absent vs null section distinct', () => {
     const json = JSON.stringify([
-      { sid: 42, name: 'Assembled', description: 'All', props: PROP_ALL, camera: CAM, display: { grid: true, axes: false, guides: true }, section: null },
+      { sid: 42, name: 'Assembled', description: 'All', props: PROP_ALL, camera: CAM, display: { grid: true, axes: false, guides: true }, viewStyle: { background: [255, 255, 255], sky: null, ground: [200, 200, 200], axes: false }, section: null },
       { sid: 43, name: 'Cut', props: PROP_CAMERA | PROP_SECTION, camera: CAM, section: { origin: [0, 0, 1], normal: [0, 0, 1], active: true } },
       { sid: 44, name: 'Cam only', props: PROP_CAMERA, camera: CAM },
     ])
@@ -25,6 +25,8 @@ describe('parseScenesJson', () => {
     expect(entries.map((e) => e.name)).toEqual(['Assembled', 'Cut', 'Cam only'])
     expect(entries[0].section).toBeNull()
     expect(entries[0].display).toEqual({ grid: true, axes: false, guides: true })
+    expect(entries[0].viewStyle).toEqual({ background: [255, 255, 255], sky: null, ground: [200, 200, 200], axes: false })
+    expect(entries[1].viewStyle).toBeUndefined()
     expect(entries[0].description).toBe('All')
     expect(entries[1].section).toEqual({ origin: [0, 0, 1], normal: [0, 0, 1], active: true })
     expect(entries[1].description).toBe('')

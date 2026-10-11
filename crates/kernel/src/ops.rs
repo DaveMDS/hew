@@ -909,6 +909,7 @@ impl Object {
     pub(crate) fn remap_materials(&mut self, f: &dyn Fn(MaterialId) -> MaterialId) {
         for face in self.faces.values_mut() {
             face.material = face.material.map(f);
+            face.back_material = face.back_material.map(f);
         }
         self.default_material = self.default_material.map(f);
     }
@@ -3693,6 +3694,7 @@ impl Object {
             inner_loops: Vec::new(),
             plane: face_plane,
             material: sub_attrs.material,
+            back_material: sub_attrs.back_material,
             uv_frame: sub_attrs.uv_frame,
             surface: sub_attrs.surface,
         });
@@ -4544,6 +4546,7 @@ impl Object {
                 // raises walls that shade smooth and whose push offsets the
                 // radius, while a straight edge stays a flat facet.
                 material: None,
+                back_material: None,
                 uv_frame: None,
                 surface: facet_curves[k].map(|g| crate::topo::SurfaceRef::Cylinder {
                     axis_point: g.center,
@@ -5450,7 +5453,11 @@ impl Object {
 
         let fa = &self.faces[face_a];
         let fb = &self.faces[face_b];
-        if fa.material != fb.material || fa.uv_frame != fb.uv_frame || fa.surface != fb.surface {
+        if fa.material != fb.material
+            || fa.back_material != fb.back_material
+            || fa.uv_frame != fb.uv_frame
+            || fa.surface != fb.surface
+        {
             return None;
         }
 
@@ -5677,7 +5684,7 @@ impl Object {
     /// (twin) adjacency, in deterministic first-appearance order — the shared
     /// substrate of [`Object::split_connected_components`] and
     /// [`Object::split_solids`]. A connected Object yields one component.
-    fn face_components(&self) -> Vec<Vec<FaceId>> {
+    pub(crate) fn face_components(&self) -> Vec<Vec<FaceId>> {
         // Faces in deterministic slotmap order, with a dense index for union-find.
         let face_ids: Vec<FaceId> = self.faces.keys().collect();
         if face_ids.len() <= 1 {
@@ -5739,7 +5746,7 @@ impl Object {
     /// for the result to be watertight (the splitter guarantees this for a
     /// valid manifold).
     #[allow(clippy::type_complexity)] // mirrors from_faces_with_holes' spec tuple
-    fn rebuild_component(&self, faces: &[FaceId]) -> Object {
+    pub(crate) fn rebuild_component(&self, faces: &[FaceId]) -> Object {
         // Remap a loop's vertices to dense local indices, appending unseen
         // positions in first-encounter order (deterministic given the loop and
         // face iteration order).
@@ -5790,6 +5797,9 @@ impl Object {
         }
 
         let mut obj = Object::from_faces_with_holes(&positions, &specs);
+        let backs: Vec<crate::material::FaceMaterial> =
+            faces.iter().map(|&f| self.faces[f].back_material).collect();
+        obj.set_built_back_materials(&backs);
         // Carry over object-level state the rebuild path does not know about.
         obj.default_material = self.default_material;
         obj.planarity_tol = self.planarity_tol;
@@ -6275,7 +6285,7 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
 
 /// One face of a closed shell, flattened for the parity cast: its plane,
 /// outer loop positions, and hole loop positions.
-type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
+pub(crate) type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
 
 /// A point strictly inside the simple polygon `poly` (projected along
 /// `normal`), or `None` for a degenerate outline. Candidates are the
@@ -6372,7 +6382,7 @@ const WALL_GUARD_RAY_DIRS: [Vec3; 4] = [
 /// Tries each candidate direction until one casts cleanly (no boundary
 /// graze, no in-plane run through `p`); falls back to the first direction's
 /// count if all graze. Deterministic either way.
-fn point_in_shell_faces(faces: &[ShellFace], p: Point3) -> bool {
+pub(crate) fn point_in_shell_faces(faces: &[ShellFace], p: Point3) -> bool {
     for d in WALL_GUARD_RAY_DIRS {
         let (count, ambiguous) = shell_face_ray_cast(faces, p, d);
         if !ambiguous {
@@ -8444,6 +8454,7 @@ fn build_coplanar_wall(
         inner_loops: Vec::new(),
         plane,
         material: None,
+        back_material: None,
         uv_frame: None,
         surface: None,
     });
@@ -8731,6 +8742,7 @@ fn do_split_face(
         // frame ( +  extension), and analytic surface; face A keeps them by
         // reusing its FaceId.
         material: obj.faces[face].material,
+        back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
     });
@@ -8931,6 +8943,7 @@ fn do_split_face_hole(
         inner_loops: Vec::new(),
         plane: face_plane,
         material: obj.faces[face].material,
+        back_material: obj.faces[face].back_material,
         uv_frame: obj.faces[face].uv_frame,
         surface: obj.faces[face].surface,
     });

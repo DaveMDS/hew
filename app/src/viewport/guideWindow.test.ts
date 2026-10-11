@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { windowFor, guideReach, type GuideWindow } from './guideWindow'
+import { windowFor, guideReach, guideSpanOf, clampToSpan, stretchToUse, type GuideWindow } from './guideWindow'
 
 describe('windowFor', () => {
   it('centres on the focus and snaps the half-length up to a power of two', () => {
@@ -84,5 +84,27 @@ describe('guideReach', () => {
   it('never shrinks a guide nearer than the focus, and caps the depth scale', () => {
     expect(guideReach(1, [1, 0, 0], [0, -2, 0], view(true))).toBeCloseTo(1, 12)
     expect(guideReach(1, [1, 0, 0], [0, 1000, 0], view(true))).toBeCloseTo(20, 12)
+  })
+})
+
+describe('guideSpanOf / clampToSpan', () => {
+  it('treats a 6-element line as infinite and reads from/to from 8', () => {
+    expect(guideSpanOf([0, 0, 0, 1, 0, 0])).toEqual({ lo: -Infinity, hi: Infinity })
+    expect(guideSpanOf([0, 0, 0, 1, 0, 0, 0, 0.5])).toEqual({ lo: 0, hi: 0.5 })
+    expect(guideSpanOf([0, 0, 0, 1, 0, 0, 2, 1])).toEqual({ lo: 1, hi: 2 })
+  })
+
+  it('clamps a window to the span and returns null when it misses', () => {
+    expect(clampToSpan(-5, 5, 0, Infinity)).toEqual([0, 5])
+    expect(clampToSpan(-5, 5, 0, 0.0127)).toEqual([0, 0.0127])
+    expect(clampToSpan(-9, -6, 0, Infinity)).toBeNull()
+    expect(clampToSpan(7, 9, 0, 1)).toBeNull()
+  })
+
+  it('uses a segment whole wherever it lies, and clamps a ray', () => {
+    expect(stretchToUse(-50, 50, 120, 130)).toEqual([120, 130])
+    expect(stretchToUse(-50, 50, 0, Infinity)).toEqual([0, 50])
+    expect(stretchToUse(-50, -10, 0, Infinity)).toBeNull()
+    expect(stretchToUse(-50, 50, -Infinity, Infinity)).toEqual([-50, 50])
   })
 })

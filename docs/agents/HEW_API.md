@@ -101,7 +101,10 @@ result *by construction*, and beneath it they cannot. No native modeling
 command of this API can produce a leaky solid; the worst it can produce
 is a typed refusal — the one honest exception is `hew.doc.import`, which,
 exactly as in the UI, yields watertight-or-honestly-leaky Objects from
-foreign mesh data. This is the load-bearing decision: it is what makes
+foreign mesh data. The repair commands (`hew.solid.cap`, `thicken`,
+`delete_faces`, `mark_surface`) keep the claim: they take an open object
+and either close it into a solid or leave it open, and none of them
+opens a solid. This is the load-bearing decision: it is what makes
 "an AI agent builds a well-formed, watertight, editable model" a property
 of the platform rather than a property of the agent.
 
@@ -197,7 +200,7 @@ object (never positional).
  "params": {"id": "obj_5f3a"}}
 
 {"jsonrpc": "2.0", "id": 4, "result":
- {"kind": "object", "name": "Leg", "watertight": true,
+ {"kind": "object", "name": "Leg", "watertight": true, "health": "solid",
   "bbox": {"min": [0.07, 0.07, 0.0], "max": [0.13, 0.13, 0.45]}}}
 ```
 
@@ -368,8 +371,11 @@ non-normative until specified.
 ### 5.1 Entity identifiers
 
 Objects, Sketches, Groups, Component definitions, Instances, Guides,
-Materials, and Tags are addressed by opaque string identifiers
-(`"obj_5f3a"` above is illustrative; clients must not parse ids).
+Materials, Tags, and Annotations (dimensions and leader texts, `ann_…`)
+are addressed by opaque string identifiers (`"obj_5f3a"` above is
+illustrative; clients must not parse ids). `hew.query.describe` answers
+an annotation id with its kind, anchors, offset and text;
+`hew.entity.delete` removes one.
 
 Neither of the kernel's own identity mechanisms is stable enough to hand
 to a client: runtime handles are generational (deleting and re-creating
@@ -447,7 +453,9 @@ compound-id treatment already given to a sketch's regions and curve
 chains (§5.1) extends to its edges too: `"edg_<sketch>_<key>"`, minted
 and resolved exactly like a region or curve id. `hew.query.entity` on a
 sketch lists its edges (id, endpoints, owning curve if any) alongside
-its regions and curves, and answers a query on an edge id directly;
+its regions (each with `face`: `false` for a loop of edges with no face,
+which `hew.solid.extrude` refuses `region_has_no_face`) and curves, and
+answers a query on an edge id directly;
 `hew.entity.delete` accepts one to erase exactly that edge — the
 eraser's own tool, one edge, one undo step — leaving whatever the
 kernel's own sticky rules do to the vertices and regions it touches
@@ -496,11 +504,14 @@ a **derived-point locator** naming a point of existing geometry:
 - `{"point": "bbox", "of": <entity id>, "anchor": "center" | "min" | "max"}`
 - `{"point": "position", "of": <guide id>}` — a guide *point*'s location
 
-Guides are addressable entities but not box-shaped: a guide *line* is
-infinite — an origin and a direction, not a finite segment — so `bbox`
-anchors on one refuse typed rather than fabricating a meaningless
-corner. Its origin and direction read back via `hew.query.entity`, and
-intersection-based alignment (the crossing of two guides) is client-side
+Guides are addressable entities but not box-shaped: a guide *line* is an
+origin and a direction, infinite for one Hew draws and a ray or a segment
+where a `.skp` file holds one, so `bbox` anchors on one refuse typed
+rather than fabricating a meaningless corner. Its origin, direction,
+stretch (`from` and `to`, meters along the direction from the origin,
+`null` for an end that runs on forever) and `tags` (paths, as a node's; a
+guide with a hidden tag is in the document but neither drawn nor snapped
+to) read back via `hew.query.entity`, and intersection-based alignment (the crossing of two guides) is client-side
 arithmetic at 1.0; the Reserved snap-resolution form below is the future
 shortcut.
 
@@ -700,10 +711,10 @@ for, not shipped.
 | Namespace | Contents | Tier |
 |---|---|---|
 | `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty; in the desktop app also front, attached, label — §4.2) | Required |
-| `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry) | Required (`import`, `purge_unused`, `close`, `focus` Standard) |
+| `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
 | `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
-| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` Standard) |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
 | `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
@@ -827,10 +838,51 @@ Semantics notes, normative:
   creates or opens documents and clients `attach`; whether a live host
   additionally honors `new`/`open` (opening a fresh window, say) is
   host-defined and advertised via capabilities.
+- `hew.doc.open` takes a `.hew` or a SketchUp `.skp` (either container,
+  chosen by the `.skp` extension). Opening a `.skp` is not an edit: it
+  leaves no undo step. A headless host keeps the opened file as the
+  source of the document's next `.skp` save; opening a `.hew` or
+  `hew.doc.new` drops it. A file the reader cannot decode refuses
+  `load_failed`.
+- `hew.doc.save` takes an optional `format`: `"hew"`, `"skp"` (the 2026
+  container, what current SketchUp saves) or `"skp2017"` (opens in
+  SketchUp Make 2017 and later). Without it the path's extension decides:
+  a `.skp` path keeps the working document's own `.skp` container when it
+  came from a `.skp` (the 2026 one otherwise), anything else writes
+  `.hew`; with no path, the working file's own format is used. An
+  explicit `format` that contradicts the path's extension (a `.skp` path
+  with `"hew"`, or a non-`.skp` path with `"skp"` / `"skp2017"`) refuses
+  `format_mismatch` and writes nothing, so one format's bytes never land
+  in the other's file. A `.skp` save builds on the file the document came
+  from (or was last saved as), so unchanged content stays as SketchUp
+  wrote it, and the written file becomes the new source; a `.hew` save
+  drops it. The result carries `format` (what was written) and, for a
+  `.skp`, `simplified` (what the file could not hold exactly) and
+  `writer_notes` (what the 2017 writer dropped), both arrays of strings.
+  In the desktop app a live save runs the app's own Save (Save As with a
+  `path`, a saved copy with `copy`), so a `.skp` path or format writes
+  exactly what File ▸ Save would. A live host that would only hand the
+  bytes back (no `path`, nothing for the app to write) refuses a `.skp`
+  format with `host_capability_missing`; `hew.doc.export` with `"skp"` /
+  `"skp2017"` hands back a SketchUp file instead.
+- `hew.doc.export` also writes `"skp"` and `"skp2017"`, as `save` does
+  but never changing the document's own file or source.
+- A SketchUp file carries display units (SketchUp's Model Info > Units).
+  `hew.doc.save` and `hew.doc.export` take an optional `units`, one of
+  `hew.view.units`'s formats (`"m"|"cm"|"mm"|"arch"|"frac_in"|"dec_in"`),
+  that the written `.skp` opens in — a save back over a `.skp` included.
+  Without it the rules are the app's File menu's: a save back keeps the
+  file's own units, and a new file or an export takes the host's display
+  units — the app's preference on a live host, meters (a new app's
+  default) on a headless one, which has no preference of its own. An
+  unknown name, or `units` on an export to a format with none to set,
+  refuses `-32602` before the host hears of it; a `.hew` save ignores it.
 - `hew.doc.import` merges a foreign-format file (STL, glTF/GLB, COLLADA,
   `.skp`) into the attached document as new entities, through the same
   importer crates and shared healing pipeline the UI uses — it is not
-  `open`, which loads a `.hew` document. Import options mirror the UI's
+  `open`, which makes the file the working document. A `.skp` import's
+  report carries the reader's `warnings` (damaged records it skipped).
+  Import options mirror the UI's
   import-time questions as explicit parameters; notably STL, which
   carries no units, refuses typed unless `units` is given — there is no
   one to prompt.
@@ -1050,6 +1102,52 @@ Semantics notes, normative:
   purged too) — as ONE undo entry, and adds no entry at all when there is
   nothing to purge. Returns `{materials, definitions}`, the counts
   actually removed.
+- **Model health.** An object is a solid (watertight) or open. Imports
+  are where open objects come from (§2), and an open object is one of:
+  a **surface** (`flat_sheet`, `bent_sheet` — a single sheet drawn on
+  purpose, not a defect), or open and needing attention: `cappable` (one
+  flat opening around the whole object, a box missing its lid),
+  `holes` (only openings smaller than the object), `mixed`, or
+  `non_manifold` (the open edge branches, or does not close; no repair
+  trusts it). `hew.query.scene` and `hew.query.entity` report this as
+  `health` beside `watertight` (an instance: the most serious verdict
+  among its definition's members); `watertight` keeps its meaning, false
+  for a surface. `hew.doc.health` lists every open object — world objects
+  and component-definition members, a member once however often it is
+  placed — with its verdict, its open rims (`role`, `planar`, `cappable`
+  — a face can close it —, `closed`, `perimeter`, `extent`, `edges`), its
+  seam family (objects an importer
+  split from one shape, joined by shared rims), whether it is marked as a
+  surface, and counts by kind; `objects` narrows it. It is read-only.
+- The repairs each take an `object` (a world object or a definition
+  member; a member's repair reaches every instance), keep its id, and are
+  one undo entry; a batch is one `hew.doc.transact`. `hew.solid.cap`
+  closes the object's flat openings with faces (`rims` indexes
+  `hew.doc.health`'s rims; omitted, every `cappable` rim — or, when none
+  is, all of them, so the refusal says why), nesting coplanar openings so
+  a pipe's open end closes as a ring, and turns an island the caps close
+  inside out right side out (`reversed`; a cavity inside another island
+  stays a cavity). The new
+  faces are face tokens `cap.1`, `cap.2`, … in a transaction. It refuses
+  `rim_not_planar`, `rim_self_intersecting`, `cap_would_be_coplanar` (a
+  flat surface: thicken it instead), `non_manifold_rim`, `caps_overlap`
+  (the face would cover another opening on its plane), `unknown_rim` and
+  `object_is_solid`. `hew.solid.thicken` pulls a flat surface into a
+  solid `distance` thick along each face's front normal (negative: behind
+  it; `centered`: half each way), keeping its faces, paint and texture
+  placement on both sides; separate pieces of the surface become solids
+  of their own (`object_ids`). Anything but a flat surface refuses
+  `not_a_flat_sheet`; under a micron refuses `thickness_too_small`.
+  `hew.solid.delete_faces` removes faces (locators on that object) from an
+  open object; islands cut loose become objects of their own beside it
+  (`object_ids`), and removing every face — or naming none — deletes it
+  (`deleted`), a component member too unless it is its component's last
+  object (`last_definition_member`). A solid
+  refuses `object_is_solid`: removing a face from a solid would make it
+  leaky, the stance of §2. `hew.solid.mark_surface` marks an open object
+  as a surface on purpose (`accepted: false` clears it): stored in the
+  object's `hew.health` attributes, no geometry, and `hew.doc.health`
+  keeps listing it with `accepted: true`.
 - `hew.entity.move` with `copy` over a Sketch selection refuses typed at
   1.0, whatever the count: the UI's sketch copy is tool-layer replay
   through the sticky rules, and the kernel-side sketch duplicate op does
@@ -1090,7 +1188,9 @@ Semantics notes, normative:
   area. A live host applies it through that module's own setter (never a
   direct storage write), so the desktop app's separate Settings window
   stays in sync via the existing cross-window broadcast; a headless host
-  has no display preference to set and refuses `host_capability_missing`.
+  has no display preference to set and refuses `host_capability_missing`
+  (a headless `.skp` save or export names its units per call instead).
+  A live `.skp` export opens in this preference unless it names units.
 - `hew.library.*` addresses an item by its stable `id` (the `hew.library`
   metadata's UUID) or by its library-relative path — either works
   anywhere an `item` parameter appears. `hew.library.insert` goes through
@@ -1164,14 +1264,22 @@ step.
 merely what was requested.** `hew.scenes.add`'s `properties` (each of
 `camera`, `hidden_nodes`, `hidden_tags`, `section`, `display`) defaults
 to `true` for all five; `hew.scenes.update`'s defaults to whatever the
-Scene already captures (re-capture, never silently widen). `camera` and
+Scene already captures (re-capture, never silently widen). A camera,
+given or reported, carries `parallel_height`: the height the view spans
+at the target in meters, which is what a parallel view frames whatever
+the eye distance (a SketchUp parallel scene keeps exactly this). Given
+without it, a camera takes what its perspective view spans at the
+target; the kernel never stores a height that is not finite and
+positive. `camera` and
 `display` are captured only when there is something to capture: an
 explicit `camera` param, or — when none was given and the property is
 requested — the document's own saved working camera
 (`hew.view.snapshot`'s cameraless-path fallback); a brand-new document
 with no working camera and no explicit `camera` param therefore reports
 `props.camera: false` even though `properties.camera` defaulted to
-`true`. `hidden_nodes`, `hidden_tags`, and `section` always capture
+`true`. The display property also carries the document's view style
+(`view_style`: backdrop and axes, as a `.skp` scene's style sets them)
+when the document has one; activating the Scene restores it. `hidden_nodes`, `hidden_tags`, and `section` always capture
 something when requested — an empty set, or a captured-but-no-plane
 `section: null` — so those three stay `true` whenever asked for. This
 mirrors the kernel's own `Scene::props()`, which is literally "which

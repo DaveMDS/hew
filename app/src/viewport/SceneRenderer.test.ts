@@ -51,6 +51,7 @@ function makeMesh(watertight: boolean) {
     group_material_ids: () => new BigUint64Array([SENTINEL]),
     group_starts: () => new Uint32Array([0]),
     group_counts: () => new Uint32Array([3]),
+    group_backs: () => new Uint8Array([0]),
     edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
     watertight: () => watertight,
     free: vi.fn(),
@@ -73,6 +74,8 @@ const IDENTITY_LOCAL_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
 interface MockPlacement {
   memberId: bigint
   localPose: number[]
+  /** The definition hides this placement (`instance_expanded_shown` 0). */
+  hidden?: boolean
 }
 
 /** Mock WasmScene; only the methods SceneRenderer's `refresh`/instance path
@@ -125,6 +128,11 @@ function makeScene(opts: {
       const inst = instances[id.toString()]
       if (inst === undefined) return new Float64Array()
       return Float64Array.from(placementsOf(inst).flatMap((p) => p.localPose))
+    },
+    instance_expanded_shown: (id: bigint) => {
+      const inst = instances[id.toString()]
+      if (inst === undefined) return new Uint8Array()
+      return Uint8Array.from(placementsOf(inst).map((p) => (p.hidden === true ? 0 : 1)))
     },
     // No def-owned sketches by default — overridden by callers that seed
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
@@ -725,6 +733,37 @@ describe('SceneRenderer — GPU-instanced placements (RR16)', () => {
     expect(batches[0].count).toBe(2)
     const tx = slotMatrices(batches[0]).map((m) => m.elements[12]).sort()
     expect(tx).toEqual([0, 7])
+  })
+
+  describe('a member the definition hides', () => {
+    it('suppresses its slot in every placement, and shows it again when setHidden finds it shown', () => {
+      const placements: MockPlacement[] = [
+        { memberId: 1n, localPose: IDENTITY_LOCAL_POSE },
+        { memberId: 2n, localPose: IDENTITY_LOCAL_POSE, hidden: true },
+      ]
+      const inst = (x: number) => ({
+        def: 100n,
+        pose: [1, 0, 0, x, 0, 1, 0, 0, 0, 0, 1, 0],
+        memberIds: [1n, 2n],
+        memberWatertight: { '1': true, '2': true },
+        placements,
+      })
+      const scene = makeScene({ instances: { '10': inst(0), '11': inst(5) } })
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refresh()
+      const slots = (member: bigint) => {
+        const batch = instancedBatches(renderer.instancesGroup).find((b) => b.name.startsWith(`InstanceBatch_${member}_`))
+        if (batch === undefined) throw new Error(`no batch for member ${member}`)
+        return slotMatrices(batch)
+      }
+      expect(slots(1n).every((m) => !isDegenerate(m))).toBe(true)
+      expect(slots(2n).every((m) => isDegenerate(m))).toBe(true)
+
+      // The member's tag is shown again: the next setHidden re-reads it.
+      placements[1] = { ...placements[1], hidden: false }
+      renderer.setHidden([], [])
+      expect(slots(2n).every((m) => !isDegenerate(m))).toBe(true)
+    })
   })
 
   describe('nested definitions — repeated placements of one member', () => {
@@ -1640,6 +1679,54 @@ function edgesMaterial(root: THREE.Group, name: string): THREE.LineBasicMaterial
 describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
   const PLANE = { origin: [0, 0, 0] as [number, number, number], normal: [0, 0, 1] as [number, number, number], active: true }
 
+  it('draws the cut profile where the active section passes through drawn solids, and only there', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(renderer.debugSectionCutSegments()).toHaveLength(0)
+
+    // The fake mesh is one triangle (0,0,0)-(1,0,0)-(0,1,0); a plane at
+    // x = 0.5 crosses two of its edges, at (0.5,0,0) and (0.5,0.5,0).
+    const atX = (x: number) => ({ origin: [x, 0, 0] as [number, number, number], normal: [1, 0, 0] as [number, number, number], active: true })
+    renderer.setSectionPlane(atX(0.5))
+    let segs = renderer.debugSectionCutSegments()
+    expect(segs).toHaveLength(1)
+    const ends = [segs[0].slice(0, 3), segs[0].slice(3, 6)].sort((a, b) => a[1] - b[1])
+    expect(ends[0][0]).toBeCloseTo(0.5)
+    expect(ends[0][1]).toBeCloseTo(0)
+    expect(ends[1][0]).toBeCloseTo(0.5)
+    expect(ends[1][1]).toBeCloseTo(0.5)
+    // The profile is an overlay: never clipped itself.
+    renderer.sectionCutGroup.traverse((child) => {
+      const mat = (child as Partial<THREE.Mesh>).material
+      if (mat !== undefined && !Array.isArray(mat)) expect(mat.clippingPlanes).toBeFalsy()
+    })
+
+    // A hidden solid has no profile; revealing it brings the profile back.
+    renderer.setHidden([1n], [])
+    expect(renderer.debugSectionCutSegments()).toHaveLength(0)
+    renderer.setHidden([], [])
+    expect(renderer.debugSectionCutSegments()).toHaveLength(1)
+
+    // An offset sweep moves the profile with the plane.
+    renderer.updateSectionPlaneOffset(atX(0.25))
+    segs = renderer.debugSectionCutSegments()
+    expect(segs).toHaveLength(1)
+    expect(segs[0][0]).toBeCloseTo(0.25)
+    expect(segs[0][3]).toBeCloseTo(0.25)
+
+    // A plane missing every solid, an inactive section, and no section
+    // draw nothing.
+    renderer.updateSectionPlaneOffset(atX(2))
+    expect(renderer.debugSectionCutSegments()).toHaveLength(0)
+    renderer.setSectionPlane({ ...atX(0.5), active: false })
+    expect(renderer.debugSectionCutSegments()).toHaveLength(0)
+    renderer.setSectionPlane(atX(0.5))
+    expect(renderer.debugSectionCutSegments()).toHaveLength(1)
+    renderer.setSectionPlane(null)
+    expect(renderer.debugSectionCutSegments()).toHaveLength(0)
+  })
+
   it('with no section, solid materials carry no clipping plane', () => {
     const scene = makeScene({ objects: { '1': true } })
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
@@ -1932,6 +2019,7 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       group_material_ids: () => new BigUint64Array([SENTINEL]),
       group_starts: () => new Uint32Array([0]),
       group_counts: () => new Uint32Array([3]),
+      group_backs: () => new Uint8Array([0]),
       edge_positions: () => new Float32Array([ox, oy, oz, ox + 1, oy, oz]),
       watertight: () => true,
       free: vi.fn(),
@@ -2288,6 +2376,7 @@ describe('SceneRenderer — untextured painted materials', () => {
         group_material_ids: () => new BigUint64Array([7n]),
         group_starts: () => new Uint32Array([0]),
         group_counts: () => new Uint32Array([3]),
+        group_backs: () => new Uint8Array([0]),
         edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
         watertight: () => true,
         free: vi.fn(),
@@ -2309,6 +2398,7 @@ describe('SceneRenderer — untextured painted materials', () => {
         component_member_objects: () => new BigUint64Array(),
         instance_expanded_members: () => new BigUint64Array(),
         instance_expanded_local_poses: () => new Float64Array(),
+        instance_expanded_shown: () => new Uint8Array(),
         component_member_sketches: () => new BigUint64Array(),
         sketch_ids: () => new BigUint64Array(),
         guide_ids: () => new BigUint64Array(),
@@ -2325,5 +2415,255 @@ describe('SceneRenderer — untextured painted materials', () => {
     } finally {
       warnSpy.mockRestore()
     }
+  })
+})
+
+describe('SceneRenderer — Model Health overlay split', () => {
+  const overlay = (over: Partial<import('../health/healthReport').HealthOverlay> = {}) => ({
+    ids: [1n, 2n],
+    warnIds: [],
+    rev: 0,
+    current: null,
+    capPreview: null,
+    ...over,
+  })
+  const setup = () => {
+    const base = makeScene({ objects: { '1': false, '2': false } })
+    const rimSegments = vi.fn(() => new Float32Array([0, 0, 0, 1, 0, 0]))
+    const rimHighlight = vi.fn(() => new Float32Array([0, 0, 0, 0, 1, 0]))
+    const scene = Object.assign(base, { health_rim_segments: rimSegments, health_rim_highlight: rimHighlight })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    return { renderer, rimSegments, rimHighlight }
+  }
+
+  it('moving the current finding / preview does not re-read the listed rims', () => {
+    const { renderer, rimSegments, rimHighlight } = setup()
+    renderer.setHealthOverlay(overlay())
+    expect(rimSegments).toHaveBeenCalledTimes(1)
+    renderer.setHealthOverlay(overlay({ current: { id: 1n, rim: 0 } }))
+    renderer.setHealthOverlay(overlay({ current: { id: 1n, rim: 1 } }))
+    renderer.setHealthOverlay(overlay({ current: { id: 1n, rim: 1 }, capPreview: [{ id: 2n, rim: 0 }] }))
+    expect(rimSegments).toHaveBeenCalledTimes(1)
+    expect(rimHighlight).toHaveBeenCalledTimes(4)
+  })
+
+  it('a changed listed set or document revision re-reads the listed rims', () => {
+    const { renderer, rimSegments } = setup()
+    renderer.setHealthOverlay(overlay())
+    renderer.setHealthOverlay(overlay({ ids: [1n] }))
+    expect(rimSegments).toHaveBeenCalledTimes(2)
+    renderer.setHealthOverlay(overlay({ ids: [1n], rev: 1 }))
+    expect(rimSegments).toHaveBeenCalledTimes(3)
+    renderer.setHealthOverlay(null)
+    renderer.setHealthOverlay(overlay({ ids: [1n], rev: 1 }))
+    expect(rimSegments).toHaveBeenCalledTimes(4)
+  })
+})
+
+describe('SceneRenderer — view-only isolation fade (setIsolationFade)', () => {
+  const faceOpacity = (root: THREE.Object3D, name: string): number => {
+    const mesh = root.getObjectByName(name) as THREE.Mesh
+    const mat = mesh.material
+    return ((Array.isArray(mat) ? mat[0] : mat) as THREE.MeshPhongMaterial).opacity
+  }
+
+  it('a faded world object stays drawn at 25 % although hidden; plain hidden objects do not draw', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true, '2': true, '3': true } }))
+    renderer.refresh()
+    renderer.setIsolationFade({ objects: new Set([2n]), instances: new Map() })
+    renderer.setHidden([2n, 3n], [])
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(true)
+    expect(renderer.objectsGroup.getObjectByName('Object_2')?.visible).toBe(true)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_2').opacity).toBeCloseTo(0.25)
+    const edge = (renderer.objectsGroup.getObjectByName('Object_2') as THREE.Group).children.find(
+      (c) => c instanceof THREE.LineSegments,
+    ) as THREE.LineSegments
+    expect((edge.material as THREE.LineBasicMaterial).opacity).toBeCloseTo(0.25)
+    expect(renderer.objectsGroup.getObjectByName('Object_3')?.visible).toBe(false)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+  })
+
+  it('clearing the fade restores full opacity and the plain hidden state', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true, '2': true } }))
+    renderer.refresh()
+    renderer.setIsolationFade({ objects: new Set([2n]), instances: new Map() })
+    renderer.setHidden([2n], [])
+    renderer.setIsolationFade(null)
+    expect(renderer.objectsGroup.getObjectByName('Object_2')?.visible).toBe(false)
+    renderer.setHidden([], [])
+    expect(renderer.objectsGroup.getObjectByName('Object_2')?.visible).toBe(true)
+    expect(facesMaterial(renderer.objectsGroup, 'Object_2').opacity).toBe(1)
+  })
+
+  it('fades only the other members of the one isolated instance; other placements stay hidden', () => {
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [5n, 6n], memberWatertight: { '5': false, '6': true } },
+        '11': { def: 100n, pose: IDENTITY_POSE, memberIds: [5n, 6n], memberWatertight: { '5': false, '6': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setIsolationFade({ objects: new Set(), instances: new Map([[10n, new Set([5n])]]) })
+    renderer.setHidden([6n], [11n])
+    // Instance 10 drew out of its batch so its members can fade individually.
+    const g10 = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    expect(g10.visible).toBe(true)
+    expect(faceOpacity(g10, 'InstanceFace_10_5_0')).toBe(1)
+    expect(faceOpacity(g10, 'InstanceFace_10_6_1')).toBeCloseTo(0.25)
+    // The other placement draws nothing: not materialized, its batch slot zeroed.
+    expect(renderer.instancesGroup.getObjectByName('Instance_11')).toBeUndefined()
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches.every((b) => slotMatrices(b).every(isDegenerate))).toBe(true)
+    // Ending isolation brings every member back at full strength.
+    renderer.setIsolationFade(null)
+    renderer.setHidden([], [])
+    const back = renderer.instancesGroup.getObjectByName('Instance_10')
+    if (back !== undefined) expect(faceOpacity(back, 'InstanceFace_10_6_1')).toBe(1)
+  })
+
+  it('a wholly faded instance (rest of a group) draws faded though hidden', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [5n], memberWatertight: { '5': true } } },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setIsolationFade({ objects: new Set(), instances: new Map([[10n, new Set<bigint>()]]) })
+    renderer.setHidden([], [10n])
+    const g = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    expect(g.visible).toBe(true)
+    expect(faceOpacity(g, 'InstanceFace_10_5_0')).toBeCloseTo(0.25)
+  })
+
+  it('a print pass ignores isolation: base hidden set, no fade; the isolated view returns after', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true, '2': true, '3': true, '4': true } }))
+    renderer.refresh()
+    // 2 is isolated; 1 is faded context; 3 is the person's own hidden; 4 is hidden by isolation.
+    renderer.setIsolationFade({ objects: new Set([1n]), instances: new Map() }, { objects: [3n], instances: [] })
+    renderer.setHidden([1n, 3n, 4n], [])
+    const visible = (id: number) => renderer.objectsGroup.getObjectByName(`Object_${id}`)?.visible
+    expect([1, 2, 3, 4].map(visible)).toEqual([true, true, false, false])
+    renderer.beginPrintPass({ style: 'shaded', restrictTo: null, includeGuides: true })
+    expect([1, 2, 3, 4].map(visible)).toEqual([true, true, false, true])
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBe(1)
+    renderer.endPrintPass()
+    expect([1, 2, 3, 4].map(visible)).toEqual([true, true, false, false])
+    expect(facesMaterial(renderer.objectsGroup, 'Object_1').opacity).toBeCloseTo(0.25)
+  })
+
+  it('a Selection-extent print does not draw the faded context', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true, '2': true } }))
+    renderer.refresh()
+    renderer.setIsolationFade({ objects: new Set([1n]), instances: new Map() }, { objects: [], instances: [] })
+    renderer.setHidden([1n], [])
+    renderer.beginPrintPass({ style: 'shaded', restrictTo: { objects: new Set([2n]), instances: new Set() }, includeGuides: true })
+    expect(renderer.objectsGroup.getObjectByName('Object_1')?.visible).toBe(false)
+    expect(renderer.objectsGroup.getObjectByName('Object_2')?.visible).toBe(true)
+    renderer.endPrintPass()
+  })
+})
+
+describe('SceneRenderer — a painted back on an open shell', () => {
+  /** A one-triangle open shell whose face has a painted back: the back's
+   *  group is the same triangle wound the other way, as the tessellator
+   *  emits it (`group_backs` 1). */
+  function meshWithBack() {
+    return {
+      ...makeMesh(false),
+      positions: () => new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0]),
+      normals: () => new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, -1, 0, 0, -1, 0, 0, -1]),
+      indices: () => new Uint32Array([0, 1, 2, 3, 5, 4]),
+      colors: () => new Float32Array(18).fill(1),
+      uvs: () => new Float32Array(12),
+      group_material_ids: () => new BigUint64Array([SENTINEL, SENTINEL]),
+      group_starts: () => new Uint32Array([0, 3]),
+      group_counts: () => new Uint32Array([3, 3]),
+      group_backs: () => new Uint8Array([0, 1]),
+    }
+  }
+  function materialsOf(renderer: SceneRenderer, name: string): THREE.MeshPhongMaterial[] {
+    const group = renderer.objectsGroup.getObjectByName(name)
+    if (group === undefined) throw new Error(`no group named ${name}`)
+    return (group.children[0] as THREE.Mesh).material as THREE.MeshPhongMaterial[]
+  }
+
+  it('draws the back one-sided and keeps it so after the section clip is reasserted', () => {
+    const scene = makeScene({ objects: { '9': false } })
+    ;(scene as unknown as { object_mesh: unknown }).object_mesh = vi.fn(() => meshWithBack())
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const [front, back] = materialsOf(renderer, 'Object_9')
+    // The open shell draws both sides; its painted back only the one side
+    // that faces away from the face's front, or it would cover the front.
+    expect(front.side).toBe(THREE.DoubleSide)
+    expect(back.side).toBe(THREE.FrontSide)
+    // Every rebuild reasserts the section state, which restores each
+    // material's natural side: the back's is its one side, not the shell's.
+    renderer.setSectionPlane(null)
+    expect(materialsOf(renderer, 'Object_9')[1].side).toBe(THREE.FrontSide)
+    // An active section forces every solid double-sided, and letting it go
+    // brings the back's one side back.
+    renderer.setSectionPlane({ origin: [0.5, 0, 0], normal: [1, 0, 0], active: true })
+    expect(materialsOf(renderer, 'Object_9')[1].side).toBe(THREE.DoubleSide)
+    renderer.setSectionPlane(null)
+    expect(materialsOf(renderer, 'Object_9')[1].side).toBe(THREE.FrontSide)
+    expect(materialsOf(renderer, 'Object_9')[0].side).toBe(THREE.DoubleSide)
+  })
+})
+
+describe('SceneRenderer — guide spans (segments and rays)', () => {
+  function guideRenderer(geometry: number[]) {
+    const scene = makeScene({ objects: {} })
+    ;(scene as unknown as { guide_kind: (id: bigint) => string }).guide_kind = () => 'line'
+    ;(scene as unknown as { guide_geometry: (id: bigint) => Float64Array }).guide_geometry = () =>
+      new Float64Array(geometry)
+    ;(scene as unknown as { guide_ids: () => BigUint64Array }).guide_ids = () => new BigUint64Array([1n])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.refreshGuides()
+    return renderer
+  }
+  function drawn(renderer: SceneRenderer): { pos: number[]; dist: number[] } {
+    const line = renderer.guidesGroup.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    return {
+      pos: Array.from(line.geometry.getAttribute('position').array),
+      dist: Array.from(line.geometry.getAttribute('lineDistance').array),
+    }
+  }
+  const view = (focus: [number, number, number]) => ({
+    focus,
+    eye: [focus[0], focus[1] - 5, focus[2]] as [number, number, number],
+    dir: [0, 1, 0] as [number, number, number],
+    spanAtFocus: 4,
+    perspective: false,
+  })
+
+  it('a 6-element line still draws as an infinite window', () => {
+    const r = guideRenderer([0, 0, 0, 1, 0, 0])
+    r.updateGuideExtents(view([3, 0, 0]))
+    const { dist } = drawn(r)
+    expect(dist[0]).toBeLessThan(0)
+    expect(dist[1]).toBeGreaterThan(3)
+  })
+
+  it('a short segment draws exactly between its ends whatever the window', () => {
+    const r = guideRenderer([1, 2, 3, 1, 0, 0, 0, 0.0127])
+    r.updateGuideExtents(view([40, 2, 3]))
+    const { pos, dist } = drawn(r)
+    expect(pos[0]).toBeCloseTo(1, 6)
+    expect(pos[3]).toBeCloseTo(1.0127, 5)
+    expect(dist[0]).toBe(0)
+    expect(dist[1]).toBeCloseTo(0.0127, 6)
+  })
+
+  it('a ray never draws behind its origin', () => {
+    const r = guideRenderer([0, 0, 0, 1, 0, 0, 0, Infinity])
+    r.updateGuideExtents(view([-60, 0, 0]))
+    const { pos, dist } = drawn(r)
+    expect(dist[0]).toBeGreaterThanOrEqual(0)
+    expect(dist[1]).toBeGreaterThanOrEqual(0)
+    expect(pos[0]).toBeGreaterThanOrEqual(0)
+    expect(pos[3]).toBeGreaterThanOrEqual(0)
+    expect(pos[0]).toBe(pos[3]) // window misses the ray: nothing visible
   })
 })

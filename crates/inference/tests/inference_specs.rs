@@ -801,6 +801,7 @@ fn mixed_scene() -> InferenceScene {
         &Guide::Line {
             origin: Point3::new(5.0, 5.0, 0.0),
             direction: Vec3::new(0.0, 0.0, 1.0),
+            span: kernel::GuideSpan::INFINITE,
         },
     );
     scene.add_guide(
@@ -4078,6 +4079,7 @@ fn collinear_guide_parameterized_near_the_camera_cannot_corrupt_a_locked_hover()
         &Guide::Line {
             origin: Point3::new(0.0, 0.0, 38.0),
             direction: Vec3::new(0.0, 0.0, 1.0),
+            span: kernel::GuideSpan::INFINITE,
         },
     );
     let anchor = Point3::ORIGIN;
@@ -4177,6 +4179,7 @@ fn locked_resolve_keeps_a_skew_guides_natural_clamp() {
         &Guide::Line {
             origin: Point3::ORIGIN,
             direction: u,
+            span: kernel::GuideSpan::INFINITE,
         },
     );
     let anchor = Point3::ORIGIN + u * 40.0;
@@ -4225,6 +4228,7 @@ fn collinear_guide_matches_the_fallback_at_an_aimed_station() {
         &Guide::Line {
             origin: Point3::new(0.0, 0.0, 38.0),
             direction: Vec3::new(0.0, 0.0, 1.0),
+            span: kernel::GuideSpan::INFINITE,
         },
     );
     let anchor = Point3::ORIGIN;
@@ -4617,5 +4621,186 @@ fn a_widened_release_query_ranks_with_the_acquire_tie_band() {
         (release.position.x - 0.021).abs() < 1e-12,
         "the widened query must not reorder already-admitted candidates: {:?}",
         release.position
+    );
+}
+
+/// A sketch's registration is bookkept per kind of candidate: registering
+/// it again replaces exactly its own entries, removing it drops them and
+/// nothing else, and a sketch never registered costs nothing to remove (a
+/// document of tens of thousands of small sketches registers each once at
+/// open, which used to walk every vector for every one of them).
+#[test]
+fn sketch_registration_replaces_and_removes_only_its_own_entries() {
+    let sid = |n: u64| SketchId::from(slotmap::KeyData::from_ffi(n));
+    let seg = |x: f64| {
+        (
+            SketchEdgeId::default(),
+            Point3::new(x, 50.0, 0.0),
+            Point3::new(x + 1.0, 50.0, 0.0),
+        )
+    };
+    let at = |x: f64| Point3::new(x, 50.0, 0.0);
+    let probe = |scene: &InferenceScene, target: Point3| -> Option<Snap> {
+        scene.resolve(&SnapQuery {
+            weights: SnapWeights::default(),
+            ray: PickRay {
+                origin: Point3::new(target.x, target.y, target.z + 5.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            anchor: None,
+            lock: None,
+            aperture: NARROW,
+            aperture_mode: ApertureMode::Cone,
+            constraint_plane: None,
+            soft_axis_aperture_scale: None,
+            off_plane_points: false,
+        })
+    };
+    let mut scene = InferenceScene::new();
+    scene.remove_sketch(sid(1)); // never registered: nothing to do
+    scene.add_sketch(sid(1), &[seg(10.0)]);
+    scene.add_sketch(sid(2), &[seg(20.0)]);
+    assert_eq!(
+        probe(&scene, at(10.0)).map(|s| s.kind),
+        Some(SnapKind::Endpoint)
+    );
+    assert_eq!(
+        probe(&scene, at(20.0)).map(|s| s.kind),
+        Some(SnapKind::Endpoint)
+    );
+
+    // Registered again elsewhere: the old entries are gone, the other
+    // sketch's stay.
+    scene.add_sketch(sid(1), &[seg(30.0)]);
+    assert!(probe(&scene, at(10.0)).is_none());
+    assert_eq!(
+        probe(&scene, at(30.0)).map(|s| s.kind),
+        Some(SnapKind::Endpoint)
+    );
+    assert_eq!(
+        probe(&scene, at(20.0)).map(|s| s.kind),
+        Some(SnapKind::Endpoint)
+    );
+
+    // Faces are their own kind: added, replaced, and dropped with the
+    // sketch.
+    let square = |x: f64| inference::SketchRegionFace {
+        region: kernel::SketchRegionId::default(),
+        plane: Plane::from_polygon(&[at(x), at(x + 1.0), Point3::new(x, 51.0, 0.0)]).unwrap(),
+        boundary: vec![
+            at(x),
+            at(x + 1.0),
+            Point3::new(x + 1.0, 51.0, 0.0),
+            Point3::new(x, 51.0, 0.0),
+        ],
+        holes: vec![],
+    };
+    let mid = |x: f64| Point3::new(x + 0.5, 50.5, 0.0);
+    scene.add_sketch_faces(sid(1), &[square(40.0)]);
+    assert_eq!(
+        probe(&scene, mid(40.0)).map(|s| s.kind),
+        Some(SnapKind::OnFace)
+    );
+    scene.add_sketch_faces(sid(1), &[square(42.0)]);
+    assert!(probe(&scene, mid(40.0)).is_none());
+    assert_eq!(
+        probe(&scene, mid(42.0)).map(|s| s.kind),
+        Some(SnapKind::OnFace)
+    );
+
+    scene.remove_sketch(sid(1));
+    assert!(probe(&scene, at(30.0)).is_none());
+    assert!(probe(&scene, mid(42.0)).is_none());
+    assert_eq!(
+        probe(&scene, at(20.0)).map(|s| s.kind),
+        Some(SnapKind::Endpoint)
+    );
+    scene.remove_sketch(sid(1)); // twice is fine
+    scene.remove_sketch(sid(2));
+    assert!(probe(&scene, at(20.0)).is_none());
+}
+
+/// A guide segment or ray snaps only where it exists: hovering its line
+/// past an end finds no guide there, hovering inside the stretch does,
+/// and two guides cross only where both exist.
+#[test]
+fn a_guide_snaps_and_crosses_only_over_its_stretch() {
+    let x = Vec3::new(1.0, 0.0, 0.0);
+    let y = Vec3::new(0.0, 1.0, 0.0);
+    let mut scene = InferenceScene::new();
+    scene.set_axes_enabled(false);
+    // A segment along x from x = 2 to x = 4, at y = 5.
+    let gid = |n: u64| GuideId::from(slotmap::KeyData::from_ffi(n));
+    scene.add_guide(
+        gid(1),
+        &Guide::Line {
+            origin: Point3::new(0.0, 5.0, 0.0),
+            direction: x,
+            span: kernel::GuideSpan {
+                from: Some(2.0),
+                to: Some(4.0),
+            },
+        },
+    );
+    let look_at = |p: Point3| {
+        resolve(
+            &scene,
+            query(ray_at(p + Vec3::new(0.0, 0.0, 10.0), p), NARROW),
+        )
+    };
+    let inside = look_at(Point3::new(3.0, 5.0, 0.0)).expect("on the segment");
+    assert_eq!(inside.kind, SnapKind::OnGuide);
+    assert!(
+        look_at(Point3::new(7.0, 5.0, 0.0)).is_none(),
+        "past the segment's end there is no guide"
+    );
+    assert!(
+        look_at(Point3::new(-3.0, 5.0, 0.0)).is_none(),
+        "before its start neither"
+    );
+
+    // A ray along y from y = 0 crossing the segment's line at (3, 5) and at
+    // (6, 5): the first crossing is on both, the second is past the
+    // segment.
+    let mut crossing = scene.clone();
+    crossing.add_guide(
+        gid(2),
+        &Guide::Line {
+            origin: Point3::new(3.0, 0.0, 0.0),
+            direction: y,
+            span: kernel::GuideSpan {
+                from: Some(0.0),
+                to: None,
+            },
+        },
+    );
+    crossing.add_guide(
+        gid(3),
+        &Guide::Line {
+            origin: Point3::new(6.0, 0.0, 0.0),
+            direction: y,
+            span: kernel::GuideSpan {
+                from: Some(0.0),
+                to: None,
+            },
+        },
+    );
+    let at = |p: Point3| {
+        resolve(
+            &crossing,
+            query(ray_at(p + Vec3::new(0.0, 0.0, 10.0), p), NARROW),
+        )
+    };
+    let hit = at(Point3::new(3.0, 5.0, 0.0)).expect("the crossing on both");
+    assert_eq!(hit.kind, SnapKind::Intersection);
+    let past = at(Point3::new(6.0, 5.0, 0.0)).expect("the ray is there");
+    assert_eq!(
+        past.kind,
+        SnapKind::OnGuide,
+        "no crossing past the segment's end, only the ray itself"
+    );
+    assert!(
+        at(Point3::new(3.0, -2.0, 0.0)).is_none(),
+        "the ray does not run back behind its start"
     );
 }

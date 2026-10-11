@@ -468,8 +468,8 @@ fn distinct_meshes_with_colliding_names_each_get_their_own_warning() {
         missing,
         warnings,
     } = gltf_import::import(&bytes).expect("import two fins");
-    let fin_msg = "'Fin' is non-manifold; imported as 3 open shells \
-                   (split at non-manifold edges, geometry unchanged)"
+    let fin_msg = "'Fin' came in as 3 separate pieces because some of its edges \
+                   are shared by more than two faces; the shape itself is unchanged"
         .to_string();
     assert_eq!(
         warnings,
@@ -499,8 +499,8 @@ fn non_manifold_fin_splits_into_open_shells_with_warning() {
     assert_eq!(
         warnings,
         vec![
-            "'Fin' is non-manifold; imported as 3 open shells \
-             (split at non-manifold edges, geometry unchanged)"
+            "'Fin' came in as 3 separate pieces because some of its edges \
+             are shared by more than two faces; the shape itself is unchanged"
                 .to_string()
         ],
         "the split is reported loudly, exactly once"

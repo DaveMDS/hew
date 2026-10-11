@@ -59,6 +59,7 @@ fn unit_box_mesh(name: &str) -> MeshRecipe {
         face_holes: vec![Vec::new(); face_count],
         base_material: kernel::serialize::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -77,6 +78,8 @@ fn build_representative_doc() -> Document {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
 
@@ -97,6 +100,8 @@ fn build_representative_doc() -> Document {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new()).expect("ingest a painted box");
 
@@ -112,6 +117,8 @@ fn build_representative_doc() -> Document {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest the component source box");

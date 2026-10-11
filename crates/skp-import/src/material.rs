@@ -41,6 +41,7 @@ impl MatTable {
                     name,
                     rgba,
                     opacity,
+                    ..
                 } => {
                     // SketchUp's opacity IS the material's alpha; Hew folds it
                     // into the palette alpha (same as dae-import's COLLADA
@@ -64,6 +65,7 @@ impl MatTable {
                     image_bytes,
                     avg_rgba,
                     opacity,
+                    ..
                 } => {
                     let avg = avg_rgba.unwrap_or([200, 200, 200, 255]);
                     let opacity = opacity.clamp(0.0, 1.0);

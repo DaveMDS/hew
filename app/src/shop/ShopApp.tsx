@@ -40,6 +40,7 @@ import { nodeKey, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 import { makeFileHost, type OpenPick } from '../io/fileHost'
 import { anchorDownload, anchorDownloadAs } from '../io/webFileHost'
+import { stripKnownExtension } from '../io/docFormat'
 import { PrintSheet } from './PrintSheet'
 import { makePrintHost } from '../print/printHost'
 import type { SceneSource } from '../print/printJob'
@@ -261,6 +262,9 @@ export function ShopApp() {
   // here even if it wanted to). A ref, not state: read imperatively on a
   // menu click, never rendered.
   const lastBytesRef = useRef<Uint8Array | null>(null)
+  // Serialization of a blank document, built on the first `.skp` open —
+  // `open_skp` needs a blank document to import into (see openSkpBytes).
+  const blankBytesRef = useRef<Uint8Array | null>(null)
 
   const [activeTool, setActiveTool] = useState<ShopToolName>('Select')
   const [toolActivationSeq, setToolActivationSeq] = useState(0)
@@ -925,6 +929,7 @@ export function ShopApp() {
         const applyState = {
           projection: savedCamera.projection() as 'perspective' | 'parallel',
           fovDeg: savedCamera.fov_deg(),
+          parallelHeight: savedCamera.parallel_height(),
           eye: [savedCamera.eye_x(), savedCamera.eye_y(), savedCamera.eye_z()] as [number, number, number],
           target: [savedCamera.target_x(), savedCamera.target_y(), savedCamera.target_z()] as [number, number, number],
           up: [savedCamera.up_x(), savedCamera.up_y(), savedCamera.up_z()] as [number, number, number],
@@ -1131,6 +1136,33 @@ export function ShopApp() {
     })
   }, [loadBytesViaHarness])
 
+  // Open a `.skp` read-only: load the blank document, `open_skp` into it,
+  // then hand the standard post-open steps the document's own `.hew`
+  // serialization — so "Save a copy (.hew)" and the recents shelf hold real
+  // `.hew` bytes, never the SketchUp file's. The name keeps its `.skp`
+  // (the title shows what was opened).
+  const openSkpBytes = useCallback(async (liveScene: Scene, name: string, skpBytes: Uint8Array) => {
+    if (blankBytesRef.current === null) {
+      const kernel = await loadKernel()
+      const fresh = kernel.newScene()
+      blankBytesRef.current = new Uint8Array(fresh.save())
+      fresh.free()
+    }
+    const blank = blankBytesRef.current
+    const blankLoaded = loadHewBytes(liveScene, blank)
+    if (!blankLoaded.ok) {
+      showToast(friendlyErrorText(blankLoaded.error))
+      return
+    }
+    try {
+      liveScene.open_skp(skpBytes)
+    } catch (err: unknown) {
+      showToast(`Open failed: ${friendlyErrorText(err)}`)
+      return
+    }
+    applyOpenedBytes(liveScene, name, new Uint8Array(liveScene.save()))
+  }, [showToast, applyOpenedBytes])
+
   const openDocument = useCallback(async () => {
     const liveScene = sceneRef.current
     if (liveScene === null) return
@@ -1143,12 +1175,19 @@ export function ShopApp() {
       return
     }
     if (pick === null) return // user cancelled
+    if (pick.kind === 'skp') {
+      // A SketchUp file opens read-only, like a `.hew`: `open_skp` loads it
+      // into the blank document (the one kernel call that creates objects,
+      // and only to display them — Shop Mode never saves back to the file).
+      await openSkpBytes(liveScene, pick.name, pick.bytes)
+      return
+    }
     if (pick.kind !== 'hew') {
-      // Import formats (.skp/.dae/.gltf/.stl) all run through a kernel
+      // The other import formats (.dae/.gltf/.stl) run through a kernel
       // import call that creates new objects — a real mutation. Shop Mode
       // issues none (module doc); point the user at the full editor rather
       // than silently downgrading to a read-only partial import.
-      showToast('Shop Mode can only open .hew files — use the full editor to import other formats.')
+      showToast('Shop Mode can only open .hew and .skp files — use the full editor to import other formats.')
       return
     }
     const loaded = loadHewBytes(liveScene, pick.bytes)
@@ -1157,7 +1196,7 @@ export function ShopApp() {
       return
     }
     applyOpenedBytes(liveScene, pick.name, pick.bytes)
-  }, [showToast, applyOpenedBytes])
+  }, [showToast, applyOpenedBytes, openSkpBytes])
 
   // Offline recents (design §"Offline recents"): tap a row in the empty
   // state's Recents list. The bytes are already in hand (IndexedDB, not a
@@ -1166,13 +1205,17 @@ export function ShopApp() {
     const liveScene = sceneRef.current
     if (liveScene === null) return
     setDocumentMenuOpen(false)
+    if (entry.format !== undefined && entry.format !== 'hew') {
+      void openSkpBytes(liveScene, entry.name, entry.bytes)
+      return
+    }
     const loaded = loadHewBytes(liveScene, entry.bytes)
     if (!loaded.ok) {
       showToast(friendlyErrorText(loaded.error))
       return
     }
     applyOpenedBytes(liveScene, entry.name, entry.bytes)
-  }, [showToast, applyOpenedBytes])
+  }, [showToast, applyOpenedBytes, openSkpBytes])
 
   // "Use full editor": persist the override and reload — the editor's own
   // "Shop Mode" entry point (design's symmetric affordance) is a later
@@ -1191,7 +1234,7 @@ export function ShopApp() {
     setDocumentMenuOpen(false)
     const bytes = lastBytesRef.current
     if (bytes === null || docName === null) return
-    anchorDownload(bytes, docName)
+    anchorDownload(bytes, stripKnownExtension(docName))
   }, [docName])
 
   // ---------------------------------------------------------------- Print… (docs/design/printing.md §9c)
@@ -1240,7 +1283,7 @@ export function ShopApp() {
           const sj = resolved.section_json()
           section = sj === undefined ? null : (parseSectionJson(JSON.parse(sj)) ?? null)
         }
-        out.push({ sid: e.sid, name: e.name, camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg }, hidden, section })
+        out.push({ sid: e.sid, name: e.name, camera: cam === undefined ? null : { projection: cam.projection, eye: cam.eye, target: cam.target, up: cam.up, fovDeg: cam.fovDeg, parallelHeight: cam.parallelHeight }, hidden, section })
       } finally {
         resolved.free()
       }

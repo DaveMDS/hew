@@ -195,6 +195,7 @@ impl Object {
                 inner_loops: Vec::new(),
                 plane,
                 material: materials.and_then(|m| m.get(face_index).copied()).flatten(),
+                back_material: None,
                 uv_frame: uv_frames.and_then(|f| f.get(face_index).copied()).flatten(),
                 surface: surfaces.and_then(|s| s.get(face_index).copied()).flatten(),
             });
@@ -292,6 +293,14 @@ impl Object {
     ///
     /// The public signature/behaviour of [`Object::from_polygons`] is
     /// unchanged; this function is a separate, internal path.
+    /// Paints the backs of a freshly built object's faces, in the order
+    /// they were built (a fresh object's faces iterate in insertion order).
+    pub(crate) fn set_built_back_materials(&mut self, backs: &[FaceMaterial]) {
+        for ((_, f), &b) in self.faces.iter_mut().zip(backs) {
+            f.back_material = b;
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     pub(crate) fn from_faces_with_holes(
         positions: &[Point3],
@@ -337,6 +346,7 @@ impl Object {
                 inner_loops: Vec::new(),
                 plane: *plane,
                 material: *material,
+                back_material: None,
                 uv_frame: *uv_frame,
                 surface: *surface,
             });
@@ -721,6 +731,116 @@ fn build_validated_loop(
         }
     }
     Ok(())
+}
+
+impl Object {
+    /// Adopt an importer's claims about this freshly built Object's edges
+    /// and faces ([`crate::import::MeshExtra`]) wherever they hold, by the
+    /// same predicates the validator enforces — a claim the geometry
+    /// contradicts is dropped (claims are metadata; dropping one is not
+    /// geometry repair). Endpoints match vertices within the Object's
+    /// planarity tolerance. Returns how many claims did not hold.
+    pub(crate) fn adopt_import_claims(&mut self, extra: &crate::import::MeshExtra) -> usize {
+        if extra.soft_edges.is_empty() && extra.edge_curves.is_empty() && extra.surfaces.is_empty()
+        {
+            return 0;
+        }
+        let tol = self.planarity_tol;
+        // Undirected edge by its two vertices.
+        let mut by_pair: std::collections::BTreeMap<(VertexId, VertexId), EdgeId> =
+            std::collections::BTreeMap::new();
+        for (eid, e) in &self.edges {
+            let he = &self.half_edges[e.half_edge];
+            let a = he.origin;
+            let b = self.half_edges[he.next].origin;
+            by_pair.insert(if a < b { (a, b) } else { (b, a) }, eid);
+        }
+        // Vertices bucketed on a grid of the tolerance, so a lookup checks
+        // its own and the neighboring cells.
+        let cell = |p: Point3| -> [i64; 3] {
+            [p.x, p.y, p.z].map(|c| (c / tol.max(1e-12)).floor() as i64)
+        };
+        let mut grid: std::collections::BTreeMap<[i64; 3], Vec<VertexId>> =
+            std::collections::BTreeMap::new();
+        for (vid, v) in &self.vertices {
+            grid.entry(cell(v.position)).or_default().push(vid);
+        }
+        let find = |p: Point3| -> Option<VertexId> {
+            let c = cell(p);
+            let mut best: Option<(f64, VertexId)> = None;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &v in grid
+                            .get(&[c[0] + dx, c[1] + dy, c[2] + dz])
+                            .into_iter()
+                            .flatten()
+                        {
+                            let d = (self.vertices[v].position - p).length();
+                            if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
+                                best = Some((d, v));
+                            }
+                        }
+                    }
+                }
+            }
+            best.map(|(_, v)| v)
+        };
+        let edge_of = |[p, q]: [Point3; 2]| -> Option<EdgeId> {
+            let (a, b) = (find(p)?, find(q)?);
+            by_pair.get(&if a < b { (a, b) } else { (b, a) }).copied()
+        };
+        let mut dropped = 0;
+        for &pair in &extra.soft_edges {
+            match edge_of(pair) {
+                // A soft edge is a seam between two faces.
+                Some(e) if self.edges[e].twin_half_edge.is_some() => self.edges[e].soft = true,
+                _ => dropped += 1,
+            }
+        }
+        for &(pair, g) in &extra.edge_curves {
+            let on = |p: Point3| ((p - g.center).length() - g.radius).abs() <= tol;
+            let ok = g.radius > crate::tol::POINT_MERGE && on(pair[0]) && on(pair[1]);
+            match edge_of(pair).filter(|_| ok) {
+                Some(e) => self.edges[e].curve = Some(g),
+                None => dropped += 1,
+            }
+        }
+        if !extra.surfaces.is_empty() {
+            let fids: Vec<FaceId> = self.faces.keys().collect();
+            for f in fids {
+                let fits = |s: &SurfaceRef| -> bool {
+                    let SurfaceRef::Cylinder {
+                        axis_point,
+                        axis,
+                        radius,
+                    } = *s;
+                    let face = &self.faces[f];
+                    if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION
+                        || radius <= crate::tol::POINT_MERGE
+                        || axis.dot(face.plane.normal()).abs() > crate::tol::NORMAL_DIRECTION
+                    {
+                        return false;
+                    }
+                    let dist = |p: Point3| {
+                        let d = p - axis_point;
+                        (d - axis * d.dot(axis)).length()
+                    };
+                    // A chord facet's corners lie ON the cylinder, not just
+                    // inside it: stricter than the validator's bound, so a
+                    // flat face that happens to fit inside is not claimed.
+                    std::iter::once(face.outer_loop)
+                        .chain(face.inner_loops.iter().copied())
+                        .flat_map(|l| self.loop_positions(l).collect::<Vec<_>>())
+                        .all(|p| (dist(p) - radius).abs() <= tol)
+                };
+                if let Some(s) = extra.surfaces.iter().find(|s| fits(s)) {
+                    self.faces[f].surface = Some(*s);
+                }
+            }
+        }
+        dropped
+    }
 }
 
 #[cfg(test)]

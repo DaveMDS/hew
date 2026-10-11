@@ -599,6 +599,7 @@ struct FaceProof {
     /// by which side of a re-minted edge is its primary) must come back
     /// carrying exactly the paint the recorded state had.
     material: crate::material::FaceMaterial,
+    back_material: crate::material::FaceMaterial,
     uv_frame: Option<crate::material::UvFrame>,
 }
 
@@ -632,6 +633,7 @@ impl StateProof {
                     plane: face.plane,
                     surface: face.surface,
                     material: face.material,
+                    back_material: face.back_material,
                     uv_frame: face.uv_frame,
                 })
                 .collect(),
@@ -815,6 +817,7 @@ impl StateProof {
             // and its paint and UV frame.
             candidate.faces[f].surface = rec.surface;
             candidate.faces[f].material = rec.material;
+            candidate.faces[f].back_material = rec.back_material;
             candidate.faces[f].uv_frame = rec.uv_frame;
         }
         // Fast path: neither the recorded state nor the candidate carries a

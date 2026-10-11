@@ -24,6 +24,7 @@ pub fn public_id(entity: &EntityRef, sid: u64) -> String {
         EntityRef::Guide(_) => "gde",
         EntityRef::Material(_) => "mat",
         EntityRef::Tag(_) => "tag",
+        EntityRef::Annotation(_) => "ann",
     };
     format!("{prefix}_{sid:x}")
 }
@@ -105,6 +106,7 @@ impl IdResolver {
                 | ("gde", EntityRef::Guide(_))
                 | ("mat", EntityRef::Material(_))
                 | ("tag", EntityRef::Tag(_))
+                | ("ann", EntityRef::Annotation(_))
         );
         matches.then(|| entity.clone())
     }

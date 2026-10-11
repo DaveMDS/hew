@@ -309,8 +309,9 @@ fn skp_group_containing_a_component_stays_a_group_the_component_stays_shared() {
     });
     assert_eq!(
         group_frame,
-        Some(("Group#769", 6)),
-        "the door frame group nests as a Group, not a shared def"
+        Some(("Front Entry Door Frame", 6)),
+        "the door frame group nests as a Group, not a shared def, under its \
+         own placement name (not its definition's \"Group#769\")"
     );
 
     let slab_def = front_entry_door
@@ -335,11 +336,13 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     // to 69 baked objects with 34 leaky shells — the .skp path keeps shared
     // definitions and watertight solids instead). house's two genuinely
     // non-manifold source meshes DECOMPOSE into open shells (loud split
-    // warnings) instead of being rejected: 49 watertight solids + 3 leaky
-    // pieces, nothing skipped.
-    assert_eq!(report.objects_created, 52);
-    assert_eq!(report.watertight, 49);
-    assert_eq!(report.leaky, 3);
+    // warnings) instead of being rejected: 50 watertight solids + 7 leaky
+    // pieces, nothing skipped. (Coplanar faces stay apart as SketchUp holds
+    // them; when they merged on import, one more solid split and the
+    // pieces were fewer: 49 + 3.)
+    assert_eq!(report.objects_created, 57);
+    assert_eq!(report.watertight, 50);
+    assert_eq!(report.leaky, 7);
     // Group/component split (the corrected mapping): most of what the old
     // (pre-`is_group`) heuristic counted as "shared definitions nesting 4
     // deep" were actually SketchUp GROUPS (Front Wall, Slab, the window and
@@ -357,7 +360,7 @@ fn house_ingests_with_shared_defs_and_loud_skips() {
     assert_eq!(doc.instance_ids().len(), 6);
     assert_eq!(doc.group_ids().len(), 0);
     assert_eq!(doc.component_ids().len(), 6);
-    assert_eq!(doc.expanded_placements().len(), 56);
+    assert_eq!(doc.expanded_placements().len(), 60);
     assert_eq!(
         doc.component_ids()
             .iter()
@@ -430,11 +433,13 @@ fn shared_texture_and_textured_opacity_survive_import() {
     assert!(out.textures_missing.is_empty());
 
     // Textured opacity folds into the tint alpha exactly like the solid arm:
-    // "[Translucent Glass Tinted]" stores 0.52 with its use-opacity flag set
-    // -> alpha round(0.52 * 255) = 133; opaque textured materials stay 255.
+    // "[Translucent Glass Tinted]" stores a transparency of 0.52 with its
+    // flag set (house.dae exports it as an RGB_ZERO transparent colour), so
+    // it is 48% opaque -> alpha round(0.48 * 255) = 122; opaque textured
+    // materials stay 255.
     let glass = find("[Translucent Glass Tinted]");
     assert!(glass.texture.is_some());
-    assert_eq!(glass.color, Rgba8::rgba(255, 255, 255, 133));
+    assert_eq!(glass.color, Rgba8::rgba(255, 255, 255, 122));
     assert_eq!(
         find("[Wood Floor Light]").color,
         Rgba8::rgba(255, 255, 255, 255)
@@ -442,7 +447,9 @@ fn shared_texture_and_textured_opacity_survive_import() {
 }
 
 #[test]
-fn back_painted_face_still_gets_its_material() {
+fn a_face_keeps_its_front_and_back_paint() {
+    // back-material.skp: one face painted differently on each side. The
+    // front paint is the face's material, the back paint its back.
     let out = skp_import::import(&fixture("back-material.skp")).unwrap();
     let mesh = out
         .scene
@@ -453,12 +460,18 @@ fn back_painted_face_still_gets_its_material() {
             _ => None,
         })
         .expect("one world face");
-    assert!(
-        mesh.face_materials
-            .iter()
-            .any(|&m| m != kernel::NO_MATERIAL),
-        "back-only paint falls back onto the face material"
-    );
+    let painted: Vec<(u32, u32)> = mesh
+        .face_materials
+        .iter()
+        .zip(&mesh.extra.face_back_materials)
+        .map(|(&f, &b)| (f, b))
+        .filter(|&(_, b)| b != kernel::NO_MATERIAL)
+        .collect();
+    assert_eq!(painted.len(), 1, "{:?}", mesh.extra.face_back_materials);
+    let (front, back) = painted[0];
+    assert!(front != kernel::NO_MATERIAL && front != back);
+    let name = |d: u32| out.scene.materials[d as usize].name.clone();
+    assert_ne!(name(front), name(back));
 }
 
 // ── Visibility and layers ────────────────────────────────────────────────────
@@ -471,10 +484,20 @@ fn hidden_faces_and_hidden_layers_do_not_open_solids() {
     assert_eq!(report.objects_created, 1);
     assert_eq!(report.watertight, 1, "the box stays closed");
 
-    // layers.skp: three boxes on three layers (one layer hidden) — all import.
-    let (report, _) = ingest("layers.skp");
-    assert_eq!(report.objects_created, 1);
-    assert_eq!(report.watertight, 1, "all three boxes' shells stay closed");
+    // layers.skp: three loose boxes on three layers (one layer hidden) —
+    // all import, each its own solid tagged with its layer (loose geometry
+    // carries its layer on its faces), the hidden layer's tag hidden.
+    let (report, doc) = ingest("layers.skp");
+    assert_eq!(report.objects_created, 3);
+    assert_eq!(report.watertight, 3, "all three boxes' shells stay closed");
+    let mut tags: Vec<String> = doc
+        .top_level_nodes()
+        .into_iter()
+        .map(|n| doc.node_tags(n).concat().join("/"))
+        .collect();
+    tags.sort();
+    assert_eq!(tags, ["BigLayer", "LittleLayer", "MediumLayer"]);
+    assert_eq!(doc.tag_meta().filter(|(_, hidden)| *hidden).count(), 1);
 }
 
 // ── Guides ───────────────────────────────────────────────────────────────────
@@ -572,6 +595,15 @@ fn scenes_arrive_with_cameras_hidden_tags_and_the_saved_view() {
     let s2 = &scenes[1];
     assert_eq!(s2.hidden_tags.as_ref().map(|t| t.len()), Some(0));
     assert!(s2.camera.is_some());
+    // Each scene saved its style: the look comes along, and it is the
+    // file's own backdrop (sky and ground on, the model axes drawn).
+    for s in scenes {
+        let style = s
+            .view_style
+            .unwrap_or_else(|| panic!("{}: saved style", s.name));
+        assert_eq!(style, doc.view_style().unwrap(), "{}", s.name);
+        assert!(s.props().display, "{}", s.name);
+    }
 
     // Importing into a document that already has content keeps its view.
     let out = skp_import::import(&fixture("two-scenes.skp")).unwrap();
@@ -586,4 +618,413 @@ fn scenes_arrive_with_cameras_hidden_tags_and_the_saved_view() {
         "a non-empty document keeps its camera"
     );
     assert_eq!(doc2.scenes().len(), 2, "scenes are still added");
+}
+
+#[test]
+fn geometry_hew_built_reads_as_written_and_a_files_own_is_repaired() {
+    // Two triangles sharing an edge, wound against each other. A file's own
+    // mesh like that is repaired on open (one face turned over to agree);
+    // marked as built by Hew (`loose_built`), it reads as written — both
+    // faces turned as they are, split where they disagree.
+    use skp_import::openskp::{Attributes, Dictionary, Mesh, MeshEdge, MeshFace, Owner, Value};
+    let mut m = skp_import::openskp::Model::parse(&fixture("box.skp")).unwrap();
+    let run = m
+        .geometry
+        .iter()
+        .position(|r| r.def_index.is_none())
+        .unwrap();
+    let face = |outer: Vec<u32>, z: f64| MeshFace {
+        outer,
+        normal: [0.0, 0.0, z],
+        ..Default::default()
+    };
+    let edge = |v0: u32, v1: u32| MeshEdge {
+        v0,
+        v1,
+        ..Default::default()
+    };
+    m.geometry[run].mesh = Mesh {
+        vertices: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        faces: vec![face(vec![0, 1, 2], 1.0), face(vec![3, 2, 0], -1.0)],
+        edges: vec![edge(0, 1), edge(1, 2), edge(2, 0), edge(2, 3), edge(3, 0)],
+        ..Default::default()
+    };
+    m.geometry[run].curves.clear();
+    let normals = |m: &skp_import::openskp::Model| -> Vec<i64> {
+        let bytes = skp_import::openskp::Document17::from_model(m)
+            .unwrap()
+            .write();
+        let out = skp_import::import(&bytes).unwrap();
+        let mut doc = Document::new();
+        doc.ingest(out.scene, out.textures_missing).unwrap();
+        let mut n: Vec<i64> = doc
+            .visible_object_ids()
+            .into_iter()
+            .flat_map(|o| {
+                doc.object(o)
+                    .unwrap()
+                    .faces()
+                    .iter()
+                    .map(|(_, f)| f.plane.normal().z.round() as i64)
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        n.sort();
+        n
+    };
+    // A file's own: repaired, the two faces agree.
+    let repaired = normals(&m);
+    assert_eq!(repaired.len(), 2);
+    assert_eq!(repaired[0], repaired[1], "{repaired:?}");
+    // Built by Hew: as written.
+    m.dictionaries.push(Attributes {
+        owner: Owner::Model,
+        dictionaries: vec![Dictionary {
+            name: "hew".into(),
+            entries: vec![
+                ("version".into(), Value::Int(1)),
+                ("loose_built".into(), Value::Bool(true)),
+            ],
+            flag: 0,
+        }],
+    });
+    assert_eq!(normals(&m), [-1, 1]);
+}
+
+/// The house fixture's open objects, by kind: what Model Health lists for
+/// a real SketchUp file. Mostly solids; the open ones are sheets the model
+/// drew on purpose and one box the importer split at two internal faces
+/// (a seam family of three cappable slices — the middle one open at both
+/// ends — and two partition sheets). The import report carries the same
+/// counts.
+#[test]
+fn the_house_fixtures_open_objects_read_as_surfaces_and_cappable_boxes() {
+    let (report, doc) = ingest("house.skp");
+    let c = doc.health_report(None).counts();
+    assert_eq!(
+        c, report.health,
+        "the import report's counts are the document's"
+    );
+    assert_eq!(c.objects, report.objects_created);
+    assert_eq!((c.solids, c.flat_sheets, c.bent_sheets), (50, 3, 1));
+    assert_eq!((c.cappable, c.holes, c.mixed, c.non_manifold), (3, 0, 0, 0));
+    assert_eq!(c.seam_families, 1);
+    assert_eq!(c.surfaces() + c.needing_attention(), report.leaky);
+}
+
+#[test]
+fn sketchup_dimensions_open_on_edge_midpoints_arc_centers_and_in_plane() {
+    use kernel::Annotation;
+    use openskp::{Anchor, Dimension, Model};
+    // cylinder.skp: arcs among the model's own entities. Four dimensions
+    // SketchUp can draw on it, written beside it: arc center to a vertex
+    // along x (frame 1), an edge's midpoint to a point along n × x (frame
+    // 2), a vertex to a point raised off the dimension's plane, which
+    // measures the distance in that plane (frame 0), and from where two
+    // edges meet.
+    let mut m = Model::parse(&fixture("cylinder.skp")).unwrap();
+    let ri = m
+        .geometry
+        .iter()
+        .position(|r| r.def_index.is_none() && r.curves.iter().any(|c| c.arc.is_some()))
+        .expect("an arc among the model's own entities");
+    let run = &m.geometry[ri];
+    let curve = run.curves.iter().find(|c| c.arc.is_some()).unwrap();
+    let center = curve.arc.as_ref().unwrap().center_m;
+    let edge = run.mesh.edges.iter().find(|e| e.pid != 0).unwrap();
+    let (p, q) = (
+        run.mesh.vertices[edge.v0 as usize],
+        run.mesh.vertices[edge.v1 as usize],
+    );
+    let mid = [
+        (p[0] + q[0]) / 2.0,
+        (p[1] + q[1]) / 2.0,
+        (p[2] + q[2]) / 2.0,
+    ];
+    let vi = run.mesh.vertex_pids.iter().position(|&v| v != 0).unwrap();
+    let (vertex, vpid) = (run.mesh.vertices[vi], run.mesh.vertex_pids[vi]);
+    let (cpid, epid) = (curve.pid, edge.pid);
+    let at = |kind, entity| Anchor {
+        kind,
+        entity: Some(entity),
+        ..Default::default()
+    };
+    let free = |point_m| Anchor {
+        kind: 1,
+        point_m,
+        ..Default::default()
+    };
+    let dim = |start, end, variant| Dimension {
+        start,
+        end,
+        normal: [0.0, 0.0, 1.0],
+        x_axis: [1.0, 0.0, 0.0],
+        offset_m: 0.5,
+        variant,
+        ..Default::default()
+    };
+    let raised = [vertex[0] + 3.0, vertex[1] + 4.0, vertex[2] + 7.0];
+    // Where two edges meet: the edge above and one sharing its first end.
+    let other = run
+        .mesh
+        .edges
+        .iter()
+        .find(|e| e.pid != 0 && e.pid != epid && (e.v0 == edge.v0 || e.v1 == edge.v0))
+        .unwrap();
+    let corner = run.mesh.vertices[edge.v0 as usize];
+    let crossing = Anchor {
+        kind: 9,
+        entity: Some(epid),
+        second: Some(other.pid),
+        ..Default::default()
+    };
+    m.dimensions = vec![
+        dim(at(10, cpid), at(2, vpid), 1),
+        dim(at(4, epid), free([mid[0] + 1.0, mid[1] + 2.0, mid[2]]), 2),
+        dim(at(2, vpid), free(raised), 0),
+        dim(crossing, free([corner[0] + 1.0, corner[1], corner[2]]), 1),
+    ];
+    m.texts.clear();
+    let bytes = openskp::Document17::from_model(&m).unwrap().write();
+
+    let out = skp_import::import(&bytes).unwrap();
+    let dims: Vec<_> = out
+        .scene
+        .extra
+        .annotations
+        .iter()
+        .filter_map(|a| match a {
+            Annotation::LinearDimension { a, b, offset, .. } => Some((a.point, b.point, *offset)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(dims.len(), 4, "every dimension opens: {:?}", out.warnings);
+    let near = |a: kernel::Point3, b: [f64; 3]| {
+        (a.x - b[0]).abs() < 1e-9 && (a.y - b[1]).abs() < 1e-9 && (a.z - b[2]).abs() < 1e-9
+    };
+    let v = |o: kernel::Vec3, b: [f64; 3]| near(kernel::Point3::new(o.x, o.y, o.z), b);
+    // Frame 1: from the arc's center, measured along x, offset along y.
+    assert!(near(dims[0].0, center));
+    assert!(near(dims[0].1, [vertex[0], center[1], center[2]]));
+    assert!(v(dims[0].2, [0.0, 0.5, 0.0]));
+    // Frame 2: from the edge's midpoint, measured along y, offset along -x.
+    assert!(near(dims[1].0, mid));
+    assert!(near(dims[1].1, [mid[0], mid[1] + 2.0, mid[2]]));
+    assert!(v(dims[1].2, [-0.5, 0.0, 0.0]));
+    // Frame 0: the 3-4 run in the plane (5 long), not the 7 rise, offset
+    // across it.
+    assert!(near(dims[2].0, vertex));
+    assert!(near(
+        dims[2].1,
+        [vertex[0] + 3.0, vertex[1] + 4.0, vertex[2]]
+    ));
+    assert!(v(dims[2].2, [-0.4, 0.3, 0.0]));
+    // Where the two edges meet: their shared corner.
+    let c = dims[3].0;
+    assert!(
+        (c.x - corner[0]).abs() < 1e-9
+            && (c.y - corner[1]).abs() < 1e-9
+            && (c.z - corner[2]).abs() < 1e-9,
+        "{c:?} is not {corner:?}"
+    );
+}
+
+#[test]
+fn a_dimension_on_one_placement_of_a_component_opens_on_that_placement() {
+    // dim-second-instance.skp (OpenSKP's anchors pair): two placements of
+    // one box component, and a dimension SketchUp's Dimension tool drew
+    // between two top front corners of the second, 38.75 in apart.
+    let out = skp_import::import(&fixture("dim-second-instance.skp")).unwrap();
+    let ends: Vec<_> = out
+        .scene
+        .extra
+        .annotations
+        .iter()
+        .filter_map(|a| match a {
+            kernel::Annotation::LinearDimension { a, b, .. } => Some((a.point, b.point)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends.len(), 1);
+    let at = |p: kernel::Point3, q: [f64; 3]| {
+        let v = [p.x, p.y, p.z].map(|v| v / 0.0254);
+        assert!(
+            (0..3).all(|k| (v[k] - q[k]).abs() < 1e-6),
+            "{v:?} is not {q:?}"
+        );
+    };
+    at(ends[0].0, [48.9375, 0.0, 31.3125]);
+    at(ends[0].1, [87.6875, 0.0, 31.3125]);
+}
+
+/// An image placed inside a group (or a component) arrives with it: an
+/// instance of the image's definition — one face painted with the picture
+/// — among the group's members, at the picture's world pose. Both
+/// containers; the 2017 one carries the image as an instance record.
+#[test]
+fn an_image_inside_a_group_arrives_in_that_group() {
+    let (_, root) = ingest("2026/feature-pack.skp");
+    let root_image = root
+        .instance_ids()
+        .into_iter()
+        .find(|&i| {
+            let def = root.instance_def(i).unwrap();
+            root.component_name(def)
+                .is_some_and(|n| n.starts_with("Image"))
+        })
+        .expect("feature-pack places one image at the root");
+    let want = root.instance_pose(root_image).unwrap();
+    for name in ["2026/image-in-group.skp", "image-in-group.skp"] {
+        let (_, doc) = ingest(name);
+        let group = doc
+            .group_ids()
+            .into_iter()
+            .find(|&g| doc.group_name(g) == Some("Picture group"))
+            .unwrap_or_else(|| panic!("{name}: the group arrives"));
+        let members = doc.group_members(group).unwrap();
+        let image = members
+            .iter()
+            .find_map(|m| match m {
+                kernel::NodeId::Instance(i) => Some(*i),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name}: the image is an instance in the group"));
+        let def = doc.instance_def(image).unwrap();
+        assert!(
+            doc.component_name(def)
+                .is_some_and(|n| n.starts_with("Image")),
+            "{name}: the instance is of the image's definition"
+        );
+        let members = doc.def_member_nodes(def).unwrap();
+        let [kernel::NodeId::Object(o)] = members.as_slice() else {
+            panic!("{name}: the image definition holds its one face");
+        };
+        let obj = doc.object(*o).unwrap();
+        assert!(
+            obj.faces().iter().any(|(f, _)| {
+                doc.face_material(*o, f)
+                    .and_then(|m| doc.material(m))
+                    .is_some_and(|m| m.texture.is_some())
+            }),
+            "{name}: the face is painted with the picture"
+        );
+        // Where feature-pack shows the picture: the group's pose composed
+        // with the image's place inside it.
+        let got = doc.instance_pose(image).unwrap();
+        for (a, b) in got.to_affine().iter().zip(want.to_affine().iter()) {
+            assert!((a - b).abs() < 1e-6, "{name}: pose {got:?} vs {want:?}");
+        }
+    }
+}
+
+/// A group holding only edges arrives as a group with no members holding
+/// its drawing: one sketch per plane the edges lie in, in world
+/// coordinates (the group's placement applied), and the group's own
+/// dimension and label as annotations through the same placement. Both
+/// containers.
+#[test]
+fn a_group_of_lines_arrives_as_a_group_holding_its_drawing() {
+    for name in ["2026/lines-group.skp", "lines-group.skp"] {
+        let (report, doc) = ingest(name);
+        let group = doc
+            .group_ids()
+            .into_iter()
+            .find(|&g| doc.group_name(g) == Some("Lines"))
+            .unwrap_or_else(|| panic!("{name}: the group arrives"));
+        assert!(
+            doc.group_members(group).unwrap().is_empty(),
+            "{name}: nothing but lines"
+        );
+        let held = doc.group_member_sketches(group);
+        assert_eq!(
+            held.len(),
+            1,
+            "{name}: the square and its diagonal lie in one plane"
+        );
+        let sk = doc.sketch(held[0]).unwrap();
+        assert_eq!(sk.edges().len(), 5, "{name}");
+        // Placed 2 m along x: the square's corners are at x = 2 and 3.
+        let xs: std::collections::BTreeSet<i64> = sk
+            .vertices()
+            .values()
+            .map(|v| (v.position.x * 1000.0).round() as i64)
+            .collect();
+        assert_eq!(xs, [2000, 3000].into(), "{name}");
+        assert!(doc.sketch_shown(held[0]), "{name}");
+        assert!(
+            report.sketches.iter().all(|s| s.is_some()),
+            "{name}: every sketch built"
+        );
+        // The group's dimension and label, through the group's pose.
+        let mut dims = 0;
+        let mut labels = Vec::new();
+        for id in doc.annotation_ids() {
+            match doc.annotation(id).unwrap() {
+                kernel::Annotation::LinearDimension { a, b, .. } => {
+                    dims += 1;
+                    assert!(
+                        (a.point.x - 2.0).abs() < 1e-9 && (b.point.x - 3.0).abs() < 1e-9,
+                        "{name}: {a:?} {b:?}"
+                    );
+                }
+                kernel::Annotation::LeaderText {
+                    anchor,
+                    offset,
+                    text,
+                } => {
+                    labels.push(text.clone());
+                    assert!((anchor.point.x - 2.5).abs() < 1e-9, "{name}: {anchor:?}");
+                    assert!((offset.z - 0.3).abs() < 1e-9, "{name}: {offset:?}");
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((dims, labels), (1, vec!["lines".to_string()]), "{name}");
+    }
+}
+
+// ── An import built in steps ────────────────────────────────────────────
+
+/// An import built a few items at a time is the import built at once,
+/// and says how far it has come.
+#[test]
+fn an_import_built_in_steps_is_the_import_built_at_once() {
+    for name in ["box-component-two-instances.skp", "feature-pack.skp"] {
+        let bytes = fixture(name);
+        let at_once = skp_import::import(&bytes).expect(name);
+        let mut job = skp_import::import_begin(&bytes).expect(name);
+        let (done, total) = job.progress();
+        assert_eq!(done, 0, "{name}");
+        assert!(total > 0, "{name}: something to build");
+        let mut steps = 0usize;
+        loop {
+            let finished = job.step(1);
+            steps += 1;
+            let (done, t) = job.progress();
+            assert_eq!(t, total, "{name}: the total holds");
+            assert_eq!(done, steps.min(total), "{name}: one item per step");
+            if finished {
+                break;
+            }
+        }
+        assert_eq!(steps, total, "{name}: every item took one step");
+        let stepped = job.finish().expect(name);
+        assert_eq!(stepped.scene.defs.len(), at_once.scene.defs.len(), "{name}");
+        assert_eq!(
+            stepped.scene.roots.len(),
+            at_once.scene.roots.len(),
+            "{name}"
+        );
+        assert_eq!(stepped.warnings, at_once.warnings, "{name}");
+        let mut a = Document::new();
+        a.ingest(at_once.scene, at_once.textures_missing).unwrap();
+        let mut b = Document::new();
+        b.ingest(stepped.scene, stepped.textures_missing).unwrap();
+        assert_eq!(a.state_hash(), b.state_hash(), "{name}: the same document");
+    }
 }

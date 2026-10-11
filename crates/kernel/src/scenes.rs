@@ -111,17 +111,23 @@ pub struct Scene {
     pub hidden_tags: Option<BTreeSet<u64>>,
     pub section: Option<Option<SectionPlaneState>>,
     pub display: Option<DisplayState>,
+    /// How the view is shown (`style.rs`): the backdrop and the axes a
+    /// SketchUp scene's style sets. Captured with the display property
+    /// from the document's own `view_style`, so a document shown Hew's
+    /// way captures none; `None` leaves the look alone on apply.
+    pub view_style: Option<crate::style::ViewStyle>,
 }
 
 impl Scene {
-    /// Which properties this Scene captures (`Some` fields).
+    /// Which properties this Scene captures (`Some` fields). The display
+    /// property covers the editor's toggles and the view style alike.
     pub fn props(&self) -> SceneProps {
         SceneProps {
             camera: self.camera.is_some(),
             hidden_nodes: self.hidden_nodes.is_some(),
             hidden_tags: self.hidden_tags.is_some(),
             section: self.section.is_some(),
-            display: self.display.is_some(),
+            display: self.display.is_some() || self.view_style.is_some(),
         }
     }
 }
@@ -137,6 +143,9 @@ impl Scene {
 pub struct ResolvedScene {
     pub camera: Option<CameraState>,
     pub display: Option<DisplayState>,
+    /// The view style to show (`None` = not captured; the document's own
+    /// is already set to it by `apply_scene`).
+    pub view_style: Option<crate::style::ViewStyle>,
     /// `None` when neither hidden property is captured (nothing to push).
     pub hidden_object_ids: Option<Vec<ObjectId>>,
     pub hidden_instance_ids: Option<Vec<InstanceId>>,
@@ -300,6 +309,7 @@ impl Document {
             hidden_tags: None,
             section: None,
             display: None,
+            view_style: None,
         };
         self.capture_into(&mut scene, props, camera, display);
         self.scenes.insert(index, scene);
@@ -362,6 +372,7 @@ impl Document {
         }
         if !props.display {
             scene.display = None;
+            scene.view_style = None;
         }
         self.scenes[index] = scene;
         Ok(())
@@ -443,6 +454,9 @@ impl Document {
         if let Some(section) = resolved.section {
             self.section_plane = section;
         }
+        if let Some(style) = resolved.view_style {
+            self.set_view_style(Some(style));
+        }
         Ok(resolved)
     }
 
@@ -465,6 +479,11 @@ impl Document {
         }
         if let (Some(captured), Some(live)) = (&scene.display, live_display) {
             props.display = captured != live;
+        }
+        if let Some(captured) = scene.view_style
+            && self.view_style() != Some(captured)
+        {
+            props.display = true;
         }
         if let Some(captured) = &scene.hidden_tags {
             let live_hidden: BTreeSet<u64> = self.hidden_tag_sids();
@@ -537,12 +556,17 @@ impl Document {
         if props.camera
             && let Some(c) = camera
         {
-            scene.camera = Some(c);
+            scene.camera = Some(c.usable());
         }
         if props.display
             && let Some(d) = display
         {
             scene.display = Some(d);
+        }
+        if props.display {
+            // The look goes with the display: the document's own view
+            // style, or none when it is shown Hew's way.
+            scene.view_style = self.view_style();
         }
         if props.hidden_nodes {
             scene.hidden_nodes = Some(self.hidden_node_sids());
@@ -667,6 +691,7 @@ impl Document {
         ResolvedScene {
             camera: scene.camera,
             display: scene.display,
+            view_style: scene.view_style,
             hidden_object_ids,
             hidden_instance_ids,
             hidden_tag_paths,

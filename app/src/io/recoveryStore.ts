@@ -12,6 +12,8 @@
  */
 
 import type { DocSessionState } from './documentSession'
+import type { DocFormat } from './fileHost'
+import { normalizeDocFormat } from './docFormat'
 
 /** Metadata describing one autosaved recovery snapshot. */
 export interface RecoveryMeta {
@@ -20,14 +22,27 @@ export interface RecoveryMeta {
   savedAt: number
   /** Display name (currentRef.name | importedName | 'Untitled'). */
   name: string
-  /** Original .hew absolute path (Tauri) or null (web / unsaved document). */
+  /** Original document absolute path (Tauri) or null (web / unsaved document). */
   path: string | null
+  /** The format the document was bound to (`.hew`, or a SketchUp container
+   * whose source is stored beside the snapshot). Records written before this
+   * field existed read back as `'hew'` — see `normalizeRecoveryMeta`. */
+  format: DocFormat
+}
+
+/** Bring a parsed (possibly older) RecoveryMeta record up to the current
+ * shape: a missing or unrecognized `format` becomes `'hew'`. */
+export function normalizeRecoveryMeta(raw: Omit<RecoveryMeta, 'format'> & { format?: unknown }): RecoveryMeta {
+  return { ...raw, format: normalizeDocFormat(raw.format) }
 }
 
 /** A recovery snapshot read back from storage. */
 export interface RecoverySnapshot {
   bytes: Uint8Array
   meta: RecoveryMeta
+  /** The `.skp` source stored beside the snapshot (see `writeSource`), or
+   * null when none was stored. */
+  source: Uint8Array | null
 }
 
 /**
@@ -43,6 +58,14 @@ export interface RecoveryListing {
 export interface RecoveryStore {
   /** Persist a snapshot, overwriting any previous one from this window. */
   write(bytes: Uint8Array, meta: RecoveryMeta): Promise<void>
+  /**
+   * Persist (or, with null, remove) the `.skp` source of this window's
+   * document beside its snapshot. Sources can be 100+ MB, so the caller
+   * writes one only when it changes (after an open or a save), never on
+   * every autosave tick. `clear` and `discardAll` remove it with the
+   * snapshot.
+   */
+  writeSource(source: Uint8Array | null): Promise<void>
   /** Enumerate every recoverable snapshot, newest first. */
   list(): Promise<RecoveryListing[]>
   /**
@@ -88,6 +111,7 @@ export function makeRecoveryStore(): RecoveryStore {
     )
     return {
       write: (bytes, meta) => storePromise.then((s) => s.write(bytes, meta)),
+      writeSource: (source) => storePromise.then((s) => s.writeSource(source)),
       list: () => storePromise.then((s) => s.list()),
       claim: (slot) => storePromise.then((s) => s.claim(slot)),
       clear: () => storePromise.then((s) => s.clear()),

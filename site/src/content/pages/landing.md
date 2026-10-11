@@ -25,7 +25,7 @@ screenshots:
     caption: "A home theater in the light theme — materials, outliner, and live solid status for every object."
   - src: "/screenshots/guest-house-light.webp"
     alt: "The Hew desktop app on macOS light theme, showing a complex converted SketchUp file of the framing of a house, object info, extensive textures, components"
-    caption: "A whole-house framing model imported from SketchUp with components, textures, and tags intact. The red badge counts imported parts that were never watertight."
+    caption: "A whole-house framing model imported from SketchUp with components, textures, and tags intact. The status badge counts the imported parts that aren't solid, such as glass, pipes, and boxes without lids."
 features:
   - title: "The tools you already know"
     icon: pushpull

@@ -952,10 +952,16 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
             "`path` must be absolute: the app's working directory is not the caller's (hew-cli makes it absolute for you).",
         ));
     }
-    if !path.to_ascii_lowercase().ends_with(".hew") {
+    // A `.hew` document, or a `.skp` opened as the document's own file
+    // (the app's open-skp path); other formats merge through hew.doc.import.
+    let is_document = |p: &str| {
+        let lower = p.to_ascii_lowercase();
+        lower.ends_with(".hew") || lower.ends_with(".skp")
+    };
+    if !is_document(path) {
         return Err(Refused::new(
             "load_failed",
-            "hew.doc.open opens .hew documents; use hew.doc.import to merge other formats.",
+            "hew.doc.open opens .hew and .skp documents; use hew.doc.import to merge other formats.",
         ));
     }
     // The same file is already open in a window: attach to it rather than
@@ -973,16 +979,16 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
         }));
     }
     // Validate before granting anything: the file must exist, and what it
-    // resolves to (a symlink named *.hew included) must itself be a .hew
-    // file. Only then does the approval — which stands in for the native
-    // dialog pick — go in, and for write too, since the document is opened
-    // bound to this path and its Save writes back to it.
+    // resolves to (a symlink named *.hew or *.skp included) must itself be
+    // a document file. Only then does the approval — which stands in for
+    // the native dialog pick — go in, and for write too, since the
+    // document is opened bound to this path and its Save writes back to it.
     let canonical = match std::fs::canonicalize(path) {
-        Ok(c) if c.is_file() && c.to_string_lossy().to_ascii_lowercase().ends_with(".hew") => c,
+        Ok(c) if c.is_file() && is_document(&c.to_string_lossy()) => c,
         Ok(_) => {
             return Err(Refused::new(
                 "load_failed",
-                format!("{path}: not a .hew file"),
+                format!("{path}: not a .hew or .skp file"),
             ))
         }
         Err(e) => return Err(Refused::new("load_failed", format!("{path}: {e}"))),
@@ -1169,6 +1175,11 @@ fn save_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool {
     }
 }
 
+/// The display length formats `hew.doc.save`'s `units` names: keep in step
+/// with `crates/api`'s `LENGTH_FORMATS`, which this crate does not depend
+/// on (`app/src/settings/units.ts`'s `LengthFormat` is the third copy).
+const LENGTH_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
+
 /// `hew.doc.save` in the desktop app: the window saves through its own save
 /// path — the file is written, the unsaved mark cleared, the document bound
 /// to the file (title, recents, "open the same file" focus) exactly as if
@@ -1176,8 +1187,12 @@ fn save_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool {
 /// would leave the app still calling the document dirty.
 fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Value, Refused> {
     if let Some(extra) = params.as_object().and_then(|o| {
-        o.keys()
-            .find(|k| !matches!(k.as_str(), "path" | "document" | "copy"))
+        o.keys().find(|k| {
+            !matches!(
+                k.as_str(),
+                "path" | "document" | "copy" | "format" | "units"
+            )
+        })
     }) {
         return Err(Refused::new(
             "invalid_params",
@@ -1191,6 +1206,24 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     if copy && path.is_none() {
         return Err(Refused::new("invalid_params", "`copy` needs a `path`"));
     }
+    // The same `format` and `units` the headless host takes; the window
+    // resolves what they leave open (the document's own container).
+    let format = params.get("format").and_then(Value::as_str);
+    if params.get("format").is_some()
+        && !matches!(format, Some("hew") | Some("skp") | Some("skp2017"))
+    {
+        return Err(Refused::new(
+            "invalid_params",
+            "`format` is one of \"hew\", \"skp\", \"skp2017\"",
+        ));
+    }
+    let units = params.get("units").and_then(Value::as_str);
+    if params.get("units").is_some() && !units.is_some_and(|u| LENGTH_FORMATS.contains(&u)) {
+        return Err(Refused::new(
+            "invalid_params",
+            format!("`units` is one of {LENGTH_FORMATS:?}"),
+        ));
+    }
     if let Some(path) = path {
         if !std::path::Path::new(path).is_absolute() {
             return Err(Refused::new(
@@ -1198,13 +1231,25 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
                 "`path` must be absolute: the app's working directory is not the caller's (hew-cli makes it absolute for you).",
             ));
         }
-        // A .hew document is saved to a .hew file: without this an
+        // A document is saved to a .hew or .skp file: without this an
         // authenticated client could point Save at any file the user owns
         // and have the app overwrite it with document bytes.
-        if !path.to_ascii_lowercase().ends_with(".hew") {
+        let lower = path.to_ascii_lowercase();
+        let skp = lower.ends_with(".skp");
+        if !skp && !lower.ends_with(".hew") {
             return Err(Refused::new(
                 "invalid_path",
-                "`path` must end in .hew — hew.doc.save writes a Hew document.",
+                "`path` must end in .hew or .skp — hew.doc.save writes a Hew or SketchUp document.",
+            ));
+        }
+        // One format's bytes never go under the other's extension.
+        if format.is_some_and(|f| (f != "hew") != skp) {
+            return Err(Refused::new(
+                "format_mismatch",
+                format!(
+                    "`format` {} contradicts the extension of {path}",
+                    format.unwrap_or("")
+                ),
             ));
         }
         if !std::path::Path::new(path)
@@ -1234,12 +1279,19 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
         // stands in for the Save As dialog's approval of the destination.
         crate::approve_file(app, std::path::Path::new(path), true);
     }
-    if let Err(e) = run_op(app, &label, "save", json!({ "path": path, "copy": copy })) {
+    let mut op = json!({ "path": path, "copy": copy });
+    if let Some(f) = format {
+        op["format"] = json!(f);
+    }
+    if let Some(u) = units {
+        op["units"] = json!(u);
+    }
+    if let Err(e) = run_op(app, &label, "save", op) {
         return Err(Refused {
-            name: if e.refusal == "unknown_document" {
-                "unknown_document"
-            } else {
-                "save_failed"
+            name: match e.refusal.as_str() {
+                "unknown_document" => "unknown_document",
+                "format_mismatch" => "format_mismatch",
+                _ => "save_failed",
             },
             explanation: e.message,
             detail: json!({ "document": entry }),

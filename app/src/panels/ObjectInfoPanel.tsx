@@ -6,7 +6,10 @@
  *     clears the kernel name and the field falls back to showing the same
  *     default label the Outliner shows, via resolveLabel — never "(unnamed)")
  *   - Type (read-only: "Object", "Group", "Component", or "Sketch")
- *   - Solid / Leaky (only for Objects; calls scene.object_solid)
+ *   - Geometry (only for Objects; calls scene.object_solid): "Solid", or for
+ *     a non-solid object its Model Health state ("Flat panel", "Open: 3
+ *     openings", "Open edges branch", ...) with a Show link into the Model
+ *     Health panel
  *   - Bounding Box (world axis-aligned bounding-box extents, X × Y × Z, in the
  *     active length format — objectBounds.worldBoundsForSelection computes
  *     it client-side from the render meshes the app already holds; shown for
@@ -52,6 +55,17 @@ import {
   type PlaneUnitsScene,
 } from '../tools/planeUnits'
 import { runDraft } from '../tools/draftCommit'
+import {
+  canCloseRow,
+  classifyRow,
+  openReason,
+  readHealthReport,
+  rowPlacements,
+  type HealthRow,
+} from '../health/healthReport'
+import { ACTION, TOOLTIP, geometryLine } from '../health/healthCopy'
+import { batchLabel, failureLine, runBatch, thickenOp } from '../health/healthBatch'
+import { ThickenDialog } from './ThickenDialog'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
@@ -104,6 +118,39 @@ interface Props {
    * springs back. Same signature every tool's toast uses.
    */
   onToast?: (message: string, code?: string) => void
+  /**
+   * The Geometry row's "Show" link for a non-solid object: open Model Health
+   * filtered to this object. The link renders only when this is supplied.
+   */
+  onShowHealth?: (objectId: bigint) => void
+  /**
+   * The selected dimension or leader text, if any. Annotations are not
+   * nodes, so they never appear in `selectedIds`; when nothing else is
+   * selected the panel shows a read-only entry for it.
+   */
+  selectedAnnotation?: bigint | null
+  /**
+   * The selected construction guide (line or point), if any. Guides are not
+   * nodes, so they never appear in `selectedIds`; when nothing else is
+   * selected the panel shows a read-only entry for it.
+   */
+  selectedGuide?: bigint | null
+}
+
+/** The guide accessor the panel reads. */
+interface GuideScene {
+  guide_kind(id: bigint): string | undefined
+  guide_tags(id: bigint): string[]
+}
+
+/**
+ * The annotation accessors the panel reads. `annotation_tags` is optional
+ * because older generated typings predate it.
+ */
+interface AnnotationScene {
+  annotation_kind(id: bigint): string | undefined
+  annotation_text(id: bigint): string | undefined
+  annotation_tags?(id: bigint): string[]
 }
 
 /** Human-readable type label for each node kind. */
@@ -119,6 +166,19 @@ const PANEL_STYLE: React.CSSProperties = {
   display: 'flex',
   flexDirection: 'column',
   gap: '10px',
+}
+
+const HEALTH_ACTION_STYLE: React.CSSProperties = {
+  background: 'none',
+  border: '1px solid var(--border-strong)',
+  borderRadius: '3px',
+  color: 'var(--text-primary)',
+  cursor: 'pointer',
+  fontFamily: 'inherit',
+  fontSize: '11px',
+  fontWeight: 'normal',
+  padding: '0 6px',
+  whiteSpace: 'nowrap',
 }
 
 const LABEL_STYLE: React.CSSProperties = {
@@ -165,7 +225,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -252,6 +312,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         store,
         tags: [] as string[][],
         solid: null as boolean | null,
+        health: null as HealthRow | null,
         defId: null as bigint | null,
         defName: undefined as string | undefined,
         instanceIds: [] as bigint[],
@@ -265,11 +326,14 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     // object/group/instance APIs (`nodeKindToNumber` yields the -1 sentinel,
     // which no node_id-keyed wasm call accepts). Its "name" is the same
     // positional label the tree/canvas show ("Sketch 2"), derived from
-    // `sketch_ids()` order since sketches can't be renamed yet.
+    // `all_sketch_ids()` order (every live sketch, shown or not, so a
+    // hidden group does not renumber the rest) since sketches can't be
+    // renamed yet.
     if (kind !== 'object' && kind !== 'group' && kind !== 'instance') {
       const sketchId = id
       const islands = Array.from(scene.sketch_island_ids(sketchId))
-      const flat = Array.from(scene.sketch_ids()).flatMap((sid) =>
+      const listed = scene.all_sketch_ids !== undefined ? scene.all_sketch_ids() : scene.sketch_ids()
+      const flat = Array.from(listed).flatMap((sid) =>
         Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
       )
       const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islands[0])
@@ -287,6 +351,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         store: null as string | null,
         tags: [] as string[][],
         solid: null as boolean | null,
+        health: null as HealthRow | null,
         defId: null as bigint | null,
         defName: undefined as string | undefined,
         instanceIds: [] as bigint[],
@@ -335,10 +400,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       t.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
     )
 
-    // Solid/leaky only for objects
+    // Solid / verdict only for objects: a non-solid object reads its Model
+    // Health verdict (the kernel diagnosis, also for a definition member).
     let solid: boolean | null = null
+    let health: HealthRow | null = null
     if (kind === 'object') {
       solid = scene.object_solid(id)
+      if (!solid) health = readHealthReport(scene, docRev, [id]).rows[0] ?? null
     }
 
     return {
@@ -355,6 +423,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       defaultLabel,
       tags,
       solid,
+      health,
       defId,
       defName,
       instanceIds,
@@ -554,6 +623,47 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     onGeometryChanged()
   }, [nodeInfo, localSegments, scene, onGeometryChanged, onSelectMany, onToast])
 
+  // Model Health repairs for an open object (a definition member repairs the
+  // shared definition). A refusal toasts the kernel's copy; success goes
+  // through the same refresh as any panel edit.
+  const runHealthRepair = useCallback(
+    (call: () => unknown) => {
+      try {
+        call()
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const raw = err instanceof Error ? err.message : String(err)
+        onToast?.(kernelErrorMessage(code ?? 'Unknown', raw), code ?? undefined)
+        return
+      }
+      onGeometryChanged()
+    },
+    [onToast, onGeometryChanged],
+  )
+
+  // Thicken… on a flat surface: one `hew.solid.thicken` through the API's
+  // transaction path (the same one the panel's batches use), refusals toasted.
+  const [thickenOpen, setThickenOpen] = useState(false)
+  const runThicken = useCallback(
+    (row: HealthRow, distance: number, centered: boolean) => {
+      setThickenOpen(false)
+      try {
+        const result = runBatch(scene, (n) => batchLabel('thicken', n), [thickenOp(row, distance, centered)])
+        if (result.failed.length > 0) {
+          onToast?.(failureLine('thicken', result.failed[0].explanation))
+          return
+        }
+      } catch (err) {
+        const code = parseKernelErrorCode(err)
+        const raw = err instanceof Error ? err.message : String(err)
+        onToast?.(code !== null ? kernelErrorMessage(code, raw) : raw, code ?? undefined)
+        return
+      }
+      onGeometryChanged()
+    },
+    [scene, onToast, onGeometryChanged],
+  )
+
   // --------------------------------------------------------------------------
   // Tag add state — hidden behind a "+" affordance (HIG-style disclosure).
   // The field auto-focuses when revealed; Enter commits, Esc cancels, blurring
@@ -650,9 +760,89 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     onTagsChanged()
   }, [nodeInfo, scene, onTagsChanged])
 
+  // A selected dimension or leader text (read-only). Re-derived on every
+  // document change, since the text and tags can change without the id doing so.
+  const annotationInfo = useMemo(() => {
+    if (selectedIds.length !== 0 || selectedAnnotation === null) return null
+    const ann = scene as unknown as AnnotationScene
+    const kind = ann.annotation_kind(selectedAnnotation)
+    if (kind === undefined) return null
+    const type = kind === 'leader' ? 'Text' : kind === 'radial' ? 'Radial dimension' : 'Dimension'
+    const name = kind === 'leader' ? ann.annotation_text(selectedAnnotation) || type : type
+    const tags = (ann.annotation_tags?.(selectedAnnotation) ?? []).map((t) => t.split('/'))
+    return { name, type, tags }
+    // docRev: text and tags change on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene, selectedIds, selectedAnnotation, docRev])
+
+  // A selected construction guide (read-only).
+  const guideInfo = useMemo(() => {
+    if (selectedIds.length !== 0 || selectedAnnotation !== null || selectedGuide === null) return null
+    const guides = scene as unknown as GuideScene
+    const kind = guides.guide_kind(selectedGuide)
+    if (kind === undefined) return null
+    const tags = guides.guide_tags(selectedGuide).map((t) => t.split('/'))
+    return { name: kind === 'point' ? 'Guide point' : 'Guide line', type: 'Guide', tags }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene, selectedIds, selectedAnnotation, selectedGuide, docRev])
+
   // --------------------------------------------------------------------------
   // Render
   // --------------------------------------------------------------------------
+
+  if (annotationInfo !== null) {
+    return (
+      <div style={PANEL_STYLE}>
+        <div>
+          <div style={LABEL_STYLE}>Name</div>
+          <div style={VALUE_STYLE}>{annotationInfo.name}</div>
+        </div>
+        <div>
+          <div style={LABEL_STYLE}>Type</div>
+          <div style={VALUE_STYLE}>{annotationInfo.type}</div>
+        </div>
+        {annotationInfo.tags.length > 0 && (
+          <div>
+            <div style={LABEL_STYLE}>Tags</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {annotationInfo.tags.map((path) => (
+                <div key={path.join('/')} style={VALUE_STYLE}>
+                  {path.join(' / ')}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  if (guideInfo !== null) {
+    return (
+      <div style={PANEL_STYLE}>
+        <div>
+          <div style={LABEL_STYLE}>Name</div>
+          <div style={VALUE_STYLE}>{guideInfo.name}</div>
+        </div>
+        <div>
+          <div style={LABEL_STYLE}>Type</div>
+          <div style={VALUE_STYLE}>{guideInfo.type}</div>
+        </div>
+        {guideInfo.tags.length > 0 && (
+          <div>
+            <div style={LABEL_STYLE}>Tags</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              {guideInfo.tags.map((path) => (
+                <div key={path.join('/')} style={VALUE_STYLE}>
+                  {path.join(' / ')}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
 
   // Nothing selected → an empty panel, no boilerplate.
   if (nodeInfo === null && selectedIds.length === 0) {
@@ -889,18 +1079,87 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         </div>
       )}
 
-      {/* Solid / Leaky — only for objects */}
+      {/* Geometry — only for objects: Solid, or the Model Health verdict
+       * ("Surface" is a sheet drawn on purpose, never styled as a problem)
+       * with a Show link into the Model Health panel. */}
       {nodeInfo.solid !== null && (
         <div>
           <div style={LABEL_STYLE}>Geometry</div>
           <div
             style={{
               ...VALUE_STYLE,
-              color: nodeInfo.solid ? 'var(--status-solid)' : 'var(--status-leaky)',
+              color: nodeInfo.solid
+                ? 'var(--status-solid)'
+                : 'var(--text-secondary)',
               fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: '8px',
+              flexWrap: 'wrap',
             }}
           >
-            {nodeInfo.solid ? 'Solid' : 'Leaky'}
+            <span data-object-verdict>
+              {nodeInfo.solid ? 'Solid' : geometryLine(nodeInfo.health === null ? 'closerLook' : classifyRow(nodeInfo.health), nodeInfo.health?.rims.length ?? 0, nodeInfo.health?.accepted ?? false, nodeInfo.health === null ? undefined : openReason(nodeInfo.health))}
+            </span>
+            {nodeInfo.health !== null && !nodeInfo.solid && (
+              <>
+                {canCloseRow(nodeInfo.health) && (
+                  <button
+                    type="button"
+                    title={TOOLTIP.close(rowPlacements(nodeInfo.health))}
+                    style={HEALTH_ACTION_STYLE}
+                    onClick={() => runHealthRepair(() => scene.cap_rims(nodeInfo.id, null))}
+                  >
+                    {ACTION.close}
+                  </button>
+                )}
+                {classifyRow(nodeInfo.health) === 'flatPanels' && (
+                  <button
+                    type="button"
+                    title={TOOLTIP.addThickness}
+                    style={HEALTH_ACTION_STYLE}
+                    onClick={() => setThickenOpen(true)}
+                  >
+                    {ACTION.addThickness}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  title={nodeInfo.health.accepted ? TOOLTIP.unkeep(rowPlacements(nodeInfo.health)) : TOOLTIP.keep(rowPlacements(nodeInfo.health))}
+                  style={HEALTH_ACTION_STYLE}
+                  onClick={() => runHealthRepair(() => scene.set_accepted_surface(nodeInfo.id, !nodeInfo.health!.accepted))}
+                >
+                  {nodeInfo.health.accepted ? ACTION.unkeep : ACTION.keep}
+                </button>
+              </>
+            )}
+            {thickenOpen && nodeInfo.health !== null && (
+              <ThickenDialog
+                count={1}
+                onCancel={() => setThickenOpen(false)}
+                onConfirm={(distance, centered) => runThicken(nodeInfo.health!, distance, centered)}
+              />
+            )}
+            {!nodeInfo.solid && onShowHealth !== undefined && (
+              <button
+                type="button"
+                aria-label={ACTION.showInList}
+                onClick={() => onShowHealth(nodeInfo.id)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  color: 'var(--accent-base)',
+                  fontFamily: 'inherit',
+                  fontSize: 'inherit',
+                  fontWeight: 'normal',
+                  textDecoration: 'underline',
+                }}
+              >
+                {ACTION.showInList}
+              </button>
+            )}
           </div>
         </div>
       )}

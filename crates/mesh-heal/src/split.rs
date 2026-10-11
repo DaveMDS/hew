@@ -294,6 +294,75 @@ fn has_duplicate_directed_edge(faces: &[Vec<usize>], face_holes: &[Vec<Vec<usize
     false
 }
 
+/// Each closed, inside-out piece of a split turned outward — unless a
+/// closed outward piece encloses it: a hollow solid's cavity, inward by
+/// convention, as [`crate::orient_outward`] judges a whole mesh (whose
+/// closed-shell test could not see the pieces until the split).
+pub fn orient_pieces_outward(pieces: Vec<MeshPiece>) -> Vec<MeshPiece> {
+    let shells: Vec<(bool, f64)> = pieces
+        .iter()
+        .map(|p| {
+            let closed = crate::is_closed(&p.faces);
+            let volume6 = if closed {
+                crate::signed_volume6(&p.faces, &p.positions)
+            } else {
+                0.0
+            };
+            (closed, volume6)
+        })
+        .collect();
+    let flip: Vec<bool> = pieces
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let (closed, volume6) = shells[i];
+            if !closed || volume6 >= 0.0 {
+                return false;
+            }
+            let Some(probe) = p
+                .faces
+                .iter()
+                .find(|f| !f.is_empty())
+                .map(|f| p.positions[f[0]])
+            else {
+                return false;
+            };
+            let enclosed = pieces.iter().enumerate().any(|(j, other)| {
+                j != i
+                    && shells[j].0
+                    && shells[j].1 > 0.0
+                    && crate::winding_number(probe, &other.faces, &other.positions).abs()
+                        > crate::WINDING_ENCLOSED
+            });
+            !enclosed
+        })
+        .collect();
+    pieces
+        .into_iter()
+        .zip(flip)
+        .map(|(p, flip)| {
+            if !flip {
+                return p;
+            }
+            let all = vec![true; p.faces.len()];
+            let (faces, face_materials, face_corner_uvs, face_holes) = crate::apply_winding_flips(
+                &all,
+                &p.faces,
+                &p.face_materials,
+                &p.face_corner_uvs,
+                &p.face_holes,
+            );
+            MeshPiece {
+                positions: p.positions,
+                faces,
+                face_materials,
+                face_corner_uvs,
+                face_holes,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod specs {
     use super::*;

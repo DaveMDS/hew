@@ -12,11 +12,17 @@
 //! The recipe types carry no `serde` derives — they are in-memory only and do
 //! **not** touch the file format (DEVELOPMENT.md rule).
 
+use std::collections::BTreeMap;
+
+use crate::attr::AttrDict;
 use crate::camera::CameraState;
+use crate::document::NodeId;
 use crate::ids::{ComponentId, GroupId, InstanceId, MaterialId, ObjectId};
 use crate::material::{Material, UvFrame};
-use crate::math::Point3;
-use crate::scenes::SectionPlaneState;
+use crate::math::{Plane, Point3};
+use crate::scenes::{DisplayState, SectionPlaneState};
+use crate::sketch::{CurveAnalytic, CurveGeom};
+use crate::topo::SurfaceRef;
 use crate::transform::Transform;
 
 // ── Recipe IR ────────────────────────────────────────────────────────────────
@@ -50,6 +56,98 @@ pub struct MeshRecipe {
     /// node name. Root-first segment lists, e.g. `[["Structure","Roof"]]`.
     /// Set by `dae-import` (WS2); default empty until that workstream lands.
     pub tags: Vec<Vec<String>>,
+    /// What the source says about the mesh beyond its faces (a `.skp`'s
+    /// soft edges, welded arcs and curved surfaces) and the importer's key
+    /// for it. Empty by default.
+    pub extra: MeshExtra,
+}
+
+/// Source claims about a mesh's edges and faces, applied by `ingest` to the
+/// built Object wherever they hold — claims are metadata, never geometry,
+/// so one the built Object contradicts is dropped (the map-or-drop
+/// contract of [`SurfaceRef`] and [`crate::topo::Edge::curve`]), never
+/// forced. Positions name edges, since healing may renumber vertices; an
+/// endpoint matches the built vertex within the Object's planarity
+/// tolerance.
+#[derive(Debug, Clone, Default)]
+pub struct MeshExtra {
+    /// The importer's identity for this mesh's Object (see
+    /// [`ImportNode::Group::key`]); reported back in [`ImportReport::keys`].
+    pub key: Option<u64>,
+    /// Edges drawn soft in the source: the seams of a curved surface.
+    /// Applied to interior edges only (a soft edge has two faces).
+    pub soft_edges: Vec<[Point3; 2]>,
+    /// Edges that are chords of a circle (a welded arc in the source).
+    pub edge_curves: Vec<([Point3; 2], CurveGeom)>,
+    /// Curved surfaces the mesh's faces may be facets of: each face whose
+    /// plane and vertices fit one becomes its chord facet.
+    pub surfaces: Vec<SurfaceRef>,
+    /// USER-hidden in the source (a hidden `.skp` group standing for one
+    /// solid): imported, registered hidden-by-default, never dropped.
+    pub hidden: bool,
+    /// Per-face dense back paint, parallel to [`MeshRecipe::faces`]
+    /// (`NO_MATERIAL` for none; empty for a mesh with none): a `.skp`
+    /// face painted on its back (see [`crate::topo::Face::back_material`]).
+    pub face_back_materials: Vec<u32>,
+}
+
+/// A drawn, unextruded sketch carried by an import: one planar set of
+/// segments, with its welded curves.
+#[derive(Debug, Clone)]
+pub struct ImportSketch {
+    /// The sketch plane (world frame, or the owning definition's frame).
+    pub plane: Plane,
+    /// Dense index into [`ImportScene::defs`] of the owning definition;
+    /// `None` for a world sketch.
+    pub def: Option<usize>,
+    /// The key ([`ImportNode::Group::key`]) of the group the sketch is
+    /// drawn in (a `.skp` group of edges), `None` for one in no group. The
+    /// group must lie in the sketch's frame (`def`); one that does not is
+    /// ignored and the sketch stays free.
+    pub group: Option<u64>,
+    /// Segment endpoints, in drawing order. Each must lie on `plane`.
+    pub segments: Vec<[Point3; 2]>,
+    /// Welded curves: the segment indices of each chain, and the circle it
+    /// was drawn from when it has one.
+    pub curves: Vec<(Vec<usize>, Option<CurveAnalytic>)>,
+    /// Tag paths the sketch carries (a `.skp` edge's layer), root-first:
+    /// it is not shown while one of them, or a tag above one, is hidden.
+    /// Empty for none. An import declares the tags it uses
+    /// ([`ImportScene::tags`]).
+    pub tags: Vec<Vec<String>>,
+}
+
+/// What an imported attribute dictionary hangs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportAttrTarget {
+    /// The document itself.
+    Document,
+    /// Every node built from the import node with this key.
+    Node(u64),
+    /// A definition, by dense index into [`ImportScene::defs`].
+    Def(usize),
+    /// A palette material, by dense index into [`ImportScene::materials`].
+    Material(usize),
+    /// A declared tag, by path.
+    Tag(Vec<String>),
+}
+
+/// The parts of an import beyond the node tree: sketches and attribute
+/// dictionaries. Empty by default.
+#[derive(Debug, Clone, Default)]
+pub struct ImportSceneExtra {
+    /// Drawn sketches, created inside the import's undo step.
+    pub sketches: Vec<ImportSketch>,
+    /// Attribute dictionaries to set, in order (a later one for the same
+    /// target replaces an earlier one's namespaces of the same name).
+    pub attrs: Vec<(ImportAttrTarget, AttrDict)>,
+    /// Dimensions and leader texts, with free anchors (an import cannot
+    /// name nodes it is still building). Created inside the import's undo
+    /// step.
+    pub annotations: Vec<crate::annotation::Annotation>,
+    /// Each annotation's tag paths, parallel to `annotations` (empty, or
+    /// short, for none).
+    pub annotation_tags: Vec<Vec<Vec<String>>>,
 }
 
 /// A shared definition recipe: a subtree in definition-local coords.
@@ -156,23 +254,38 @@ pub struct ImportSceneRecipe {
     /// The section plane active in this scene (world frame), when the
     /// scene captures one; `Some(None)` captures "no section cut".
     pub section: Option<Option<SectionPlaneState>>,
+    /// The editor display toggles the scene captures, when it captures
+    /// them (a `.skp` Hew wrote carries them).
+    pub display: Option<DisplayState>,
+    /// The look the scene captures (a `.skp` scene's saved style:
+    /// backdrop and axes), when it captures one.
+    pub view_style: Option<crate::style::ViewStyle>,
 }
 
 /// A construction guide carried by an import (`.skp` guides).
 /// Ingested inside the same `DocAction::Imported` step as the geometry, so
 /// one undo removes the whole import, guides included.
 pub enum ImportGuide {
-    /// An infinite construction line: a point on it + a direction.
+    /// A construction line: a point on it + a direction, over a stretch.
     Line {
         /// A point the line passes through (meters, world space).
         origin: Point3,
         /// Line direction; normalized by `ingest` (degenerate → skipped, reported).
         direction: crate::math::Vec3,
+        /// The stretch that exists, in meters along the NORMALIZED
+        /// direction from `origin` ([`crate::GuideSpan::INFINITE`] for the
+        /// whole line; one of no length → skipped, reported).
+        span: crate::guide::GuideSpan,
+        /// Tag paths, root-first (a `.skp` guide's layer, then each
+        /// container's above it); the guide hides with them.
+        tags: Vec<Vec<String>>,
     },
     /// A construction point.
     Point {
         /// Position (meters, world space).
         position: Point3,
+        /// Tag paths, as for a line.
+        tags: Vec<Vec<String>>,
     },
 }
 
@@ -213,6 +326,11 @@ pub struct ImportScene {
     /// The section cut active in the source's saved view, adopted under
     /// the same empty-document rule as [`ImportScene::camera`].
     pub section: Option<SectionPlaneState>,
+    /// How the source document is shown (`style.rs`), adopted under the
+    /// same empty-document rule as [`ImportScene::camera`].
+    pub view_style: Option<crate::style::ViewStyle>,
+    /// Sketches and attribute dictionaries.
+    pub extra: ImportSceneExtra,
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
@@ -229,16 +347,39 @@ pub struct SkippedMesh {
 pub struct ImportReport {
     /// Total `Object`s created (world objects + definition members).
     pub objects_created: usize,
+    /// Drawing segments built: the edges of every sketch the import made
+    /// (lines that bound no face in the source), so an open that brought
+    /// in lines alone can say so.
+    pub lines_added: usize,
     /// How many of the created objects are watertight.
     pub watertight: usize,
-    /// How many of the created objects have open (non-watertight) shells.
+    /// How many of the created objects have open (non-watertight) shells —
+    /// surfaces included ([`ImportReport::health`] tells them apart).
     pub leaky: usize,
+    /// The created objects by what they are (`crate::health`): solids,
+    /// surfaces, and the open ones that need attention, plus the seam
+    /// families the importer's splits left. A definition member counts
+    /// once, however many times it is placed.
+    pub health: crate::health::HealthCounts,
     /// Meshes that `from_polygons_with_materials` rejected — reported but not
     /// repaired (DEVELOPMENT.md rule 4).
     pub skipped: Vec<SkippedMesh>,
     /// Image URIs that the importer could not resolve from the `ImageMap`
     /// (populated by `dae-import`, passed through `ingest` unchanged).
     pub textures_missing: Vec<String>,
+    /// Importer keys -> the nodes built from them. One key can name several
+    /// nodes: a shared definition's members are rebuilt per material
+    /// variant of the definition.
+    pub keys: BTreeMap<u64, Vec<NodeId>>,
+    /// Each recipe definition's component, by dense index (`None` when
+    /// every member was rejected).
+    pub defs: Vec<Option<ComponentId>>,
+    /// The sketches created, in [`ImportSceneExtra::sketches`] order
+    /// (`None` for one that could not be built — reported in `skipped`).
+    pub sketches: Vec<Option<crate::ids::SketchId>>,
+    /// The annotations created, in [`ImportSceneExtra::annotations`] order
+    /// (`None` for one that was skipped — reported in `skipped`).
+    pub annotations: Vec<Option<crate::ids::AnnotationId>>,
 }
 
 // ── DocAction::Imported + ingest ──────────────────────────────────────────────

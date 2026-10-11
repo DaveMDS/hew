@@ -15,7 +15,8 @@
  * FileRef.handle is the absolute file path string.
  */
 
-import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 
 /**
  * Write `bytes` to `path` via the raw-IPC-body `write_file_bytes` command
@@ -35,6 +36,22 @@ import type { ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPic
 async function writeFileBytes(path: string, bytes: Uint8Array): Promise<void> {
   const { invoke } = await import('@tauri-apps/api/core')
   await invoke('write_file_bytes', bytes as never, { headers: { path: encodeURIComponent(path) } })
+}
+
+/**
+ * Write a document's bytes to `path`. `.hew` keeps the original
+ * `write_file` JSON-array route; a SketchUp file goes through the raw-body
+ * route, because a real model is tens to hundreds of megabytes and the JSON
+ * route costs about four bytes of IPC per file byte.
+ */
+async function writeDocument(path: string, bytes: Uint8Array, format: DocFormat): Promise<void> {
+  if (format === 'hew') {
+    const { invoke } = await import('@tauri-apps/api/core')
+    // write_file expects Vec<u8>; pass Array.from so Tauri IPC sees a JSON array.
+    await invoke('write_file', { path, contents: Array.from(bytes) })
+    return
+  }
+  await writeFileBytes(path, bytes)
 }
 
 /** Extract the basename from a path that may use / or \ separators. */
@@ -82,7 +99,9 @@ export async function resolveImportPickFromPath(filePath: string, fileBytes: Uin
 
   // SketchUp files embed their textures — return the bytes, skip texture scan.
   if (/\.skp$/i.test(filePath)) {
-    return { kind: 'skp', name: basename(filePath), bytes: fileBytes, path: filePath }
+    // `handle` is the path: a `.skp` Open binds the file as the document's
+    // own, and (in every Tauri pick) the path is already write-approved.
+    return { kind: 'skp', name: basename(filePath), bytes: fileBytes, path: filePath, handle: filePath }
   }
 
   // STL has no external resources (and no units — the caller prompts).
@@ -166,7 +185,7 @@ export class TauriFileHost implements FileHost {
     const bytes = new Uint8Array(buf)
 
     return {
-      ref: { name: basename(path), handle: path },
+      ref: { name: basename(path), format: 'hew', handle: path },
       bytes,
     }
   }
@@ -176,23 +195,27 @@ export class TauriFileHost implements FileHost {
       return this.saveAs(bytes, 'Untitled.hew')
     }
     const path = ref.handle as string
-    const { invoke } = await import('@tauri-apps/api/core')
-    // write_file expects Vec<u8>; pass Array.from so Tauri IPC sees a JSON array.
-    await invoke('write_file', { path, contents: Array.from(bytes) })
+    await writeDocument(path, bytes, ref.format)
     return ref
   }
 
-  async saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null> {
+  async saveAs(bytes: Uint8Array, suggestedName: string, format: DocFormat = 'hew'): Promise<FileRef | null> {
     const { invoke } = await import('@tauri-apps/api/core')
     const path = await invoke<string | null>('pick_save_path', {
-      defaultName: suggestedName.endsWith('.hew') ? suggestedName : suggestedName + '.hew',
-      filters: [{ name: 'Hew model', extensions: ['hew'] }],
+      defaultName: nameForFormat(suggestedName, format),
+      filters: [{ name: formatDescription(format), extensions: [extensionFor(format).slice(1)] }],
     })
     if (path === null) return null
 
-    await invoke('write_file', { path, contents: Array.from(bytes) })
+    await writeDocument(path, bytes, format)
 
-    return { name: basename(path), handle: path }
+    return { name: basename(path), format, handle: path }
+  }
+
+  async writeTo(path: string, bytes: Uint8Array, format?: DocFormat): Promise<FileRef> {
+    if (format === undefined) await writeFileBytes(path, bytes)
+    else await writeDocument(path, bytes, format)
+    return { name: basename(path), format: format ?? 'hew', handle: path }
   }
 
   async exportBinary(

@@ -39,6 +39,9 @@ export const PROP_LABEL: Record<SceneProp, string> = {
 export interface CameraStateJson {
   projection: 'perspective' | 'parallel'
   fovDeg: number
+  /** The height the view spans at `target`, meters (the parallel frustum's
+   * height) — absent in a camera recorded before the field existed. */
+  parallelHeight?: number
   eye: [number, number, number]
   target: [number, number, number]
   up: [number, number, number]
@@ -66,6 +69,8 @@ export interface SceneEntry {
   props: number
   camera?: CameraStateJson
   display?: DisplayStateJson
+  /** The look the Scene restores with its display property (`.skp` scene styles). */
+  viewStyle?: ViewStyleJson
   /** `null` = captured with no plane; absent = not captured. */
   section?: SectionPlaneJson | null
 }
@@ -97,7 +102,27 @@ export function parseCameraJson(v: unknown): CameraStateJson | undefined {
   const o = v as Record<string, unknown>
   if (o.projection !== 'perspective' && o.projection !== 'parallel') return undefined
   if (typeof o.fovDeg !== 'number' || !isTriple(o.eye) || !isTriple(o.target) || !isTriple(o.up)) return undefined
-  return { projection: o.projection, fovDeg: o.fovDeg, eye: o.eye, target: o.target, up: o.up }
+  const out: CameraStateJson = { projection: o.projection, fovDeg: o.fovDeg, eye: o.eye, target: o.target, up: o.up }
+  if (typeof o.parallelHeight === 'number' && Number.isFinite(o.parallelHeight) && o.parallelHeight > 0) out.parallelHeight = o.parallelHeight
+  return out
+}
+
+/** A document's view style as `view_style_json` gives it (kernel `ViewStyle`). */
+export interface ViewStyleJson {
+  background: [number, number, number]
+  sky: [number, number, number] | null
+  ground: [number, number, number] | null
+  axes: boolean
+}
+
+export function parseViewStyleJson(v: unknown): ViewStyleJson | null {
+  if (typeof v !== 'object' || v === null) return null
+  const o = v as Record<string, unknown>
+  const rgb = (x: unknown): x is [number, number, number] =>
+    Array.isArray(x) && x.length === 3 && x.every((c) => typeof c === 'number' && Number.isInteger(c) && c >= 0 && c <= 255)
+  if (!rgb(o.background) || typeof o.axes !== 'boolean') return null
+  if (!(o.sky === null || rgb(o.sky)) || !(o.ground === null || rgb(o.ground))) return null
+  return { background: o.background, sky: o.sky, ground: o.ground, axes: o.axes }
 }
 
 export function parseDisplayJson(v: unknown): DisplayStateJson | undefined {
@@ -142,6 +167,8 @@ export function parseScenesJson(json: string): SceneEntry[] {
     if (camera !== undefined) entry.camera = camera
     const display = parseDisplayJson(o.display)
     if (display !== undefined) entry.display = display
+    const viewStyle = parseViewStyleJson(o.viewStyle)
+    if (viewStyle !== null) entry.viewStyle = viewStyle
     if ('section' in o) {
       if (o.section === null) entry.section = null
       else {

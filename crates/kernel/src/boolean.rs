@@ -89,6 +89,7 @@ struct FacePoly {
     holes: Vec<Vec<Point3>>,
     plane: Plane,
     material: FaceMaterial,
+    back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
 }
@@ -106,6 +107,7 @@ struct OrientedFace {
     holes: Vec<Vec<Point3>>,
     plane: Plane,
     material: FaceMaterial,
+    back_material: FaceMaterial,
     uv_frame: Option<UvFrame>,
     surface: Option<SurfaceRef>,
 }
@@ -182,6 +184,7 @@ fn face_polys(obj: &Object) -> Vec<FacePoly> {
                 .collect(),
             plane: f.plane,
             material: f.material,
+            back_material: f.back_material,
             uv_frame: f.uv_frame,
             surface: f.surface,
         })
@@ -294,7 +297,7 @@ fn collect_faces(
                     region,
                     fp.plane,
                     flip,
-                    fp.material,
+                    (fp.material, fp.back_material),
                     fp.uv_frame,
                     fp.surface,
                 )?;
@@ -448,7 +451,7 @@ impl OrientedFace {
         region: Region,
         plane: Plane,
         flip: bool,
-        material: FaceMaterial,
+        (material, back_material): (FaceMaterial, FaceMaterial),
         uv_frame: Option<UvFrame>,
         surface: Option<SurfaceRef>,
     ) -> Result<OrientedFace, BooleanError> {
@@ -458,6 +461,7 @@ impl OrientedFace {
                 holes: region.holes,
                 plane,
                 material,
+                back_material,
                 uv_frame,
                 surface,
             });
@@ -480,6 +484,7 @@ impl OrientedFace {
             holes,
             plane,
             material,
+            back_material,
             // UV frame propagates to boolean result faces ( ext.), and so
             // does the analytic surface (a sub-face of a chord facet is on
             // the same cylinder; a flipped one still is — the reference is
@@ -812,6 +817,8 @@ fn assemble(mut faces: Vec<OrientedFace>, planarity_tol: f64) -> Result<Object, 
             .collect();
         Object::from_faces_with_holes(&positions, &with_holes)
     };
+    let backs: Vec<FaceMaterial> = faces.iter().map(|f| f.back_material).collect();
+    obj.set_built_back_materials(&backs);
 
     // The result is no more planar than its loosest operand: imported
     // geometry is flat only to `IMPORT_PLANE_DIST`, and boolean faces

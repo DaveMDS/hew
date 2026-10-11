@@ -350,6 +350,17 @@ function genOf(scene: PlaneUnitsScene): string | null {
 
 /** The drawing on `ctx`'s plane, cached until the document changes. `null`
  *  when the context is stale or the kernel refuses the listing. */
+/** Puts one plane's listing, read some other way (the whole document's in
+ *  one call), where `readPlaneUnits` finds it for this document revision. */
+export function seedPlaneUnits(scene: PlaneUnitsScene, ctx: string, pu: PlaneUnits | null): void {
+  const gen = genOf(scene)
+  if (gen === null) return
+  if (cache === null || cache.scene !== scene || cache.gen !== gen) {
+    cache = { scene, gen, byCtx: new Map() }
+  }
+  cache.byCtx.set(ctx, pu)
+}
+
 export function readPlaneUnits(scene: PlaneUnitsScene, ctx: string): PlaneUnits | null {
   const gen = genOf(scene)
   if (cache === null || cache.scene !== scene || cache.gen !== gen || gen === null) {
@@ -803,7 +814,14 @@ export interface OutlinerDrawing {
 /** The scene slice the outliner reads. `object_drawing_planes` finds the
  *  planes of topology-only drawing (a drawn shape with no sketch at all). */
 export interface OutlinerScene extends PlaneUnitsScene {
+  /** Every plane the free world drawing lies on with its listing, in one
+   *  call (`Scene.plane_units_all_json`): `[{plane: [px,py,pz,nx,ny,nz],
+   *  units}]`. Absent on an older host, which lists plane by plane. */
+  plane_units_all_json?(): string
   sketch_ids(): ArrayLike<bigint>
+  /** Every live world sketch, shown or not; the Outliner lists and numbers
+   *  by this so hiding a group does not renumber the rest. */
+  all_sketch_ids?(): ArrayLike<bigint>
   sketch_plane(sketch: bigint): Float64Array | undefined
   object_drawing_planes?(object: bigint): ArrayLike<number>
 }
@@ -868,7 +886,33 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
       ctxs.push(c)
     }
   }
-  for (const sid of Array.from(scene.sketch_ids())) add(ctxOfSketch(scene as unknown as WasmScene, sid))
+  // The free drawing's planes come in one read when the host offers it,
+  // each plane's listing seeded into the cache under its context, so the
+  // loop below reads them back without a kernel call per plane: a model
+  // of tens of thousands of small sketches (a furnished room's stray
+  // edges) took minutes plane by plane.
+  if (scene.plane_units_all_json !== undefined) {
+    let entries: { plane: number[]; units: unknown }[] = []
+    try {
+      entries = JSON.parse(scene.plane_units_all_json()) as { plane: number[]; units: unknown }[]
+    } catch (e) {
+      entries = []
+    }
+    for (const entry of entries) {
+      const ctx = ctxOfPlane([entry.plane[0], entry.plane[1], entry.plane[2]], [entry.plane[3], entry.plane[4], entry.plane[5]])
+      if (ctx === null) continue
+      seedPlaneUnits(scene, ctx, parsePlaneUnits(ctx, JSON.stringify(entry.units)))
+      add(ctx)
+    }
+  }
+  // Without the batch, each sketch names its own plane. (With it, every
+  // free sketch's plane is already listed, and a sketch's own context can
+  // differ from its plane's at the last digit, which would read that plane
+  // a second time, the slow way.)
+  if (scene.plane_units_all_json === undefined) {
+    const listed = scene.all_sketch_ids !== undefined ? scene.all_sketch_ids() : scene.sketch_ids()
+    for (const sid of Array.from(listed)) add(ctxOfSketch(scene as unknown as WasmScene, sid))
+  }
   for (const o of objects) {
     for (const c of drawingCtxsOfObject(scene, o)) add(c)
   }

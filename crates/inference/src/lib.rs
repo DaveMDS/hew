@@ -1244,11 +1244,25 @@ struct BareSegment {
 /// world coordinates, unlike Object geometry).
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum SceneGuideGeom {
-    /// An infinite construction line through `origin` along unit `direction`.
-    Line { origin: Point3, direction: Vec3 },
+    /// A construction line through `origin` along unit `direction`, over
+    /// `span` (the whole line, a ray, or a segment): only that stretch
+    /// snaps, and only a crossing on it.
+    Line {
+        origin: Point3,
+        direction: Vec3,
+        span: kernel::GuideSpan,
+    },
     /// A single construction point.
     Point { position: Point3 },
 }
+
+/// Kinds of sketch candidate a registered sketch can have, as bits of
+/// `InferenceScene::sketch_kinds`.
+const SKETCH_SEGMENTS: u8 = 1;
+const SKETCH_VERTICES: u8 = 2;
+const SKETCH_RIMS: u8 = 4;
+const SKETCH_POLYGON_CENTERS: u8 = 8;
+const SKETCH_FACES: u8 = 16;
 
 /// The engine's view of the scene: world-space snap candidates extracted
 /// from every Object, refreshed incrementally as Objects change.
@@ -1292,6 +1306,13 @@ pub struct InferenceScene {
     /// EDGE's Midpoint/OnEdge keep their [`Provenance::SketchEdge`]: an edge
     /// genuinely is a direction reference.
     sketch_segments: Vec<(SketchId, SketchEdgeId, Option<SketchCurveId>, BareSegment)>,
+    /// Which kinds of sketch candidate (`SKETCH_*` bits) each registered
+    /// sketch has in the vectors below. A removal, and the replacement at
+    /// the start of each `add_sketch_*`, walks a vector only for a sketch
+    /// that has entries in it: a document of tens of thousands of small
+    /// sketches registers each once at open, and walking every vector
+    /// for every one of them to remove nothing was quadratic.
+    sketch_kinds: BTreeMap<SketchId, u8>,
     /// Committed sketch *vertices*, keyed by `SketchId`, carrying their
     /// `SketchVertexId` so the per-vertex edit tool (Phase D) can pick an exact
     /// vertex to drag. Registered/cleared alongside `sketch_segments`.
@@ -1417,6 +1438,7 @@ impl Default for InferenceScene {
             rims: Vec::new(),
             guides: Vec::new(),
             sketch_segments: Vec::new(),
+            sketch_kinds: BTreeMap::new(),
             sketch_vertices: Vec::new(),
             sketch_rims: Vec::new(),
             sketch_polygon_centers: Vec::new(),
@@ -1880,7 +1902,15 @@ impl InferenceScene {
     pub fn add_guide(&mut self, id: GuideId, guide: &Guide) {
         self.remove_guide(id);
         let geom = match *guide {
-            Guide::Line { origin, direction } => SceneGuideGeom::Line { origin, direction },
+            Guide::Line {
+                origin,
+                direction,
+                span,
+            } => SceneGuideGeom::Line {
+                origin,
+                direction,
+                span,
+            },
             Guide::Point { position } => SceneGuideGeom::Point { position },
         };
         self.guides.push(SceneGuide { id, geom });
@@ -1920,17 +1950,9 @@ impl InferenceScene {
                 .iter()
                 .map(|&(eid, a, b)| (id, eid, None, BareSegment { a, b })),
         );
+        self.note_sketch_kind(id, SKETCH_SEGMENTS);
     }
 
-    /// Like [`InferenceScene::add_sketch`], but each segment also names the
-    /// drawn curve chain it is a facet of (`None` for a plain line or a
-    /// rectangle side). The curve id rides onto that segment's endpoints as
-    /// [`Snap::sketch_curve_source`], so clicking a drawn circle/arc exactly
-    /// on a facet VERTEX selects the curve, the same as clicking a facet edge
-    /// — closing the other half of the provenance-less-analytic-point gap
-    /// (the rim's Center/Quadrant are handled by
-    /// [`InferenceScene::add_sketch_curves`]). Replace semantics, same as
-    /// `add_sketch`.
     pub fn add_sketch_edges(
         &mut self,
         id: SketchId,
@@ -1942,86 +1964,89 @@ impl InferenceScene {
                 .iter()
                 .map(|&(eid, cid, a, b)| (id, eid, cid, BareSegment { a, b })),
         );
+        self.note_sketch_kind(id, SKETCH_SEGMENTS);
     }
 
-    /// Registers (or re-registers) the committed *vertices* of sketch `id` as
-    /// pickable targets for the per-vertex edit tool (Phase D), carrying each
-    /// `SketchVertexId`. Replace semantics like [`InferenceScene::add_sketch`]:
-    /// drops any prior vertices for `id` first. Callers register vertices and
-    /// segments together on every sketch mutation.
     pub fn add_sketch_vertices(&mut self, id: SketchId, vertices: &[(SketchVertexId, Point3)]) {
-        self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
+        if self.drop_sketch_kind(id, SKETCH_VERTICES) {
+            self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
+        }
         self.sketch_vertices
             .extend(vertices.iter().map(|&(vid, p)| (id, vid, p)));
+        self.note_sketch_kind(id, SKETCH_VERTICES);
     }
 
-    /// Registers (or re-registers) the committed *curve rims* of sketch `id`
-    /// — the exact circles of its drawn curves ([`kernel::Sketch::curve_rims`])
-    /// — as Center/Quadrant/Tangent candidates, so an unextruded circle or
-    /// arc snaps at its true center exactly like a solid's rim. Replace
-    /// semantics like [`InferenceScene::add_sketch_vertices`]: drops any
-    /// prior rims for `id` first. Callers register rims, vertices, and
-    /// segments together on every sketch mutation.
     pub fn add_sketch_curves(&mut self, id: SketchId, rims: &[SketchCurveRim]) {
-        self.sketch_rims.retain(|(sid, _)| *sid != id);
+        if self.drop_sketch_kind(id, SKETCH_RIMS) {
+            self.sketch_rims.retain(|(sid, _)| *sid != id);
+        }
         self.sketch_rims
             .extend(rims.iter().map(|r| (id, r.clone())));
+        self.note_sketch_kind(id, SKETCH_RIMS);
     }
 
-    /// Registers (or re-registers) the exact drawn centers of sketch `id`'s
-    /// regular polygons ([`kernel::Sketch::polygon_centers`]) as
-    /// [`SnapKind::Center`] candidates, so a drawn polygon snaps at its
-    /// center exactly like a drawn circle does.
-    ///
-    /// Centers only, by design: a polygon's corners are already `Endpoint`
-    /// candidates and its side midpoints already `Midpoint` candidates, so
-    /// cardinal points of its circumcircle would add candidates lying on no
-    /// edge at all. Replace semantics like
-    /// [`InferenceScene::add_sketch_curves`]: drops any prior polygon centers
-    /// for `id` first. Callers register these alongside rims, faces,
-    /// vertices, and segments on every sketch mutation. Circle centers do NOT
-    /// belong here — they arrive with the rest of their rim through
-    /// `add_sketch_curves`, so a caller registering both gets each center
-    /// exactly once.
-    ///
-    /// Each center arrives with its owning curve chain
-    /// ([`kernel::Sketch::polygon_centers`]'s own return shape), so the
-    /// resulting [`SnapKind::Center`] carries [`Snap::sketch_curve_source`]
-    /// exactly like a circle's does — a polygon's center selects the polygon.
     pub fn add_sketch_polygon_centers(
         &mut self,
         id: SketchId,
         centers: &[(SketchCurveId, Point3)],
     ) {
-        self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
+        if self.drop_sketch_kind(id, SKETCH_POLYGON_CENTERS) {
+            self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
+        }
         self.sketch_polygon_centers
             .extend(centers.iter().map(|&(cid, c)| (id, cid, c)));
+        self.note_sketch_kind(id, SKETCH_POLYGON_CENTERS);
     }
 
-    /// Registers (or re-registers) the committed *region faces* of sketch `id`
-    /// — its closed drawn loops ([`kernel::Sketch::regions`]) — as hoverable,
-    /// occluding faces, so an unextruded rectangle/circle snaps on its fill
-    /// ([`SnapKind::OnFace`]) and hides geometry behind it exactly like a
-    /// solid's face, instead of the ray passing through. Replace semantics
-    /// like [`InferenceScene::add_sketch`]: drops any prior faces for `id`
-    /// first. Callers register faces, rims, vertices, and segments together on
-    /// every sketch mutation. See [`SketchRegionFace`].
     pub fn add_sketch_faces(&mut self, id: SketchId, faces: &[SketchRegionFace]) {
-        self.sketch_faces.retain(|(sid, _)| *sid != id);
+        if self.drop_sketch_kind(id, SKETCH_FACES) {
+            self.sketch_faces.retain(|(sid, _)| *sid != id);
+        }
         self.sketch_faces
             .extend(faces.iter().map(|f| (id, f.clone())));
+        self.note_sketch_kind(id, SKETCH_FACES);
     }
 
-    /// Drops all candidates registered for sketch `id`. Unknown ids are a
-    /// no-op — removal must be idempotent (mirroring
-    /// [`InferenceScene::remove_object`]) so callers can remove-then-add
-    /// freely.
+    /// Records that `id` now has candidates of `kind` registered.
+    fn note_sketch_kind(&mut self, id: SketchId, kind: u8) {
+        *self.sketch_kinds.entry(id).or_insert(0) |= kind;
+    }
+
+    /// Forgets that `id` has candidates of `kind`; `true` when it had some
+    /// (so the caller must walk that kind's vector to drop them).
+    fn drop_sketch_kind(&mut self, id: SketchId, kind: u8) -> bool {
+        let Some(kinds) = self.sketch_kinds.get_mut(&id) else {
+            return false;
+        };
+        let had = *kinds & kind != 0;
+        *kinds &= !kind;
+        if *kinds == 0 {
+            self.sketch_kinds.remove(&id);
+        }
+        had
+    }
+
+    /// Unregisters every candidate of one sketch, walking only the vectors
+    /// it has entries in (none, for a sketch never registered).
     pub fn remove_sketch(&mut self, id: SketchId) {
-        self.sketch_segments.retain(|(sid, _, _, _)| *sid != id);
-        self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
-        self.sketch_rims.retain(|(sid, _)| *sid != id);
-        self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
-        self.sketch_faces.retain(|(sid, _)| *sid != id);
+        let Some(kinds) = self.sketch_kinds.remove(&id) else {
+            return;
+        };
+        if kinds & SKETCH_SEGMENTS != 0 {
+            self.sketch_segments.retain(|(sid, _, _, _)| *sid != id);
+        }
+        if kinds & SKETCH_VERTICES != 0 {
+            self.sketch_vertices.retain(|(sid, _, _)| *sid != id);
+        }
+        if kinds & SKETCH_RIMS != 0 {
+            self.sketch_rims.retain(|(sid, _)| *sid != id);
+        }
+        if kinds & SKETCH_POLYGON_CENTERS != 0 {
+            self.sketch_polygon_centers.retain(|(sid, _, _)| *sid != id);
+        }
+        if kinds & SKETCH_FACES != 0 {
+            self.sketch_faces.retain(|(sid, _)| *sid != id);
+        }
     }
 
     /// Publishes one transient (in-progress) segment as a snap candidate —
@@ -2748,6 +2773,7 @@ impl InferenceScene {
                     SceneGuideGeom::Line {
                         origin: go,
                         direction: gd,
+                        span,
                     } => {
                         // Reach reference only for a guide COLLINEAR with an
                         // active lock (`reach_for`): that guide must clamp
@@ -2757,6 +2783,10 @@ impl InferenceScene {
                         // other guide keeps its own natural origin and bound
                         // (round-8 review MAJOR).
                         let pos = closest_point_on_line_to_ray(go, gd, reach_for(gd), origin, dir);
+                        // A ray or a segment snaps only where it exists.
+                        if !span.contains((pos - go).dot(gd)) {
+                            continue;
+                        }
                         if let Some((ang, depth)) = wcone(pos, SnapKind::OnGuide) {
                             candidates.push((SnapKind::OnGuide, ang, depth, pos, None, Some(gd)));
                         }
@@ -2772,14 +2802,21 @@ impl InferenceScene {
         // strength, so a real vertex at the crossing still wins). Like plain
         // guide snaps: no provenance, suppressed when guides are hidden.
         if self.guides_enabled {
-            let guide_lines: Vec<(Point3, Vec3)> = self
+            let guide_lines: Vec<(Point3, Vec3, kernel::GuideSpan)> = self
                 .guides
                 .iter()
                 .filter_map(|g| match g.geom {
-                    SceneGuideGeom::Line { origin, direction } => Some((origin, direction)),
+                    SceneGuideGeom::Line {
+                        origin,
+                        direction,
+                        span,
+                    } => Some((origin, direction, span)),
                     SceneGuideGeom::Point { .. } => None,
                 })
                 .collect();
+            // A crossing counts only on the stretch of a guide that exists.
+            let on =
+                |o: Point3, d: Vec3, s: &kernel::GuideSpan, p: Point3| s.contains((p - o).dot(d));
 
             // Guide × segment (object edges near the ray — world and placed
             // alike — plus every live sketch segment; sketch candidates stay
@@ -2789,22 +2826,29 @@ impl InferenceScene {
                     candidates.push((SnapKind::Intersection, ang, depth, p, None, None));
                 }
             };
-            for &(go, gd) in &guide_lines {
+            for &(go, gd, ref gs) in &guide_lines {
                 for seg in world_segments().chain(placed_segments.iter()) {
-                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
+                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b)
+                        && on(go, gd, gs, p)
+                    {
                         emit(p, &mut candidates);
                     }
                 }
                 for (_, _, _, seg) in &self.sketch_segments {
-                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b) {
+                    if let Some(p) = line_segment_intersection(go, gd, seg.a, seg.b)
+                        && on(go, gd, gs, p)
+                    {
                         emit(p, &mut candidates);
                     }
                 }
             }
             // Guide × guide.
-            for (i, &(ao, ad)) in guide_lines.iter().enumerate() {
-                for &(bo, bd) in guide_lines.iter().skip(i + 1) {
-                    if let Some(p) = line_line_intersection(ao, ad, bo, bd) {
+            for (i, &(ao, ad, ref a_span)) in guide_lines.iter().enumerate() {
+                for &(bo, bd, ref b_span) in guide_lines.iter().skip(i + 1) {
+                    if let Some(p) = line_line_intersection(ao, ad, bo, bd)
+                        && on(ao, ad, a_span, p)
+                        && on(bo, bd, b_span, p)
+                    {
                         emit(p, &mut candidates);
                     }
                 }
@@ -5815,6 +5859,7 @@ mod tests {
         let guide = Guide::Line {
             origin: Point3::new(2.0, 0.0, 0.0),
             direction: guide_dir,
+            span: kernel::GuideSpan::INFINITE,
         };
         scene.add_guide(GuideId::default(), &guide);
         assert_eq!(scene.guide_count(), 1);
@@ -5888,6 +5933,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(1.0, 1.0, 0.0),
                 direction: Vec3::new(0.0, 0.0, 1.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
 
@@ -5963,6 +6009,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(10.0, 0.0, 5.0),
                 direction: Vec3::new(1.0, 0.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
 
@@ -6029,6 +6076,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(-5.0, 3.0, 0.0),
                 direction: Vec3::new(1.0, 0.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
 
@@ -6574,6 +6622,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(0.5, 0.0, 0.0),
                 direction: Vec3::new(0.0, 1.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
 
@@ -6608,6 +6657,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(0.0, 0.0, 0.0),
                 direction: Vec3::new(0.0, 1.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
         let at_vertex = scene
@@ -6639,6 +6689,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(0.3, 0.0, 0.0),
                 direction: Vec3::new(0.0, 1.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
         scene.add_guide(
@@ -6646,6 +6697,7 @@ mod tests {
             &Guide::Line {
                 origin: Point3::new(0.0, 0.7, 0.0),
                 direction: Vec3::new(1.0, 0.0, 0.0),
+                span: kernel::GuideSpan::INFINITE,
             },
         );
 

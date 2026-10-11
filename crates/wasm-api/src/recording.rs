@@ -441,16 +441,21 @@ pub enum RecordedCall {
     /// `set_node_user_hidden(kind, id, hidden)` — persisted view state
     /// (manifest v6), same rationale as [`RecordedCall::SetTagHidden`].
     SetNodeUserHidden { kind: u8, id: u64, hidden: bool },
-    /// `set_camera_state(projection, fov_deg, eye, target, up)` — the
+    /// `set_camera_state(projection, fov_deg, parallel_height, eye, target, up)` — the
     /// camera's working view (docs/design/camera.md §5): not undoable, but
     /// persisted with the document (manifest v13), same rationale as
     /// [`RecordedCall::SetTagHidden`]. Additive variant: a recording that
     /// never sets a camera state (every recording captured before this
     /// shipped) replays on older builds unchanged; one that does fails to
-    /// parse there — loudly, never silently divergent.
+    /// parse there — loudly, never silently divergent. `parallel_height`
+    /// came later (manifest v19): a recording without it replays with the
+    /// height the perspective view spans at the target, as the app showed
+    /// it then.
     SetCameraState {
         projection: String,
         fov_deg: f64,
+        #[serde(default)]
+        parallel_height: Option<f64>,
         eye: [f64; 3],
         target: [f64; 3],
         up: [f64; 3],
@@ -465,6 +470,10 @@ pub enum RecordedCall {
     },
     /// `clear_section_plane()`.
     ClearSectionPlane,
+    /// `set_view_style_json(json)` — the document's view style
+    /// (`kernel::ViewStyle`, manifest v19): persisted view state, same
+    /// rationale as [`RecordedCall::SetCameraState`]. `None` clears it.
+    SetViewStyle { json: Option<String> },
     /// `add_scene(name, props, camera_json, display_json, after)` — Scenes
     /// (docs/design/scenes.md) are persisted view state; every Scene edit
     /// replays so saved bytes and the state hash match. Additive variants,
@@ -768,6 +777,30 @@ pub enum RecordedCall {
     },
     /// `delete_def_member(component, object)`.
     DeleteDefMember { component: u64, object: u64 },
+    /// `cap_rims(object, rims)` — Model Health's cap (the import-health
+    /// design R1). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
+    /// replay unchanged; one that caps fails to parse on older builds —
+    /// loudly, never silently divergent. The same holds for the two below.
+    CapRims {
+        object: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rims: Option<Vec<u32>>,
+    },
+    /// `delete_faces(object, faces)` — Model Health's face removal (R2).
+    DeleteFaces { object: u64, faces: Vec<u64> },
+    /// `set_accepted_surface(object, accepted)` — Model Health's mark (R3).
+    SetAcceptedSurface { object: u64, accepted: bool },
+    /// `thicken_sheet(object, start, end)` — Model Health's pull of a flat
+    /// sheet into a solid (R4).
+    ThickenSheet { object: u64, start: f64, end: f64 },
+    /// `thicken_sheet_in_instance(instance, object, distance)` — the Push/Pull
+    /// tool pulling a flat surface member picked through an instance.
+    ThickenSheetInInstance {
+        instance: u64,
+        object: u64,
+        distance: f64,
+    },
     /// `delete_definition(component)` — deletes a component definition and
     /// every instance that places it (v1.1 assets lane). Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings

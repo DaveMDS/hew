@@ -31,6 +31,7 @@ import type { PrintHost, PrintSetup } from '../print/printHost'
 import type { PrintPageModel } from '../print/PrintDocument'
 import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
+import type { IsolationTarget } from '../viewport/isolation'
 import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
 import { curveRunsView, imprintView } from './drawingView'
 import {
@@ -89,6 +90,9 @@ export interface CameraPose {
 export interface HarnessDeps {
   getScene: () => Scene | null
   getViewportApi: () => ViewportApi | null
+  /** View-only isolation through the app's handler (kernel hide state follows). */
+  isolate: (targets: IsolationTarget[]) => number
+  clearIsolation: () => void
   /** Reconcile + re-render after a mutation (the app's document-changed path). */
   reconcile: () => void
   /** Current object/group/instance selection. */
@@ -364,6 +368,9 @@ export interface HewTestHarness {
    * returning the ImportReport (object/watertight/leaky/skipped/warnings).
    * Additive, exactly like File▸Import's kernel call. Test-only. */
   importStl(bytes: number[], unitScale: number): StlImportReportJs
+  /** `Scene.skp_container(bytes)`: which `.skp` container the bytes are
+   * (`'skp2026'`, `'skp2017'`, or `''`). Reads nothing from the document. Test-only. */
+  skpContainer(bytes: number[]): string
   // recording ( high + low, one artifact)
   startRecording(): void
   stopRecording(): void
@@ -609,8 +616,10 @@ export interface HewTestHarness {
   /** `'line' | 'point'` for a guide handle, or undefined if stale/hidden. */
   getGuideKind(id: string): string | undefined
 
-  /** A guide's geometry: `[ox,oy,oz, dx,dy,dz]` for a line (origin + unit
-   * direction), `[x,y,z]` for a point; undefined if stale/hidden. */
+  /** A guide's geometry: `[ox,oy,oz, dx,dy,dz, from,to]` for a line (origin,
+   * unit direction, then the span in meters along it; -Infinity / +Infinity
+   * for an end that runs on forever), `[x,y,z]` for a point; undefined if
+   * stale/hidden. */
   getGuideGeometry(id: string): number[] | undefined
 
   /**
@@ -1084,6 +1093,22 @@ export interface HewTestHarness {
    * hard-coded pixel). `behind` true = the point is behind the camera. */
   worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
   /**
+   * View-only isolation (`ViewportApi.isolate`), through the app's own handler
+   * so the kernel's hide state follows exactly as it does from Model Health.
+   * A target is `{kind:'object'|'group'|'instance', id}` or
+   * `{kind:'member', object, instance}`. Returns how many objects are shown.
+   */
+  isolate(targets: ({ kind: string; id: string } | { kind: 'member'; object: string; instance: string })[]): number
+  /** End isolation (Show everything). */
+  clearIsolation(): void
+  /** The live isolation (targets, shown count, and what is hidden/faded), or
+   *  null when nothing is isolated. Ids are decimal strings. */
+  getIsolation(): {
+    targets: ({ kind: string; id: string } | { kind: 'member'; object: string; instance: string })[]
+    hiddenObjects: string[]
+    hiddenInstances: string[]
+  } | null
+  /**
    * Render the current camera pose and read back the color of the pixel a
    * world point projects to — for pinning *which* of two depth-coincident
    * layers wins a rendering tie (e.g. a sketch line drawn on an origin axis
@@ -1490,6 +1515,13 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     importStl: (bytes, unitScale) =>
       act((s) => s.import_stl(new Uint8Array(bytes), unitScale) as StlImportReportJs),
+
+    skpContainer: (bytes) => {
+      const scene = deps.getScene()
+      if (scene === null) throw new Error('skpContainer: kernel not ready')
+      const SceneClass = scene.constructor as unknown as { skp_container(b: Uint8Array): string }
+      return SceneClass.skp_container(new Uint8Array(bytes))
+    },
 
     print: {
       arm: () => deps.setPrintRecorder?.(printRecorder),
@@ -2311,6 +2343,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         s.set_camera_state(
           state.projection,
           state.fovDeg,
+          state.parallelHeight,
           new Float64Array(state.eye),
           new Float64Array(state.target),
           new Float64Array(state.up),
@@ -2328,6 +2361,35 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.worldToScreen(world)
+    },
+
+    isolate: (targets) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const parsed: IsolationTarget[] = targets.map((t) =>
+        t.kind === 'member'
+          ? { kind: 'member', object: BigInt((t as { object: string }).object), instance: BigInt((t as { instance: string }).instance) }
+          : { kind: (t as { kind: string }).kind as NodeKind, id: BigInt((t as { id: string }).id) },
+      )
+      return deps.isolate(parsed)
+    },
+
+    clearIsolation: () => deps.clearIsolation(),
+
+    getIsolation: () => {
+      const api = deps.getViewportApi()
+      const targets = api?.getIsolation() ?? null
+      if (api === null || targets === null) return null
+      const hidden = api.getEffectiveHiddenIds()
+      return {
+        targets: targets.map((t) =>
+          t.kind === 'member'
+            ? { kind: 'member' as const, object: t.object.toString(), instance: t.instance.toString() }
+            : { kind: t.kind, id: t.id.toString() },
+        ),
+        hiddenObjects: hidden.objects.map(String),
+        hiddenInstances: hidden.instances.map(String),
+      }
     },
 
     pixelColorAt: (world) => {

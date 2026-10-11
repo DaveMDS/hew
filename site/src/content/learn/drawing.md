@@ -14,6 +14,8 @@ The five tools share one working sketch on the ground, so shapes drawn with diff
 
 Layered shapes edit like a drawing, too. Where two closed shapes share a line, that line splits them into separate regions; select it with the Select tool and press `Delete`, and the regions merge into one larger face. Draw a rectangle, cap it with an arc, delete the line between them — one arch-shaped region, one pull.
 
+A closed loop of lines can also have no face at all: that is how a wire frame or a light rig opened from a SketchUp file arrives, since SketchUp has no face there either. Such a loop draws as lines only and has nothing to push or pull. Draw over one of its lines with the Line tool, from one end to the other, and the loop gets its face, just as it does in SketchUp.
+
 Selection matches what you drew. Clicking a straight line selects just that line. Clicking a drawn arc or circle selects the curve up to wherever it crosses or touches other geometry — an untouched circle selects whole; a circle welded into an outline selects one run at a time, so you can delete the part inside without losing the rounded corner. Clicking inside a filled region selects the connected shape it belongs to, and shapes drawn apart from each other are independent: selecting, deleting, or moving one never touches the other, even though they share the working sketch.
 
 While any drawing tool is active, the status bar explains the next step, the top-right readout shows live dimensions, and everything you type goes into that readout (see "Typing exact values" below).

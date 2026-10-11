@@ -163,3 +163,79 @@ fn rename_survives_save_and_load() {
     assert_eq!(loaded.node_tags(NodeId::Object(obj)), &[p(&["Fixings"])]);
     assert_eq!(loaded.save(), bytes);
 }
+
+/// A guide carries tags as a node does: a rename rewrites them, a delete
+/// strips them, undo and redo replay both, and a hidden tag hides the
+/// guide from drawing and snapping while a save keeps it.
+#[test]
+fn rename_and_delete_carry_a_guides_tags_with_undo() {
+    use kernel::{ImportGuide, ImportScene, ImportTag, Vec3};
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: vec![
+            ImportGuide::Line {
+                origin: Point3::ORIGIN,
+                direction: Vec3::new(1.0, 0.0, 0.0),
+                tags: vec![p(&["Rig"]), p(&["Cameras"])],
+                span: kernel::GuideSpan::INFINITE,
+            },
+            ImportGuide::Point {
+                position: Point3::new(1.0, 2.0, 3.0),
+                tags: vec![p(&["Cameras"])],
+            },
+        ],
+        tags: vec![
+            ImportTag {
+                path: p(&["Rig"]),
+                hidden: false,
+            },
+            ImportTag {
+                path: p(&["Cameras"]),
+                hidden: false,
+            },
+        ],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+    };
+    doc.ingest(scene, Vec::new()).unwrap();
+    let ids = doc.guide_ids();
+    assert_eq!(ids.len(), 2);
+    let (line, point) = (ids[0], ids[1]);
+    assert_eq!(doc.guide_tags(line), &[p(&["Rig"]), p(&["Cameras"])]);
+
+    // Hidden through a tag: in the document, not shown.
+    doc.set_tag_hidden(p(&["Cameras"]), true);
+    assert!(!doc.guide_shown(line) && !doc.guide_shown(point));
+    assert_eq!(doc.guide_ids().len(), 2, "a save keeps a hidden guide");
+    doc.set_tag_hidden(p(&["Cameras"]), false);
+    assert!(doc.guide_shown(line));
+
+    let change = doc.rename_tag(&p(&["Cameras"]), p(&["Views"])).unwrap();
+    assert_eq!(change.guides_touched.len(), 2);
+    assert_eq!(doc.guide_tags(line), &[p(&["Rig"]), p(&["Views"])]);
+    assert_eq!(doc.guide_tags(point), &[p(&["Views"])]);
+    doc.undo().unwrap();
+    assert_eq!(doc.guide_tags(point), &[p(&["Cameras"])]);
+    doc.redo().unwrap();
+    assert_eq!(doc.guide_tags(point), &[p(&["Views"])]);
+
+    let change = doc.delete_tag(&p(&["Views"])).unwrap();
+    assert_eq!(change.guides_touched.len(), 2);
+    assert_eq!(doc.guide_tags(line), &[p(&["Rig"])]);
+    assert!(doc.guide_tags(point).is_empty());
+    doc.undo().unwrap();
+    assert_eq!(doc.guide_tags(point), &[p(&["Views"])]);
+    doc.redo().unwrap();
+    assert!(doc.guide_tags(point).is_empty());
+
+    // The tags survive a save.
+    let loaded = Document::load(&doc.save()).unwrap();
+    let ids = loaded.guide_ids();
+    assert_eq!(loaded.guide_tags(ids[0]), &[p(&["Rig"])]);
+}

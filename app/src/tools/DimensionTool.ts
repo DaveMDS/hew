@@ -80,6 +80,7 @@
  *
  * Esc cancels the current stage; a fresh click always starts over.
  */
+import { shownAnnotationIds } from '../viewport/shownAnnotations'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -1189,7 +1190,7 @@ export class DimensionTool implements Tool {
     const scene = this.wasmScene
     if (typeof scene.annotation_ids !== 'function') return []
     const out: DimensionLineCandidate[] = []
-    for (const id of scene.annotation_ids()) {
+    for (const id of shownAnnotationIds(scene)) {
       if (scene.annotation_kind(id) !== 'linear') continue
       const a = scene.annotation_anchor_point(id, 0)
       const b = scene.annotation_anchor_point(id, 1)

@@ -22,6 +22,7 @@ pub mod commands;
 pub mod dispatch;
 pub mod envelope;
 pub mod geom;
+pub mod health;
 pub mod host;
 pub mod ids;
 pub mod locate;
@@ -33,12 +34,17 @@ pub mod transact;
 pub use dispatch::{Connection, DispatchOutcome};
 pub use envelope::{ErrorObject, Request, RequestId, Response, codes};
 pub use host::{
-    DepthPass, Host, ImportImage, ImportOptions, LibraryItemEntry, LibraryListing,
-    LibraryReadResult, LibraryWriteResult, LibraryWriteTarget, LineDrawingFormat,
-    LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SnapshotCamera,
-    SnapshotParams, SnapshotProjection, SnapshotResult, StandardView, ViewCameraSpec,
-    resolve_document,
+    DepthPass, DocFormat, Host, ImportImage, ImportOptions, LENGTH_FORMATS, LibraryItemEntry,
+    LibraryListing, LibraryReadResult, LibraryWriteResult, LibraryWriteTarget, LineDrawingFormat,
+    LineDrawingParams, LineDrawingResult, NoHost, PrintPdfParams, PrintPdfResult, SaveOutcome,
+    SnapshotCamera, SnapshotParams, SnapshotProjection, SnapshotResult, StandardView,
+    ViewCameraSpec, resolve_document,
 };
 pub use ids::IdResolver;
 pub use refusal::Refusal;
 pub use registry::{CommandClass, CommandDecl, Profile, Registry, Served, Tier};
+
+/// An import's objects by kind; see [`health::counts_json`].
+pub fn health_counts_json(c: &kernel::health::HealthCounts) -> serde_json::Value {
+    health::counts_json(c)
+}

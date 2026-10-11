@@ -20,6 +20,7 @@ function makeResolved(overrides: Record<string, any> = {}) {
   return {
     camera_json: vi.fn().mockReturnValue(CAM_JSON),
     display_json: vi.fn().mockReturnValue(JSON.stringify({ grid: false, axes: true, guides: true })),
+    view_style_json: vi.fn().mockReturnValue(JSON.stringify({ background: [255, 255, 255], sky: null, ground: null, axes: false })),
     has_hidden: vi.fn().mockReturnValue(true),
     hidden_object_ids: vi.fn().mockReturnValue(new BigUint64Array([7n, 8n])),
     hidden_instance_ids: vi.fn().mockReturnValue(new BigUint64Array([])),
@@ -63,6 +64,7 @@ function makeApi(): ViewportApi {
   return {
     getCameraState: vi.fn().mockReturnValue({ projection: 'perspective', fovDeg: 45, eye: [1, 1, 1], target: [0, 0, 0], up: [0, 0, 1] }),
     setHidden: vi.fn(),
+    refreshSketches: vi.fn(),
     setSectionPlane: vi.fn(),
     tweenCameraState: vi.fn((_s: unknown, _ms: number, done?: (c: boolean) => void) => done?.(true)),
     captureFrame: vi.fn().mockReturnValue({ width: 0, height: 0, pixels: new Uint8Array() }),
@@ -79,6 +81,7 @@ function setup(scene: Scene, api: ViewportApi = makeApi()) {
     docRev: 0,
     display: { grid: true, axes: true, guides: true },
     setDisplay: vi.fn(),
+    setViewStyle: vi.fn(),
     setHiddenState: vi.fn(),
     exitAllContexts: vi.fn(),
     markDirty: vi.fn(),
@@ -117,7 +120,10 @@ describe('useScenesController', () => {
     // Leaf ids straight to renderer + kernel inference.
     expect(api.setHidden).toHaveBeenCalledWith([7n, 8n], [])
     expect(scene.set_hidden).toHaveBeenCalled()
+    // Drafting is rebuilt from the kernel's new tag and group state.
+    expect(api.refreshSketches).toHaveBeenCalledTimes(1)
     expect(deps.setDisplay).toHaveBeenCalledWith({ grid: false, axes: true, guides: true })
+    expect(deps.setViewStyle).toHaveBeenCalledWith({ background: [255, 255, 255], sky: null, ground: null, axes: false })
     expect(api.setSectionPlane).toHaveBeenCalledWith({ origin: [0, 0, 1], normal: [0, 0, 1], active: true })
     expect(api.tweenCameraState).toHaveBeenCalled()
     expect((api.tweenCameraState as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(600)
@@ -126,9 +132,24 @@ describe('useScenesController', () => {
     expect(deps.markDirty).not.toHaveBeenCalled()
   })
 
+  it('activate while isolated: ends isolation first and gives the kernel the effective hidden set', () => {
+    const scene = makeScene([{ sid: 1, name: 'A', props: PROP_ALL }])
+    const order: string[] = []
+    const api = makeApi() as unknown as Record<string, unknown>
+    api.clearIsolation = vi.fn(() => order.push('clear'))
+    api.setHidden = vi.fn(() => order.push('setHidden'))
+    api.getEffectiveHiddenIds = vi.fn(() => ({ objects: [7n, 8n], instances: [] }))
+    ;(scene.set_hidden as ReturnType<typeof vi.fn>).mockImplementation(() => order.push('kernel'))
+    const { hook } = setup(scene, api as unknown as ViewportApi)
+    act(() => hook.result.current.activate(1))
+    expect(order).toEqual(['clear', 'setHidden', 'kernel'])
+    expect(scene.set_hidden).toHaveBeenCalledWith(new BigUint64Array([7n, 8n]), new BigUint64Array())
+  })
+
   it('activate: an uncaptured property is left alone', () => {
     const resolved = makeResolved({
       display_json: vi.fn().mockReturnValue(undefined),
+      view_style_json: vi.fn().mockReturnValue(undefined),
       has_section: vi.fn().mockReturnValue(false),
       has_hidden: vi.fn().mockReturnValue(false),
       has_hidden_tags: vi.fn().mockReturnValue(false),
@@ -138,6 +159,7 @@ describe('useScenesController', () => {
     const { hook, deps, api } = setup(scene)
     act(() => hook.result.current.activate(1))
     expect(deps.setDisplay).not.toHaveBeenCalled()
+    expect(deps.setViewStyle).not.toHaveBeenCalled()
     expect(deps.setHiddenState).not.toHaveBeenCalled()
     expect(api.setHidden).not.toHaveBeenCalled()
     expect(api.setSectionPlane).not.toHaveBeenCalled()

@@ -242,7 +242,7 @@ test('entry convergence: an Outliner double-click on a session MEMBER while its 
   // for the object) — the bug this fixes closed the session outright,
   // dropping back to zero chips and a bare top-level object context.
   await expect(page.getByText('editing', { exact: true })).toHaveCount(2)
-  await expect(page.getByRole('button', { name: 'Model' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Model', exact: true })).toBeVisible()
   // The kernel agrees: the group session is still open (its member reads
   // as hidden/empty from the outside, the same assertion the sibling
   // convergence test above uses).
@@ -296,7 +296,7 @@ test('entry convergence: an Outliner double-click on an object nested inside a g
   await expect(page.getByText('editing', { exact: true })).toHaveCount(2)
   // The root "Model" crumb is still a clickable button — the combined path
   // is non-empty (Group → Object), not collapsed back to the top level.
-  await expect(page.getByRole('button', { name: 'Model' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Model', exact: true })).toBeVisible()
 
   // The kernel agrees: a group session is open on exactly this group (its
   // member is a genuinely top-level world object right now, the ungroup

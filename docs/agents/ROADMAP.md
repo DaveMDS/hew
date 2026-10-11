@@ -693,7 +693,69 @@ below.
   else the model's own active plane), so the model first appears as it
   last did in SketchUp. Production-scale
   files (hundreds of megabytes, millions of faces, renderer-plugin
-  attribute dictionaries) walk exactly on the continuous archive path
+  attribute dictionaries) walk exactly on the continuous archive path.
+  Soft and smooth edges, welded arcs and circles, every placement's own
+  name, guide points, and attribute dictionaries (dynamic components',
+  plugins') come across too, and so do a material's transparency, the
+  paint on each side of a face (`Face::back_material`, drawn where a
+  back can be seen), the side of the model a section cut keeps, a
+  parallel scene's view height, content a component hides by tag or by
+  its own hidden flag (hidden in every placement), SketchUp's own
+  dimensions and texts as Hew annotations carrying their layers' tags
+  (inside groups and components too), placed images in either container
+  wherever they sit, the file's backdrop (background, sky and ground,
+  the axes) as the document's view style and each scene's saved style
+  as the scene's own, and edges that bound no face
+  as drafting lines — a group of lines alone becoming a group that holds
+  its drawing (`Document::set_sketch_group`), shown and hidden with it.
+  Each was checked against SketchUp itself on a production house model
+  with 32 scenes
+- SketchUp (`.skp`) as a working format (`crates/skp-export`, on
+  OpenSKP's writers): File ▸ Open makes a `.skp` the document's own file,
+  Save writes it back in its own container, and Save As and Export write
+  `.hew`, the 2026 container, or the 2017 format SketchUp Make 2017 opens.
+  Every Object becomes a SketchUp group of its own (solids stay
+  discrete), merge groups and components keep their structure, sketches
+  become loose geometry, curved walls are soft and smooth, circles are
+  welded arcs, textures keep Hew's exact placement, and tags, scenes,
+  guides, the section plane, camera, axes, attributes, dimensions and
+  leader text come along. A `hew` attribute dictionary carries what the
+  format has no field for (tag paths, sketches, curved-surface claims,
+  scene display toggles), so a file Hew wrote reopens in Hew with
+  nothing lost — the round-trip suite holds every corpus file and a
+  native document to that. Saving back over an opened `.skp` builds on
+  the file: everything unchanged (a group's or component's geometry with
+  every soft edge, curve, texture placement and per-face layer, whole
+  group subtrees, the loose geometry) and everything Hew does not model
+  (styles, settings, fonts, texts, unused components, dictionaries) stay
+  exactly as SketchUp wrote them, and only what changed is rewritten —
+  an unchanged open-and-save of the 753-definition theater model rewrites
+  none of them, a moved object exactly one. A one-time notice names what
+  a `.skp` could not hold exactly, with a "Save a .hew copy" button. The
+  desktop app registers as an alternate `.skp` handler on macOS (Open
+  With), not the default
+- **Make Solid** (`kernel::health`, `kernel::repair`): an import report
+  states neutrally how many objects came in solid and how many are panels,
+  sheets and open shapes (normal in SketchUp models, which work as they
+  are), counting a component's members once. **Object ▸ Make Solid…** (the
+  selection, or the whole model; the report's button: the import) walks
+  through one kind per page in plain words: openings (left open by default,
+  since ducts, pipes and lidless boxes are open on purpose; closed by
+  default on a selection), split shapes (rejoined at their seams only),
+  flat panels (left, or thickened), curved sheets, and shapes that can't be
+  closed with flat faces, each with a one-sentence reason. Choose for each
+  item overrides a page's choice per object; the whole run is one undo
+  step. Clicking an item isolates it in the viewport (everything else
+  hidden, the rest of its group or component faded) and draws its open
+  edges. Push/Pull, the booleans, Slice and the STL/3MF warning point to
+  Make Solid. **Object ▸ Model Health…** opens a floating window (closed
+  at launch, moved and sized by the person, remembered) listing every
+  object that isn't solid for one-at-a-time repairs; framing from it fits
+  the object beside the window. Object Info has the same buttons, and
+  Push/Pull on a flat panel makes it a slab. The same is in the API
+  (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
+  `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
+  in `hew.query`), so a script can repair a file
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
 - STL curve resolution: cylinder walls re-facet from their analytic
@@ -727,7 +789,7 @@ below.
 | `.hew` (native) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | — |
+| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |
@@ -921,6 +983,15 @@ below.
 
 ### Longer-term
 
+- **More Model Health repairs** for what Close and Thicken… leave open:
+  thickening bent surfaces (an offset shell that refuses folds it cannot
+  resolve), patching non-planar holes, bridging two parallel openings
+  (a window pane modeled as two faces), and welding openings that miss
+  each other by a hair. Removing faces enclosed inside a shape was
+  prototyped and measured: it made 2 of 88 hard cases solid across three
+  real models (the rest have real open ends), so it waits for a model where
+  inside faces are the main cause
+
 - **True toroidal surfaces** (`SurfaceRef::Torus`): sweep walls around a
   turning path currently carry no analytic surface claim — a cylinder
   claim there would be false, so the verifier refuses it and push/pull
@@ -945,8 +1016,27 @@ below.
   which round-trips a saved item's geometry through the same kernel
   entry points the UI's own Library browser uses; the plugin system adds
   sandboxed transports and scoped profiles on top of the same bus
-- **SketchUp (`.skp`) export** — import is supported today; writing `.skp`
-  is not yet
+- **SketchUp (`.skp`) writing — the remaining gaps.** Dimensions and
+  leader text are written with point anchors, so in SketchUp they do not
+  follow the geometry they measure (a radius dimension hangs on an edge of
+  the arc under its point; one of a circle nothing draws stays Hew's
+  only); SketchUp's own dimensions and texts open as Hew annotations
+  wherever their list is placed once — screen texts (pinned to the view,
+  not the model), and dimensions and texts inside a component placed
+  several times, stay in the file, and a save back keeps them as they
+  are; hidden edges that bound no face stay in the file too (Hew has no
+  hidden drawing); a document's and a scene's view style cover the
+  backdrop and the axes only — edge and face styles wait for a styles
+  feature;
+  images open only from the 2026 format and only among the model's own
+  entities; a model's style (background, sky and ground, edge and face
+  styles) is not carried; a save back over a `.skp` keeps the definition
+  of a group the document deleted (unplaced, as a purge would remove);
+  SketchUp-native loose geometry opens as a healed mesh Object rather
+  than as sketches; the `.skp` file association is macOS-only (the
+  Windows installer would take the default from SketchUp); files from
+  SketchUp 2016 and earlier do not open (OpenSKP reads their headers, not
+  their geometry, so Hew asks for a re-save from a current SketchUp)
 - **Signed Windows installers** — macOS builds are signed and notarized,
   auto-update and the hosted web build are shipped; Windows executables
   ship unsigned (SmartScreen warns, documented as accepted) until the
@@ -1008,4 +1098,5 @@ below.
   unpushed shape on a face (drawing, see Shipped): every edit it
   allows lowers to a coplanar surgery that cannot open the shell, and it is
   still not a general face or edge editor — a boss's wall or a solid's
-  own corner cannot be dragged.
+  own corner cannot be dragged. Model Health's face removal is the other
+  exception, and it works only on open imported objects, never a solid.

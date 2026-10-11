@@ -21,6 +21,7 @@
 pub use openskp;
 
 mod convert;
+mod extras;
 mod material;
 
 /// Typed failures from [`import`].
@@ -92,6 +93,70 @@ pub struct SkpScene {
     /// container produce none (an OpenSKP regression guarantee). Surface
     /// these in the import report; fixes belong upstream in OpenSKP.
     pub warnings: Vec<String>,
+    /// Where each imported node and definition came from in the file, by
+    /// importer key ([`kernel::ImportReport::keys`]) and definition recipe
+    /// index ([`kernel::ImportReport::defs`]): what a later save back to
+    /// the file needs to put unchanged content back where it was.
+    pub provenance: Provenance,
+}
+
+/// Where an imported node came from in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Origin {
+    /// The model's loose geometry (an Object).
+    Loose,
+    /// The geometry of a group placement standing alone for the group (an
+    /// Object), by the placement's persistent id.
+    GroupGeometry { pid: u32 },
+    /// A group placement's own geometry beside its children (an Object).
+    GroupOwnGeometry { pid: u32 },
+    /// A group placement (a Group).
+    Group { pid: u32 },
+    /// A component placement (an Instance).
+    Instance { pid: u32 },
+    /// A placed image among the model's own entities (an Instance of the
+    /// image's definition): a save back keeps the file's image, moved
+    /// where the Instance is.
+    Image { pid: u32 },
+    /// A component definition's own geometry (an Object inside a
+    /// definition): the definition's index in the file's definition list
+    /// and the paint its placement passed down.
+    DefinitionGeometry { definition: usize, slot: u16 },
+}
+
+/// Provenance of an import (see [`SkpScene::provenance`]).
+#[derive(Debug, Clone, Default)]
+pub struct Provenance {
+    /// Importer key -> origins. A key can name a group placement's geometry
+    /// and the group both; the node's kind tells which origin is its own.
+    pub nodes: Vec<(u64, Origin)>,
+    /// Definition recipe index -> (the file definition's name, the paint
+    /// its placements passed down): each Hew definition is one material
+    /// variant of a file definition. Names identify a component definition
+    /// in SketchUp (they are unique), and survive a rewrite of the file
+    /// where list positions do not.
+    pub defs: Vec<(usize, String, u16)>,
+    /// Annotation index (into the scene's annotations) -> the SketchUp
+    /// text or dimension it was read from: a save back keeps that record
+    /// while the annotation is unchanged.
+    pub annotations: Vec<(usize, AnnotationOrigin)>,
+    /// Tag path -> the file layer it was read from, by name: a save back
+    /// renames the layer in place when the tag is renamed, and knows a
+    /// layer no tag stands for any more.
+    pub tags: Vec<(Vec<String>, String)>,
+    /// Sketch indices (into the scene's sketches) read from the file's
+    /// loose edges: a save back keeps those edges as they are while the
+    /// sketches are unchanged.
+    pub loose_sketches: Vec<usize>,
+}
+
+/// The SketchUp record an imported annotation was read from: its list in
+/// the file, its index there and its persistent id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AnnotationOrigin {
+    Text { index: usize, pid: u32 },
+    Dimension { index: usize, pid: u32 },
+    RadialDimension { index: usize, pid: u32 },
 }
 
 /// Parse SketchUp `.skp` bytes — the 2026 container or the 2017 format —
@@ -102,6 +167,14 @@ pub struct SkpScene {
 /// here — meshes are emitted as-is and `Document::ingest` skips and reports
 /// any it rejects (rule 4: reported, never repaired).
 pub fn import(bytes: &[u8]) -> Result<SkpScene, SkpError> {
+    let mut job = import_begin(bytes)?;
+    job.step(usize::MAX);
+    job.finish()
+}
+
+/// Start an import: read the file (the one step that cannot be split)
+/// and set up the conversion. See [`ImportJob`].
+pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
     // Container gate: identify ANY SketchUp file from its header, then
     // accept the two decoded layouts. The 2026 ZIP container is read
     // whatever version string it carries — it is the layout every current
@@ -129,7 +202,6 @@ pub fn import(bytes: &[u8]) -> Result<SkpScene, SkpError> {
     }
 
     let model = openskp::Model::parse(bytes).map_err(|e| SkpError::Parse(e.to_string()))?;
-    let out = convert::convert(&model);
     // A DAMAGED parse that composes NOTHING importable is a loud failure,
     // not a silent empty success (the failure mode that motivated this: a
     // 57 MB house model desyncing 32k times and importing as an empty
@@ -137,18 +209,58 @@ pub fn import(bytes: &[u8]) -> Result<SkpScene, SkpError> {
     // empty models and guide-only files exist, and their uninstanced
     // template-figure faces are correctly not imported.
     let recovery_notes = model.diagnostics.iter().filter(|d| d.is_desync()).count();
-    if recovery_notes > 0
-        && out.scene.roots.is_empty()
-        && out.scene.defs.is_empty()
-        && out.scene.guides.is_empty()
-    {
-        return Err(SkpError::EmptyScene { recovery_notes });
-    }
-    Ok(SkpScene {
-        scene: out.scene,
-        textures_missing: out.textures_missing,
-        warnings: out.warnings,
+    Ok(ImportJob {
+        job: convert::ConvertJob::begin(std::rc::Rc::new(model)),
+        recovery_notes,
     })
+}
+
+/// An import under way: the file is read ([`import_begin`]); its shapes
+/// are then built a few at a time ([`ImportJob::step`]), so an open can
+/// say how far it has come, and [`ImportJob::finish`] hands the recipe
+/// over.
+pub struct ImportJob {
+    job: convert::ConvertJob,
+    recovery_notes: usize,
+}
+
+impl ImportJob {
+    /// Items built so far, out of all of them: the file's runs of loose
+    /// geometry and its top-level placements.
+    pub fn progress(&self) -> (usize, usize) {
+        self.job.progress()
+    }
+
+    /// Shapes (definition recipes) built so far.
+    pub fn shapes(&self) -> usize {
+        self.job.shapes()
+    }
+
+    /// Build up to `items` more; true once everything is built.
+    pub fn step(&mut self, items: usize) -> bool {
+        self.job.step(items)
+    }
+
+    /// Build whatever is left and hand the recipe over.
+    pub fn finish(self) -> Result<SkpScene, SkpError> {
+        let out = self.job.finish();
+        if self.recovery_notes > 0
+            && out.scene.roots.is_empty()
+            && out.scene.defs.is_empty()
+            && out.scene.guides.is_empty()
+            && out.scene.extra.sketches.is_empty()
+        {
+            return Err(SkpError::EmptyScene {
+                recovery_notes: self.recovery_notes,
+            });
+        }
+        Ok(SkpScene {
+            scene: out.scene,
+            textures_missing: out.textures_missing,
+            warnings: out.warnings,
+            provenance: out.provenance,
+        })
+    }
 }
 
 /// Major version from the header's brace form: `"{17.3.116}"` -> 17.

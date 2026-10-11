@@ -68,4 +68,56 @@ describe('nextPaint', () => {
     expect(resolved).toBe(true)
     await p
   })
+
+  describe('on a hidden page, which runs no animation frames', () => {
+    let visibility: DocumentVisibilityState
+    let listeners: Array<() => void>
+
+    beforeEach(() => {
+      visibility = 'visible'
+      listeners = []
+      vi.stubGlobal('document', {
+        get visibilityState() {
+          return visibility
+        },
+        addEventListener: (_type: string, cb: () => void) => listeners.push(cb),
+        removeEventListener: (_type: string, cb: () => void) => {
+          listeners = listeners.filter((l) => l !== cb)
+        },
+      })
+    })
+
+    it('resolves without waiting for a frame', async () => {
+      visibility = 'hidden'
+      let resolved = false
+      void nextPaint().then(() => { resolved = true })
+      await drainMicrotasks()
+      expect(resolved).toBe(true)
+      expect(queue.length).toBe(0)
+    })
+
+    it('stops waiting when the page is hidden while the frames are pending', async () => {
+      let resolved = false
+      void nextPaint().then(() => { resolved = true })
+      fireFrame()
+      await drainMicrotasks()
+      expect(resolved).toBe(false)
+      visibility = 'hidden'
+      for (const l of [...listeners]) l()
+      await drainMicrotasks()
+      expect(resolved).toBe(true)
+      expect(listeners.length).toBe(0)
+    })
+
+    it('still waits for both frames while visible, and lets go of its listener', async () => {
+      let resolved = false
+      void nextPaint().then(() => { resolved = true })
+      expect(listeners.length).toBe(1)
+      fireFrame()
+      fireFrame()
+      await drainMicrotasks()
+      expect(resolved).toBe(true)
+      expect(listeners.length).toBe(0)
+    })
+  })
 })

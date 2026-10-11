@@ -22,6 +22,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { modLabel, isMac } from '../platform'
 import { shortcutFor, type ToolName } from '../tools/toolRegistry'
 import type { StandardView } from '../viewport/Viewport'
+import { MENU } from '../health/healthCopy'
 
 export interface MenuBarProps {
   /** Bare document name (no dirty mark, no " — Hew" suffix — `documentSession.ts`'s
@@ -980,6 +981,15 @@ export function MenuBar({
               label="Intersect"
               disabled={!(editGates?.canBoolean ?? false)}
               onClick={withClose(() => onEditAction?.('edit-intersect'))}
+            />
+            <div style={SEPARATOR_STYLE} />
+            <MenuItem
+              label={MENU.makeSolid}
+              onClick={withClose(() => onEditAction?.('make-solid'))}
+            />
+            <MenuItem
+              label={MENU.modelHealthItem}
+              onClick={withClose(() => onEditAction?.('model-health'))}
             />
           </div>
         )}

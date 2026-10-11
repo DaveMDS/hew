@@ -1,17 +1,18 @@
 import { describe, it, expect } from 'vitest'
-import { formatRecoveryTime, shouldPromptRecovery } from './recoveryStore'
+import { formatRecoveryTime, normalizeRecoveryMeta, shouldPromptRecovery } from './recoveryStore'
 import type { RecoveryListing, RecoveryMeta } from './recoveryStore'
 import { INITIAL_SESSION } from './documentSession'
 import type { DocSessionState } from './documentSession'
 import type { FileRef } from './fileHost'
 
-const mockRef = (name: string): FileRef => ({ name, handle: null })
+const mockRef = (name: string): FileRef => ({ name, format: 'hew', handle: null })
 
 const mockMeta = (savedAt: number): RecoveryMeta => ({
   version: 1,
   savedAt,
   name: 'Untitled',
   path: null,
+  format: 'hew',
 })
 
 const mockListing = (slot = 'main', savedAt = 0): RecoveryListing => ({
@@ -82,5 +83,28 @@ describe('shouldPromptRecovery', () => {
   it('returns false when both currentRef is set and dirty is true', () => {
     const session: DocSessionState = { currentRef: mockRef('opened.hew'), dirty: true, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: new Set() }
     expect(shouldPromptRecovery(session, [mockListing()])).toBe(false)
+  })
+})
+
+describe('normalizeRecoveryMeta', () => {
+  it('defaults a record written before the format field to hew', () => {
+    const old = { version: 1 as const, savedAt: 5, name: 'house.hew', path: '/tmp/house.hew' }
+    expect(normalizeRecoveryMeta(old).format).toBe('hew')
+  })
+
+  it('keeps a SketchUp format', () => {
+    const meta = { version: 1 as const, savedAt: 5, name: 'a.skp', path: null, format: 'skp2017' }
+    expect(normalizeRecoveryMeta(meta).format).toBe('skp2017')
+    expect(normalizeRecoveryMeta({ ...meta, format: 'skp2026' }).format).toBe('skp2026')
+  })
+
+  it('falls back to hew for an unrecognized format value', () => {
+    const meta = { version: 1 as const, savedAt: 5, name: 'a', path: null, format: 'skp2030' }
+    expect(normalizeRecoveryMeta(meta).format).toBe('hew')
+  })
+
+  it('preserves every other field', () => {
+    const meta = { version: 1 as const, savedAt: 42, name: 'x.skp', path: '/p/x.skp', format: 'skp2026' }
+    expect(normalizeRecoveryMeta(meta)).toEqual(meta)
   })
 })

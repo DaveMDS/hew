@@ -70,6 +70,7 @@ function pickByMidpoint(listing: { units: { key: string; edges: { key: string; a
     return 'null'
   }
 }
+import { BANNED_RE, readableText } from '../health/bannedWords'
 
 // ---------------------------------------------------------------------------
 // Mock Scene factory — provides only the methods the panels actually call.
@@ -620,13 +621,38 @@ describe('ObjectInfoPanel', () => {
     expect(screen.getByText('Solid')).toBeInTheDocument()
   })
 
-  it('shows "Leaky" for a non-watertight object', () => {
+  /** A one-row Model Health report for object 1, as the wasm query returns it. */
+  const healthJson = (verdict: Record<string, unknown>, extra: Record<string, unknown> = {}): string =>
+    JSON.stringify({
+      rows: [
+        {
+          object: '1',
+          name: null,
+          definition: null,
+          definition_name: null,
+          placements: 1,
+          instances: [],
+          accepted: false,
+          family: null,
+          verdict,
+          rims: [],
+          branching_vertices: 0,
+          islands: 1,
+          ...extra,
+        },
+      ],
+      families: [],
+      counts: {},
+    })
+
+  const renderOpen = (json: string, onShowHealth?: (id: bigint) => void) =>
     render(
       <ObjectInfoPanel
         scene={makeScene({
           object_name: () => undefined,
           node_tags: () => [],
           object_solid: () => false,
+          health_report_json: () => json,
         })}
         docRev={0}
         selectedIds={[{ kind: 'object', id: 1n }]}
@@ -634,9 +660,150 @@ describe('ObjectInfoPanel', () => {
         onGeometryChanged={vi.fn()}
         onTagsChanged={vi.fn()}
         onSelectMany={vi.fn()}
+        onShowHealth={onShowHealth}
       />,
     )
-    expect(screen.getByText('Leaky')).toBeInTheDocument()
+
+  it('says what is wrong in plain words, never "Leaky", for a non-solid object', () => {
+    renderOpen(
+      healthJson({ kind: 'cappable' }, { rims: [{ role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }] }),
+    )
+    expect(screen.getByText('Open: 1 opening')).toBeInTheDocument()
+    expect(screen.queryByText(/leaky/i)).not.toBeInTheDocument()
+  })
+
+  it('reads each kind in plain words', () => {
+    const okRim = { role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }
+    const { unmount } = renderOpen(healthJson({ kind: 'flat_sheet', holes: 0 }))
+    expect(screen.getByText('Flat panel')).toBeInTheDocument()
+    unmount()
+    const second = renderOpen(healthJson({ kind: 'bent_sheet' }))
+    expect(screen.getByText('Curved sheet')).toBeInTheDocument()
+    second.unmount()
+    const third = renderOpen(healthJson({ kind: 'holes', planar: 2, warped: 0 }, { rims: [okRim, okRim] }))
+    expect(screen.getByText('Open: 2 openings')).toBeInTheDocument()
+    third.unmount()
+    const fourth = renderOpen(healthJson({ kind: 'mixed' }))
+    expect(screen.getByText("Open edges don't lie flat")).toBeInTheDocument()
+    fourth.unmount()
+    const fifth = renderOpen(healthJson({ kind: 'non_manifold' }, { branching_vertices: 2 }))
+    expect(screen.getByText('Open edges branch')).toBeInTheDocument()
+    fifth.unmount()
+    renderOpen(
+      healthJson({ kind: 'holes', planar: 1, warped: 0 }, { rims: [{ role: 'outer', planar: true, closed: true, cappable: false, sheet_edge: true, perimeter: 4, extent: 1, edges: 4 }] }),
+    )
+    expect(screen.getByText('Open edges run along a lip')).toBeInTheDocument()
+  })
+
+  it('uses none of the kernel words anywhere on screen, for every kind', () => {
+    const okRim = { role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }
+    const badRim = { ...okRim, planar: false, cappable: false }
+    const cases: Array<[Record<string, unknown>, Record<string, unknown>]> = [
+      [{ kind: 'cappable' }, { rims: [okRim] }],
+      [{ kind: 'holes', planar: 1, warped: 1 }, { rims: [okRim, badRim] }],
+      [{ kind: 'flat_sheet', holes: 2 }, {}],
+      [{ kind: 'flat_sheet', holes: 0 }, { accepted: true }],
+      [{ kind: 'bent_sheet' }, {}],
+      [{ kind: 'mixed' }, {}],
+      [{ kind: 'non_manifold' }, {}],
+      [{ kind: 'cappable' }, { family: 0 }],
+    ]
+    for (const [verdict, extra] of cases) {
+      const { container, unmount } = renderOpen(healthJson(verdict, extra))
+      const text = readableText(container)
+      expect(text, JSON.stringify(verdict)).not.toMatch(BANNED_RE)
+      expect(text).toMatch(/Geometry/)
+      unmount()
+    }
+  })
+
+  it('a kept panel reads as kept', () => {
+    renderOpen(healthJson({ kind: 'flat_sheet', holes: 0 }, { accepted: true }))
+    expect(screen.getByText('Flat panel (kept as is)')).toBeInTheDocument()
+  })
+
+  it('the Show link asks the app to open Model Health on this object', () => {
+    const onShow = vi.fn()
+    renderOpen(healthJson({ kind: 'mixed' }), onShow)
+    fireEvent.click(screen.getByRole('button', { name: 'Show in list' }))
+    expect(onShow).toHaveBeenCalledWith(1n)
+  })
+
+  describe('Model Health repairs', () => {
+    const planarRim = { role: 'outer', planar: true, closed: true, cappable: true, perimeter: 4, extent: 1, edges: 4 }
+    const renderRepair = (json: string, extra: Record<string, unknown>, onGeometryChanged = vi.fn(), onToast = vi.fn()) => {
+      render(
+        <ObjectInfoPanel
+          scene={makeScene({
+            object_name: () => undefined,
+            node_tags: () => [],
+            object_solid: () => false,
+            health_report_json: () => json,
+            ...extra,
+          })}
+          docRev={0}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+          onNameChanged={vi.fn()}
+          onGeometryChanged={onGeometryChanged}
+          onTagsChanged={vi.fn()}
+          onSelectMany={vi.fn()}
+          onToast={onToast}
+        />,
+      )
+      return { onGeometryChanged, onToast }
+    }
+
+    it('Close caps every opening and refreshes; Keep as is keeps', () => {
+      const cap_rims = vi.fn(() => '{"faces":1,"closed":true,"reversed":false}')
+      const set_accepted_surface = vi.fn()
+      const { onGeometryChanged } = renderRepair(healthJson({ kind: 'cappable' }, { rims: [planarRim] }), { cap_rims, set_accepted_surface })
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      expect(cap_rims).toHaveBeenCalledWith(1n, null)
+      fireEvent.click(screen.getByRole('button', { name: 'Keep as is' }))
+      expect(set_accepted_surface).toHaveBeenCalledWith(1n, true)
+      expect(onGeometryChanged).toHaveBeenCalledTimes(2)
+    })
+
+    it('a kept object offers Don\'t keep', () => {
+      const set_accepted_surface = vi.fn()
+      renderRepair(healthJson({ kind: 'cappable' }, { accepted: true, rims: [planarRim] }), { set_accepted_surface })
+      expect(screen.queryByRole('button', { name: 'Keep as is' })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: "Don't keep" }))
+      expect(set_accepted_surface).toHaveBeenCalledWith(1n, false)
+    })
+
+    it("an object that can't be closed offers no Close", () => {
+      renderRepair(healthJson({ kind: 'non_manifold' }), {})
+      expect(screen.queryByRole('button', { name: 'Close' })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Keep as is' })).toBeInTheDocument()
+    })
+
+    it('a refusal toasts the kernel copy and does not refresh', () => {
+      const cap_rims = vi.fn(() => {
+        throw new Error('RimNotPlanar: not flat')
+      })
+      const { onGeometryChanged, onToast } = renderRepair(healthJson({ kind: 'mixed' }), { cap_rims })
+      fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+      expect(onToast.mock.calls[0][1]).toBe('RimNotPlanar')
+      expect(onGeometryChanged).not.toHaveBeenCalled()
+    })
+  })
+
+  it('a solid object has no Show link', () => {
+    render(
+      <ObjectInfoPanel
+        scene={makeScene({ object_name: () => undefined, node_tags: () => [], object_solid: () => true })}
+        docRev={0}
+        selectedIds={[{ kind: 'object', id: 1n }]}
+        onNameChanged={vi.fn()}
+        onGeometryChanged={vi.fn()}
+        onTagsChanged={vi.fn()}
+        onSelectMany={vi.fn()}
+        onShowHealth={vi.fn()}
+      />,
+    )
+    expect(screen.getByText('Solid')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Show in list' })).not.toBeInTheDocument()
   })
 
   it('shows "Group" for a group node with no solid/leaky indicator', () => {
@@ -2110,6 +2277,34 @@ describe('DocumentTree', () => {
     expect(leaky?.getAttribute('stroke-dasharray')).toBeTruthy()
     const solid = container.querySelector('[data-node-icon="object-solid"] path')
     expect(solid?.getAttribute('stroke-dasharray')).toBeNull()
+  })
+
+  it('Model Health state picks the object icon: surface (no dash), open (dashed), solid by default', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [
+        { kind: 'object', id: 1n },
+        { kind: 'object', id: 2n },
+        { kind: 'object', id: 3n },
+      ],
+      object_ids: () => new BigUint64Array([1n, 2n, 3n]),
+    })
+    const { container } = render(
+      <DocumentTree
+        {...docTreeBase}
+        scene={scene}
+        watertightMap={new Map([[1n, true], [2n, false], [3n, false]])}
+        objectHealth={new Map<bigint, 'surface' | 'open'>([[2n, 'surface'], [3n, 'open']])}
+      />,
+    )
+    expect(container.querySelectorAll('[data-node-icon="object-solid"]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-node-icon="object-surface"]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-node-icon="object-leaky"]')).toHaveLength(1)
+    // A surface is a thin outline with no dash, in a neutral color.
+    const surface = container.querySelector('[data-node-icon="object-surface"]')
+    expect(surface?.querySelector('path')?.getAttribute('stroke-dasharray')).toBeNull()
+    expect(surface).toHaveStyle({ color: 'var(--text-muted)' })
+    expect(container.querySelector('[data-node-icon="object-leaky"] title')?.textContent).toBe('Open shape: not solid')
+    expect(container.querySelector('[data-node-icon="object-surface"] title')?.textContent).toBe('Flat panel or curved sheet')
   })
 
   it('nested groups start collapsed; clicking the chevron expands them', () => {

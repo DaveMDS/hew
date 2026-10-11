@@ -563,6 +563,7 @@ fn leaky_box_mesh(name: &str) -> kernel::MeshRecipe {
         face_holes: vec![Vec::new(); face_count],
         base_material: kernel::serialize::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 
@@ -592,6 +593,8 @@ fn leaky_instance_doc() -> Document {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest a component instance with a leaky sole member");

@@ -21,8 +21,8 @@
 //! directly below instead of gated as a burn-down property.
 
 use api::{
-    Connection, DispatchOutcome, Host, NoHost, Profile, Refusal, Request, RequestId, Response,
-    SnapshotParams, SnapshotResult, codes,
+    Connection, DispatchOutcome, DocFormat, Host, NoHost, Profile, Refusal, Request, RequestId,
+    Response, SaveOutcome, SnapshotParams, SnapshotResult, codes,
 };
 use kernel::{Document, Plane, Point3};
 use serde_json::{Value, json};
@@ -73,6 +73,13 @@ fn edit_the_document(doc: &mut Document) {
 struct FakeHost {
     /// The last path `save_document` was called with.
     last_save_path: Option<String>,
+    /// The `format` `save_document` was last called with.
+    last_save_format: Option<DocFormat>,
+    /// The `units` the last `save_document`/`export_document` was given.
+    last_save_units: Option<String>,
+    last_export_units: Option<String>,
+    /// If set, a save to a path returns this instead of a bare write.
+    save_outcome: Option<SaveOutcome>,
     /// If set, `export_document` returns this instead of its default.
     export_result: Option<Result<Option<Vec<u8>>, Refusal>>,
     /// If set, `import_document` returns this instead of its default.
@@ -110,12 +117,19 @@ impl Host for FakeHost {
         &mut self,
         _doc: &Document,
         path: Option<&str>,
-    ) -> Result<Option<Vec<u8>>, Refusal> {
+        format: Option<DocFormat>,
+        units: Option<&str>,
+    ) -> Result<SaveOutcome, Refusal> {
+        self.last_save_format = format;
+        self.last_save_units = units.map(str::to_string);
         match path {
             Some(p) => {
                 self.last_save_path = Some(p.to_string());
-                // A host that writes the file itself returns nothing.
-                Ok(None)
+                // A host that writes the file itself returns no bytes.
+                Ok(match self.save_outcome.take() {
+                    Some(o) => o,
+                    None => SaveOutcome::written(),
+                })
             }
             None => Err(Refusal::api("path_required", "no working path yet")),
         }
@@ -127,7 +141,9 @@ impl Host for FakeHost {
         _format: &str,
         _path: Option<&str>,
         _segments_per_turn: u32,
+        units: Option<&str>,
     ) -> Result<Option<Vec<u8>>, Refusal> {
+        self.last_export_units = units.map(str::to_string);
         self.export_result
             .take()
             .unwrap_or_else(|| Ok(Some(vec![1, 2, 3])))
@@ -497,6 +513,200 @@ fn save_forwards_the_path_and_returns_the_empty_result() {
     assert_eq!(host.last_save_path.as_deref(), Some("out.hew"));
 }
 
+/// `format` reaches the host as the typed enum, and the three wire names
+/// are the only ones the command takes.
+#[test]
+fn save_forwards_each_format_to_the_host_as_the_enum() {
+    for (wire, expected) in [
+        ("hew", DocFormat::Hew),
+        ("skp", DocFormat::Skp),
+        ("skp2017", DocFormat::Skp2017),
+    ] {
+        let mut conn = Connection::new(Profile::Core, "test");
+        let mut doc = Document::new();
+        let mut host = FakeHost::default();
+        hello_attach(&mut conn, &mut doc, &mut host);
+        call_ok(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            2,
+            "hew.doc.save",
+            json!({ "path": "out.x", "format": wire }),
+        );
+        assert_eq!(host.last_save_format, Some(expected), "{wire}");
+    }
+}
+
+#[test]
+fn save_without_a_format_leaves_the_choice_to_the_host() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.skp" }),
+    );
+    assert_eq!(host.last_save_format, None);
+}
+
+#[test]
+fn save_and_export_hand_named_units_to_the_host() {
+    // A SketchUp file's display units, by hew.view.units's names; absent,
+    // the host decides (None reaches it).
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.skp", "units": "mm" }),
+    );
+    assert_eq!(host.last_save_units.as_deref(), Some("mm"));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.doc.save",
+        json!({ "path": "out.skp" }),
+    );
+    assert_eq!(host.last_save_units, None);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.doc.export",
+        json!({ "format": "skp2017", "units": "arch" }),
+    );
+    assert_eq!(host.last_export_units.as_deref(), Some("arch"));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.doc.export",
+        json!({ "format": "skp" }),
+    );
+    assert_eq!(host.last_export_units, None);
+}
+
+#[test]
+fn units_outside_the_length_formats_or_off_a_skp_export_are_refused_before_the_host() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    for (id, method, params) in [
+        (
+            2,
+            "hew.doc.save",
+            json!({ "path": "out.skp", "units": "furlongs" }),
+        ),
+        (
+            3,
+            "hew.doc.export",
+            json!({ "format": "skp", "units": "in" }),
+        ),
+        (
+            4,
+            "hew.doc.export",
+            json!({ "format": "stl", "units": "mm" }),
+        ),
+    ] {
+        let r = call(&mut conn, &mut doc, &mut host, id, method, params.clone());
+        assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS, "{params}");
+    }
+    assert_eq!(host.last_save_units, None);
+    assert_eq!(host.last_export_units, None);
+}
+
+#[test]
+fn save_refuses_an_unknown_format_before_the_host_hears_of_it() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let r = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.x", "format": "obj" }),
+    );
+    assert!(r.error.is_some(), "an unknown format is a params error");
+    assert_eq!(host.last_save_path, None, "the host was never called");
+}
+
+/// A `.skp` save reports what the file could not hold, under
+/// `simplified` / `writer_notes`, next to the format it resolved.
+#[test]
+fn save_reports_simplified_and_writer_notes_for_a_skp() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost {
+        save_outcome: Some(SaveOutcome {
+            format: Some(DocFormat::Skp2017),
+            simplified: vec!["curved faces".to_string()],
+            writer_notes: vec!["dropped scenes".to_string()],
+            ..SaveOutcome::default()
+        }),
+        ..Default::default()
+    };
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let result = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.skp", "format": "skp2017" }),
+    );
+    assert_eq!(
+        result,
+        json!({
+            "format": "skp2017",
+            "simplified": ["curved faces"],
+            "writer_notes": ["dropped scenes"],
+        })
+    );
+}
+
+/// A `.hew` save reports its format but no SketchUp-only keys.
+#[test]
+fn save_of_a_hew_reports_no_skp_keys() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    let mut host = FakeHost {
+        save_outcome: Some(SaveOutcome {
+            format: Some(DocFormat::Hew),
+            ..SaveOutcome::default()
+        }),
+        ..Default::default()
+    };
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let result = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.save",
+        json!({ "path": "out.hew" }),
+    );
+    assert_eq!(result, json!({ "format": "hew" }));
+}
+
 /// Lane C's saved mark: a host that writes the file itself (`CliHost`'s
 /// shape — `save_document` returns `None`) has completed the save the
 /// instant the command returns `Ok`, so `hew.doc.save` marks the document
@@ -537,8 +747,10 @@ fn save_leaves_the_document_dirty_when_the_host_only_returns_bytes() {
             &mut self,
             doc: &Document,
             _path: Option<&str>,
-        ) -> Result<Option<Vec<u8>>, Refusal> {
-            Ok(Some(doc.save_for_persistence()))
+            _format: Option<DocFormat>,
+            _units: Option<&str>,
+        ) -> Result<SaveOutcome, Refusal> {
+            Ok(SaveOutcome::with_bytes(doc.save_for_persistence()))
         }
     }
 
@@ -568,9 +780,11 @@ fn save_returns_bytes_when_the_host_has_no_filesystem() {
             &mut self,
             doc: &Document,
             path: Option<&str>,
-        ) -> Result<Option<Vec<u8>>, Refusal> {
+            _format: Option<DocFormat>,
+            _units: Option<&str>,
+        ) -> Result<SaveOutcome, Refusal> {
             assert!(path.is_none(), "the caller strips the path for such a host");
-            Ok(Some(doc.save_for_persistence()))
+            Ok(SaveOutcome::with_bytes(doc.save_for_persistence()))
         }
     }
 
@@ -614,6 +828,28 @@ fn export_with_no_path_returns_bytes_base64() {
     // encoder itself; this pins the handler wires bytes through it.
     assert_eq!(result["bytes_base64"], "AQID");
     assert_eq!(result["format"], "stl");
+}
+
+/// The SketchUp formats are export formats like any other: the command
+/// forwards the name and echoes it back.
+#[test]
+fn export_takes_the_skp_formats() {
+    for format in ["skp", "skp2017"] {
+        let mut conn = Connection::new(Profile::Core, "test");
+        let mut doc = Document::new();
+        let mut host = FakeHost::default();
+        hello_attach(&mut conn, &mut doc, &mut host);
+        let result = call_ok(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            2,
+            "hew.doc.export",
+            json!({ "format": format }),
+        );
+        assert_eq!(result["bytes_base64"], "AQID");
+        assert_eq!(result["format"], format);
+    }
 }
 
 #[test]

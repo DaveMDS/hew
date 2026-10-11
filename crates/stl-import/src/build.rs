@@ -249,14 +249,14 @@ pub fn build_scene(
 
     if split_shell_count > 0 {
         warnings.push(format!(
-            "{split_shell_count} part{} had non-manifold geometry; imported as {split_piece_total} open shell{} (split at non-manifold edges, geometry unchanged)",
+            "{split_shell_count} part{} came in as {split_piece_total} separate piece{} because some edges are shared by more than two faces; the shapes themselves are unchanged",
             if split_shell_count == 1 { "" } else { "s" },
             if split_piece_total == 1 { "" } else { "s" },
         ));
     }
     if degenerate_dropped_total > 0 {
         warnings.push(format!(
-            "{degenerate_dropped_total} degenerate sliver face{} (too thin to build) {} removed; an affected part may arrive leaky",
+            "{degenerate_dropped_total} face{} too thin to build {} left out, so a part may have small gaps",
             if degenerate_dropped_total == 1 { "" } else { "s" },
             if degenerate_dropped_total == 1 { "was" } else { "were" },
         ));
@@ -290,6 +290,8 @@ pub fn build_scene(
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         },
         warnings,
     )
@@ -307,6 +309,8 @@ fn empty_scene() -> ImportScene {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     }
 }
 
@@ -572,6 +576,7 @@ fn recipe_from_arrays(
         face_holes,
         base_material: NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     }
 }
 

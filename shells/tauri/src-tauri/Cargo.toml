@@ -80,8 +80,8 @@ qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 # this crate. Shell-crate-only, like fontdb/qrcode above.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6.4"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSObject", "NSURL", "NSDictionary", "NSValue"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPrintInfo", "NSPrintOperation", "NSWindow", "NSView", "NSResponder", "NSApplication", "NSScreen", "NSGraphics", "NSCursor"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSGeometry", "NSObject", "NSURL", "NSDictionary", "NSValue", "NSArray"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPrintInfo", "NSPrintOperation", "NSWindow", "NSView", "NSResponder", "NSApplication", "NSScreen", "NSGraphics", "NSCursor", "NSSavePanel", "NSPanel", "NSPopUpButton", "NSButton", "NSControl", "NSTextField", "NSGridView", "NSCell", "NSLayoutConstraint"] }
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "objc2-app-kit", "WKWebView"] }
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
@@ -89,6 +89,11 @@ gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(windows)'.dependencies]
+# The save panel's common item dialog (src/save_panel/windows.rs):
+# IFileSaveDialog + IFileDialogCustomize + its event sink. Already in the
+# tree through tauri/wry at this version; listing it makes the shell API
+# callable from this crate.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 webview2-com = "0.38.2"
 windows-core = "0.61"
 windows-sys = { version = "0.61", features = [

@@ -88,7 +88,10 @@ fn rename(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             })?;
             ctx.doc.set_material_name(m, name)?
         }
-        EntityRef::Sketch(_) | EntityRef::Guide(_) | EntityRef::Tag(_) => {
+        EntityRef::Sketch(_)
+        | EntityRef::Guide(_)
+        | EntityRef::Tag(_)
+        | EntityRef::Annotation(_) => {
             return Err(CmdError::Refusal(Refusal::api(
                 "rename_unsupported",
                 "Only objects, groups, instances, component definitions, and materials can be renamed today.",
@@ -144,6 +147,7 @@ fn delete(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         EntityRef::Sketch(s) => ctx.doc.delete_sketch(s)?,
         EntityRef::Guide(g) => ctx.doc.delete_guide(g)?,
         EntityRef::Tag(path) => ctx.doc.delete_tag(&path)?,
+        EntityRef::Annotation(a) => ctx.doc.delete_annotation(a)?,
         EntityRef::Material(m) => ctx.doc.delete_material(m)?,
         EntityRef::Component(c) => ctx.doc.delete_definition(c)?,
     };

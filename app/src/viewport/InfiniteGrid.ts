@@ -43,6 +43,10 @@ const FRAGMENT_SHADER = `
   uniform vec3 uMinorColor;
   uniform vec3 uMajorColor;
   uniform float uAxesVisible;
+  // 1 paints the ground color everywhere between the lines (Hew's own
+  // look, or a document style with a ground); 0 leaves only the lines, so
+  // the backdrop shows through (a style without a ground).
+  uniform float uGroundAlpha;
   // >= 0 overrides the per-fragment camera distance used for cell-size LOD
   // below with this FIXED value; < 0 (the default) uses the real per-fragment
   // distance. Set under parallel projection (docs/design/camera.md section 1):
@@ -121,6 +125,7 @@ const FRAGMENT_SHADER = `
     // and its only boundary is the frustum far-plane: a natural straight
     // horizon, no ring at any camera angle.
     vec3 color = mix(uGroundColor, mix(uMinorColor, uMajorColor, gMajor), gLine);
+    float alpha = max(uGroundAlpha, gLine);
 
     // Suppress the grid's own through-origin lines when the origin axes are
     // visible — they're geometrically coincident with the red/green axes
@@ -130,10 +135,12 @@ const FRAGMENT_SHADER = `
     // are hidden — "one or the other, never both stacked". Every OTHER grid
     // line (not through the origin) is untouched either way.
     if (uAxesVisible > 0.5) {
-      color = mix(color, uGroundColor, originLineFactor(vWorldPos.xy));
+      float f = originLineFactor(vWorldPos.xy);
+      color = mix(color, uGroundColor, f);
+      alpha = mix(alpha, uGroundAlpha, f);
     }
 
-    gl_FragColor = vec4(color, 1.0);
+    gl_FragColor = vec4(color, alpha);
   }
 `
 
@@ -161,7 +168,16 @@ export class InfiniteGrid {
         // until the next real `setAxesVisible` call corrects it.
         uAxesVisible: { value: axesVisible ? 1 : 0 },
         uLodDistanceOverride: { value: -1 },
+        uGroundAlpha: { value: 1 },
       },
+      // Blended over the clear color so a style without a ground leaves
+      // only the lines; custom (not Normal) blending so three keeps it on
+      // with `transparent: false` below, which keeps the plane a backdrop
+      // in the opaque pass.
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
       // A BACKDROP, not an occluder: opaque-pass (transparent: false) so it
       // draws before the model, at renderOrder -1 so it's first within that
       // pass, and with no depth write so everything drawn after paints over
@@ -229,6 +245,12 @@ export class InfiniteGrid {
     (this.material.uniforms.uGroundColor.value as THREE.Color).set(groundColor)
     ;(this.material.uniforms.uMinorColor.value as THREE.Color).set(minorColor)
     ;(this.material.uniforms.uMajorColor.value as THREE.Color).set(majorColor)
+  }
+
+  /** Whether the plane paints its ground color between the lines (a
+   * document style without a ground draws the lines alone). */
+  setGroundFilled(filled: boolean): void {
+    this.material.uniforms.uGroundAlpha.value = filled ? 1 : 0
   }
 
   /** Call whenever the origin axes' own visibility changes (View ▸ Axes) —

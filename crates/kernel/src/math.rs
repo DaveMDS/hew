@@ -238,6 +238,15 @@ impl Plane {
         })
     }
 
+    /// The same plane facing the other way: the normal and the offset
+    /// negated, exactly (no renormalization).
+    pub fn flipped(&self) -> Plane {
+        Plane {
+            normal: -self.normal,
+            offset: -self.offset,
+        }
+    }
+
     /// The unit normal.
     pub fn normal(&self) -> Vec3 {
         self.normal

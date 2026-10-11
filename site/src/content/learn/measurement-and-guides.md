@@ -93,7 +93,7 @@ Guides are construction geometry — dashed lines and point markers that are nev
 - Where a guide **crosses** an edge, a sketch line, or another guide, the amber Intersection cue appears — click there to land exactly on the crossing, which is usually the whole reason the guide exists.
 - **View ▸ Guides** hides or shows all guides at once; hidden guides don't snap.
 - To delete one guide, select it with the Select tool and press `Delete`. **Edit ▸ Delete Guide Lines** clears every guide in one undoable step.
-- Guides are saved in the `.hew` file, and guides in imported SketchUp files come across.
+- Guides are saved in the `.hew` file, and guides in imported SketchUp files come across. A SketchUp guide that starts at a point or runs between two keeps that length, so it draws and snaps only there, as it does in SketchUp. A guide from a SketchUp file carries the tag its layer became, so hiding that tag in the Tags panel hides the guide, and a Scene that hides the tag hides it too; select a guide to see its tags in Object Info.
 
 ## Reading precision from the model
 

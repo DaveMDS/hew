@@ -77,7 +77,7 @@ These panels are covered in depth in [Organizing your model](/learn/organizing/)
 
 ## The status bar
 
-The strip along the bottom always shows the active tool's name and a one-line hint about what it expects next. If you're ever unsure what a tool wants, look here. On the right, the watertightness badge summarizes the whole model: green "N objects ✓ solid" or red "N leaky".
+The strip along the bottom always shows the active tool's name and a one-line hint about what it expects next. If you're ever unsure what a tool wants, look here. On the right, the badge summarizes the whole model: "N objects ✓ solid", or "N objects · 3 not solid" when some aren't (click it to open the Model Health window, which lists them; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid)).
 
 ## Menus and title bar
 

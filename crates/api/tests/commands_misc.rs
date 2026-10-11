@@ -1489,7 +1489,12 @@ fn guide_angular_rotates_base_dir_around_plane_normal_and_adds_one_undo_entry() 
     let EntityRef::Guide(gid) = entity else {
         panic!("expected a guide")
     };
-    let Some(kernel::Guide::Line { origin, direction }) = doc.guide(gid).copied() else {
+    let Some(kernel::Guide::Line {
+        origin,
+        direction,
+        span: kernel::GuideSpan::INFINITE,
+    }) = doc.guide(gid).copied()
+    else {
         panic!("expected a guide line")
     };
     assert!(origin.approx_eq(Point3::new(2.0, 3.0, 4.0), 1e-12));

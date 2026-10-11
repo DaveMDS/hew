@@ -26,6 +26,7 @@ stl-import = { workspace = true }
 gltf-import = { workspace = true }
 dae-import = { workspace = true }
 skp-import = { workspace = true }
+skp-export = { workspace = true }
 # The Hew Library's on-disk layout (docs/agents/HEW_API.md §8.1;
 # docs/design/v1.1-cycle.md's Lane B): folder resolution, file naming, and
 # atomic list/read/write/remove, shared with the Tauri shell.

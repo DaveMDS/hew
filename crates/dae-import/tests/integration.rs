@@ -105,8 +105,8 @@ fn non_manifold_fin_splits_into_open_shells_with_warning() {
     assert_eq!(
         warnings,
         vec![
-            "'Fin' is non-manifold; imported as 3 open shells \
-             (split at non-manifold edges, geometry unchanged)"
+            "'Fin' came in as 3 separate pieces because some of its edges \
+             are shared by more than two faces; the shape itself is unchanged"
                 .to_string()
         ],
         "the split is reported loudly, exactly once"
@@ -152,8 +152,8 @@ fn split_warnings_are_deterministic_and_deduped_by_geometry_id() {
 
     let msg = |name: &str| {
         format!(
-            "'{name}' is non-manifold; imported as 3 open shells \
-             (split at non-manifold edges, geometry unchanged)"
+            "'{name}' came in as 3 separate pieces because some of its edges \
+             are shared by more than two faces; the shape itself is unchanged"
         )
     };
     assert_eq!(

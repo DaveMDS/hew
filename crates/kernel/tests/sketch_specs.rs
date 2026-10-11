@@ -1904,3 +1904,481 @@ fn offset_ring_enclosing_a_region_does_not_malform_it() {
         assert!(s.profile(rid).is_ok(), "region {rid:?} has no profile");
     }
 }
+
+// ------------------------------------------------------- loops with no face
+
+/// A closed loop can be edges alone (rule 6): it keeps that while nothing
+/// touches it, and it has no profile to extrude.
+#[test]
+fn a_loop_of_edges_alone_has_no_face_and_keeps_none_while_untouched() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    let rid = s.regions().keys().next().expect("a region");
+    assert!(!s.regions()[rid].faceless, "a drawn loop has a face");
+    s.make_regions_faceless();
+    assert!(s.regions()[rid].faceless);
+    assert_eq!(s.profile(rid).unwrap_err(), SketchError::RegionHasNoFace);
+    // Drawing elsewhere leaves it as it is, id and state.
+    s.add_segment(pt(5.0, 5.0), pt(6.0, 5.0)).unwrap();
+    assert!(s.regions()[rid].faceless);
+    s.set_region_faceless(rid, false).unwrap();
+    assert!(s.profile(rid).is_ok());
+}
+
+/// Drawing over an edge of a faceless loop gives the loop its face, as in
+/// SketchUp, without reshaping it: same region id, nothing else changes.
+#[test]
+fn drawing_over_an_edge_of_a_faceless_loop_gives_it_a_face() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    let rid = s.regions().keys().next().unwrap();
+    let before = counts(&s);
+    let report = s.add_segment(pt(2.0, 0.0), pt(2.0, 1.0)).unwrap();
+    assert_eq!(counts(&s), before, "nothing new is drawn");
+    assert!(report.regions_created.is_empty() && report.regions_removed.is_empty());
+    assert!(
+        !s.regions()[rid].faceless,
+        "the loop drawn over has its face"
+    );
+    assert!(s.profile(rid).is_ok());
+}
+
+/// A new edge across a faceless loop reshapes it: the halves are new
+/// regions, and a region a drawing step brings about has a face.
+#[test]
+fn a_new_edge_across_a_faceless_loop_makes_faced_halves() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    s.add_segment(pt(0.0, 0.0), pt(2.0, 1.0)).unwrap();
+    assert_eq!(s.regions().len(), 2);
+    assert!(s.regions().values().all(|r| !r.faceless));
+}
+
+/// A faceless loop copied or moved whole is the same loop elsewhere, not
+/// one drawn: it stays faceless, while the drawing around it is untouched.
+#[test]
+fn a_faceless_loop_copied_or_moved_stays_faceless() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    let edges: Vec<_> = s.edges().keys().collect();
+    s.copy_edges_transformed(
+        &edges,
+        &kernel::Transform::translation(kernel::Vec3::new(5.0, 0.0, 0.0)),
+    )
+    .unwrap();
+    assert_eq!(s.regions().len(), 2);
+    assert!(
+        s.regions().values().all(|r| r.faceless),
+        "the copy is faceless too"
+    );
+    // Move the original: it is replayed at its new place, still faceless.
+    s.apply_transform_edges(
+        &edges,
+        &kernel::Transform::translation(kernel::Vec3::new(0.0, 5.0, 0.0)),
+    )
+    .unwrap();
+    assert_eq!(s.regions().len(), 2);
+    assert!(s.regions().values().all(|r| r.faceless));
+    // A loop drawn beside them has its face, as ever.
+    for (a, b) in rect_segments(10.0, 10.0, 11.0, 11.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    assert_eq!(s.regions().values().filter(|r| !r.faceless).count(), 1);
+}
+
+/// A line that merely ends on a faceless loop's edge splits that edge
+/// without closing anything: the loop keeps its state (rule 6), as does
+/// a loop healed by erasing such a line.
+#[test]
+fn a_line_ending_on_a_faceless_loops_edge_leaves_it_faceless() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 2.0, 2.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    let r = s.add_segment(pt(1.0, 0.0), pt(1.0, -1.0)).unwrap();
+    assert_eq!(s.regions().len(), 1);
+    assert!(
+        s.regions().values().all(|r| r.faceless),
+        "a T-junction closes no loop"
+    );
+    // Erase the stub: the healed loop is the same loop, still faceless.
+    let stub = r.new_edges[0];
+    s.remove_edge(stub).unwrap();
+    assert_eq!(s.regions().len(), 1);
+    assert!(s.regions().values().all(|r| r.faceless));
+}
+
+/// Erasing an edge never gives a face: two faceless loops merged by erasing
+/// the edge between them are one faceless loop, and a faced loop next to a
+/// faceless one loses its boundary, and its face, with that edge.
+#[test]
+fn erasing_an_edge_between_faceless_loops_keeps_the_merged_loop_faceless() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 1.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    for (a, b) in rect_segments(1.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    let shared = s
+        .edges()
+        .iter()
+        .find(|(_, e)| {
+            let (p, q) = (s.vertices()[e.from].position, s.vertices()[e.to].position);
+            (p.x - 1.0).abs() < 1e-9 && (q.x - 1.0).abs() < 1e-9
+        })
+        .map(|(id, _)| id)
+        .expect("the shared edge");
+    s.remove_edge(shared).unwrap();
+    assert_eq!(s.regions().len(), 1);
+    assert!(s.regions().values().all(|r| r.faceless));
+
+    // Faced beside faceless: the merge has no face either.
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 1.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    for (a, b) in rect_segments(1.0, 0.0, 2.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    let left = s
+        .regions()
+        .iter()
+        .find(|(_, r)| {
+            r.outer
+                .iter()
+                .all(|&v| s.vertices()[v].position.x <= 1.0 + 1e-9)
+        })
+        .map(|(id, _)| id)
+        .expect("the left square");
+    s.set_region_faceless(left, true).unwrap();
+    assert_eq!(s.regions().values().filter(|r| !r.faceless).count(), 1);
+    let shared = s
+        .edges()
+        .iter()
+        .find(|(_, e)| {
+            let (p, q) = (s.vertices()[e.from].position, s.vertices()[e.to].position);
+            (p.x - 1.0).abs() < 1e-9 && (q.x - 1.0).abs() < 1e-9
+        })
+        .map(|(id, _)| id)
+        .unwrap();
+    s.remove_edge(shared).unwrap();
+    assert_eq!(s.regions().len(), 1);
+    assert!(s.regions().values().all(|r| r.faceless));
+}
+
+/// Tracing an edge of a loop inside a larger faceless loop faces the inner
+/// loop alone; the ring around it keeps no face until its own edge is
+/// drawn over.
+#[test]
+fn tracing_an_inner_loops_edge_faces_that_loop_alone() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 4.0, 4.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    for (a, b) in rect_segments(1.0, 1.0, 2.0, 2.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    s.make_regions_faceless();
+    s.add_segment(pt(1.0, 1.0), pt(2.0, 1.0)).unwrap();
+    let faced: Vec<_> = s.regions().values().filter(|r| !r.faceless).collect();
+    assert_eq!(faced.len(), 1);
+    assert_eq!(faced[0].outer.len(), 4);
+    assert!(faced[0].holes.is_empty(), "the inner loop, not the ring");
+    s.add_segment(pt(0.0, 0.0), pt(4.0, 0.0)).unwrap();
+    assert!(s.regions().values().all(|r| !r.faceless));
+}
+
+/// A wire moved exactly onto a faced loop does not take the face away.
+#[test]
+fn a_faceless_loop_moved_onto_a_faced_loop_leaves_the_face() {
+    let mut s = xy_sketch();
+    for (a, b) in rect_segments(0.0, 0.0, 1.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    for (a, b) in rect_segments(5.0, 0.0, 6.0, 1.0) {
+        s.add_segment(a, b).unwrap();
+    }
+    let wire: Vec<_> = s
+        .regions()
+        .iter()
+        .find(|(_, r)| s.vertices()[r.outer[0]].position.x >= 5.0 - 1e-9)
+        .map(|(id, _)| id)
+        .into_iter()
+        .collect();
+    s.set_region_faceless(wire[0], true).unwrap();
+    let moved: Vec<_> = s
+        .edges()
+        .iter()
+        .filter(|(_, e)| s.vertices()[e.from].position.x >= 5.0 - 1e-9)
+        .map(|(id, _)| id)
+        .collect();
+    assert_eq!(moved.len(), 4);
+    s.apply_transform_edges(
+        &moved,
+        &kernel::Transform::translation(kernel::Vec3::new(-5.0, 0.0, 0.0)),
+    )
+    .unwrap();
+    assert_eq!(s.regions().len(), 1);
+    assert!(s.regions().values().all(|r| !r.faceless), "the face stays");
+}
+
+/// A coordinate that is not a number is off every plane: the segment is
+/// refused with the point named, never drawn (a distance test alone would
+/// let it through, since nothing compares greater than a tolerance when
+/// one side is not a number).
+#[test]
+fn a_point_that_is_not_a_number_is_refused_as_off_the_plane() {
+    let mut s = xy_sketch();
+    assert_eq!(
+        s.add_segment(pt(f64::NAN, 0.0), pt(1.0, 0.0)).unwrap_err(),
+        SketchError::PointOffPlane { which: 0 }
+    );
+    assert_eq!(
+        s.add_segment(pt(0.0, 0.0), pt(1.0, f64::INFINITY))
+            .unwrap_err(),
+        SketchError::PointOffPlane { which: 1 }
+    );
+    assert_eq!(counts(&s), (0, 0, 0), "nothing was drawn");
+}
+
+// ------------------------------------------------ many segments at once
+
+/// Segments added at once build exactly what adding them one by one
+/// builds: a tiling of squares (shared sides given twice), then lines
+/// across it that cross, end on edges and run along them.
+#[test]
+fn segments_added_at_once_build_what_one_by_one_builds() {
+    let mut segs: Vec<(Point3, Point3)> = Vec::new();
+    for i in 0..6 {
+        for j in 0..4 {
+            let (x0, y0, x1, y1) = (i as f64, j as f64, i as f64 + 1.0, j as f64 + 1.0);
+            segs.extend(rect_segments(x0, y0, x1, y1));
+        }
+    }
+    segs.push((pt(-0.5, 0.5), pt(6.5, 3.5))); // crossing many
+    segs.push((pt(2.5, -1.0), pt(2.5, 0.0))); // ending on an edge
+    segs.push((pt(0.0, 2.0), pt(1.5, 2.0))); // along a side, past its end
+    segs.push((pt(3.3, 1.3), pt(3.7, 1.7))); // inside a square, apart
+    let mut one = xy_sketch();
+    for &(a, b) in &segs {
+        one.add_segment(a, b).unwrap();
+    }
+    let mut bulk = xy_sketch();
+    bulk.add_segments_for_test(&segs).unwrap();
+    assert_eq!(counts(&bulk), counts(&one));
+    let edge_set = |s: &Sketch| -> Vec<[[i64; 2]; 2]> {
+        let q = |p: Point3| [(p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64];
+        let mut e: Vec<[[i64; 2]; 2]> = s
+            .edges()
+            .values()
+            .map(|ed| {
+                let mut pair = [
+                    q(s.vertices()[ed.from].position),
+                    q(s.vertices()[ed.to].position),
+                ];
+                pair.sort_unstable();
+                pair
+            })
+            .collect();
+        e.sort_unstable();
+        e
+    };
+    assert_eq!(edge_set(&bulk), edge_set(&one));
+    let rings = |s: &Sketch| -> Vec<Vec<[i64; 2]>> {
+        let mut r: Vec<Vec<[i64; 2]>> = s
+            .regions()
+            .values()
+            .map(|r| {
+                let mut ring: Vec<[i64; 2]> = r
+                    .outer
+                    .iter()
+                    .map(|&v| {
+                        let p = s.vertices()[v].position;
+                        [(p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64]
+                    })
+                    .collect();
+                ring.sort_unstable();
+                ring
+            })
+            .collect();
+        r.sort();
+        r
+    };
+    assert_eq!(rings(&bulk), rings(&one));
+    assert_eq!(bulk.islands().len(), one.islands().len());
+    // Into a sketch that already has drawing, the same holds.
+    let mut one2 = xy_sketch();
+    one2.add_segment(pt(0.5, 0.5), pt(5.5, 0.5)).unwrap();
+    let mut bulk2 = one2.clone();
+    for &(a, b) in &segs {
+        one2.add_segment(a, b).unwrap();
+    }
+    bulk2.add_segments_for_test(&segs).unwrap();
+    assert_eq!(edge_set(&bulk2), edge_set(&one2));
+    assert_eq!(rings(&bulk2), rings(&one2));
+}
+
+/// Segments added at once each on its own curve build what adding them
+/// one by one inside each curve's bracket builds: every edge on the same
+/// curve, a circle crossing lines and another circle, an arc drawn over a
+/// line already there taking that line into its curve, and plain lines
+/// outside every curve.
+#[test]
+fn segments_added_at_once_on_curves_build_what_one_by_one_builds() {
+    let polygon = |cx: f64, cy: f64, r: f64, n: usize, from: usize, to: usize| {
+        (from..to)
+            .map(|i| {
+                let a = |k: usize| std::f64::consts::TAU * k as f64 / n as f64;
+                (
+                    pt(cx + r * a(i).cos(), cy + r * a(i).sin()),
+                    pt(cx + r * a(i + 1).cos(), cy + r * a(i + 1).sin()),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let plain = vec![
+        (pt(-3.0, 0.0), pt(3.0, 0.0)),
+        (pt(0.0, -3.0), pt(0.0, 3.0)),
+        (pt(1.0, 0.0), pt(1.5, 0.5)),
+    ];
+    // An "arc" of two facets whose first facet retraces part of the x axis.
+    let arc_over_line = vec![
+        (pt(-2.0, 0.0), pt(-1.0, 0.0)),
+        (pt(-1.0, 0.0), pt(-0.5, 0.8)),
+    ];
+    let curves = vec![
+        polygon(0.0, 0.0, 2.0, 24, 0, 24),
+        polygon(1.5, 1.0, 1.0, 16, 0, 16),
+        polygon(-1.0, -1.0, 0.7, 12, 0, 5),
+        arc_over_line,
+    ];
+    let mut one = xy_sketch();
+    for &(a, b) in &plain {
+        one.add_segment(a, b).unwrap();
+    }
+    for c in &curves {
+        one.begin_curve();
+        for &(a, b) in c {
+            one.add_segment(a, b).unwrap();
+        }
+        one.end_curve();
+    }
+    let mut bulk = xy_sketch();
+    let mut segs: Vec<(Point3, Point3, Option<kernel::SketchCurveId>)> =
+        plain.iter().map(|&(a, b)| (a, b, None)).collect();
+    for c in &curves {
+        let id = bulk.begin_curve();
+        bulk.end_curve();
+        segs.extend(c.iter().map(|&(a, b)| (a, b, Some(id))));
+    }
+    bulk.add_segments_on_curves_for_test(&segs).unwrap();
+    assert_eq!(counts(&bulk), counts(&one));
+    let edge_set = |s: &Sketch| {
+        let q = |p: Point3| [(p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64];
+        let mut e: Vec<([[i64; 2]; 2], Option<kernel::SketchCurveId>)> = s
+            .edges()
+            .values()
+            .map(|ed| {
+                let mut pair = [
+                    q(s.vertices()[ed.from].position),
+                    q(s.vertices()[ed.to].position),
+                ];
+                pair.sort_unstable();
+                (pair, ed.curve)
+            })
+            .collect();
+        e.sort_unstable_by_key(|a| a.0);
+        e
+    };
+    assert_eq!(
+        edge_set(&bulk),
+        edge_set(&one),
+        "the same edges on the same curves"
+    );
+    let adopted = edge_set(&one)
+        .iter()
+        .filter(|(p, c)| *p == [[-2_000_000, 0], [-1_000_000, 0]] && c.is_some())
+        .count();
+    assert_eq!(adopted, 1, "the arc took the line it was drawn over");
+    assert_eq!(bulk.regions().len(), one.regions().len());
+    assert_eq!(bulk.islands().len(), one.islands().len());
+}
+
+/// A segment the sticky rules refuse stops the bulk add where it is, with
+/// the refusal add_segment gives, the segments before it in place.
+#[test]
+fn a_segment_at_infinity_is_refused_before_the_bulk_add_starts() {
+    let mut s = xy_sketch();
+    let err = s
+        .add_segments_for_test(&[
+            (pt(0.0, 0.0), pt(1.0, 0.0)),
+            (pt(0.0, 0.0), pt(f64::INFINITY, 0.0)),
+        ])
+        .unwrap_err();
+    assert_eq!(err, SketchError::PointOffPlane { which: 1 });
+    assert_eq!(counts(&s), (0, 0, 0), "refused before anything was drawn");
+    // Finite coordinates whose span overflows still finish.
+    let far = f64::MAX / 2.0;
+    let segs = [(pt(-far, 0.0), pt(far, 0.0)), (pt(0.0, 1.0), pt(0.0, 2.0))];
+    let mut all = xy_sketch();
+    let at_once = all.add_segments_for_test(&segs);
+    let mut one = xy_sketch();
+    let mut one_by_one = Ok(());
+    for &(a, b) in &segs {
+        if let Err(e) = one.add_segment(a, b) {
+            one_by_one = Err(e);
+            break;
+        }
+    }
+    assert_eq!(at_once, one_by_one);
+    assert_eq!(counts(&all), counts(&one));
+}
+
+/// A segment added at once that runs along an edge the same insertion
+/// splits retraces the fragment instead of doubling it, as adding it on
+/// its own does.
+#[test]
+fn a_bulk_segment_along_a_split_edge_retraces_the_fragment() {
+    // Beyond one end: P-Q then M-R with M on PQ and R past Q.
+    let mut one = xy_sketch();
+    one.add_segment(pt(0.0, 0.0), pt(2.0, 0.0)).unwrap();
+    one.add_segment(pt(1.0, 0.0), pt(3.0, 0.0)).unwrap();
+    let mut all = xy_sketch();
+    all.add_segments_for_test(&[(pt(0.0, 0.0), pt(2.0, 0.0)), (pt(1.0, 0.0), pt(3.0, 0.0))])
+        .unwrap();
+    assert_eq!(counts(&all), counts(&one));
+    assert_eq!(counts(&all), (4, 3, 0));
+    // Inside: P-Q then A-B strictly within it.
+    let mut all = xy_sketch();
+    all.add_segments_for_test(&[(pt(0.0, 0.0), pt(4.0, 0.0)), (pt(1.0, 0.0), pt(3.0, 0.0))])
+        .unwrap();
+    assert_eq!(counts(&all), (4, 3, 0));
+}
+
+#[test]
+fn a_refused_segment_stops_the_bulk_add_with_its_refusal() {
+    let mut s = xy_sketch();
+    let err = s
+        .add_segments_for_test(&[
+            (pt(0.0, 0.0), pt(1.0, 0.0)),
+            (pt(0.0, 0.0), Point3::new(1.0, 1.0, 5.0)),
+            (pt(2.0, 0.0), pt(3.0, 0.0)),
+        ])
+        .unwrap_err();
+    assert_eq!(err, SketchError::PointOffPlane { which: 1 });
+    assert_eq!(counts(&s), (2, 1, 0));
+}

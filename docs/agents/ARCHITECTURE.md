@@ -260,6 +260,18 @@ all inside the same undo step (`Document::complete_change` adds owned
 sketches to a change). The file records an owned sketch's owner as
 `owner_object` (HEW_FILE_FORMAT.md 4.6, v17).
 
+Imports are the one source of open Objects, and many of them are
+**surfaces**: a single sheet SketchUp let someone draw on purpose (a pane
+of glass, a sign, terrain). Model Health (`kernel::health`) reports that as
+a *verdict* — `flat_sheet` or `bent_sheet` beside `cappable`, `holes`,
+`mixed` and `non_manifold` — derived from the open boundary every time it
+is asked, never stored as a kind of Object. A surface is still an open
+Object to every operation; the verdict only keeps the UI from presenting it
+as broken, and the one flag a person can set (`hew.health` / `surface` in
+the Object's attributes) records that they accepted it as a surface. Native
+drawing still never makes one: a flat shape stays a Sketch until it is
+extruded.
+
 A Sketch is the larval form of a solid: extruding a region makes the
 drawn profile BECOME the solid's base face, so the geometry that bounded
 it leaves the sketch — really deleted, not hidden. Exactly the edges no
@@ -348,7 +360,22 @@ Guides are persisted construction geometry — offset lines, angular lines,
 and points — distinct from both Sketches and solid Objects. They carry no
 fill and no watertightness, never extrude, and exist purely as durable
 reference geometry and inference snap targets, created by measuring and
-angle tools and cleared explicitly.
+angle tools and cleared explicitly. A guide carries tags like a node: one
+with a hidden tag stays in the document but is neither drawn nor snapped
+to, so a Scene's hidden tags hide guides as they hide drawing (a `.skp`
+guide opens on its layer's tag). A guide line has a stretch: the whole
+line for one Hew draws, or a ray or a segment where a `.skp` file holds
+one (SketchUp's Tape Measure makes both), and only that stretch is drawn,
+snapped to, or crossed for an intersection snap.
+
+A Sketch's closed loop normally has a face: the region that is filled,
+picked and extruded. A loop can also be edges alone (`faceless`), which is
+what SketchUp has where a face was erased or edges alone were drawn: a
+wire-frame component, a renderer's light rig. Such a loop is not filled,
+picked or extruded, and it stays a loop with no face while it is moved,
+copied, split by a line ending on one of its edges, or merged by erasing
+an edge. Drawing over one of its edges gives it a face, as in SketchUp,
+and a loop a drawing step closes always has one.
 
 ### 2.10 Operations that preserve watertightness by construction
 
@@ -373,6 +400,9 @@ is designed so that watertightness can never be broken as a side effect:
   faces back into one, which leaves the shell closed by construction, so
   the kernel accepts exactly that and still refuses any merge across
   non-coplanar faces.
+  Model Health's `delete_faces` removes faces from an **open** Object only
+  (an import's stray sheet, an importer's partition sheet); a solid refuses
+  it with `ObjectIsSolid`, the same stance.
 
 ### 2.11 The session model: editing containers with the unmodified tool set
 
@@ -474,16 +504,17 @@ the session had already been closed, without interrupting the edit.
 | `crates/kernel` | Half-edge mesh, Document tree (Sketch / Object / Group / Component / Guide), watertightness tracking, booleans, undo, native-format serialization | nothing UI-, I/O-, or network-facing |
 | `crates/inference` | Snapping/inference engine: endpoint, midpoint, on-edge, on-face, axis, parallel, perpendicular queries over a spatial index | `kernel` |
 | `crates/tessellate` | Kernel topology → render buffers | `kernel` |
-| `crates/mesh-heal` | Shared foreign-mesh healing pipeline (weld, dedup, T-junction stitching, orientation, coplanar merge) used by every importer | `kernel` |
+| `crates/mesh-heal` | Shared foreign-mesh healing pipeline (weld, dedup, T-junction stitching, orientation, coplanar merge — skipped for `.skp`, whose faces are already the drawn polygons) used by every importer | `kernel` |
 | `crates/mesh-export` | STL, 3MF, glTF/GLB, and USDZ writers for `hew.doc.export`, shared by every host that implements it | `kernel`, `tessellate` |
 | `crates/dae-import` | COLLADA (`.dae`) → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/gltf-import` | glTF/GLB → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |
+| `crates/skp-export` | Document → SketchUp `.skp` (2026 container or 2017 format) on OpenSKP's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `openskp` |
 | `crates/stl-import` | STL (binary + ASCII, hand-written parser) → Objects | `kernel`, `mesh-heal` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
-| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `stl-import` |
+| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import` |
 | `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/`, `library` |
@@ -561,7 +592,12 @@ teaching the kernel about any external format:
   [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader
   maintained as its own project and consumed as an ordinary versioned
   dependency. It shares the same `mesh-heal` pipeline as every other
-  importer.
+  importer, and reports where each imported node came from in the file.
+- **`skp-export`** writes `.skp` on OpenSKP's writers, in the mapping
+  `skp-import` reads back as the same document. Saving back over an
+  opened `.skp` starts from the file's own model and reuses its records
+  for everything the document did not change, so a file can go Hew →
+  SketchUp → Hew without losing what either side does not model.
 - **`gltf-import`** reads glTF/GLB through the same importer shape and the
   same shared healing pipeline.
 - **`stl-import`** reads STL (binary and ASCII, auto-detected; a
@@ -763,6 +799,14 @@ subtract, slice, push-through); an Object that ends up leaky (most often
 from import, where the source geometry may genuinely have gaps) is flagged
 as such rather than presented as solid.
 
+The UI does not show the bare flag. An open Object is shown by its Model
+Health verdict (2.6): a surface reads as a surface, with its own Outliner
+icon. The status badge and the import report state how many Objects are
+not solid without treating it as a fault (open shapes are normal in
+imported models); the Model Health window lists every open Object
+(component members once) with its open rims, and Make Solid closes the
+ones a person needs as solids.
+
 ### 5.2 The topology validator
 
 A validator checks manifold edges, closed face loops, consistent
@@ -783,6 +827,14 @@ where foreign mesh data is normalized — welded, de-duplicated, re-oriented,
 and stitched — before it is ever handed to the kernel's own construction
 path; that healing is explicitly bounded to the point where external data
 enters the system, and native kernel operations are never subject to it.
+
+Repairing an import after it lands is a separate, explicit thing a person
+(or an API client) asks for, never something an import or a diagnosis does
+on its own: `cap_rims` closes flat openings with faces, `thicken_sheet`
+pulls a flat surface into a solid, `delete_faces` removes faces from an
+open Object, and marking a surface sets one attribute. Each is an ordinary
+undoable operation that commits only a result the validator accepts and
+refuses typed otherwise (`kernel::repair`).
 
 ### 5.4 Tolerance policy
 

@@ -201,11 +201,11 @@ A model with four "Object N" rows is worth tidying.
 
 Save the Hew document with `⌘S` / `Ctrl+S` (or **File ▸ Save**). The native format is **`.hew`** — an open container that keeps geometry, names, groups, materials, and tags together, and saves byte-for-byte identically each time. Hew also autosaves a recovery snapshot every 12 seconds, so a crash won't cost you the session ([Files, saving, and recovery](/learn/files-and-saving/)).
 
-To print, choose **File ▸ Export…**, pick **STL binary (.stl)**, and click Export.
+To print, choose **File ▸ Export…**, pick **STL binary (.stl)** in the dialog's Format list, and save. (In the browser, Hew asks for the format in its own dialog first.)
 
-![The Export dialog with STL binary selected](/docs/export-dialog.webp)
+![The browser's Export dialog with STL binary selected](/docs/export-dialog.webp)
 
-Because every Object is watertight by construction, the STL is manifold — no gaps, flipped normals, or open shells for your slicer to repair. If anything in the model *weren't* solid, Hew would warn you and name it rather than hand you a broken file. The mesh exports in millimeters, ready for any slicer.
+Because every Object is watertight by construction, the STL is manifold — no gaps, flipped normals, or open shells for your slicer to repair. If anything in the model *weren't* solid (an imported mesh with a gap, say), Hew would warn you and name it rather than hand you a broken file. The mesh exports in millimeters, ready for any slicer.
 
 ## Where to go next
 

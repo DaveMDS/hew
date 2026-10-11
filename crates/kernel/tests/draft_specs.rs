@@ -2701,3 +2701,203 @@ fn a_shape_moved_across_the_edge_and_back_is_whole_again() {
     let pu = doc.plane_units(top(), None, &[o]).unwrap();
     assert_eq!(pu.units[0].edges.len(), 2, "a vertex the user placed stays");
 }
+
+/// A loop with no face (sketch rule 6) stays one through the drafting
+/// engine: an edit on its plane that leaves it alone rebuilds the sketch
+/// without giving it a face, the plane's units list it as not
+/// extrudable, and drawing over one of its edges in a draft gives it its
+/// face as drawing anywhere else does.
+#[test]
+fn a_faceless_loop_survives_a_draft_edit_until_an_edge_is_drawn_over() {
+    let g = |x: f64, y: f64| p(x, y, 0.0);
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground_plane());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            (g(0.0, 0.0), g(2.0, 0.0)),
+            (g(2.0, 0.0), g(2.0, 2.0)),
+            (g(2.0, 2.0), g(0.0, 2.0)),
+            (g(0.0, 2.0), g(0.0, 0.0)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+        sk.make_regions_faceless();
+    }
+    assert!(doc.extrudable_regions(s).unwrap().is_empty());
+    let units = doc.plane_units(ground_plane(), None, &[]).unwrap();
+    assert_eq!(units.regions.len(), 1);
+    assert!(units.regions[0].extrude.is_none(), "nothing to extrude");
+
+    // A stub from a corner: the loop is rebuilt, still with no face.
+    doc.draft(ground_plane(), None, &[], "Line", |w| {
+        w.add_segment(g(2.0, 2.0), g(4.0, 4.0)).map(|_| ())
+    })
+    .unwrap();
+    let live: Vec<_> = doc.sketch_ids();
+    assert!(
+        live.iter()
+            .all(|&id| doc.extrudable_regions(id).unwrap().is_empty()),
+        "a stub closes no loop"
+    );
+    // A line ending on an edge splits it without closing anything either.
+    doc.draft(ground_plane(), None, &[], "Line", |w| {
+        w.add_segment(g(1.0, 0.0), g(1.0, -1.0)).map(|_| ())
+    })
+    .unwrap();
+    assert!(
+        doc.sketch_ids()
+            .iter()
+            .all(|&id| doc.extrudable_regions(id).unwrap().is_empty())
+    );
+    // Drawn over, the loop has its face.
+    doc.draft(ground_plane(), None, &[], "Line", |w| {
+        w.add_segment(g(0.0, 0.0), g(0.0, 2.0)).map(|_| ())
+    })
+    .unwrap();
+    assert_eq!(
+        doc.sketch_ids()
+            .iter()
+            .map(|&id| doc.extrudable_regions(id).unwrap().len())
+            .sum::<usize>(),
+        1
+    );
+}
+
+/// The whole frame's drawing listed in one pass is the same listing as
+/// asking plane by plane: the same planes, each with the same units and
+/// regions, objects with a face on a plane taking part, excluded ones not.
+#[test]
+fn the_free_planes_listed_at_once_match_the_listing_plane_by_plane() {
+    let (mut doc, b) = boxdoc();
+    // Drawing on the ground beside the box, on the box's top plane, and on
+    // a plane of its own.
+    let ground = doc.add_sketch(ground_plane());
+    {
+        let sk = doc.sketch_mut(ground).unwrap();
+        sk.add_segment(p(11.0, 0.0, 0.0), p(12.0, 0.0, 0.0))
+            .unwrap();
+        sk.add_segment(p(12.0, 0.0, 0.0), p(12.0, 1.0, 0.0))
+            .unwrap();
+    }
+    let on_top = doc.add_sketch(top());
+    {
+        let sk = doc.sketch_mut(on_top).unwrap();
+        for (a, c) in [
+            (p(0.2, 0.2, 3.0), p(0.6, 0.2, 3.0)),
+            (p(0.6, 0.2, 3.0), p(0.6, 0.6, 3.0)),
+            (p(0.6, 0.6, 3.0), p(0.2, 0.6, 3.0)),
+            (p(0.2, 0.6, 3.0), p(0.2, 0.2, 3.0)),
+        ] {
+            sk.add_segment(a, c).unwrap();
+        }
+    }
+    let tilted = Plane::from_point_normal(p(0.0, 0.0, 5.0), Vec3::new(0.0, 1.0, 1.0)).unwrap();
+    let apart = doc.add_sketch(tilted);
+    doc.sketch_mut(apart)
+        .unwrap()
+        .add_segment(p(0.0, 0.0, 5.0), p(1.0, 0.0, 5.0))
+        .unwrap();
+
+    let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
+    assert_eq!(all.len(), 3, "three planes carry free drawing");
+    for (plane, units) in &all {
+        let objects = doc.drawable_objects_on_plane(*plane, None);
+        let one = doc.plane_units(*plane, None, &objects).unwrap();
+        assert_eq!(units.units.len(), one.units.len(), "units on {plane:?}");
+        assert_eq!(
+            units.units.iter().map(|u| u.key).collect::<Vec<_>>(),
+            one.units.iter().map(|u| u.key).collect::<Vec<_>>()
+        );
+        assert_eq!(units.regions.len(), one.regions.len());
+        for (r1, r2) in units.regions.iter().zip(&one.regions) {
+            assert_eq!(r1.key, r2.key);
+            assert_eq!(r1.over.map(|(o, _)| o), r2.over.map(|(o, _)| o));
+        }
+    }
+    // The box takes part on its top plane: the square drawn there is a
+    // region over its face.
+    let top_units = all
+        .iter()
+        .find(|(pl, _)| {
+            (pl.normal() - up()).length() < 1e-9
+                && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
+        })
+        .map(|(_, u)| u)
+        .expect("the top plane");
+    assert!(
+        top_units
+            .regions
+            .iter()
+            .any(|r| r.over.is_some_and(|(o, _)| o == b))
+    );
+    // Excluded (hidden on screen), the box takes no part.
+    let without = doc.free_plane_units(None, &std::collections::BTreeSet::from([b]));
+    let top_without = without
+        .iter()
+        .find(|(pl, _)| {
+            (pl.normal() - up()).length() < 1e-9
+                && pl.signed_distance(p(0.0, 0.0, 3.0)).abs() < 1e-9
+        })
+        .map(|(_, u)| u)
+        .expect("the top plane");
+    assert!(top_without.regions.iter().all(|r| r.over.is_none()));
+}
+
+/// A face plane and a sketch plane that coincide within tolerance can
+/// round to neighboring buckets of the one-pass listing; the object still
+/// takes part, exactly as the plane-by-plane listing has it.
+#[test]
+fn the_one_pass_listing_finds_an_object_across_a_bucket_edge() {
+    let mut doc = Document::new();
+    let g = doc.add_sketch(ground_plane());
+    {
+        let sk = doc.sketch_mut(g).unwrap();
+        for (a, b) in [
+            (p(0., 0., 0.), p(1., 0., 0.)),
+            (p(1., 0., 0.), p(1., 1., 0.)),
+            (p(1., 1., 0.), p(0., 1., 0.)),
+            (p(0., 1., 0.), p(0., 0., 0.)),
+        ] {
+            sk.add_segment(a, b).unwrap();
+        }
+    }
+    let region = doc.extrudable_regions(g).unwrap()[0];
+    // A height a hair below a half-micrometer boundary; the drawing's plane
+    // a hair above it, within the plane tolerance of the box's top.
+    let height = 0.00158749999995;
+    let (b, _) = doc.extrude_region(g, region, height).unwrap();
+    let plane = Plane::from_point_normal(p(0.0, 0.0, 0.0015875000001), up()).unwrap();
+    let s = doc.add_sketch(plane);
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        let z = 0.0015875000001;
+        for (a, c) in [
+            (p(0.2, 0.2, z), p(0.6, 0.2, z)),
+            (p(0.6, 0.2, z), p(0.6, 0.6, z)),
+            (p(0.6, 0.6, z), p(0.2, 0.6, z)),
+            (p(0.2, 0.6, z), p(0.2, 0.2, z)),
+        ] {
+            sk.add_segment(a, c).unwrap();
+        }
+    }
+    let all = doc.free_plane_units(None, &std::collections::BTreeSet::new());
+    let (listed_plane, units) = all
+        .iter()
+        .find(|(pl, _)| pl.signed_distance(p(0.0, 0.0, height)).abs() < 1e-6)
+        .expect("the top plane");
+    let objects = doc.drawable_objects_on_plane(*listed_plane, None);
+    assert_eq!(objects, vec![b], "the box has a face on the plane");
+    let one = doc.plane_units(*listed_plane, None, &objects).unwrap();
+    assert_eq!(
+        units.regions.iter().filter(|r| r.over.is_some()).count(),
+        one.regions.iter().filter(|r| r.over.is_some()).count(),
+        "the square over the box's top is a region over its face either way"
+    );
+    assert!(
+        units
+            .regions
+            .iter()
+            .any(|r| r.over.is_some_and(|(o, _)| o == b))
+    );
+}

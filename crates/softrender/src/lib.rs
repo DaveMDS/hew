@@ -69,13 +69,7 @@ impl Camera {
                     fov_y_deg: state.fov_deg,
                 },
                 kernel::CameraProjection::Parallel => Projection::Parallel {
-                    // The saved state keeps fov even under parallel; derive
-                    // a half-height from the eye distance and that fov so
-                    // the framing matches what the app showed.
-                    half_height: {
-                        let d = (state.target - state.eye).length();
-                        d * (state.fov_deg.to_radians() * 0.5).tan()
-                    },
+                    half_height: state.parallel_height / 2.0,
                 },
             },
         }
@@ -430,7 +424,7 @@ pub fn render(
             .unwrap_or(Vec3::new(0.0, -1.0, 0.0));
         let perspective = matches!(frame.proj, Projection::Perspective { .. });
 
-        for tri in mesh.indices.chunks_exact(3) {
+        for tri in mesh.front_triangles() {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             let clipped = frame.clip_triangle([cams[a], cams[b], cams[c]]);
             if clipped.is_empty() {
@@ -727,10 +721,12 @@ pub fn document_items_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> V
         // Nested definitions expand recursively: every leaf placement
         // composes its def-local pose with this instance's own — still
         // tagged with the OUTERMOST instance's sid.
-        for (member, local) in doc.expanded_def_placements(def) {
+        let shown = doc.expanded_def_placements_shown(def);
+        for ((member, local), shown) in doc.expanded_def_placements(def).into_iter().zip(shown) {
             // A user-hidden definition member is hidden in every instance
-            // (the per-node flag's documented semantics).
-            if hidden.objects.contains(&member) {
+            // (the per-node flag's documented semantics), and so is one
+            // under a hidden member or tag.
+            if !shown || hidden.objects.contains(&member) {
                 continue;
             }
             let Some(obj) = doc.object(member) else {
@@ -790,8 +786,9 @@ pub fn document_bbox_hiding(doc: &kernel::Document, hidden: &HiddenLeaves) -> (P
         else {
             continue;
         };
-        for (member, local) in doc.expanded_def_placements(def) {
-            if hidden.objects.contains(&member) {
+        let shown = doc.expanded_def_placements_shown(def);
+        for ((member, local), shown) in doc.expanded_def_placements(def).into_iter().zip(shown) {
+            if !shown || hidden.objects.contains(&member) {
                 continue;
             }
             let composed = local.then(&pose);
@@ -1340,6 +1337,7 @@ mod perspective_tests {
             uvs: vec![0.0; 6],
             groups: vec![tessellate::MaterialGroup {
                 material: None,
+                back: false,
                 start: 0,
                 count: 3,
             }],

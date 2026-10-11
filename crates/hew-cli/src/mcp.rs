@@ -52,14 +52,14 @@ impl JsonRpcErr {
 
 /// The two ways an `McpServer` reaches a document: embedded (its own
 /// in-process kernel + document) or live (forwarded to a running desktop
-/// instance over [`crate::live`]). `doc` is boxed so the `Live` variant —
-/// which is comparatively tiny — doesn't pay for the `Document`-sized
-/// space every `Backend` value reserves.
+/// instance over [`crate::live`]). `doc` and `host` are boxed so the `Live`
+/// variant — which is comparatively tiny — doesn't pay for the space every
+/// `Backend` value reserves.
 enum Backend {
     Embedded {
         conn: Connection,
         doc: Box<Document>,
-        host: CliHost,
+        host: Box<CliHost>,
     },
     Live(Box<live::LiveSession>),
 }
@@ -231,7 +231,7 @@ impl McpServer {
             backend: Backend::Embedded {
                 conn,
                 doc: Box::new(doc),
-                host,
+                host: Box::new(host),
             },
             registry: Registry::protocol_1(),
             profile,
@@ -447,7 +447,7 @@ impl McpServer {
             document,
         };
         let outcome = match &mut self.backend {
-            Backend::Embedded { conn, doc, host } => conn.dispatch(doc, host, request),
+            Backend::Embedded { conn, doc, host } => conn.dispatch(doc, &mut **host, request),
             Backend::Live(session) => session.dispatch(request).map_err(|e| JsonRpcErr {
                 code: -32603,
                 message: format!("live transport error: {e}"),

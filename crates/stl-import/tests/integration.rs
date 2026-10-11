@@ -675,9 +675,7 @@ fn near_degenerate_sliver_does_not_skip_the_whole_object() {
     // (the sliver only shared a vertex, so no shell opened), the import warns
     // that sliver geometry was removed.
     assert!(
-        out.warnings
-            .iter()
-            .any(|w| w.contains("degenerate sliver face")),
+        out.warnings.iter().any(|w| w.contains("too thin to build")),
         "removing a kernel-degenerate face must be reported in the import warnings: {:?}",
         out.warnings
     );
@@ -761,7 +759,7 @@ fn fully_degenerate_isolated_shell_still_reports_its_drop() {
     assert!(
         out.warnings
             .iter()
-            .any(|w| w.contains("1 degenerate sliver face")),
+            .any(|w| w.contains("1 face too thin to build was left out")),
         "a fully-degenerate shell must still report its dropped face: {:?}",
         out.warnings
     );
@@ -811,7 +809,7 @@ fn non_manifold_part_decomposes_and_no_piece_is_dropped() {
     };
     let (scene, warnings) = build_scene(raw, 1.0, None);
     assert!(
-        warnings.iter().any(|w| w.contains("non-manifold")),
+        warnings.iter().any(|w| w.contains("separate pieces")),
         "the split must be reported, got {warnings:?}"
     );
 

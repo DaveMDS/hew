@@ -22,6 +22,7 @@
 //! the demo path.
 
 mod draft_api;
+mod health;
 mod live;
 mod log;
 mod recording;
@@ -251,6 +252,7 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Op(KernelOpError::PushPull(inner)) => api_err(inner, &e),
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
         DocumentError::InvalidAxesFrame(inner) => api_err(inner, &e),
+        DocumentError::Repair(inner) => api_err(inner, &e),
         // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
         // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
@@ -288,12 +290,97 @@ fn records_itself(method: &str, frame: &str) -> bool {
 /// `import_gltf`, and `import_skp`; `warnings` carries each importer's
 /// conversion notes (non-manifold split decompositions, plus `.skp` parser
 /// recovery notes).
+/// A `.skp` open under way (see [`Scene::open_skp_begin`]).
+struct PendingOpen {
+    bytes: Vec<u8>,
+    container: String,
+    stage: OpenStage,
+    /// Set by the begin and cleared by the first step: the one load the
+    /// caller makes between the two (the blank document the file opens
+    /// into) keeps the open; any other load ends it (see `load_core`).
+    awaits_load: bool,
+}
+
+enum OpenStage {
+    /// The file's placements are being read into shapes.
+    Shapes(skp_import::ImportJob),
+    /// The document is being built from the shapes.
+    Objects {
+        job: kernel::IngestJob,
+        provenance: skp_import::Provenance,
+        warnings: Vec<String>,
+    },
+    /// The objects are built; the next step finishes the ingest (health,
+    /// guides, drawing, annotations, scenes).
+    Finishing {
+        job: kernel::IngestJob,
+        provenance: skp_import::Provenance,
+        warnings: Vec<String>,
+    },
+    /// The document holds the file; the next step keeps the file as the
+    /// save-back source and reconciles the scene.
+    Source {
+        report: kernel::ImportReport,
+        change: DocChange,
+        provenance: skp_import::Provenance,
+        warnings: Vec<String>,
+    },
+    /// Taken apart by the step that moved on.
+    Finished,
+}
+
+impl PendingOpen {
+    /// `{ phase, done, total, shapes }` for the app's progress display.
+    fn progress(&self) -> JsValue {
+        let (phase, done, total, shapes) = match &self.stage {
+            OpenStage::Shapes(job) => {
+                let (done, total) = job.progress();
+                ("shapes", done, total, job.shapes())
+            }
+            OpenStage::Objects { job, .. } => {
+                let p = job.progress();
+                ("objects", p.done, p.total, 0)
+            }
+            OpenStage::Finishing { .. } => ("finishing", 0, 1, 0),
+            OpenStage::Source { .. } => ("source", 0, 1, 0),
+            OpenStage::Finished => ("done", 0, 0, 0),
+        };
+        let o = JsObject::new();
+        Reflect::set(&o, &JsValue::from_str("phase"), &JsValue::from_str(phase)).unwrap();
+        Reflect::set(
+            &o,
+            &JsValue::from_str("done"),
+            &JsValue::from_f64(done as f64),
+        )
+        .unwrap();
+        Reflect::set(
+            &o,
+            &JsValue::from_str("total"),
+            &JsValue::from_f64(total as f64),
+        )
+        .unwrap();
+        Reflect::set(
+            &o,
+            &JsValue::from_str("shapes"),
+            &JsValue::from_f64(shapes as f64),
+        )
+        .unwrap();
+        o.into()
+    }
+}
+
 fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> JsValue {
     let js_report = JsObject::new();
     Reflect::set(
         &js_report,
         &JsValue::from_str("objects_created"),
         &JsValue::from_f64(report.objects_created as f64),
+    )
+    .unwrap();
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("lines_added"),
+        &JsValue::from_f64(report.lines_added as f64),
     )
     .unwrap();
     Reflect::set(
@@ -345,7 +432,76 @@ fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> Js
     }
     Reflect::set(&js_report, &JsValue::from_str("warnings"), &warnings_arr).unwrap();
 
+    // The created objects by kind (solids / surfaces / open), as the import
+    // report and the Model Health panel tell them apart.
+    let health = js_sys::JSON::parse(&health::counts_json(&report.health).to_string())
+        .expect("serde_json output is JSON");
+    Reflect::set(&js_report, &JsValue::from_str("health"), &health).unwrap();
+
     js_report.into()
+}
+
+/// The app's length format name as the units a `.skp` opens in.
+fn skp_units(name: Option<&str>) -> Option<skp_export::DisplayUnits> {
+    name.and_then(skp_export::DisplayUnits::from_name)
+}
+
+fn skp_target(target: &str) -> Result<skp_export::Target, JsError> {
+    match target {
+        "skp2026" => Ok(skp_export::Target::Skp2026),
+        "skp2017" => Ok(skp_export::Target::Skp2017),
+        other => Err(JsError::new(&format!("SKP: unknown target '{other}'"))),
+    }
+}
+
+/// A written `.skp` as the plain JS object [`Scene::save_skp`] and
+/// [`Scene::export_skp`] return.
+fn skp_export_to_js(out: &skp_export::Export) -> JsValue {
+    let js = JsObject::new();
+    let strings = |v: &[String]| {
+        let arr = js_sys::Array::new();
+        for s in v {
+            arr.push(&JsValue::from_str(s));
+        }
+        arr
+    };
+    Reflect::set(
+        &js,
+        &JsValue::from_str("bytes"),
+        &js_sys::Uint8Array::from(out.bytes.as_slice()),
+    )
+    .unwrap();
+    Reflect::set(
+        &js,
+        &JsValue::from_str("simplified"),
+        &strings(&out.simplified),
+    )
+    .unwrap();
+    Reflect::set(
+        &js,
+        &JsValue::from_str("writer_notes"),
+        &strings(&out.writer_notes),
+    )
+    .unwrap();
+    js.into()
+}
+
+/// The save time and seed a written `.skp` records: the browser's clock
+/// and entropy (the standard library has neither on wasm32-unknown-unknown),
+/// the system's in a native build (the crate's own unit tests).
+fn write_env() -> skp_export::WriteEnv {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let r = || (js_sys::Math::random() * 4_294_967_296.0) as u64;
+        skp_export::WriteEnv {
+            unix_time: (js_sys::Date::now() / 1000.0) as u32,
+            seed: (r() << 32) | r(),
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        skp_export::WriteEnv::system()
+    }
 }
 
 /// Serialize a kernel [`kernel::InsertReport`] to the plain JS object the
@@ -1092,7 +1248,8 @@ pub fn item_ghost_mesh(bytes: &[u8]) -> Result<GhostMeshJs, JsError> {
             let n = n.normalized().unwrap_or(kernel::Vec3::new(0.0, 0.0, 1.0));
             normals.extend_from_slice(&[n.x as f32, n.y as f32, n.z as f32]);
         }
-        indices.extend(m.indices.iter().map(|&ix| ix + base));
+        // The faces themselves: a painted back's copy would only double them.
+        indices.extend(m.front_triangles().flatten().map(|&ix| ix + base));
         for i in (0..m.edge_positions.len()).step_by(3) {
             let p = it.pose.apply_point(kernel::Point3::new(
                 m.edge_positions[i] as f64,
@@ -1213,6 +1370,13 @@ impl MeshJs {
     /// `group_material_ids`.
     pub fn group_counts(&self) -> Vec<u32> {
         self.mesh.groups.iter().map(|g| g.count).collect()
+    }
+
+    /// Whether each index-buffer group draws faces' painted backs (1) or
+    /// faces themselves (0), parallel to `group_material_ids`
+    /// ([`tessellate::MaterialGroup::back`]).
+    pub fn group_backs(&self) -> Vec<u8> {
+        self.mesh.groups.iter().map(|g| u8::from(g.back)).collect()
     }
 
     /// Line-segment endpoints (xyz pairs), one segment per unique **hard**
@@ -1780,6 +1944,12 @@ impl CameraStateJs {
         self.state.fov_deg
     }
 
+    /// The height the view spans at the target, meters: the parallel
+    /// frustum's height under `"parallel"` (see `kernel::CameraState`).
+    pub fn parallel_height(&self) -> f64 {
+        self.state.parallel_height
+    }
+
     pub fn eye_x(&self) -> f64 {
         self.state.eye.x
     }
@@ -2031,6 +2201,30 @@ pub struct Scene {
     next_draft_handle: u64,
     /// The open history bracket ([`Scene::history_bracket_open`]), if any.
     open_bracket: Option<kernel::DocTransaction>,
+    /// The objects the last import created (Model Health's "Last import"
+    /// scope); replaced by each import, kept across other edits.
+    last_import_objects: Vec<ObjectId>,
+    /// Model Health verdicts by object for [`Scene::health_summary_json`],
+    /// dropped for every object a change touches (`reconcile`) and all at
+    /// once when a document loads.
+    health_cache: std::collections::BTreeMap<ObjectId, kernel::health::Verdict>,
+    /// The app's display length format, as the live bridge last reported
+    /// it ([`Scene::set_display_units`]): what an API `.skp` export opens in.
+    api_display_units: Option<String>,
+    /// The `.skp` file this document was opened from or last saved as,
+    /// with where each node came from in it: the source a later `.skp`
+    /// save builds on, keeping what did not change and whatever the
+    /// document does not model as the file has it. Set by
+    /// [`Scene::open_skp`] and [`Scene::commit_skp_save`], cleared by
+    /// [`Scene::load`]; the app persists it with a recovery snapshot
+    /// through [`Scene::skp_source`] / [`Scene::set_skp_source`].
+    skp_source: Option<skp_export::SkpSource>,
+    /// The source a [`Scene::save_skp`] made, adopted by
+    /// [`Scene::commit_skp_save`] once the app has written the file.
+    pending_skp_source: Option<skp_export::SkpSource>,
+    /// A `.skp` open under way between [`Scene::open_skp_begin`] and the
+    /// [`Scene::open_skp_step`] that finishes it.
+    pending_open: Option<PendingOpen>,
 }
 
 impl Default for Scene {
@@ -2082,6 +2276,7 @@ impl Scene {
         // so a definition edit re-tessellates the shared geometry.
         for &id in &change.objects_touched {
             self.mesh_cache.remove(id);
+            self.health_cache.remove(&id);
             // A user-hidden object stays out of inference even when a mutation
             // touches it, so snap/pick never resurrect hidden candidates.
             if self.doc.is_world_object(id) && !self.hidden_objects.contains(&id) {
@@ -2121,11 +2316,13 @@ impl Scene {
                 self.register_sketch(sid);
             }
         }
-        // Guides: re-register if still live, else unregister.
+        // Guides: re-register if still live and shown, else unregister.
         // Guides have no session-only hidden-set (unlike objects/instances) —
-        // `Document::guide` already returns `None` for a hidden/deleted guide.
+        // `Document::guide` already returns `None` for a hidden/deleted
+        // guide, and one hidden through its tags (`Document::guide_shown`)
+        // must not snap either.
         for &gid in &change.guides_touched {
-            match self.doc.guide(gid) {
+            match self.doc.guide(gid).filter(|_| self.doc.guide_shown(gid)) {
                 Some(g) => self.inference.add_guide(gid, g),
                 None => self.inference.remove_guide(gid),
             }
@@ -2207,7 +2404,13 @@ impl Scene {
         // still drops the whole family at once). Deterministic expansion
         // order — placement order participates in candidate ranking
         // tie-breaks.
-        for (m, local) in self.doc.expanded_def_placements(def) {
+        // A member hidden in the definition (user-hidden, or on a hidden
+        // tag) is neither drawn nor snapped to.
+        let shown = self.doc.expanded_def_placements_shown(def);
+        for ((m, local), shown) in self.doc.expanded_def_placements(def).into_iter().zip(shown) {
+            if !shown {
+                continue;
+            }
             if !self.inference.has_def_member(m) {
                 let Some(object) = self.doc.object(m) else {
                     continue;
@@ -2338,6 +2541,7 @@ impl Scene {
             let faces: Vec<SketchRegionFace> = source
                 .regions()
                 .iter()
+                .filter(|(_, loops)| !loops.faceless)
                 .map(|(region, loops)| {
                     let point = |vid: &kernel::SketchVertexId| {
                         pose.apply_point(source.vertices()[*vid].position)
@@ -2361,7 +2565,8 @@ impl Scene {
 
     /// Builds inference face candidates for sketch `s`'s closed regions in
     /// world space — the outer boundary and every hole, on the sketch plane
-    /// (see [`inference::InferenceScene::add_sketch_faces`]). Region iteration
+    /// (see [`inference::InferenceScene::add_sketch_faces`]). A loop with no
+    /// face (`sketch.rs` rule 6) is no face to snap to. Region iteration
     /// is `SlotMap` slot order, which is deterministic (DEVELOPMENT.md §7), so
     /// the registered face order — and thus any OnFace tie-break — is
     /// reproducible.
@@ -2369,6 +2574,7 @@ impl Scene {
         let plane = s.plane();
         s.regions()
             .iter()
+            .filter(|(_, r)| !r.faceless)
             .map(|(rid, r)| {
                 let pos = |vid: &kernel::SketchVertexId| s.vertices()[*vid].position;
                 SketchRegionFace {
@@ -2457,6 +2663,12 @@ impl Scene {
             open_draft: None,
             open_bracket: None,
             next_draft_handle: 0,
+            last_import_objects: Vec::new(),
+            health_cache: std::collections::BTreeMap::new(),
+            api_display_units: None,
+            skp_source: None,
+            pending_skp_source: None,
+            pending_open: None,
         }
     }
 
@@ -2491,6 +2703,14 @@ impl Scene {
     /// connection ends; this just releases what `Scene` was holding for it.
     pub fn api_connection_close(&mut self, conn_id: u32) {
         self.api_connections.remove(&conn_id);
+    }
+
+    /// The app's display length format (`m`, `cm`, `mm`, `arch`,
+    /// `frac_in`, `dec_in`), which the live bridge reports before each
+    /// [`Scene::api_dispatch`]: an API `hew.doc.export` of a SketchUp file
+    /// opens in it unless the caller names units, as File > Export does.
+    pub fn set_display_units(&mut self, format: &str) {
+        self.api_display_units = Some(format.to_string());
     }
 
     /// Dispatches one newline-delimited JSON-RPC frame (docs/agents/HEW_API.md
@@ -2532,6 +2752,12 @@ impl Scene {
                 return Some(serde_json::to_string(&resp).expect("Response serializes"));
             }
         };
+        // An import over the API sets Model Health's "Last import" scope
+        // like one from the File menu: the objects it leaves behind that
+        // were not there before.
+        let import_before: Option<std::collections::BTreeSet<ObjectId>> =
+            records_itself(&request.method, frame)
+                .then(|| self.doc.live_object_ids().into_iter().collect());
         let Some(conn) = self.api_connections.get_mut(&conn_id) else {
             // Not a protocol case reachable by any well-behaved client —
             // an unknown conn_id is a Tauri-bridge bug, not a client
@@ -2558,7 +2784,10 @@ impl Scene {
             .registry()
             .get(&method)
             .is_some_and(|c| c.mutates_document);
-        let mut host = live::LiveHost::default();
+        let mut host = live::LiveHost {
+            display_units: self.api_display_units.clone(),
+            ..live::LiveHost::default()
+        };
         let outcome = conn.dispatch(&mut self.doc, &mut host, request);
         let api::DispatchOutcome::Reply(resp) = outcome else {
             // A dropped client-originated notification: no side effect,
@@ -2581,6 +2810,14 @@ impl Scene {
                 });
             }
             self.full_resync();
+            if let Some(before) = import_before {
+                self.last_import_objects = self
+                    .doc
+                    .live_object_ids()
+                    .into_iter()
+                    .filter(|o| !before.contains(o))
+                    .collect();
+            }
         }
         if resp.error.is_none() {
             // `hew.view.camera`/`zoom_extents`/`units` are NOT `mutates`
@@ -2652,6 +2889,7 @@ impl Scene {
     /// do not).
     fn full_resync(&mut self) {
         self.mesh_cache = SecondaryMap::new();
+        self.health_cache.clear();
         self.inference = InferenceScene::new();
         self.inference.set_axes_frame(self.doc.axes());
         for id in self.doc.visible_object_ids() {
@@ -2667,12 +2905,8 @@ impl Scene {
                 self.register_instance(iid);
             }
         }
-        for id in self.doc.guide_ids() {
-            if let Some(g) = self.doc.guide(id) {
-                self.inference.add_guide(id, g);
-            }
-        }
-        for sid in self.doc.sketch_ids() {
+        self.reregister_guides();
+        for sid in self.doc.visible_sketch_ids() {
             self.register_sketch(sid);
         }
         self.refresh_active_definition_inference();
@@ -2804,8 +3038,20 @@ impl Scene {
         }
     }
 
-    /// Handles of every sketch in the document, for rendering all of them.
+    /// Handles of every shown sketch in the document (one drawn in a
+    /// hidden group is not), for rendering, picking and snapping.
     pub fn sketch_ids(&self) -> Vec<u64> {
+        self.doc
+            .visible_sketch_ids()
+            .iter()
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
+    /// Handles of every live world sketch, shown or not (one drawn in a
+    /// hidden group included), in the document's order: what the Outliner
+    /// lists and numbers, so hiding a group does not renumber the rest.
+    pub fn all_sketch_ids(&self) -> Vec<u64> {
         self.doc
             .sketch_ids()
             .iter()
@@ -3453,7 +3699,11 @@ impl Scene {
             .doc
             .sketch(sid)
             .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
-        Ok(s.regions().keys().map(|r| r.data().as_ffi()).collect())
+        Ok(s.regions()
+            .iter()
+            .filter(|(_, r)| !r.faceless)
+            .map(|(r, _)| r.data().as_ffi())
+            .collect())
     }
 
     // --------------------------------------------------------------- solids
@@ -5027,6 +5277,23 @@ impl Scene {
             .collect()
     }
 
+    /// Whether each expanded placement is shown, 1 or 0 per entry,
+    /// parallel to [`Scene::instance_expanded_members`]: a placement is
+    /// hidden when a member on its path through the definition is
+    /// user-hidden or carries a hidden tag
+    /// ([`kernel::Document::expanded_def_placements_shown`]). The instance's
+    /// own hidden state is not counted.
+    pub fn instance_expanded_shown(&self, instance: u64) -> Vec<u8> {
+        let Some(def) = self.doc.instance_def(instance_id(instance)) else {
+            return Vec::new();
+        };
+        self.doc
+            .expanded_def_placements_shown(def)
+            .into_iter()
+            .map(u8::from)
+            .collect()
+    }
+
     /// Whether a definition has NESTED members (member groups or member
     /// instances). The app gates the in-context editing entry on this —
     /// the flat editing surfaces refuse nested definitions typed.
@@ -5323,6 +5590,8 @@ impl Scene {
     pub fn set_tag_hidden(&mut self, path: String, hidden: bool) {
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         self.doc.set_tag_hidden(segments, hidden);
+        // A guide hides with its tags: what snaps follows at once.
+        self.reregister_guides();
         recording::record(recording::RecordedCall::SetTagHidden { path, hidden });
     }
 
@@ -5421,6 +5690,222 @@ impl Scene {
         self.doc.object_solid(object_id(id))
     }
 
+    /// Model health (`kernel::health`): every open object of `scope` (object
+    /// handles; every live object, definition members included, when absent)
+    /// with its verdict, rims, placements and seam family, plus the scope's
+    /// counts — JSON for the Model Health panel. Handles are decimal strings.
+    pub fn health_report_json(&self, scope: Option<Vec<u64>>) -> String {
+        let scope: Option<Vec<ObjectId>> = scope.map(|v| v.into_iter().map(object_id).collect());
+        health::report_json(&self.doc, scope.as_deref())
+    }
+
+    /// The rims of `ids` as world-space line segments (six floats per
+    /// boundary edge), at every placement of each object: the viewport's
+    /// rim overlay.
+    pub fn health_rim_segments(&self, ids: Vec<u64>) -> Vec<f32> {
+        let ids: Vec<ObjectId> = ids.into_iter().map(object_id).collect();
+        health::rim_segments(&self.doc, &ids, None)
+    }
+
+    /// World bounds of objects at their placements, as one box `[minx,
+    /// miny, minz, maxx, maxy, maxz]`: `objects[i]` under the outermost
+    /// instance `instances[i]` (0 for a world object, or for every placement
+    /// of a member). Stale handles and members with no such placement add
+    /// nothing; empty when nothing remains. How isolation frames members of
+    /// a big component instead of the whole instance, in one walk of the
+    /// placements however many members are framed.
+    pub fn objects_world_bounds(&self, objects: Vec<u64>, instances: Vec<u64>) -> Vec<f64> {
+        let pairs: Vec<(ObjectId, Option<InstanceId>)> = objects
+            .iter()
+            .enumerate()
+            .map(|(i, &o)| {
+                let inst = instances
+                    .get(i)
+                    .copied()
+                    .filter(|&h| h != 0)
+                    .map(instance_id);
+                (object_id(o), inst)
+            })
+            .collect();
+        health::world_bounds(&self.doc, &pairs)
+    }
+
+    /// Every live object's Model Health verdict in short, for the status
+    /// badge and the Outliner icons: JSON `{counts, open: [[handle, kind,
+    /// accepted], …]}` (`counts` without seam families; `open` lists every
+    /// object that is not a solid). Cached per object between edits, so it
+    /// stays cheap on a big import; [`Scene::health_report_json`] has the
+    /// full detail for the panel.
+    pub fn health_summary_json(&mut self) -> String {
+        health::summary_json(&self.doc, &mut self.health_cache)
+    }
+
+    /// The objects the last import (or `.skp` open) created, still live:
+    /// Model Health's "Last import" scope.
+    pub fn last_import_object_ids(&self) -> Vec<u64> {
+        let live: std::collections::BTreeSet<ObjectId> =
+            self.doc.live_object_ids().into_iter().collect();
+        self.last_import_objects
+            .iter()
+            .filter(|o| live.contains(o))
+            .map(|o| o.data().as_ffi())
+            .collect()
+    }
+
+    /// One rim of one object, as [`Scene::health_rim_segments`] draws it:
+    /// the panel's current finding.
+    pub fn health_rim_highlight(&self, id: u64, rim: u32) -> Vec<f32> {
+        let id = object_id(id);
+        health::rim_segments(&self.doc, &[id], Some((id, rim as usize)))
+    }
+
+    /// The Hew API's public ids (`obj_…`) for object handles, in order —
+    /// how the app names objects in a `hew.doc.transact` frame it runs
+    /// through [`Scene::api_dispatch`] (Model Health's batches). A stale
+    /// handle maps to an empty string.
+    pub fn object_public_ids(&self, ids: Vec<u64>) -> Vec<String> {
+        ids.into_iter()
+            .map(|h| {
+                let entity = kernel::EntityRef::Object(object_id(h));
+                self.doc
+                    .object(object_id(h))
+                    .and(self.doc.sid_of(&entity))
+                    .map(|sid| api::ids::public_id(&entity, sid))
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// Close open rims of an object — a world object or a definition
+    /// member, whose repair every instance shows — with faces: Model
+    /// Health's cap ([`kernel::Document::cap_rims`]). `rims` indexes the
+    /// object's rims in [`Scene::health_report_json`]'s order; omitted caps
+    /// every rim that can take a face. Returns JSON `{faces, closed,
+    /// reversed}`: how many faces were added, whether the object is now a
+    /// solid, and whether closing it turned an inside-out shell over.
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, or a cap refusal:
+    /// `ObjectIsSolid`, `UnknownRim`, `RimNotPlanar`, `RimSelfIntersecting`,
+    /// `CapWouldBeCoplanar`, `NonManifoldRim`, `CapsOverlap`, `Invalid`.
+    pub fn cap_rims(&mut self, object: u64, rims: Option<Vec<u32>>) -> Result<String, ApiError> {
+        let indices: Option<Vec<usize>> = rims
+            .as_ref()
+            .map(|r| r.iter().map(|&i| i as usize).collect());
+        let (report, change) = self
+            .doc
+            .cap_rims(object_id(object), indices.as_deref())
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CapRims { object, rims });
+        Ok(serde_json::json!({
+            "faces": report.faces.len(),
+            "closed": report.closed,
+            "reversed": report.reversed,
+        })
+        .to_string())
+    }
+
+    /// Remove `faces` (face handles) from an open object: Model Health's
+    /// face removal ([`kernel::Document::delete_faces`]). Islands the
+    /// deletion cuts loose become objects of their own beside it; their
+    /// handles are returned. Removing every face deletes the object.
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, `LastDefinitionMember`, or a
+    /// refusal: `ObjectIsSolid`, `UnknownFace`, `Invalid`.
+    pub fn delete_faces(&mut self, object: u64, faces: Vec<u64>) -> Result<Vec<u64>, ApiError> {
+        let ids: Vec<kernel::FaceId> = faces
+            .iter()
+            .map(|&f| kernel::FaceId::from(KeyData::from_ffi(f)))
+            .collect();
+        let (split_off, change) = self
+            .doc
+            .delete_faces(object_id(object), &ids)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteFaces { object, faces });
+        Ok(split_off.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// Pull a flat sheet into a solid: Model Health's thicken
+    /// ([`kernel::Document::thicken_sheet`]). Each island of the sheet is
+    /// swept along its own face normal from offset `start` to offset `end`
+    /// (meters: `0, d` pulls it out of its front like Push/Pull, `-d/2,
+    /// d/2` centers the thickness on it). The object becomes the solid;
+    /// further islands become solids of their own, whose handles are
+    /// returned. One undo step.
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, or a refusal: `ObjectIsSolid`,
+    /// `NotAFlatSheet`, `ThicknessTooSmall`, `Invalid`.
+    pub fn thicken_sheet(
+        &mut self,
+        object: u64,
+        start: f64,
+        end: f64,
+    ) -> Result<Vec<u64>, ApiError> {
+        let (split_off, change) = self
+            .doc
+            .thicken_sheet(object_id(object), start, end)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ThickenSheet { object, start, end });
+        Ok(split_off.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// [`Scene::thicken_sheet`] for a definition member picked through
+    /// `instance` — the Push/Pull tool pulling a flat surface inside a
+    /// component: `distance` is the WORLD drag distance, mapped through the
+    /// instance's pose like [`Scene::push_pull_in_component`]'s, pulled out
+    /// of the surface's front (`0 → distance`).
+    ///
+    /// # Errors
+    /// `UnknownInstance`, `AmbiguousInstanceScale`, or as
+    /// [`Scene::thicken_sheet`].
+    pub fn thicken_sheet_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        distance: f64,
+    ) -> Result<Vec<u64>, ApiError> {
+        let (component, local) = self
+            .doc
+            .map_instance_world_distance(instance_id(instance), distance)
+            .map_err(doc_err)?;
+        if self.doc.object_owner_component(object_id(object)) != Some(component) {
+            return Err(stale("UnknownObject", "definition member"));
+        }
+        let (split_off, change) = self
+            .doc
+            .thicken_sheet(object_id(object), 0.0, local)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ThickenSheetInInstance {
+            instance,
+            object,
+            distance,
+        });
+        Ok(split_off.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// Mark an open object as a surface someone accepted, or clear the
+    /// mark: Model Health hides marked rows unless asked
+    /// ([`kernel::Document::set_accepted_surface`]). One undo step; setting
+    /// what is already set records nothing.
+    ///
+    /// # Errors
+    /// `UnknownObject`; `ObjectIsSolid` when marking a solid.
+    pub fn set_accepted_surface(&mut self, object: u64, accepted: bool) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .set_accepted_surface(object_id(object), accepted)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetAcceptedSurface { object, accepted });
+        Ok(())
+    }
+
     /// The LIVE member objects of a definition (definition-local geometry), in
     /// order. Fetch each one's mesh via [`Scene::object_mesh`] and draw it at
     /// the instance pose. Empty if the component is stale/hidden.
@@ -5459,7 +5944,7 @@ impl Scene {
             .def_member_sketches(component_id(component))
             .unwrap_or_default()
             .iter()
-            .filter(|&&s| self.doc.sketch(s).is_some())
+            .filter(|&&s| self.doc.sketch(s).is_some() && !self.doc.sketch_tags_hidden(s))
             .map(|s| s.data().as_ffi())
             .collect()
     }
@@ -5887,6 +6372,11 @@ impl Scene {
             .regions()
             .get(rid)
             .ok_or_else(|| stale("UnknownRegion", "region"))?;
+        // A loop with no face (`sketch.rs` rule 6) has nothing to fill:
+        // an empty boundary, and the renderer draws no fill mesh.
+        if region.faceless {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::with_capacity(region.outer.len() * 3);
         for &vid in &region.outer {
             let p = s.vertices()[vid].position;
@@ -6254,7 +6744,9 @@ impl Scene {
     }
 
     /// Records the camera's current working view: `projection` is
-    /// `"perspective"` or `"parallel"`; `eye`/`target`/`up` are xyz triples.
+    /// `"perspective"` or `"parallel"`; `parallel_height` is what the view
+    /// spans at the target, meters (the parallel frustum's height);
+    /// `eye`/`target`/`up` are xyz triples.
     ///
     /// View state, deliberately NOT undoable — matches how SketchUp treats
     /// the camera (mirrors [`Scene::set_tag_hidden`]'s own non-undoable,
@@ -6265,6 +6757,7 @@ impl Scene {
         &mut self,
         projection: &str,
         fov_deg: f64,
+        parallel_height: f64,
         eye: Box<[f64]>,
         target: Box<[f64]>,
         up: Box<[f64]>,
@@ -6281,9 +6774,15 @@ impl Scene {
         let eye3 = triple(&eye, "eye")?;
         let target3 = triple(&target, "target")?;
         let up3 = triple(&up, "up")?;
+        if !(parallel_height.is_finite() && parallel_height > 0.0) {
+            return Err(ApiError(
+                "BadCamera: parallel_height must be a finite positive number".to_string(),
+            ));
+        }
         self.doc.set_camera_state(kernel::CameraState {
             projection: kernel_projection,
             fov_deg,
+            parallel_height,
             eye: Point3::new(eye3[0], eye3[1], eye3[2]),
             target: Point3::new(target3[0], target3[1], target3[2]),
             up: kernel::Vec3::new(up3[0], up3[1], up3[2]),
@@ -6291,6 +6790,7 @@ impl Scene {
         recording::record(recording::RecordedCall::SetCameraState {
             projection: projection.to_string(),
             fov_deg,
+            parallel_height: Some(parallel_height),
             eye: eye3,
             target: target3,
             up: up3,
@@ -6549,7 +7049,7 @@ impl Scene {
         let origin = Point3::new(ox, oy, oz);
         let dir = kernel::Vec3::new(dx, dy, dz);
         let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
-        for sid in self.doc.sketch_ids() {
+        for sid in self.doc.visible_sketch_ids() {
             let Some(sketch) = self.doc.sketch(sid) else {
                 continue;
             };
@@ -6565,7 +7065,8 @@ impl Scene {
             let hit = origin + dir * t;
             // ALL closed regions participate; every one is extrudable
             // (interpenetration is allowed everywhere in Hew).
-            for rid in sketch.regions().keys() {
+            // (A loop with no face, sketch rule 6, is nothing to pick.)
+            for (rid, _) in sketch.regions().iter().filter(|(_, r)| !r.faceless) {
                 if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
                     continue;
                 }
@@ -6630,7 +7131,8 @@ impl Scene {
                 continue; // plane is behind the ray origin
             }
             let hit = origin + dir * t;
-            for rid in sketch.regions().keys() {
+            // (A loop with no face, sketch rule 6, is nothing to pick.)
+            for (rid, _) in sketch.regions().iter().filter(|(_, r)| !r.faceless) {
                 if !sketch.region_contains_point(rid, hit).unwrap_or(false) {
                     continue;
                 }
@@ -7256,35 +7758,77 @@ impl Scene {
         self.inference.set_axes_enabled(enabled);
     }
 
-    /// Handles of every currently visible construction guide.
+    /// Handles of every construction guide to draw: live, and not hidden
+    /// through a tag ([`Document::guide_shown`]). A guide under a hidden
+    /// tag stays in the document and in a save; it is only not listed here.
     pub fn guide_ids(&self) -> Vec<u64> {
         self.doc
             .guide_ids()
             .iter()
+            .filter(|&&id| self.doc.guide_shown(id))
             .map(|id| id.data().as_ffi())
             .collect()
     }
 
-    /// `"line"` | `"point"`, or `undefined` if `guide` is stale/hidden.
+    /// A guide's tag paths, each `/`-joined like [`Scene::node_tags`]
+    /// (same limitation for segments containing `/`). Empty for a stale id.
+    pub fn guide_tags(&self, guide: u64) -> Vec<String> {
+        self.doc
+            .guide_tags(guide_id(guide))
+            .iter()
+            .map(|segments| segments.join("/"))
+            .collect()
+    }
+
+    /// Snap registration for every live guide: a shown one is a snap
+    /// target, one hidden through its tags is not. Run after anything that
+    /// changes tag visibility outside a `DocChange` (a tag toggle, a Scene).
+    pub(crate) fn reregister_guides(&mut self) {
+        for id in self.doc.guide_ids() {
+            match self.doc.guide(id).filter(|_| self.doc.guide_shown(id)) {
+                Some(g) => self.inference.add_guide(id, g),
+                None => self.inference.remove_guide(id),
+            }
+        }
+    }
+
+    /// `"line"` | `"point"`, or `undefined` if `guide` is stale, hidden, or
+    /// hidden through a tag (then it is not drawn, so it has no kind to show).
     pub fn guide_kind(&self, guide: u64) -> Option<String> {
-        match self.doc.guide(guide_id(guide))? {
+        let id = guide_id(guide);
+        if !self.doc.guide_shown(id) {
+            return None;
+        }
+        match self.doc.guide(id)? {
             Guide::Line { .. } => Some("line".to_string()),
             Guide::Point { .. } => Some("point".to_string()),
         }
     }
 
     /// `guide`'s geometry, or `undefined` if stale/hidden: a line yields
-    /// `[ox, oy, oz, dx, dy, dz]` (origin + unit direction); a point yields
-    /// `[x, y, z]`. Check [`Scene::guide_kind`] to know which shape to expect.
+    /// `[ox, oy, oz, dx, dy, dz, from, to]` (origin + unit direction, then
+    /// the stretch that exists in meters along it, `-Infinity` / `Infinity`
+    /// for an end that runs on forever); a point yields `[x, y, z]`. Check
+    /// [`Scene::guide_kind`] to know which shape to expect.
     pub fn guide_geometry(&self, guide: u64) -> Option<Vec<f64>> {
-        match self.doc.guide(guide_id(guide))? {
-            Guide::Line { origin, direction } => Some(vec![
+        let id = guide_id(guide);
+        if !self.doc.guide_shown(id) {
+            return None;
+        }
+        match self.doc.guide(id)? {
+            Guide::Line {
+                origin,
+                direction,
+                span,
+            } => Some(vec![
                 origin.x,
                 origin.y,
                 origin.z,
                 direction.x,
                 direction.y,
                 direction.z,
+                span.from.unwrap_or(f64::NEG_INFINITY),
+                span.to.unwrap_or(f64::INFINITY),
             ]),
             Guide::Point { position } => Some(vec![position.x, position.y, position.z]),
         }
@@ -7644,6 +8188,17 @@ impl Scene {
             .collect()
     }
 
+    /// The live annotations the viewport draws: those none of whose tags is
+    /// hidden ([`kernel::Document::annotation_shown`]), in kernel order.
+    pub fn shown_annotation_ids(&self) -> Vec<u64> {
+        self.doc
+            .annotation_ids()
+            .into_iter()
+            .filter(|&id| self.doc.annotation_shown(id))
+            .map(|id| id.data().as_ffi())
+            .collect()
+    }
+
     /// `"linear"` | `"radial"` | `"leader"`, or `undefined` if stale/hidden.
     pub fn annotation_kind(&self, id: u64) -> Option<String> {
         match self.doc.annotation(annotation_id(id))? {
@@ -7779,6 +8334,16 @@ impl Scene {
         }
     }
 
+    /// An annotation's tag paths, each `/`-joined like [`Scene::node_tags`]
+    /// (same limitation for segments containing `/`). Empty for a stale id.
+    pub fn annotation_tags(&self, id: u64) -> Vec<String> {
+        self.doc
+            .annotation_tags(annotation_id(id))
+            .iter()
+            .map(|segments| segments.join("/"))
+            .collect()
+    }
+
     // ------------------------------------------------------------ import
 
     /// Import COLLADA bytes (+ host-resolved images) into the current document.
@@ -7853,6 +8418,7 @@ impl Scene {
 
         // Reconcile caches (additive — do NOT clear like `load`).
         self.reconcile(&change);
+        self.last_import_objects = change.objects_touched.clone();
 
         // Imports push DocAction::Imported and extend the saved document, so
         // they are recorded like any other committed mutation — with the file
@@ -7908,6 +8474,7 @@ impl Scene {
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
+        self.last_import_objects = change.objects_touched.clone();
 
         recording::record_import("import_gltf", gltf_bytes, |bytes| {
             recording::RecordedCall::ImportGltf { bytes }
@@ -7940,6 +8507,318 @@ impl Scene {
         Ok(import_report_to_js(&report, &warnings))
     }
 
+    /// Open a `.skp` file as this document's own file: [`Scene::import_skp`]
+    /// into the (blank) document, keeping the file's bytes as the source a
+    /// later [`Scene::save_skp`] builds on. The report is
+    /// [`Scene::import_skp`]'s plus `container`: `"skp2026"` or
+    /// `"skp2017"`, the format the file is in (and that a plain Save
+    /// writes back).
+    ///
+    /// # Errors
+    /// As [`Scene::import_skp`].
+    pub fn open_skp(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        self.open_skp_begin(skp_bytes)?;
+        loop {
+            let progress = self.open_skp_step(f64::INFINITY)?;
+            let phase = Reflect::get(&progress, &JsValue::from_str("phase"))
+                .ok()
+                .and_then(|p| p.as_string())
+                .unwrap_or_default();
+            if phase == "done" {
+                return Reflect::get(&progress, &JsValue::from_str("report"))
+                    .map_err(|_| JsError::new("SKP: no report"));
+            }
+        }
+    }
+
+    /// Start opening a `.skp`: read the file (the one part that cannot be
+    /// split), then hand back the first progress object. The open then
+    /// goes on through [`Scene::open_skp_step`], which the app calls
+    /// between paints so it can show how far the open has come. Progress
+    /// is `{ phase, done, total, shapes }`: `phase` is `"shapes"` while
+    /// the file's placements are read (`shapes` counts the definitions
+    /// built so far), `"objects"` while the document is built from them,
+    /// `"finishing"` for the one step that completes the document (health,
+    /// guides, drawing, scenes), `"source"` for the one step that keeps the
+    /// file for saving back, and `"done"` with the open report under
+    /// `report`. See [`Scene::open_skp`] for what an open is.
+    pub fn open_skp_begin(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        // (Taken by value: the bytes cross into wasm memory once and the
+        // save-back source keeps that copy, rather than a second one — on
+        // a 400 MB file the difference is a good part of what the browser
+        // allows.)
+        // A begin while another open is stepping drops that open; what it
+        // built so far stays in the document until the caller loads anew,
+        // as the app does after a begin succeeds. The first load after a
+        // begin keeps the open (see `load_core`), so the app can read, and
+        // so check, the file before it touches the document: a file the
+        // reader refuses leaves the document as it was.
+        self.pending_open = None;
+        let container = Scene::skp_container(&skp_bytes);
+        let job =
+            skp_import::import_begin(&skp_bytes).map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        let pending = PendingOpen {
+            bytes: skp_bytes,
+            container,
+            stage: OpenStage::Shapes(job),
+            awaits_load: true,
+        };
+        let progress = pending.progress();
+        self.pending_open = Some(pending);
+        Ok(progress)
+    }
+
+    /// Go on with the open [`Scene::open_skp_begin`] started, for about
+    /// `budget_ms` of work (at least one item), and report how far it has
+    /// come; the step that finishes it returns `phase: "done"` with the
+    /// open report. An error (a recipe the kernel refuses) ends the open
+    /// with nothing pending.
+    pub fn open_skp_step(&mut self, budget_ms: f64) -> Result<JsValue, JsError> {
+        let Some(mut pending) = self.pending_open.take() else {
+            return Err(JsError::new("SKP: no open under way"));
+        };
+        pending.awaits_load = false;
+        let started = js_sys::Date::now();
+        let over = |started: f64| js_sys::Date::now() - started >= budget_ms;
+        loop {
+            match pending.stage {
+                OpenStage::Shapes(ref mut job) => {
+                    if job.step(1) {
+                        let OpenStage::Shapes(job) =
+                            std::mem::replace(&mut pending.stage, OpenStage::Finished)
+                        else {
+                            unreachable!()
+                        };
+                        let out = job
+                            .finish()
+                            .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+                        let provenance = out.provenance;
+                        let warnings = out.warnings;
+                        let job = self
+                            .doc
+                            .ingest_begin(out.scene, out.textures_missing)
+                            .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+                        pending.stage = OpenStage::Objects {
+                            job,
+                            provenance,
+                            warnings,
+                        };
+                    }
+                }
+                OpenStage::Objects { ref mut job, .. } => {
+                    if self.doc.ingest_step(job, 1).finished() {
+                        // The rest of the ingest (health, guides, drawing,
+                        // scenes) and then the save-back source are each
+                        // one step of their own, so the overlay repaints
+                        // before each and names it.
+                        let OpenStage::Objects {
+                            job,
+                            provenance,
+                            warnings,
+                        } = std::mem::replace(&mut pending.stage, OpenStage::Finished)
+                        else {
+                            unreachable!()
+                        };
+                        pending.stage = OpenStage::Finishing {
+                            job,
+                            provenance,
+                            warnings,
+                        };
+                        break;
+                    }
+                }
+                OpenStage::Finishing { .. } => {
+                    let OpenStage::Finishing {
+                        job,
+                        provenance,
+                        warnings,
+                    } = std::mem::replace(&mut pending.stage, OpenStage::Finished)
+                    else {
+                        unreachable!()
+                    };
+                    let (report, change) = self.doc.ingest_finish(job);
+                    pending.stage = OpenStage::Source {
+                        report,
+                        change,
+                        provenance,
+                        warnings,
+                    };
+                    break;
+                }
+                OpenStage::Source { .. } => {
+                    let OpenStage::Source {
+                        report,
+                        change,
+                        provenance,
+                        warnings,
+                    } = std::mem::replace(&mut pending.stage, OpenStage::Finished)
+                    else {
+                        unreachable!()
+                    };
+                    let report = self.finish_open_skp(
+                        pending.bytes,
+                        &pending.container,
+                        &provenance,
+                        &warnings,
+                        report,
+                        &change,
+                    )?;
+                    let progress = JsObject::new();
+                    Reflect::set(
+                        &progress,
+                        &JsValue::from_str("phase"),
+                        &JsValue::from_str("done"),
+                    )
+                    .unwrap();
+                    Reflect::set(&progress, &JsValue::from_str("report"), &report).unwrap();
+                    return Ok(progress.into());
+                }
+                OpenStage::Finished => unreachable!("a finished open is never pending"),
+            }
+            if over(started) {
+                break;
+            }
+        }
+        let progress = pending.progress();
+        self.pending_open = Some(pending);
+        Ok(progress)
+    }
+
+    /// What every `.skp` open ends with once the document holds the file:
+    /// the scene reconciled, the open recorded, its history dropped (an
+    /// open is not an edit) and the bytes kept as the save-back source.
+    fn finish_open_skp(
+        &mut self,
+        skp_bytes: Vec<u8>,
+        container: &str,
+        provenance: &skp_import::Provenance,
+        warnings: &[String],
+        report: kernel::ImportReport,
+        change: &DocChange,
+    ) -> Result<JsValue, JsError> {
+        self.reconcile(change);
+        self.last_import_objects = change.objects_touched.clone();
+        recording::record_import("import_skp", &skp_bytes, |bytes| {
+            recording::RecordedCall::ImportSkp { bytes }
+        });
+        // Opening is not an edit: Undo must not take the file back out.
+        self.doc
+            .forget_history()
+            .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        self.skp_source = Some(skp_export::SkpSource::after_open(
+            skp_bytes, &self.doc, provenance, &report,
+        ));
+        self.pending_skp_source = None;
+        let report = import_report_to_js(&report, warnings);
+        Reflect::set(
+            &report,
+            &JsValue::from_str("container"),
+            &JsValue::from_str(container),
+        )
+        .unwrap();
+        Ok(report)
+    }
+
+    /// Which `.skp` container `bytes` are: `"skp2026"` (the ZIP container
+    /// current SketchUp saves), `"skp2017"` (the 2017 format), or `""` for
+    /// anything else.
+    pub fn skp_container(bytes: &[u8]) -> String {
+        match skp_import::openskp::detect_container(bytes) {
+            skp_import::openskp::Container::Zip => "skp2026",
+            skp_import::openskp::Container::Carchive2017 => "skp2017",
+            skp_import::openskp::Container::Unknown => "",
+        }
+        .to_string()
+    }
+
+    /// Save the document as a `.skp` file in `target` (`"skp2026"` or
+    /// `"skp2017"`): built on the document's source file when it has one
+    /// (unchanged content and everything the document does not model kept
+    /// as the file has it), written whole otherwise. Returns `{ bytes:
+    /// Uint8Array, simplified: string[], writer_notes: string[] }`:
+    /// `simplified` lists what the file could not hold exactly (the app's
+    /// one-time notice), `writer_notes` what a 2017 file dropped. The
+    /// written file becomes the source of the next save once the app calls
+    /// [`Scene::commit_skp_save`] after writing it — a canceled or failed
+    /// write leaves the source as it was. While a session is open the file
+    /// is written as if it were closed, as [`Scene::save`] does.
+    ///
+    /// `units` is a length format (`m`, `cm`, `mm`, `arch`, `frac_in`,
+    /// `dec_in`): the app's display units, which a file written whole opens
+    /// in while one built on its source keeps the source's — or, with
+    /// `units_named` (the live API's `units`), the units the file opens in
+    /// over its own too. Absent or unknown, a new SketchUp model's units.
+    ///
+    /// # Errors
+    /// An unknown `target`, or a model the writer refuses.
+    pub fn save_skp(
+        &mut self,
+        target: &str,
+        units: Option<String>,
+        units_named: Option<bool>,
+    ) -> Result<JsValue, JsError> {
+        let units = match skp_units(units.as_deref()) {
+            None => skp_export::SaveUnits::Keep,
+            Some(u) if units_named == Some(true) => skp_export::SaveUnits::Set(u),
+            Some(u) => skp_export::SaveUnits::New(u),
+        };
+        let saved = skp_export::save_in(
+            &self.doc,
+            skp_target(target)?,
+            write_env(),
+            self.skp_source.as_ref(),
+            units,
+        )
+        .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        self.pending_skp_source = Some(saved.source);
+        Ok(skp_export_to_js(&saved.export))
+    }
+
+    /// The file the last [`Scene::save_skp`] produced was written: it is
+    /// the document's source now. A no-op without a pending save.
+    pub fn commit_skp_save(&mut self) {
+        if let Some(s) = self.pending_skp_source.take() {
+            self.skp_source = Some(s);
+        }
+    }
+
+    /// Write the document as a `.skp` file in `target` without making it
+    /// the document's file (File ▸ Export). Same result shape as
+    /// [`Scene::save_skp`].
+    ///
+    /// # Errors
+    /// As [`Scene::save_skp`].
+    pub fn export_skp(&self, target: &str, units: Option<String>) -> Result<JsValue, JsError> {
+        Ok(skp_export_to_js(&self.write_skp(target, units.as_deref())?))
+    }
+
+    /// The `.skp` source kept for the next save (see the field), as an
+    /// opaque blob for crash recovery, or `undefined` when the document has
+    /// none.
+    pub fn skp_source(&self) -> Option<Vec<u8>> {
+        self.skp_source.as_ref().map(skp_export::SkpSource::to_blob)
+    }
+
+    /// Restore (or clear, with `undefined`) the `.skp` source from a blob
+    /// [`Scene::skp_source`] gave — the recovery path, which reloads a
+    /// `.hew` snapshot and then hands back the source persisted beside it.
+    /// Anything else (raw file bytes included) clears it: a source without
+    /// provenance cannot tell what changed.
+    pub fn set_skp_source(&mut self, blob: Option<Vec<u8>>) {
+        self.skp_source = blob.as_deref().and_then(skp_export::SkpSource::from_blob);
+        self.pending_skp_source = None;
+    }
+
+    fn write_skp(&self, target: &str, units: Option<&str>) -> Result<skp_export::Export, JsError> {
+        skp_export::export_in(
+            &self.doc,
+            skp_target(target)?,
+            write_env(),
+            skp_units(units),
+        )
+        .map_err(|e| JsError::new(&format!("SKP: {e}")))
+    }
+
     /// [`Scene::import_skp`] minus the JS-value plumbing (see
     /// [`Scene::import_dae_core`]).
     fn import_skp_core(
@@ -7955,6 +8834,7 @@ impl Scene {
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
+        self.last_import_objects = change.objects_touched.clone();
 
         recording::record_import("import_skp", skp_bytes, |bytes| {
             recording::RecordedCall::ImportSkp { bytes }
@@ -8010,6 +8890,7 @@ impl Scene {
 
         // Additive — do NOT clear caches like `load`.
         self.reconcile(&change);
+        self.last_import_objects = change.objects_touched.clone();
 
         recording::record_import("import_stl", stl_bytes, |bytes| {
             recording::RecordedCall::ImportStl {
@@ -8846,6 +9727,25 @@ impl Scene {
                     DeleteDefMember { component, object } => {
                         self.delete_def_member(component, object)?;
                     }
+                    CapRims { object, rims } => {
+                        self.cap_rims(object, rims)?;
+                    }
+                    DeleteFaces { object, faces } => {
+                        self.delete_faces(object, faces)?;
+                    }
+                    SetAcceptedSurface { object, accepted } => {
+                        self.set_accepted_surface(object, accepted)?;
+                    }
+                    ThickenSheet { object, start, end } => {
+                        self.thicken_sheet(object, start, end)?;
+                    }
+                    ThickenSheetInInstance {
+                        instance,
+                        object,
+                        distance,
+                    } => {
+                        self.thicken_sheet_in_instance(instance, object, distance)?;
+                    }
                     DeleteDefinition { component } => {
                         self.delete_definition(component)?;
                     }
@@ -8882,13 +9782,22 @@ impl Scene {
                     SetCameraState {
                         projection,
                         fov_deg,
+                        parallel_height,
                         eye,
                         target,
                         up,
                     } => {
+                        let parallel_height = parallel_height.unwrap_or_else(|| {
+                            kernel::CameraState::height_at_target(
+                                Point3::new(eye[0], eye[1], eye[2]),
+                                Point3::new(target[0], target[1], target[2]),
+                                fov_deg,
+                            )
+                        });
                         self.set_camera_state(
                             &projection,
                             fov_deg,
+                            parallel_height,
                             Box::new(eye),
                             Box::new(target),
                             Box::new(up),
@@ -8906,6 +9815,9 @@ impl Scene {
                     }
                     ClearSectionPlane => {
                         self.clear_section_plane();
+                    }
+                    SetViewStyle { json } => {
+                        self.set_view_style_json(json)?;
                     }
                     AddScene {
                         name,
@@ -9565,6 +10477,22 @@ impl Scene {
 
         // Swap is committed only after successful parse.
         self.doc = new_doc;
+        self.skp_source = None;
+        self.pending_skp_source = None;
+        // The app reads (and so checks) a file before it loads the blank
+        // document the file opens into: that one load, between the begin
+        // and the first step, keeps the open, which has touched no document
+        // yet. Any other load ends an open under way, which would otherwise
+        // build into this document (with the old one's ids, once it has
+        // begun building): its next step says no open is under way.
+        match self.pending_open.as_mut() {
+            Some(pending) if pending.awaits_load => pending.awaits_load = false,
+            _ => self.pending_open = None,
+        }
+        // The last import belonged to the old document; its ids would name
+        // whatever the new one put in those slots.
+        self.last_import_objects.clear();
+        self.health_cache.clear();
         self.mesh_cache = SecondaryMap::new();
         self.inference = InferenceScene::new();
         // Hidden sets key by dense ids the new document reuses; drop them so a
@@ -9590,17 +10518,14 @@ impl Scene {
         for iid in self.doc.instance_ids() {
             self.register_instance(iid);
         }
-        // Register every visible construction guide.
-        for id in self.doc.guide_ids() {
-            if let Some(g) = self.doc.guide(id) {
-                self.inference.add_guide(id, g);
-            }
-        }
+        // Register every construction guide that is shown (one hidden
+        // through a tag is no snap target).
+        self.reregister_guides();
         // Register every sketch — segments, vertices, and curve rims. This
         // was missing (only objects/instances/guides were registered), so a
         // freshly loaded drawing offered no sketch snaps until its first
         // mutation happened to re-register it.
-        for sid in self.doc.sketch_ids() {
+        for sid in self.doc.visible_sketch_ids() {
             self.register_sketch(sid);
         }
 
@@ -11720,6 +12645,7 @@ mod tests {
             .set_camera_state(
                 "parallel",
                 62.5,
+                2.5,
                 Box::new([1.0, 2.0, 3.0]),
                 Box::new([-1.0, 0.5, 0.0]),
                 Box::new([0.0, 0.0, 1.0]),
@@ -11772,6 +12698,7 @@ mod tests {
                 .set_camera_state(
                     "isometric",
                     45.0,
+                    4.0,
                     Box::new([0.0, 0.0, 5.0]),
                     Box::new([0.0, 0.0, 0.0]),
                     Box::new([0.0, 0.0, 1.0]),
@@ -11784,6 +12711,7 @@ mod tests {
             .set_camera_state(
                 "perspective",
                 45.0,
+                4.0,
                 Box::new([0.0, 0.0, 5.0]),
                 Box::new([0.0, 0.0, 0.0]),
                 Box::new([0.0, 0.0, 1.0]),
@@ -12330,6 +13258,73 @@ mod tests {
     /// reconstructed a different document: the agent's geometry simply
     /// missing, the golden hash unmatchable. That is the exact failure
     /// this pins.
+    /// The app's display units reach a live API `.skp` export through
+    /// `Scene::set_display_units`, as the live bridge reports them before
+    /// each dispatch; units named in the call win.
+    #[test]
+    fn a_live_api_skp_export_opens_in_the_units_the_app_reported() {
+        fn unbase64(s: &str) -> Vec<u8> {
+            let val = |c: u8| match c {
+                b'A'..=b'Z' => c - b'A',
+                b'a'..=b'z' => c - b'a' + 26,
+                b'0'..=b'9' => c - b'0' + 52,
+                b'+' => 62,
+                _ => 63,
+            };
+            let bytes: Vec<u8> = s.bytes().filter(|&c| c != b'=').collect();
+            let mut out = Vec::new();
+            for chunk in bytes.chunks(4) {
+                let n = chunk
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |n, (i, &c)| n | (u32::from(val(c)) << (18 - 6 * i)));
+                for k in 0..chunk.len().saturating_sub(1) {
+                    out.push((n >> (16 - 8 * k)) as u8);
+                }
+            }
+            out
+        }
+        let mut scene = Scene::new();
+        let (sketch, region) = ground_unit_square(&mut scene);
+        scene.extrude_region(sketch, region, 0.5).expect("extrude");
+        let conn = scene.api_connection_open();
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            scene.api_dispatch(conn, frame);
+        }
+        let unit = |scene: &mut Scene, params: &str| {
+            let reply = scene
+                .api_dispatch(
+                    conn,
+                    &format!(
+                        r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.export","params":{params}}}"#
+                    ),
+                )
+                .expect("a reply");
+            let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+            let b64 = v["result"]["bytes_base64"].as_str().expect(&reply);
+            skp_import::openskp::Model::parse(&unbase64(b64))
+                .unwrap()
+                .units
+                .length_unit
+        };
+        scene.set_display_units("mm");
+        assert_eq!(unit(&mut scene, r#"{"format":"skp"}"#), 2, "the app's mm");
+        scene.set_display_units("cm");
+        assert_eq!(
+            unit(&mut scene, r#"{"format":"skp2017"}"#),
+            3,
+            "the app's cm"
+        );
+        assert_eq!(
+            unit(&mut scene, r#"{"format":"skp","units":"m"}"#),
+            4,
+            "named"
+        );
+    }
+
     #[test]
     fn a_session_mixing_ui_gestures_and_live_api_envelopes_replays_whole() {
         let mut scene = Scene::new();
@@ -16366,6 +17361,25 @@ mod tests {
     }
 
     #[test]
+    fn an_import_over_the_api_becomes_the_last_import() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        assert!(scene.last_import_object_ids().is_empty());
+        let stl = include_bytes!("../../../app/e2e/fixtures/stl/cube_open.stl");
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "hew.doc.import",
+            "params": { "path": "cube_open.stl", "units": "mm", "bytes_base64": api::commands::doc::encode_base64(stl) },
+        })
+        .to_string();
+        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        assert!(reply.contains("\"result\""), "import succeeds: {reply}");
+        let ids = scene.last_import_object_ids();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids, scene.object_ids());
+    }
+
+    #[test]
     fn api_dispatch_malformed_json_answers_a_parse_error_with_null_id() {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
@@ -16443,6 +17457,50 @@ mod tests {
             1,
             "the refused hew.doc.new left the live document untouched"
         );
+    }
+
+    /// A guide hides with its tags: it leaves the list the viewport draws
+    /// and comes back when the tag is shown again, while the document
+    /// keeps it throughout. Its tags read back `/`-joined, like a node's.
+    #[test]
+    fn a_guide_under_a_hidden_tag_is_not_listed_until_the_tag_shows() {
+        use kernel::{ImportGuide, ImportScene, ImportTag, Point3};
+        let mut doc = kernel::Document::new();
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: Vec::new(),
+            guides: vec![ImportGuide::Point {
+                position: Point3::new(1.0, 2.0, 0.0),
+                tags: vec![vec!["Rig".to_string(), "Cameras".to_string()]],
+            }],
+            tags: vec![ImportTag {
+                path: vec!["Rig".to_string(), "Cameras".to_string()],
+                hidden: false,
+            }],
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
+            view_style: None,
+            extra: Default::default(),
+        };
+        doc.ingest(scene, Vec::new()).unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let ids = scene.guide_ids();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(scene.guide_tags(ids[0]), vec!["Rig/Cameras".to_string()]);
+        scene.set_tag_hidden("Rig".to_string(), true);
+        assert!(
+            scene.guide_ids().is_empty(),
+            "hidden through a tag above its own"
+        );
+        assert!(
+            scene.doc.guide(guide_id(ids[0])).is_some(),
+            "the document keeps it"
+        );
+        scene.set_tag_hidden("Rig".to_string(), false);
+        assert_eq!(scene.guide_ids(), ids);
     }
 }
 

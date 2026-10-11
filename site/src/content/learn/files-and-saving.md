@@ -1,6 +1,6 @@
 ---
 title: "Files, saving, and recovery"
-description: "Where your work lives: the open .hew format, saving in the browser vs. the desktop, and the 12-second autosave net."
+description: "Where your work lives: the open .hew format, opening and saving SketchUp files, saving in the browser vs. the desktop, and the 12-second autosave net."
 order: 18
 ---
 
@@ -8,8 +8,8 @@ Hew's native format is `.hew`, an open, documented container (a zip holding a JS
 
 ## Saving and opening
 
-- **Save**: `⌘S` / `Ctrl+S`, or File ▸ Save. The first save asks where; after that it writes in place.
-- **Save As…** (`⇧⌘S` / `Ctrl+Shift+S`) saves a copy under a new name and switches to it.
+- **Save**: `⌘S` / `Ctrl+S`, or File ▸ Save. The first save is a Save As: it asks where and in which format. After that it writes in place, in the format the file is already in.
+- **Save As…** (`⇧⌘S` / `Ctrl+Shift+S`) shows the system save dialog with a **Format** list in it, the way every desktop app's does, and switches the document to the new file. In the browser, whose save dialog has no such list, Hew asks for the format first. See [SketchUp files](#sketchup-files) below.
 - **Open…**: `⌘O` / `Ctrl+O`. On desktop, this opens into the current window only if it's a brand-new, untouched "Untitled" document; otherwise it opens the picked file into a fresh window, leaving whatever you were doing untouched. Opening a file that's already open in another window brings that window forward — one file is never open in two windows at once. The web app, which can't open extra windows, offers to discard instead.
 - **New**: `⌘N` / `Ctrl+N`. Same rule as Open: a non-pristine document opens a fresh window on desktop; the web app offers to discard.
 - **Close** (`⌘W`, or File ▸ Close) closes the window (macOS desktop only).
@@ -18,11 +18,25 @@ The window title is the save-state indicator: a `•` before the name plus an "E
 
 Before anything would discard unsaved work — closing the window or tab, opening another file, or starting a new document — Hew shows what's about to be lost: the changes made since your last save, and **Save**, **Don't Save**, and **Cancel** to choose from. Save runs the normal save flow and, once it lands, continues whatever you were doing (opening the other file, starting the new document, or closing the window).
 
+## SketchUp files
+
+A SketchUp `.skp` file opens as a document, not only as an import. File ▸ Open takes a `.skp` (the 2026 format that current SketchUp saves, or the 2017 format) the same way it takes a `.hew`: the title shows `Model.skp`, the document starts clean, and Save writes the file back in the format it was opened in. Open Recent, drag-and-drop, and the desktop app's Open With menu all work the same way. File ▸ Import… is separate and unchanged: it adds a SketchUp file's contents to the current document and does not bind the document to that file.
+
+**Save As…** offers three formats:
+
+- **Hew document (.hew)**, the native format.
+- **SketchUp (.skp)**, the 2026 format.
+- **SketchUp 2017 (.skp)**, which opens in SketchUp Make 2017 and later.
+
+The list starts on the document's current format (Hew for a new document). Changing it changes the name's extension to match, so `Model.skp` becomes `Model.hew`, never `Model.skp.hew`.
+
+A SketchUp file cannot hold everything a Hew document can. The first time a Save or Save As to `.skp` leaves something out or simplifies it (for example, curved surfaces are written as smooth facets), Hew shows a notice listing what changed. It appears once per document, does not block anything, and has a **Save a .hew copy** button that writes a `.hew` through the Save As dialog without switching the document away from its `.skp`. Later saves of that document are silent. File ▸ Export… can also write both `.skp` flavors as copies; see [Import and export](/learn/import-export/).
+
 ## In the browser
 
 The web app uses your browser's file access support:
 
-- **Chrome, Edge, and other Chromium browsers** can open and save `.hew` files in place, like a desktop app (you'll grant permission the first time).
+- **Chrome, Edge, and other Chromium browsers** can open and save `.hew` and `.skp` files in place, like a desktop app (you'll grant permission the first time).
 - **Firefox and Safari** fall back to standard uploads/downloads: Open picks a file, and each Save downloads a fresh copy to your Downloads folder.
 
 The web app works offline once loaded — it's an installable PWA, so you can add it to your dock or home screen.
@@ -31,7 +45,7 @@ On a phone, opening the web app lands you in [Shop Mode](/learn/hew-on-your-phon
 
 ## On the desktop
 
-The desktop app (macOS, Windows, Linux) uses native open/save dialogs, remembers your last **10 recent files** (File ▸ Open Recent), and registers the `.hew` file type so double-clicking a file opens it. File ▸ New opens additional windows, each with an independent document.
+The desktop app (macOS, Windows, Linux) uses native open/save dialogs, remembers your last **10 recent files** (File ▸ Open Recent), and registers the `.hew` file type so double-clicking a file opens it. On macOS, Hew also appears under Open With for `.skp` files; it does not take over double-clicking from SketchUp. File ▸ New opens additional windows, each with an independent document.
 
 **File ▸ Open on Phone…** hands the open document to a phone on the same wifi network as a QR code. See [Hew on your phone](/learn/hew-on-your-phone/#getting-a-model-onto-your-phone) for the full handoff.
 
@@ -42,6 +56,8 @@ Hew autosaves a recovery snapshot of any unsaved changes every **12 seconds**. I
 > **Recover Unsaved Document?** — Hew found an autosaved version of "…" from a few minutes ago that wasn't saved before the app closed.
 
 Choose **Recover** to pick up where you left off, or **Discard** to throw the snapshot away. Pressing `Esc` dismisses the dialog *without* discarding — the offer returns next launch, so an accidental keypress can't destroy work.
+
+A recovered `.skp` document comes back still bound to its file, so Save writes it back in the same format.
 
 On the desktop, each window keeps its own snapshot. If you crash with several windows of unsaved work, the dialog lists every document; **Recover All** brings each one back in its own window, and **Discard All** clears them all.
 

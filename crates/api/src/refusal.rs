@@ -96,6 +96,7 @@ fn variant_code(e: &DocumentError) -> String {
         DocumentError::Op(kernel::KernelOpError::PushPull(inner)) => format!("{inner:?}"),
         DocumentError::Op(kernel::KernelOpError::Sticky(inner)) => format!("{inner:?}"),
         DocumentError::InvalidAxesFrame(inner) => format!("{inner:?}"),
+        DocumentError::Repair(inner) => format!("{inner:?}"),
         other => format!("{other:?}"),
     };
     debug

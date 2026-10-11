@@ -16,9 +16,85 @@
 
 import type React from 'react'
 
+/**
+ * How far an open has come, for the overlay's bar and its line of text.
+ * `read` is the file being read (one step that cannot be split, so no
+ * count); `shapes` the file's placements being read into shapes (`done`
+ * of `total` placements, `shapes` built so far); `objects` the document
+ * being built from them; `finishing` the one step that completes the
+ * document (health, guides, drawing, scenes); `source` the one step that
+ * keeps the file for saving back; `view` the viewport getting ready.
+ */
+export interface OpenProgress {
+  phase: 'read' | 'shapes' | 'objects' | 'finishing' | 'source' | 'view'
+  done: number
+  total: number
+  /** Shapes built so far (the `shapes` phase). */
+  shapes?: number
+  /** The file's size in bytes (the `read` phase). */
+  bytes?: number
+}
+
 interface ImportingOverlayProps {
   /** Display name of the file being imported. */
   fileName: string
+  /** File ▸ Open of a file that becomes the document's own (a .skp):
+   * "Opening", not "Importing". */
+  opening?: boolean
+  /** How far the open has come; without it the overlay only says that
+   * the file is being read. */
+  progress?: OpenProgress | null
+}
+
+/** Where each phase starts and ends on the one bar, as a share of the
+ * whole open: measured on a 395 MB model in the browser (read 10 s,
+ * shapes 18 s, objects 6 s, finishing 5 s, source 4 s, view 6 s),
+ * rounded. */
+const PHASE_SPAN: Record<OpenProgress['phase'], [number, number]> = {
+  read: [0, 0.2],
+  shapes: [0.2, 0.56],
+  objects: [0.56, 0.68],
+  finishing: [0.68, 0.78],
+  source: [0.78, 0.86],
+  view: [0.86, 1],
+}
+
+/** The bar's fill, 0–1, for a progress report. */
+export function openProgressFraction(p: OpenProgress): number {
+  const [from, to] = PHASE_SPAN[p.phase]
+  const within = p.total > 0 ? Math.min(1, p.done / p.total) : 0
+  return from + (to - from) * within
+}
+
+function formatCount(n: number): string {
+  return n.toLocaleString('en-US')
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)} MB`
+  if (n >= 1_000) return `${Math.round(n / 1_000)} KB`
+  return `${n} bytes`
+}
+
+/** The line under the bar: what is happening and how far it has come. */
+export function openProgressText(p: OpenProgress): string {
+  switch (p.phase) {
+    case 'read':
+      return p.bytes !== undefined ? `Reading the file (${formatBytes(p.bytes)})` : 'Reading the file'
+    case 'shapes': {
+      const head = `Reading placements: ${formatCount(p.done)} of ${formatCount(p.total)}`
+      return p.shapes ? `${head}, ${formatCount(p.shapes)} shapes so far` : head
+    }
+    case 'objects':
+      return `Building objects: ${formatCount(p.done)} of ${formatCount(p.total)}`
+    case 'finishing':
+      return 'Checking the objects'
+    case 'source':
+      return 'Getting ready to save back to the file'
+    case 'view':
+      return 'Getting the view ready'
+  }
 }
 
 const OVERLAY_STYLE: React.CSSProperties = {
@@ -74,6 +150,32 @@ const HINT_STYLE: React.CSSProperties = {
   textAlign: 'center',
 }
 
+const BAR_STYLE: React.CSSProperties = {
+  width: '100%',
+  height: '6px',
+  borderRadius: '3px',
+  background: 'var(--border-strong)',
+  overflow: 'hidden',
+}
+
+const BAR_FILL_STYLE: React.CSSProperties = {
+  height: '100%',
+  background: 'var(--accent-base)',
+  borderRadius: '3px',
+  transition: 'width 120ms linear',
+}
+
+const PROGRESS_LINE_STYLE: React.CSSProperties = {
+  fontSize: '12px',
+  color: 'var(--text-secondary)',
+  textAlign: 'center',
+  display: 'flex',
+  justifyContent: 'space-between',
+  width: '100%',
+  gap: '12px',
+  fontVariantNumeric: 'tabular-nums',
+}
+
 // Inject the keyframes once into the document head.
 // Using a <style> tag rather than a CSS file to keep this component self-contained
 // and consistent with the rest of the app's inline-style conventions.
@@ -88,11 +190,13 @@ export function ensureSpinnerKeyframes(): void {
   document.head.appendChild(style)
 }
 
-export function ImportingOverlay({ fileName }: ImportingOverlayProps) {
+export function ImportingOverlay({ fileName, opening = false, progress = null }: ImportingOverlayProps) {
   ensureSpinnerKeyframes()
+  const fraction = progress ? openProgressFraction(progress) : null
+  const percent = fraction === null ? null : Math.round(fraction * 100)
 
   return (
-    <div style={OVERLAY_STYLE} aria-live="assertive" aria-label="Importing model">
+    <div style={OVERLAY_STYLE} aria-live="assertive" aria-label={opening ? 'Opening model' : 'Importing model'}>
       <div
         style={CARD_STYLE}
         role="status"
@@ -100,11 +204,33 @@ export function ImportingOverlay({ fileName }: ImportingOverlayProps) {
       >
         <div style={SPINNER_STYLE} aria-hidden="true" />
         <div style={MESSAGE_STYLE}>
-          Importing{' '}
+          {opening ? 'Opening' : 'Importing'}{' '}
           <span style={FILE_NAME_STYLE}>&ldquo;{fileName}&rdquo;</span>
           &hellip;
         </div>
-        <div style={HINT_STYLE}>This may take a moment for large files.</div>
+        {progress && percent !== null ? (
+          <>
+            <div
+              style={BAR_STYLE}
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={percent}
+              aria-label="Open progress"
+            >
+              <div style={{ ...BAR_FILL_STYLE, width: `${percent}%` }} />
+            </div>
+            {/* The counts change several times a second: the bar's value
+                carries them to assistive technology, so the line itself
+                is kept out of the card's live announcements. */}
+            <div style={PROGRESS_LINE_STYLE} data-testid="open-progress" aria-live="off">
+              <span>{openProgressText(progress)}</span>
+              <span>{percent}%</span>
+            </div>
+          </>
+        ) : (
+          <div style={HINT_STYLE}>This may take a moment for large files.</div>
+        )}
       </div>
     </div>
   )

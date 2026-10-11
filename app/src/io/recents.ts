@@ -4,7 +4,7 @@
  * throws" pattern, applied to a small LRU list instead of a single autosave
  * slot).
  *
- * Every successful `.hew` open in the web build records `{bytes, name,
+ * Every successful `.hew` (or `.skp`) open in the web build records `{bytes, name,
  * timestamp, source}` here — both shells hook their own open path at the
  * narrowest seam (App.tsx's File ▸ Open, ShopApp's Open…) right after the
  * load succeeds, fire-and-forget. Nothing else does: not saves, not
@@ -25,6 +25,8 @@
  * failure must never interrupt the open flow that triggered it — callers
  * fire `recordRecent` without awaiting it for exactly that reason.
  */
+
+import type { DocFormat } from './fileHost'
 
 const DB_NAME = 'hew-recents'
 const STORE_NAME = 'recents'
@@ -80,6 +82,10 @@ export interface RecentEntry {
    *  — not recomputed on read, a snapshot of the model as it looked when
    *  this entry was last written. */
   thumbnail?: string
+  /** The document format of `bytes`: absent (every older entry) means
+   *  `'hew'`; a `.skp` open records its container so a re-open from the
+   *  shelf takes the open-skp path instead of loading the bytes as `.hew`. */
+  format?: DocFormat
 }
 
 /** The slice of a `RecentEntry` the eviction rule needs — id, freshness,
@@ -230,6 +236,7 @@ export async function recordRecent(
   idb: IDBFactory | undefined = safeIndexedDB(),
   partCount?: number,
   thumbnail?: string,
+  format: DocFormat = 'hew',
 ): Promise<void> {
   if (idb === undefined) return
   if (bytes.byteLength > MAX_TOTAL_BYTES) return
@@ -247,6 +254,7 @@ export async function recordRecent(
       if (resolvedPartCount !== undefined) incoming.partCount = resolvedPartCount
       const resolvedThumbnail = thumbnail ?? dup?.thumbnail
       if (resolvedThumbnail !== undefined) incoming.thumbnail = resolvedThumbnail
+      if (format !== 'hew') incoming.format = format
       // Exclude the matched row from `existing` before building metas — it's
       // superseded by `incoming` (same `id`), and leaving it in would double-
       // count its bytes in the size-cap math below and risk `selectEvictions`

@@ -287,8 +287,10 @@ fn digest(scene: &ImportScene) -> Digest {
             .guides
             .iter()
             .map(|g| match g {
-                ImportGuide::Line { origin, direction } => (qp(*origin), qv(*direction)),
-                ImportGuide::Point { position } => (qp(*position), [0, 0, 0]),
+                ImportGuide::Line {
+                    origin, direction, ..
+                } => (qp(*origin), qv(*direction)),
+                ImportGuide::Point { position, .. } => (qp(*position), [0, 0, 0]),
             })
             .collect(),
         camera: scene.camera.as_ref().map(cam),
@@ -640,9 +642,11 @@ fn a_model_level_cut_arrives_cutting_from_both_containers() {
         "the plane sits at 0.5 m: {:?}",
         a.origin
     );
+    // SketchUp keeps the box's lower half (the file's own thumbnail shows
+    // it), and a Hew cut's normal points at the half it removes: up.
     assert!(
-        (a.normal.z.abs() - 1.0).abs() < 1e-9,
-        "cutting across Z: {:?}",
+        (a.normal.z - 1.0).abs() < 1e-9,
+        "cutting across Z, removing the upper half: {:?}",
         a.normal
     );
     for (name, out) in [("2017", old), ("2026", new)] {

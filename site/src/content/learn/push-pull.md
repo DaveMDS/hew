@@ -28,6 +28,8 @@ Push/pulling a closed sketch region creates a brand-new **Object** — a waterti
 
 Solids interpenetrate freely in Hew, so a region drawn over a standing solid extrudes into a second solid coinciding with the first — nothing stops you overlapping or stacking solids. Merging two into one is always a separate, explicit step (a boolean union). If you overlapped something by accident, undo, or move one of the solids apart.
 
+Push/pull also turns an imported **flat panel** into a solid. A single flat face from SketchUp (a pane, a sign, a tabletop drawn as one face) isn't solid, but drag it and it becomes a slab with its paint on both sides, the same as **Add thickness…** in [Make Solid](/learn/import-export/#making-imported-shapes-solid). Other imported shapes that aren't solid can't be pushed or pulled until you close them with **Object ▸ Make Solid…**.
+
 ## Reshaping a solid
 
 Push/pulling an existing face of a solid moves that face in or out, keeping the object watertight the whole time. Pull the top of a box up to make it taller; push a side inward to make it thinner.

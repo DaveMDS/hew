@@ -26,6 +26,7 @@ pub mod camera;
 pub mod document;
 pub mod error;
 pub mod guide;
+pub mod health;
 pub mod history;
 pub mod ids;
 pub mod import;
@@ -33,9 +34,11 @@ pub mod material;
 pub mod math;
 pub mod offset;
 pub mod ops;
+pub mod repair;
 pub mod scenes;
 pub mod serialize;
 pub mod sketch;
+pub mod style;
 pub mod tol;
 pub mod topo;
 pub mod transform;
@@ -48,20 +51,21 @@ pub use camera::{CameraProjection, CameraState};
 pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun,
     DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
-    FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, InsertOptions, InsertReport,
-    LibraryProvenance, MAX_COMPONENT_DEPTH, MaterialScope, NodeId, PendingActionKind, PlaneUnits,
-    PurgeReport,
+    FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, IngestJob, IngestProgress,
+    InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH, MaterialScope, NodeId,
+    PendingActionKind, PlaneUnits, PurgeReport,
 };
 pub use error::TopologyError;
-pub use guide::Guide;
+pub use guide::{Guide, GuideSpan};
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
     AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId,
     MaterialId, ObjectId, ShellId, SketchId, VertexId,
 };
 pub use import::{
-    DefRecipe, ImportGuide, ImportNode, ImportReport, ImportScene, ImportSceneRecipe, ImportTag,
-    MeshRecipe, SkippedMesh,
+    DefRecipe, ImportAttrTarget, ImportGuide, ImportNode, ImportReport, ImportScene,
+    ImportSceneExtra, ImportSceneRecipe, ImportSketch, ImportTag, MeshExtra, MeshRecipe,
+    SkippedMesh,
 };
 pub use material::{
     FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame,
@@ -91,6 +95,7 @@ pub use sketch::{
     SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
     VertexMoved,
 };
+pub use style::ViewStyle;
 pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
 pub use transform::{Transform, TransformError};
 pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

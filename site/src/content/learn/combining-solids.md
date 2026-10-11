@@ -21,11 +21,11 @@ Combining solids is always a command you issue. [Core concepts](/learn/core-conc
 
 When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid. The pieces arrive together in a group named after the operands ("Bar − Cutter"), so nothing scatters. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable in one step.
 
-If an input isn't solid, the operation is refused with an error naming the problem. Fix the leaky object first (check Object Info to find it).
+If an input isn't solid, the operation is refused and says so. Select the open one (Object Info shows **Open** for it) and choose **Object ▸ Make Solid…** to close it; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
 ### Combining groups
 
-Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the two composites. Every solid under a group operand has to be watertight — a leaky one anywhere refuses the whole operation, and the message says which side to fix.
+Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the two composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
 
 One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. If an operand is (or contains) an instance, the command refuses and tells you so. **Explode** the instance first (or **Make Unique**, then Explode) and combine the result.
 

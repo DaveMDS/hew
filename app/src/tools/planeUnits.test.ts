@@ -496,6 +496,23 @@ describe('outlinerDrawing placement', () => {
     expect(numberedLabels(['Circle', 'Circle', 'Line'])).toEqual(['Circle 1', 'Circle 2', 'Line'])
   })
 
+  it('reads the free drawing in one call when the host offers it, without a read per plane', () => {
+    const ground = ctxGround()
+    const groundList = listing([{ key: 60, edges: [edge(60, [0, 0, 0], [1, 0, 0], { kind: 'free', sketch: 9 })] }])
+    const perPlane: string[] = []
+    const { scene } = makeScene({
+      sketch_ids: () => [9n],
+      sketch_plane: () => new Float64Array([0, 0, 0, 0, 0, 1]),
+      history_generation: () => 1n,
+      plane_units_all_json: () => JSON.stringify([{ plane: [0, 0, 0, 0, 0, 1], units: JSON.parse(groundList) }]),
+      plane_units_json: (ctx: string) => { perPlane.push(ctx); return listing([]) },
+    })
+    const d = outlinerDrawing(scene as never, [])
+    expect(d.free.map((u) => u.unit.key)).toEqual([K(60)])
+    expect(d.free[0].ref).toEqual(draftRef('draft-island', ground, K(60)))
+    expect(perPlane).toEqual([])
+  })
+
   it('finds a topology-only drawing (no sketch) through its object’s drawing planes', () => {
     const { scene } = makeScene({
       sketch_ids: () => [],

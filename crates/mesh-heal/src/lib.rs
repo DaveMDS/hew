@@ -1509,9 +1509,9 @@ pub fn merge_coplanar(
 /// `healed_face_holes` are parallel to `healed_faces`.
 ///
 /// NOTE: this wrapper discards [`heal_mesh_with_tol`]'s dropped-degenerate
-/// face count, so its callers (dae-import, skp-import) do not yet surface
+/// face count, so its caller (dae-import) does not yet surface
 /// that drop in their import warnings the way stl-import and gltf-import do.
-/// Wiring them is a known follow-up; switch those callers to
+/// Wiring it is a known follow-up; switch that caller to
 /// `heal_mesh_with_tol` when doing it.
 pub fn heal_mesh(
     raw_positions: &[Point3],
@@ -1565,6 +1565,99 @@ pub fn heal_mesh_with_tol(
     weld_tol: f64,
     merge_plane_tol: f64,
 ) -> HealedMeshWithStats {
+    heal(
+        raw_positions,
+        raw_faces,
+        raw_face_materials,
+        raw_face_corner_uvs,
+        raw_face_holes,
+        bake_tf,
+        weld_tol,
+        Some(merge_plane_tol),
+        true,
+    )
+}
+
+/// [`heal_mesh`] for a source whose faces are already the polygons the
+/// user drew — a native `.skp`: every pass but step 7's coplanar merge.
+/// Two coplanar faces sharing an edge there are two faces on purpose (a
+/// line drawn across a face, a soft diagonal), and merging them would
+/// lose that edge, and change the document each time the file is read
+/// back after Hew wrote it.
+pub fn heal_mesh_keeping_faces(
+    raw_positions: &[Point3],
+    raw_faces: &[Vec<usize>],
+    raw_face_materials: &[u32],
+    raw_face_corner_uvs: &[Vec<[f64; 2]>],
+    raw_face_holes: &[Vec<Vec<usize>>],
+    bake_tf: &Transform,
+) -> (
+    Vec<Point3>,
+    Vec<Vec<usize>>,
+    Vec<u32>,
+    FaceCornerUvs,
+    FaceHoles,
+) {
+    let (positions, faces, mats, uvs, holes, _dropped_degenerate) = heal(
+        raw_positions,
+        raw_faces,
+        raw_face_materials,
+        raw_face_corner_uvs,
+        raw_face_holes,
+        bake_tf,
+        tol::POINT_MERGE,
+        None,
+        true,
+    );
+    (positions, faces, mats, uvs, holes)
+}
+
+/// [`heal_mesh_keeping_faces`] for a mesh Hew itself wrote: welded, with
+/// degenerate faces dropped, hole winding normalized and a closed shell
+/// turned outward, but not repaired — no two-sided dedup, T-junction
+/// splicing or re-orientation of an open shell's faces — so it reads back
+/// as the faces Hew wrote, each turned the way it was.
+pub fn heal_mesh_as_written(
+    raw_positions: &[Point3],
+    raw_faces: &[Vec<usize>],
+    raw_face_materials: &[u32],
+    raw_face_corner_uvs: &[Vec<[f64; 2]>],
+    raw_face_holes: &[Vec<Vec<usize>>],
+    bake_tf: &Transform,
+) -> (
+    Vec<Point3>,
+    Vec<Vec<usize>>,
+    Vec<u32>,
+    FaceCornerUvs,
+    FaceHoles,
+) {
+    let (positions, faces, mats, uvs, holes, _dropped_degenerate) = heal(
+        raw_positions,
+        raw_faces,
+        raw_face_materials,
+        raw_face_corner_uvs,
+        raw_face_holes,
+        bake_tf,
+        tol::POINT_MERGE,
+        None,
+        false,
+    );
+    (positions, faces, mats, uvs, holes)
+}
+
+/// The pipeline; `merge_plane_tol` `None` skips step 7.
+#[allow(clippy::too_many_arguments)]
+fn heal(
+    raw_positions: &[Point3],
+    raw_faces: &[Vec<usize>],
+    raw_face_materials: &[u32],
+    raw_face_corner_uvs: &[Vec<[f64; 2]>],
+    raw_face_holes: &[Vec<Vec<usize>>],
+    bake_tf: &Transform,
+    weld_tol: f64,
+    merge_plane_tol: Option<f64>,
+    repair: bool,
+) -> HealedMeshWithStats {
     // 0. Validate face/hole vertex indices against the position array:
     //    untrusted import data (crafted glTF index buffers, corrupt sources)
     //    must be dropped here, never panic a later unchecked index.
@@ -1607,48 +1700,61 @@ pub fn heal_mesh_with_tol(
             weld_tol,
         );
 
-    // 4. Two-sided dedup.
-    let (dedup_faces, dedup_mats, dedup_uvs, dedup_holes) = dedup_two_sided(
-        &nondegenerate_faces,
-        &nondegenerate_mats,
-        &nondegenerate_uvs,
-        &nondegenerate_holes,
-    );
+    // Steps 4–5b repair a foreign mesh; one Hew wrote (`repair` off) is
+    // already what Hew built and only has a closed shell turned outward
+    // (step 6: a no-op on Hew's own solids, which are always outward).
+    let (oriented_faces, oriented_mats, oriented_uvs, oriented_holes) = if !repair {
+        orient_outward(
+            &nondegenerate_faces,
+            &nondegenerate_mats,
+            &nondegenerate_uvs,
+            &nondegenerate_holes,
+            &unique_positions,
+        )
+    } else {
+        // 4. Two-sided dedup.
+        let (dedup_faces, dedup_mats, dedup_uvs, dedup_holes) = dedup_two_sided(
+            &nondegenerate_faces,
+            &nondegenerate_mats,
+            &nondegenerate_uvs,
+            &nondegenerate_holes,
+        );
 
-    // 5. T-junction healing: splice mid-edge vertices into the faces whose edges
-    //    they sit on, so half-edges pair up manifold (SketchUp triangulation
-    //    leaves coplanar T-junctions that otherwise read as an open shell).
-    //    The on-segment gate scales with `weld_tol`: an f32-quantised source's
-    //    T-vertices sit off the exact edge line by weld-scale noise, which the
-    //    native 1 nm gate would reject wholesale.
-    //    Hole loops are threaded through unchanged (conservative).
-    let (split_faces, split_mats, split_uvs, split_holes) = split_t_junctions(
-        &dedup_faces,
-        &dedup_mats,
-        &dedup_uvs,
-        &dedup_holes,
-        &unique_positions,
-        weld_tol,
-    );
+        // 5. T-junction healing: splice mid-edge vertices into the faces whose edges
+        //    they sit on, so half-edges pair up manifold (SketchUp triangulation
+        //    leaves coplanar T-junctions that otherwise read as an open shell).
+        //    The on-segment gate scales with `weld_tol`: an f32-quantised source's
+        //    T-vertices sit off the exact edge line by weld-scale noise, which the
+        //    native 1 nm gate would reject wholesale.
+        //    Hole loops are threaded through unchanged (conservative).
+        let (split_faces, split_mats, split_uvs, split_holes) = split_t_junctions(
+            &dedup_faces,
+            &dedup_mats,
+            &dedup_uvs,
+            &dedup_holes,
+            &unique_positions,
+            weld_tol,
+        );
 
-    // 5b. Consistent orientation: flood-fill so adjacent faces agree across every
-    //    manifold edge. SketchUp occasionally reverses a subset of a shell's
-    //    faces (invisible in its double-sided view), which otherwise reads as
-    //    "directed edge traversed by more than one face" and gets the whole mesh
-    //    skipped. Non-manifold meshes are left inconsistent (still skipped).
-    let (consistent_faces, consistent_mats, consistent_uvs, consistent_holes) =
-        orient_consistent(&split_faces, &split_mats, &split_uvs, &split_holes);
+        // 5b. Consistent orientation: flood-fill so adjacent faces agree across every
+        //    manifold edge. SketchUp occasionally reverses a subset of a shell's
+        //    faces (invisible in its double-sided view), which otherwise reads as
+        //    "directed edge traversed by more than one face" and gets the whole mesh
+        //    skipped. Non-manifold meshes are left inconsistent (still skipped).
+        let (consistent_faces, consistent_mats, consistent_uvs, consistent_holes) =
+            orient_consistent(&split_faces, &split_mats, &split_uvs, &split_holes);
 
-    // 6. Orientation: flip a closed, inside-out shell to outward normals (some
-    //    SketchUp source faces are reversed — invisible there, transparent +
-    //    non-pushable here). Hole loops are reversed together with the outer.
-    let (oriented_faces, oriented_mats, oriented_uvs, oriented_holes) = orient_outward(
-        &consistent_faces,
-        &consistent_mats,
-        &consistent_uvs,
-        &consistent_holes,
-        &unique_positions,
-    );
+        // 6. Orientation: flip a closed, inside-out shell to outward normals (some
+        //    SketchUp source faces are reversed — invisible there, transparent +
+        //    non-pushable here). Hole loops are reversed together with the outer.
+        orient_outward(
+            &consistent_faces,
+            &consistent_mats,
+            &consistent_uvs,
+            &consistent_holes,
+            &unique_positions,
+        )
+    };
 
     // 7. Coplanar merge: COLLADA always triangulates, so a flat SketchUp face
     //    arrives as a fan of triangles. Merge coplanar, edge-connected,
@@ -1656,14 +1762,17 @@ pub fn heal_mesh_with_tol(
     //    selection treat them as the single face the user drew. Non-regressive:
     //    a group that wouldn't form a clean simple-loop polygon is left as-is.
     //    Faces with holes are never merged — they stay as singletons.
-    let (merged_faces, merged_mats, merged_uvs, merged_holes) = merge_coplanar(
-        &oriented_faces,
-        &oriented_mats,
-        &oriented_uvs,
-        &oriented_holes,
-        &unique_positions,
-        merge_plane_tol,
-    );
+    let (merged_faces, merged_mats, merged_uvs, merged_holes) = match merge_plane_tol {
+        Some(tol) => merge_coplanar(
+            &oriented_faces,
+            &oriented_mats,
+            &oriented_uvs,
+            &oriented_holes,
+            &unique_positions,
+            tol,
+        ),
+        None => (oriented_faces, oriented_mats, oriented_uvs, oriented_holes),
+    };
 
     // 7a. Drop any face the KERNEL would reject as degenerate. `drop_zero_area_faces`
     //    (step 3) gates on effective HEIGHT relative to `weld_tol` — the source's
@@ -2730,6 +2839,47 @@ mod tests {
     /// hollow-solid cavity — the kernel's own convention (boolean subtraction
     /// emits cavity walls facing into the removed volume). It must NOT be
     /// "corrected" to outward; only free-standing inside-out shells flip.
+    #[test]
+    fn split_pieces_turn_outward_but_a_cavity_stays_inward() {
+        // Pieces of a split: a 2 m cube wound outward, a 1 m cavity inside
+        // it wound inward, and a lone 1 m cube elsewhere wound inward.
+        let scaled = |k: f64, off: f64| -> Vec<Point3> {
+            cube_positions()
+                .iter()
+                .map(|p| Point3::new(p.x * k + off, p.y * k + off, p.z * k + off))
+                .collect()
+        };
+        let outward: Vec<Vec<usize>> = vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        let inward: Vec<Vec<usize>> = outward
+            .iter()
+            .map(|f| f.iter().rev().copied().collect())
+            .collect();
+        let piece = |positions: Vec<Point3>, faces: &Vec<Vec<usize>>| split::MeshPiece {
+            positions,
+            face_materials: vec![0; faces.len()],
+            face_corner_uvs: vec![Vec::new(); faces.len()],
+            face_holes: vec![Vec::new(); faces.len()],
+            faces: faces.clone(),
+        };
+        let pieces = vec![
+            piece(scaled(2.0, 0.0), &outward),
+            piece(scaled(1.0, 0.5), &inward),
+            piece(scaled(1.0, 10.0), &inward),
+        ];
+        let out = split::orient_pieces_outward(pieces);
+        let vol = |p: &split::MeshPiece| signed_volume6(&p.faces, &p.positions);
+        assert!(vol(&out[0]) > 0.0, "outer stays outward");
+        assert!(vol(&out[1]) < 0.0, "the enclosed cavity stays inward");
+        assert!(vol(&out[2]) > 0.0, "the lone inside-out cube turns outward");
+    }
+
     #[test]
     fn orient_outward_preserves_enclosed_cavity() {
         // Outer 2×2×2 cube (0..2) wound outward; inner 1×1×1 cube (0.5..1.5)

@@ -271,6 +271,7 @@ fn snap_onto_fixed(
     let mut fresh = Sketch::on_plane(work.plane());
     let edges: Vec<SketchEdgeId> = work.edges().keys().collect();
     replay_edges_mapped(work, &edges, &mut fresh, &map).ok()?;
+    fresh.carry_faceless_from(work, &map, &[]);
     Some(fresh)
 }
 
@@ -474,6 +475,20 @@ impl Document {
         frame: Option<ComponentId>,
         objects: &[ObjectId],
     ) -> Result<Lifted, DocumentError> {
+        self.lift_plane_with(plane, frame, objects, None)
+    }
+
+    /// [`Document::lift_plane`] with the plane's free sketches given
+    /// (`free`), when the caller has already found them, instead of found
+    /// by walking every sketch of the frame — what
+    /// [`Document::free_plane_units`] does once for all planes.
+    fn lift_plane_with(
+        &self,
+        plane: Plane,
+        frame: Option<ComponentId>,
+        objects: &[ObjectId],
+        free: Option<Vec<SketchId>>,
+    ) -> Result<Lifted, DocumentError> {
         let mut objs: Vec<ObjectId> = Vec::new();
         for &o in objects {
             if self.objects.get(o).is_none_or(|r| r.hidden)
@@ -515,12 +530,17 @@ impl Document {
                             .twin
                             .map(|t| obj.loops()[obj.half_edges()[t].loop_id].face);
                         // An edge between two faces on the plane is drawing,
-                        // unless they are painted differently: that split is
-                        // the solid's content (the paint boundary), kept like
-                        // its own edges.
-                        if other.is_some_and(|g| {
-                            on.contains(&g) && obj.faces()[g].material == face.material
-                        }) {
+                        // unless they are painted differently or the edge is
+                        // soft: that split is the solid's content (the paint
+                        // boundary, a source's smoothed seam — a terrain's
+                        // flat triangles), kept like its own edges.
+                        if !obj.edges()[he.edge].soft
+                            && other.is_some_and(|g| {
+                                on.contains(&g)
+                                    && obj.faces()[g].material == face.material
+                                    && obj.faces()[g].back_material == face.back_material
+                            })
+                        {
                             stored.push(StoredEdge {
                                 store: Store::Topo(o),
                                 a,
@@ -541,9 +561,9 @@ impl Document {
                 }
             }
         }
-        for &(a, b) in &fixed {
-            work.add_segment(a, b).map_err(DocumentError::Sketch)?;
-        }
+        // All the face edges at once: the same sticky rules, found
+        // through a grid rather than a scan of every edge per edge.
+        work.add_segments(&fixed).map_err(DocumentError::Sketch)?;
         // Claimed facets go in one chain per circle, as a drawn circle's do,
         // so chain-granular edits (select or erase the circle, offset,
         // refacet, rim inference) see the whole circle, not one facet.
@@ -653,17 +673,20 @@ impl Document {
                 }
             }
         }
-        let free: Vec<SketchId> = self
-            .sketches
-            .iter()
-            .filter(|&(s, sk)| {
-                !self.sketch_tombstoned(&s)
-                    && !self.object_sketches.contains_key(&s)
-                    && self.def_sketches.get(&s).copied() == frame
-                    && planes_coincide(&plane, &sk.plane())
-            })
-            .map(|(s, _)| s)
-            .collect();
+        let free: Vec<SketchId> = match free {
+            Some(given) => given,
+            None => self
+                .sketches
+                .iter()
+                .filter(|&(s, sk)| {
+                    !self.sketch_tombstoned(&s)
+                        && !self.object_sketches.contains_key(&s)
+                        && self.def_sketches.get(&s).copied() == frame
+                        && planes_coincide(&plane, &sk.plane())
+                })
+                .map(|(s, _)| s)
+                .collect(),
+        };
         let sketch_ids: Vec<SketchId> = owned
             .values()
             .flatten()
@@ -672,7 +695,11 @@ impl Document {
             .collect();
         for s in sketch_ids {
             let sk = &self.sketches[s];
+            // (A loop with no face stays one on the working sketch; a face
+            // already there, a solid's, keeps its face under a wire.)
+            let faced = work.faced_rings();
             replay_sketch_into(sk, &mut work).map_err(DocumentError::Sketch)?;
+            work.carry_faceless_from(sk, &|p| p, &faced);
             for e in sk.edges().values() {
                 stored.push(StoredEdge {
                     store: Store::Sketch(s),
@@ -874,8 +901,11 @@ impl Document {
             .keys()
             .map(|e| (key_of(after, e), e))
             .collect();
+        // (Nothing drawn or erased, and no loop given or robbed of its face
+        // by drawing over an edge: nothing to lower.)
         if before_keys.len() == after_keys.len()
             && after_keys.keys().all(|k| before_keys.contains(k))
+            && !face_state_changed(before, after)
         {
             return Ok((DraftReport::default(), DocChange::default()));
         }
@@ -1307,9 +1337,13 @@ impl Document {
             let cur = &self.sketches[s];
             let cur_keys: BTreeSet<SegKey> = cur.edges().keys().map(|e| key_of(cur, e)).collect();
             let new_keys: BTreeSet<SegKey> = edges.iter().map(|&e| key_of(after, e)).collect();
-            if cur_keys != new_keys {
+            // (A loop given its face by drawing over an edge changes no edge,
+            // but the sketch all the same.)
+            if cur_keys != new_keys || face_state_changed(cur, after) {
                 let mut fresh = Sketch::on_plane(cur.plane());
                 replay_edges(after, &edges, &mut fresh).map_err(DocumentError::Sketch)?;
+                // A loop with no face stays one through the rebuild (sketch rule 6).
+                fresh.carry_faceless_from(after, &|p| p, &[]);
                 rewrites.push((s, fresh));
             }
         }
@@ -1317,11 +1351,15 @@ impl Document {
         for (o, edges) in new_owned {
             let mut fresh = Sketch::on_plane(*plane);
             replay_edges(after, &edges, &mut fresh).map_err(DocumentError::Sketch)?;
+            // A loop with no face stays one through the rebuild (sketch rule 6).
+            fresh.carry_faceless_from(after, &|p| p, &[]);
             creations.push((Some(o), fresh));
         }
         if !new_free.is_empty() {
             let mut fresh = Sketch::on_plane(*plane);
             replay_edges(after, &new_free, &mut fresh).map_err(DocumentError::Sketch)?;
+            // A loop with no face stays one through the rebuild (sketch rule 6).
+            fresh.carry_faceless_from(after, &|p| p, &[]);
             creations.push((None, fresh));
         }
 
@@ -1401,6 +1439,23 @@ impl Document {
         };
         Ok((report, change))
     }
+}
+
+/// Whether a loop of `cur` has a face in `after` and none in `cur`, or the
+/// other way round: the working sketch carries `cur`'s loops by position
+/// (sketch rule 6), so the same ring with another state is a change to
+/// write back.
+fn face_state_changed(cur: &Sketch, after: &Sketch) -> bool {
+    let ring = |sk: &Sketch, r: &crate::sketch::SketchRegion| -> Vec<Point3> {
+        r.outer.iter().map(|&v| sk.vertices()[v].position).collect()
+    };
+    cur.regions().values().any(|r| {
+        let cur_ring = ring(cur, r);
+        after
+            .regions()
+            .values()
+            .any(|ar| ar.faceless != r.faceless && same_ring(&cur_ring, &ring(after, ar)))
+    })
 }
 
 /// Replays every edge of `src` into `dst` through the sticky machinery, one
@@ -1866,6 +1921,125 @@ impl Document {
         objects: &[ObjectId],
     ) -> Result<PlaneUnits, DocumentError> {
         let lifted = self.lift_plane(plane, frame, objects)?;
+        self.plane_units_of(&lifted)
+    }
+
+    /// The drawing of a frame, plane by plane, in one pass: every plane a
+    /// free sketch of the frame lies on (planes within tolerance as one),
+    /// each listed as [`Document::plane_units`] lists it, with the objects
+    /// of the frame that have a face on the plane taking part, except the
+    /// `excluded` ones (hidden on screen). Each plane is lifted with its
+    /// own sketches, found by one grouping of all of them; asking plane by
+    /// plane walks every sketch and every face of the frame for each plane,
+    /// which on a document of tens of thousands of small sketches took
+    /// minutes. The order is by plane, so the listing is deterministic.
+    pub fn free_plane_units(
+        &self,
+        frame: Option<ComponentId>,
+        excluded: &BTreeSet<ObjectId>,
+    ) -> Vec<(Plane, PlaneUnits)> {
+        // A plane's bucket: its normal and offset at a grain of a
+        // millionth, a thousand times coarser than the tolerances two
+        // coincident planes are allowed to differ by. Such planes land in
+        // one bucket or in two adjacent ones, never further apart, so a
+        // lookup probes the bucket and its neighbors in every direction
+        // and `planes_coincide` decides: no plane is listed twice, and no
+        // object with a face on a plane is missed at a bucket's edge.
+        let key_of = |pl: &Plane| -> [i64; 4] {
+            let n = pl.normal();
+            let d = -pl.signed_distance(Point3::ORIGIN);
+            let q = |x: f64| (x * 1e6).round() as i64;
+            [q(n.x), q(n.y), q(n.z), q(d)]
+        };
+        let around = |k: [i64; 4]| -> Vec<[i64; 4]> {
+            let mut out = Vec::with_capacity(81);
+            for a in -1..=1 {
+                for b in -1..=1 {
+                    for c in -1..=1 {
+                        for e in -1..=1 {
+                            out.push([k[0] + a, k[1] + b, k[2] + c, k[3] + e]);
+                        }
+                    }
+                }
+            }
+            out
+        };
+        // Free sketches by plane, in sketch order.
+        let mut groups: Vec<(Plane, Vec<SketchId>)> = Vec::new();
+        let mut group_of: BTreeMap<[i64; 4], Vec<usize>> = BTreeMap::new();
+        for (s, sk) in self.sketches.iter() {
+            if self.sketch_tombstoned(&s)
+                || self.object_sketches.contains_key(&s)
+                || self.def_sketches.get(&s).copied() != frame
+            {
+                continue;
+            }
+            let plane = sk.plane();
+            let key = key_of(&plane);
+            let found = around(key).into_iter().find_map(|k| {
+                group_of
+                    .get(&k)?
+                    .iter()
+                    .copied()
+                    .find(|&g| planes_coincide(&groups[g].0, &plane))
+            });
+            match found {
+                Some(g) => groups[g].1.push(s),
+                None => {
+                    group_of.entry(key).or_default().push(groups.len());
+                    groups.push((plane, vec![s]));
+                }
+            }
+        }
+        // The frame's objects by the planes of their faces.
+        let mut objects_by_plane: BTreeMap<[i64; 4], Vec<ObjectId>> = BTreeMap::new();
+        for (id, rec) in self.objects.iter() {
+            let drawable = !rec.hidden
+                && self.object_owner_component(id) == frame
+                && match rec.owner {
+                    ObjectOwner::World { parent } => parent.is_none(),
+                    ObjectOwner::Definition { .. } => true,
+                }
+                && !excluded.contains(&id);
+            if !drawable {
+                continue;
+            }
+            for face in rec.object.faces().values() {
+                let on = objects_by_plane.entry(key_of(&face.plane)).or_default();
+                if !on.contains(&id) {
+                    on.push(id);
+                }
+            }
+        }
+        let mut out = Vec::with_capacity(groups.len());
+        for (plane, sketches) in groups {
+            let mut objects: Vec<ObjectId> = Vec::new();
+            for k in around(key_of(&plane)) {
+                for &o in objects_by_plane.get(&k).into_iter().flatten() {
+                    if objects.contains(&o) {
+                        continue;
+                    }
+                    let obj = &self.objects[o].object;
+                    if obj.faces().keys().any(|f| face_on_plane(obj, f, &plane)) {
+                        objects.push(o);
+                    }
+                }
+            }
+            objects.sort_unstable();
+            let Ok(lifted) = self.lift_plane_with(plane, frame, &objects, Some(sketches)) else {
+                continue;
+            };
+            let Ok(units) = self.plane_units_of(&lifted) else {
+                continue;
+            };
+            out.push((plane, units));
+        }
+        out
+    }
+
+    /// [`Document::plane_units`] of a plane already lifted.
+    fn plane_units_of(&self, lifted: &Lifted) -> Result<PlaneUnits, DocumentError> {
+        let plane = lifted.plane;
         let w = &lifted.before;
         let pos = |v: SketchVertexId| w.vertices()[v].position;
         let fixed = |a: Point3, b: Point3| lifted.fixed.iter().any(|&(c, d)| along(a, b, c, d));
@@ -2005,7 +2179,10 @@ impl Document {
                         let sk = &self.sketches[s];
                         sk.regions()
                             .keys()
-                            .find(|&rid| sk.region_contains_point(rid, sample).unwrap_or(false))
+                            .find(|&rid| {
+                                !sk.regions()[rid].faceless
+                                    && sk.region_contains_point(rid, sample).unwrap_or(false)
+                            })
                             .map(|rid| (s, rid))
                     });
                     (None, found)
@@ -2052,9 +2229,9 @@ impl Document {
 
 impl Document {
     /// The planes `object` carries drawing on, in its own frame: each plane
-    /// where two of its coplanar, same-facing faces meet along an edge (a
-    /// shape drawn there split the face), and each plane of a sketch it
-    /// owns. One entry per plane, in face-key order then sketch order. Empty
+    /// where two of its coplanar, same-facing faces meet along an edge that
+    /// is not soft (a shape drawn there split the face), and each plane of a
+    /// sketch it owns. One entry per plane, in face-key order then sketch order. Empty
     /// for a stale or hidden object. Renderers and the outliner list an
     /// object's drawing plane by plane through [`Document::plane_units`].
     pub fn object_drawing_planes(&self, object: ObjectId) -> Vec<Plane> {
@@ -2073,14 +2250,17 @@ impl Document {
                 .chain(face.inner_loops.iter().copied())
                 .flat_map(|l| obj.loop_half_edges(l))
                 .any(|h| {
-                    obj.half_edges()[h]
-                        .twin
-                        .map(|t| obj.loops()[obj.half_edges()[t].loop_id].face)
-                        .is_some_and(|g| {
-                            g != f
-                                && face_on_plane(obj, g, &plane)
-                                && obj.faces()[g].material == face.material
-                        })
+                    let he = &obj.half_edges()[h];
+                    !obj.edges()[he.edge].soft
+                        && he
+                            .twin
+                            .map(|t| obj.loops()[obj.half_edges()[t].loop_id].face)
+                            .is_some_and(|g| {
+                                g != f
+                                    && face_on_plane(obj, g, &plane)
+                                    && obj.faces()[g].material == face.material
+                                    && obj.faces()[g].back_material == face.back_material
+                            })
                 });
             if split {
                 push(plane);

@@ -10,7 +10,7 @@
 
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::{CmdError, Ctx, Handler};
-use crate::host::{ImportImage, ImportOptions, SnapshotParams};
+use crate::host::{DocFormat, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -140,9 +140,44 @@ struct SaveParams {
     /// Serialize and hand the bytes back — nothing is written anywhere, the
     /// document is not bound to a file and is not marked saved. Works the
     /// same on every host; it is how a client reads a document it does not
-    /// own (hew-cli's live render fallback).
+    /// own (hew-cli's live render fallback). Always `.hew` bytes.
     #[serde(default)]
     return_bytes: bool,
+    /// `"hew"`, `"skp"` or `"skp2017"`; absent means the path's extension
+    /// (or, with no path, the working file's own format) decides.
+    #[serde(default)]
+    format: Option<DocFormat>,
+    /// The display units a SketchUp file opens in, by name; absent, the
+    /// host decides as the app's File > Save does.
+    #[serde(default)]
+    units: Option<String>,
+}
+
+/// `app/src/settings/units.ts`'s `LengthFormat` union
+/// ([`crate::LENGTH_FORMATS`]): an unrecognized value is refused
+/// statically (`-32602`) rather than reach the host at all.
+pub(crate) fn check_length_format(format: &str) -> Result<(), CmdError> {
+    if crate::LENGTH_FORMATS.contains(&format) {
+        Ok(())
+    } else {
+        Err(CmdError::Params(format!(
+            "unknown display unit format \"{format}\" (expected one of {:?})",
+            crate::LENGTH_FORMATS
+        )))
+    }
+}
+
+/// A save's `format` and, for a SketchUp file, what it could not hold.
+fn outcome_fields(outcome: &SaveOutcome) -> Value {
+    let mut out = serde_json::json!({});
+    if let Some(f) = outcome.format {
+        out["format"] = Value::String(f.as_str().to_string());
+        if f.is_skp() {
+            out["simplified"] = serde_json::json!(outcome.simplified);
+            out["writer_notes"] = serde_json::json!(outcome.writer_notes);
+        }
+    }
+    out
 }
 
 fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -150,31 +185,39 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         path,
         copy,
         return_bytes,
+        format,
+        units,
     } = parse(params)?;
+    if let Some(u) = &units {
+        check_length_format(u)?;
+    }
     if return_bytes {
-        if path.is_some() || copy {
+        if path.is_some() || copy || format.is_some_and(DocFormat::is_skp) || units.is_some() {
             return Err(CmdError::Params(
-                "`return_bytes` takes neither `path` nor `copy`".into(),
+                "`return_bytes` hands back .hew bytes and takes no `path`, `copy`, SketchUp `format` or `units`".into(),
             ));
         }
         return Ok(serde_json::json!({
-            "bytes_base64": encode_base64(&ctx.doc.save_for_persistence())
+            "bytes_base64": encode_base64(&ctx.doc.save_for_persistence()),
+            "format": "hew",
         }));
     }
     if copy {
         let Some(path) = path else {
             return Err(CmdError::Params("`copy` needs a `path`".into()));
         };
-        ctx.host
-            .save_copy(ctx.doc, &path)
+        let outcome = ctx
+            .host
+            .save_copy(ctx.doc, &path, format, units.as_deref())
             .map_err(CmdError::Refusal)?;
-        return Ok(serde_json::json!({}));
+        return Ok(outcome_fields(&outcome));
     }
-    let written = ctx
+    let outcome = ctx
         .host
-        .save_document(ctx.doc, path.as_deref())
+        .save_document(ctx.doc, path.as_deref(), format, units.as_deref())
         .map_err(CmdError::Refusal)?;
-    // A host that wrote the file itself (`CliHost`) returns nothing — the
+    let mut out = outcome_fields(&outcome);
+    // A host that wrote the file itself (`CliHost`) returns no bytes — the
     // save is complete the instant `save_document` returns `Ok`, so this
     // is the right place to mark the document clean (Lane C's saved
     // mark, docs/agents/HEW_API.md §7). A host with no filesystem of its
@@ -184,13 +227,11 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     // the live app calls `Scene::mark_saved` itself once ITS write
     // (Tauri fs, or a browser download the user confirmed) actually
     // lands.
-    match written {
-        Some(bytes) => Ok(serde_json::json!({ "bytes_base64": encode_base64(&bytes) })),
-        None => {
-            ctx.doc.mark_saved();
-            Ok(serde_json::json!({}))
-        }
+    match outcome.bytes {
+        Some(bytes) => out["bytes_base64"] = Value::String(encode_base64(&bytes)),
+        None => ctx.doc.mark_saved(),
     }
+    Ok(out)
 }
 
 // ----------------------------------------------------------- hew.doc.export
@@ -203,6 +244,9 @@ struct ExportParams {
     path: Option<String>,
     #[serde(default)]
     segments_per_turn: Option<u32>,
+    /// The display units a SketchUp file opens in; absent, the host's.
+    #[serde(default)]
+    units: Option<String>,
 }
 
 fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -210,7 +254,16 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         format,
         path,
         segments_per_turn,
+        units,
     } = parse(params)?;
+    if let Some(u) = &units {
+        check_length_format(u)?;
+        if !matches!(format.as_str(), "skp" | "skp2017") {
+            return Err(CmdError::Params(format!(
+                "units applies to SketchUp files (\"skp\", \"skp2017\"); \"{format}\" has none to set"
+            )));
+        }
+    }
     let bytes = ctx
         .host
         .export_document(
@@ -218,6 +271,7 @@ fn export_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             &format,
             path.as_deref(),
             segments_per_turn.unwrap_or(0),
+            units.as_deref(),
         )
         .map_err(CmdError::Refusal)?;
     Ok(match bytes {

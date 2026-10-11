@@ -127,6 +127,8 @@ pub fn parse_dae(dae_bytes: &[u8], images: &ImageMap) -> Result<DaeScene, DaeErr
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
 
     let mut warnings = warnings.messages;
@@ -675,8 +677,8 @@ fn cap_split_warnings(warnings: &mut Vec<String>) {
         let extra = warnings.len() - SPLIT_DETAIL_CAP;
         warnings.truncate(SPLIT_DETAIL_CAP);
         warnings.push(format!(
-            "{extra} more non-manifold mesh{} imported as open shells \
-             (split at non-manifold edges, geometry unchanged)",
+            "{extra} more mesh{} came in as separate pieces for the same \
+             reason",
             if extra == 1 { "" } else { "es" },
         ));
     }
@@ -714,6 +716,7 @@ fn recipe_from_arrays(
         face_holes,
         base_material: kernel::NO_MATERIAL,
         tags,
+        extra: Default::default(),
     }
 }
 
@@ -747,8 +750,8 @@ fn recipes_from_healed(
         // by another geometry's identical message text.
         if warnings.warned_geoms.insert(geom_id.to_string()) {
             warnings.messages.push(format!(
-                "'{}' is non-manifold; imported as {} open shell{} \
-                 (split at non-manifold edges, geometry unchanged)",
+                "'{}' came in as {} separate piece{} because some of its edges \
+                 are shared by more than two faces; the shape itself is unchanged",
                 if name.is_empty() {
                     "unnamed mesh"
                 } else {

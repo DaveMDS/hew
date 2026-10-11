@@ -169,11 +169,13 @@ test('Orbit tool: precise orbit (Ctrl/Cmd) kills inertia; the default drag coast
 
   // 2) Ctrl/Cmd held throughout: no coast (identical samples), and the
   // drag still ORBITS (target fixed, position moves) rather than inverting
-  // to pan -- Ctrl means precision, only Shift means invert.
-  const camBefore2 = await getCam(page)
+  // to pan -- Ctrl means precision, only Shift means invert. The press
+  // first sets the pivot at the depth under the cursor, so the target is
+  // sampled after it.
   await page.keyboard.down('Control')
   await page.mouse.move(cx, cy)
   await page.mouse.down()
+  const camBefore2 = await getCam(page)
   await page.mouse.move(cx + 200, cy, { steps: 4 })
   await page.mouse.up()
   const immediate2 = await getCam(page)

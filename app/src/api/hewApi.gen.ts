@@ -237,15 +237,17 @@ export interface DocCloseResult {
 }
 
 /**
- * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, or USDZ — solids only, bytes base64, or a path on hosts with filesystem access.
+ * `hew.doc.export` (v1) — Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: export_failed, host_capability_missing, nothing_to_export, save_failed
  */
 export interface DocExportParams {
-  /** "gltf" is an alias for "glb" — every host that implements one implements both */
-  format: "stl" | "3mf" | "glb" | "gltf" | "usdz"
+  /** "gltf" is an alias for "glb" — every host that implements one implements both. "skp" is the SketchUp 2026 container, "skp2017" the 2017 format; exporting never changes the document's own file */
+  format: "stl" | "3mf" | "glb" | "gltf" | "usdz" | "skp" | "skp2017"
   path?: string
   segments_per_turn?: number
+  /** SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless). */
+  units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
 }
 
 export interface DocExportResult {
@@ -264,6 +266,25 @@ export interface DocFocusParams {
 
 export interface DocFocusResult {
   document?: { attached?: boolean; dirty: boolean; front?: boolean; id: string; label?: string; path: string | null; title: string }
+}
+
+/**
+ * `hew.doc.health` (v1) — Model health: every open object (world or component member) with its verdict, open rims and seam family, and counts by kind.
+ * Tier: Standard · Class: read-only · Served: kernel
+ * Refusals: unknown_entity
+ */
+export interface DocHealthParams {
+  /** obj_ ids to diagnose; omitted = every live object, component members included */
+  objects?: string[]
+}
+
+export interface DocHealthResult {
+  /** objects, solids, flat_sheets, bent_sheets, cappable, holes, mixed, non_manifold, seam_families */
+  counts: UnspecifiedShape
+  /** objects an importer split from one shape, joined by shared rims */
+  families: { members?: string[]; shared_rims?: number }[]
+  /** one per open (non-solid) object; a component member is one row however often it is placed */
+  rows: ({ accepted: boolean; branching_vertices?: number; definition?: string | null; definition_name?: string | null; faces?: number; family?: number | null; instances?: string[]; islands?: number; name?: string | null; object: string; placements: number; rims: ({ cappable?: boolean; closed?: boolean; edges?: number; extent?: number; perimeter?: number; planar?: boolean; role?: "outer" | "hole"; shared?: boolean; sheet_edge?: boolean })[]; verdict: { holes?: number; kind: "flat_sheet" | "bent_sheet" | "cappable" | "holes" | "mixed" | "non_manifold"; planar?: number; warped?: number } })[]
 }
 
 /**
@@ -301,7 +322,7 @@ export interface DocNewResult {
 }
 
 /**
- * `hew.doc.open` (v1) — Open a .hew document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
+ * `hew.doc.open` (v1) — Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: host_capability_missing, load_failed, window_not_ready
  */
@@ -310,6 +331,7 @@ export interface DocOpenParams {
   focus?: "background" | "front"
   /** a name to find the document by later, resolvable by hew.doc.attach and listed by hew.meta.documents */
   label?: string
+  /** a .hew file, or a SketchUp .skp file (either container) when the extension is .skp; a later hew.doc.save with no format writes the same container back */
   path: string
 }
 
@@ -332,20 +354,30 @@ export interface DocPurgeUnusedResult {
 }
 
 /**
- * `hew.doc.save` (v1) — Save the attached document (Save / Save As): the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
+ * `hew.doc.save` (v1) — Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
  * Tier: Required · Class: solitary · Served: host
- * Refusals: host_capability_missing, path_required, save_failed, file_open_elsewhere
+ * Refusals: file_open_elsewhere, format_mismatch, host_capability_missing, path_required, save_failed
  */
 export interface DocSaveParams {
   /** write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path` */
   copy?: boolean
+  /** "skp" is the 2026 container (what current SketchUp saves), "skp2017" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch). */
+  format?: "hew" | "skp" | "skp2017"
   path?: string
   /** hand the document's bytes back and write nothing: no file, no binding, no saved mark; takes no `path` */
   return_bytes?: boolean
+  /** The display units a SketchUp file opens in (hew.view.units's formats), a save back over a .skp included. Absent: a save back keeps the file's own units and a new file takes the host's display units (the app's preference live; meters headless). A .hew ignores it. */
+  units?: "m" | "cm" | "mm" | "arch" | "frac_in" | "dec_in"
 }
 
 export interface DocSaveResult {
   bytes_base64?: string
+  /** the format the document was saved in */
+  format?: "hew" | "skp" | "skp2017"
+  /** present for a .skp: what the file could not hold exactly */
+  simplified?: string[]
+  /** present for a .skp: what the 2017 writer dropped */
+  writer_notes?: string[]
 }
 
 /**
@@ -993,7 +1025,7 @@ export interface ScenesAddParams {
   /** insert after this Scene's id; appended at the end when omitted */
   after?: string
   /** an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera */
-  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
   description?: string
   /** opaque editor display toggles: stored and returned, never interpreted by the kernel */
   display?: { axes: boolean; grid: boolean; guides: boolean }
@@ -1019,7 +1051,7 @@ export interface ScenesApplyParams {
 }
 
 export interface ScenesApplyResult {
-  camera?: { eye: [number, number, number]; fov_deg: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }
+  camera?: { eye: [number, number, number]; fov_deg: number; parallel_height: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }
   hidden_instance_ids?: string[]
   hidden_object_ids?: string[]
   /** null means captured-but-no-plane-placed */
@@ -1046,7 +1078,7 @@ export interface ScenesDescribeResult {}
 export interface ScenesListParams {}
 
 export interface ScenesListResult {
-  scenes: ({ camera?: { eye: [number, number, number]; fov_deg: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }; description: string; display?: { axes: boolean; grid: boolean; guides: boolean }; id: string; name: string; props: { camera: boolean; display: boolean; hidden_nodes: boolean; hidden_tags: boolean; section: boolean }; section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }; sid: number })[]
+  scenes: ({ camera?: { eye: [number, number, number]; fov_deg: number; parallel_height: number; projection: "perspective" | "parallel"; target: [number, number, number]; up: [number, number, number] }; description: string; display?: { axes: boolean; grid: boolean; guides: boolean }; id: string; name: string; props: { camera: boolean; display: boolean; hidden_nodes: boolean; hidden_tags: boolean; section: boolean }; section?: null | { active: boolean; normal: [number, number, number]; origin: [number, number, number] }; sid: number; view_style?: { axes: boolean; background: [number, number, number]; ground: [number, number, number] | null; sky: [number, number, number] | null } })[]
 }
 
 /**
@@ -1092,7 +1124,7 @@ export interface ScenesReorderResult {}
  */
 export interface ScenesUpdateParams {
   /** an explicit camera to capture — no named-view shorthand, a Scene captures a concrete eye/target, not a fitted view; when omitted and the camera property is captured, falls back to the document's own saved working camera */
-  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
   /** opaque editor display toggles: stored and returned, never interpreted by the kernel */
   display?: { axes: boolean; grid: boolean; guides: boolean }
   id: string
@@ -1310,6 +1342,47 @@ export interface SketchUnitsResult {
 }
 
 /**
+ * `hew.solid.cap` (v1) — Close an open object's flat openings with faces; an object closed all round becomes a solid.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, unknown_rim, rim_not_planar, rim_self_intersecting, cap_would_be_coplanar, non_manifold_rim, caps_overlap
+ */
+export interface SolidCapParams {
+  /** obj_ id (a world object or a component member) */
+  object: string
+  /** indices into the object's hew.doc.health rims; omitted = every cappable rim (when none is, all of them, so the refusal says why) */
+  rims?: number[]
+}
+
+export interface SolidCapResult {
+  /** the object is now a solid */
+  closed: boolean
+  /** faces added (face tokens cap.1, cap.2, ... in a transaction) */
+  faces: number
+  object_id: string
+  /** an island the caps closed was inside out, so that island's faces were turned over (a cavity inside another island is left as is) */
+  reversed: boolean
+}
+
+/**
+ * `hew.solid.delete_faces` (v1) — Remove faces from an open object; islands cut loose become objects of their own. Solids refuse.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, unknown_face, last_definition_member, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
+ */
+export interface SolidDeleteFacesParams {
+  /** faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member) */
+  faces?: UnspecifiedShape[]
+  object: string
+}
+
+export interface SolidDeleteFacesResult {
+  /** every face went, so the object was deleted */
+  deleted: boolean
+  object_id: string
+  /** islands cut loose, now objects of their own */
+  object_ids: string[]
+}
+
+/**
  * `hew.solid.delete_imprint` (v1) — Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.
  * Tier: Standard · Class: model-mutating · Served: kernel
  * Refusals: not_in_plane, not_an_imprint, draft_boundary_edge_touched, unknown_object, unknown_entity, locator_missed, ambiguous_locator, face_token_unknown, face_token_stale
@@ -1326,7 +1399,7 @@ export interface SolidDeleteImprintResult {
 /**
  * `hew.solid.extrude` (v1) — Extrude a region into a new Object, consuming the profile.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: distance_too_small, degenerate_geometry, unknown_region, unknown_entity, unknown_unit, region_not_pushable
+ * Refusals: distance_too_small, degenerate_geometry, unknown_region, region_has_no_face, unknown_entity, unknown_unit, region_not_pushable
  */
 export interface SolidExtrudeParams {
   distance: number
@@ -1385,6 +1458,22 @@ export interface SolidIntersectParams {
 
 export interface SolidIntersectResult {
   result: string
+}
+
+/**
+ * `hew.solid.mark_surface` (v1) — Mark an open object as a surface on purpose (or clear the mark); hew.doc.health keeps listing it, flagged accepted.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: object_is_solid, unknown_entity
+ */
+export interface SolidMarkSurfaceParams {
+  /** false clears the mark */
+  accepted?: boolean
+  object: string
+}
+
+export interface SolidMarkSurfaceResult {
+  accepted: boolean
+  object_id: string
 }
 
 /**
@@ -1486,6 +1575,26 @@ export interface SolidSubtractResult {
 }
 
 /**
+ * `hew.solid.thicken` (v1) — Pull a flat surface into a solid of the given thickness.
+ * Tier: Standard · Class: model-mutating · Served: kernel
+ * Refusals: object_is_solid, unknown_component, unknown_entity, explode_session_scope, invalid, not_a_flat_sheet, thickness_too_small
+ */
+export interface SolidThickenParams {
+  /** split the thickness evenly on both sides of the surface */
+  centered?: boolean
+  /** meters along each face's front normal (negative: behind it) */
+  distance: number
+  object: string
+}
+
+export interface SolidThickenResult {
+  /** the surface, now a solid */
+  object_id: string
+  /** further separate pieces of the surface, each now a solid of its own */
+  object_ids: string[]
+}
+
+/**
  * `hew.solid.union` (v1) — Boolean union of two solids.
  * Tier: Required · Class: model-mutating · Served: kernel
  * Refusals: boolean_operand_has_instance, boolean_operand_not_solid, boolean_operand_empty, grouped_operand, degenerate_contact, unknown_object, unknown_group, unknown_instance, unknown_entity
@@ -1570,7 +1679,7 @@ export interface TagSetVisibleResult {}
  */
 export interface ViewCameraParams {
   /** mutually exclusive with view; identical vocabulary to hew.view.snapshot's camera */
-  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
   /** a named standard view; mutually exclusive with camera */
   view?: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom"
 }
@@ -1623,7 +1732,7 @@ export interface ViewLineDrawingResult {
  */
 export interface ViewSnapshotParams {
   /** mutually exclusive with view */
-  camera?: { eye: [number, number, number]; fov_deg?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
+  camera?: { eye: [number, number, number]; fov_deg?: number; parallel_height?: number; projection?: "perspective" | "parallel"; target: [number, number, number]; up?: [number, number, number] }
   /** bits per pixel of the depth PNG (default 8); only with include_depth */
   depth_bits?: 8 | 16
   /** defaults to 512; out-of-range values are clamped, not refused */
@@ -1748,6 +1857,7 @@ export class HewApiClient {
     close: (params: DocCloseParams): Promise<DocCloseResult> => this.call('hew.doc.close', params),
     export: (params: DocExportParams): Promise<DocExportResult> => this.call('hew.doc.export', params),
     focus: (params: DocFocusParams): Promise<DocFocusResult> => this.call('hew.doc.focus', params),
+    health: (params: DocHealthParams): Promise<DocHealthResult> => this.call('hew.doc.health', params),
     import: (params: DocImportParams): Promise<DocImportResult> => this.call('hew.doc.import', params),
     new: (params: DocNewParams): Promise<DocNewResult> => this.call('hew.doc.new', params),
     open: (params: DocOpenParams): Promise<DocOpenResult> => this.call('hew.doc.open', params),
@@ -1848,17 +1958,21 @@ export class HewApiClient {
   }
 
   readonly solid = {
+    cap: (params: SolidCapParams): Promise<SolidCapResult> => this.mutate('hew.solid.cap', params),
+    deleteFaces: (params: SolidDeleteFacesParams): Promise<SolidDeleteFacesResult> => this.mutate('hew.solid.delete_faces', params),
     deleteImprint: (params: SolidDeleteImprintParams): Promise<SolidDeleteImprintResult> => this.mutate('hew.solid.delete_imprint', params),
     extrude: (params: SolidExtrudeParams): Promise<SolidExtrudeResult> => this.mutate('hew.solid.extrude', params),
     followMe: (params: SolidFollowMeParams): Promise<SolidFollowMeResult> => this.mutate('hew.solid.follow_me', params),
     imprints: (params: SolidImprintsParams): Promise<SolidImprintsResult> => this.call('hew.solid.imprints', params),
     intersect: (params: SolidIntersectParams): Promise<SolidIntersectResult> => this.mutate('hew.solid.intersect', params),
+    markSurface: (params: SolidMarkSurfaceParams): Promise<SolidMarkSurfaceResult> => this.mutate('hew.solid.mark_surface', params),
     moveImprint: (params: SolidMoveImprintParams): Promise<SolidMoveImprintResult> => this.mutate('hew.solid.move_imprint', params),
     pushPull: (params: SolidPushPullParams): Promise<SolidPushPullResult> => this.mutate('hew.solid.push_pull', params),
     rotateImprint: (params: SolidRotateImprintParams): Promise<SolidRotateImprintResult> => this.mutate('hew.solid.rotate_imprint', params),
     scaleImprint: (params: SolidScaleImprintParams): Promise<SolidScaleImprintResult> => this.mutate('hew.solid.scale_imprint', params),
     slice: (params: SolidSliceParams): Promise<SolidSliceResult> => this.mutate('hew.solid.slice', params),
     subtract: (params: SolidSubtractParams): Promise<SolidSubtractResult> => this.mutate('hew.solid.subtract', params),
+    thicken: (params: SolidThickenParams): Promise<SolidThickenResult> => this.mutate('hew.solid.thicken', params),
     union: (params: SolidUnionParams): Promise<SolidUnionResult> => this.mutate('hew.solid.union', params),
   }
 

@@ -1708,6 +1708,7 @@ mod tests {
             face_holes: vec![Vec::new(); face_count],
             base_material: kernel::serialize::NO_MATERIAL,
             tags: Vec::new(),
+            extra: Default::default(),
         }
     }
 
@@ -1722,6 +1723,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
@@ -1748,6 +1751,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new()).expect("ingest a painted box");
         let ids = doc.material_ids();
@@ -1779,6 +1784,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a textured box");
@@ -1804,6 +1811,7 @@ mod tests {
             face_holes: vec![Vec::new()],
             base_material: kernel::serialize::NO_MATERIAL,
             tags: Vec::new(),
+            extra: Default::default(),
         };
         let scene = ImportScene {
             materials: Vec::new(),
@@ -1814,6 +1822,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new()).expect("ingest an open quad");
         doc
@@ -1961,6 +1971,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -1976,6 +1988,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");
@@ -2647,6 +2661,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest an awkwardly named box");
@@ -2690,6 +2706,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest two colliding-sanitized boxes");
@@ -2815,6 +2833,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -2828,6 +2848,8 @@ mod tests {
             camera: None,
             scenes: Vec::new(),
             section: None,
+            view_style: None,
+            extra: Default::default(),
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");

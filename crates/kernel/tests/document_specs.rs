@@ -1362,7 +1362,9 @@ fn rescale_document_scales_world_geometry_sketches_and_guides_and_composes_insta
     // Guides scaled about the origin; a positive scale never rotates or
     // flips a guide's direction.
     match doc.guide(gl).unwrap() {
-        Guide::Line { origin, direction } => {
+        Guide::Line {
+            origin, direction, ..
+        } => {
             assert!(approx_pt(*origin, scaled(line_origin, factor)));
             assert!(direction.approx_eq(line_dir, 1e-12));
         }
@@ -4918,7 +4920,9 @@ fn add_guide_line_normalizes_direction_and_is_queryable() {
 
     assert_eq!(doc.guide_ids(), vec![id]);
     match doc.guide(id).expect("guide is live") {
-        Guide::Line { origin, direction } => {
+        Guide::Line {
+            origin, direction, ..
+        } => {
             assert!(origin.approx_eq(Point3::new(1.0, 2.0, 3.0), 1e-12));
             // Stored direction is normalized, not the raw (2,0,0) input.
             assert!(direction.approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-12));
@@ -6759,6 +6763,7 @@ fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
         face_holes: vec![Vec::new(); 5],
         base_material: kernel::NO_MATERIAL,
         tags: Vec::new(),
+        extra: Default::default(),
     };
     let scene = ImportScene {
         materials: vec![],
@@ -6769,6 +6774,8 @@ fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
         camera: None,
         scenes: Vec::new(),
         section: None,
+        view_style: None,
+        extra: Default::default(),
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.leaky, 1);

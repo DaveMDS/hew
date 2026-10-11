@@ -44,7 +44,7 @@ use tracing::info;
 
 use crate::annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 use crate::axes::{AxesFrame, AxesFrameError};
-use crate::camera::CameraState;
+use crate::camera::{CameraProjection, CameraState};
 use crate::guide::Guide;
 use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
@@ -110,6 +110,8 @@ pub enum EntityRef {
     Guide(GuideId),
     Material(MaterialId),
     Tag(Vec<String>),
+    /// A dimension or leader text (manifest v19+ gives it a stable id).
+    Annotation(AnnotationId),
 }
 
 /// Who owns an [`Object`] (ARCHITECTURE.md). A `World` object is a top-level or
@@ -345,10 +347,14 @@ struct InstanceRecord {
 /// A construction guide plus its visibility. `hidden` marks an undone
 /// creation or a delete, kept so the [`GuideId`] stays valid for redo —
 /// exactly the tombstone pattern used for objects/groups/instances.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct GuideRecord {
     guide: Guide,
     hidden: bool,
+    /// Tag paths, root-first, as a node's: a guide with a hidden tag (or a
+    /// tag below a hidden one) is not drawn or snapped to
+    /// ([`Document::guide_shown`]). Empty for an untagged guide.
+    tags: Vec<Vec<String>>,
 }
 
 /// A dimension/leader-text annotation plus its visibility and re-anchoring
@@ -363,6 +369,10 @@ struct AnnotationRecord {
     annotation: Annotation,
     hidden: bool,
     detached: bool,
+    /// Tag paths, root-first: an annotation with a hidden tag is not shown
+    /// ([`Document::annotation_shown`]). Set by an import (a `.skp`
+    /// dimension's layer).
+    tags: Vec<Vec<String>>,
 }
 
 /// One annotation a document mutation changed the re-anchoring/liveness
@@ -419,6 +429,13 @@ struct PendingSketchGesture {
 /// One node's tag-list transition inside [`DocAction::TagDeleted`]:
 /// `(node, tags before, tags after)`.
 type TagListTransition = (NodeId, Vec<Vec<String>>, Vec<Vec<String>>);
+/// An annotation's tag list before and after a tag rename or delete.
+type AnnotationTagTransition = (AnnotationId, Vec<Vec<String>>, Vec<Vec<String>>);
+/// A sketch's tag list before and after a tag rename or delete.
+type SketchTagTransition = (SketchId, Vec<Vec<String>>, Vec<Vec<String>>);
+/// `(guide, tags before, tags after)` — a tag rename/delete's effect on one
+/// guide, the same shape as [`SketchTagTransition`].
+type GuideTagTransition = (GuideId, Vec<Vec<String>>, Vec<Vec<String>>);
 
 /// Transient state for an open **explode session**
 /// (docs/design/explode-session-prototype.md, a `proto/explode-session`
@@ -637,6 +654,27 @@ pub struct HistoryEntries {
     pub saved_depth: Option<usize>,
 }
 
+/// One attribute namespace an import set: `(target, namespace, the value
+/// before, the value set)` — see `DocAction::Imported::attrs`.
+type ImportedAttr = (
+    AttrTarget,
+    String,
+    Option<BTreeMap<String, crate::attr::AttrValue>>,
+    BTreeMap<String, crate::attr::AttrValue>,
+);
+
+/// Which Model Health repair a [`DocAction::Repaired`] records, for its
+/// history label.
+#[derive(Debug, Clone, Copy)]
+enum RepairKind {
+    /// [`Document::cap_rims`] closed `rims` rims.
+    Cap { rims: usize },
+    /// [`Document::delete_faces`] removed `faces` faces.
+    DeleteFaces { faces: usize },
+    /// [`Document::thicken_sheet`] pulled a flat sheet into a solid.
+    Thicken,
+}
+
 /// One document-level step on the undo stack.
 ///
 /// Object creation is undone by hiding (not deleting), so the `ObjectId` never
@@ -789,6 +827,25 @@ enum DocAction {
         /// [`DocAction::Deleted::reanchored`].
         reanchored: Vec<AnnotationReanchor>,
     },
+    /// A Model Health repair ([`Document::cap_rims`],
+    /// [`Document::delete_faces`]) rewrote one open object's geometry in
+    /// place. Undo restores the recorded `before` snapshot verbatim and
+    /// hides `split_off` (islands a deletion cut loose as objects of their
+    /// own), taking them out of `parent`'s member list; redo restores
+    /// `after` and reverses. The object keeps its handle, name, tags, group
+    /// and attributes. Repairs are not `KernelOp`-invertible, so the
+    /// object's own [`History`] is left alone: its entries stay valid
+    /// because undo is LIFO and both snapshots are exact clones (same
+    /// handles) of the states those entries were recorded against.
+    Repaired {
+        object: ObjectId,
+        kind: RepairKind,
+        before: Object,
+        after: Object,
+        split_off: Vec<ObjectId>,
+        /// The group the object (and so every split-off piece) sits in.
+        parent: Option<GroupId>,
+    },
     /// A push-through subtract removed material from one solid, replacing
     /// it with one or more result shells (`results` — more than one when the cut
     /// severed the solid). Undo hides the results and unhides the source; redo
@@ -907,6 +964,15 @@ enum DocAction {
         sketch: SketchId,
         prev: Option<ObjectId>,
         next: Option<ObjectId>,
+    },
+    /// A sketch's group changed ([`Document::set_sketch_group`], or an
+    /// ungroup releasing the group's drawing): `prev` → `next`, either
+    /// side `None` for "in no group". Undo sets `prev` back, redo `next`;
+    /// the sketch's geometry never changes.
+    SketchGroupChanged {
+        sketch: SketchId,
+        prev: Option<GroupId>,
+        next: Option<GroupId>,
     },
     /// A move/rotate/scale applied to a whole mixed selection in one step
     /// (`transform_selection`: select-all → Move). Baked into every world
@@ -1475,6 +1541,8 @@ enum DocAction {
         /// Explicit face overrides touched (object, face) — all previously
         /// equal to `from`.
         faces: Vec<(ObjectId, FaceId)>,
+        /// Faces whose back paint was `from` and is now `to`.
+        back_faces: Vec<(ObjectId, FaceId)>,
         /// Object base materials touched — all previously equal to `from`.
         defaults: Vec<ObjectId>,
     },
@@ -1506,6 +1574,8 @@ enum DocAction {
     MaterialDeleted {
         material: MaterialId,
         faces: Vec<(ObjectId, FaceId)>,
+        /// The face rows whose back paint was the deleted material.
+        back_faces: Vec<(ObjectId, FaceId)>,
         defaults: Vec<ObjectId>,
     },
     /// [`Document::delete_definition`] hid a component definition (its
@@ -1565,6 +1635,12 @@ enum DocAction {
         identities: Vec<(Vec<String>, u64, crate::attr::AttrDict)>,
         /// Per-node tag lists: `(node, tags before, tags after)`.
         nodes: Vec<TagListTransition>,
+        /// Per-annotation tag lists, the same way.
+        annotations: Vec<AnnotationTagTransition>,
+        /// Per-sketch tag lists, the same way.
+        sketches: Vec<SketchTagTransition>,
+        /// Per-guide tag lists, the same way.
+        guides: Vec<GuideTagTransition>,
     },
     /// `rename_tag` moved a tag path (and every registered tag nested under
     /// it) to a new path: registry entries re-keyed — keeping their stable
@@ -1577,6 +1653,12 @@ enum DocAction {
         registry: Vec<(Vec<String>, Vec<String>)>,
         /// Per-node tag lists: `(node, tags before, tags after)`.
         nodes: Vec<TagListTransition>,
+        /// Per-annotation tag lists, the same way.
+        annotations: Vec<AnnotationTagTransition>,
+        /// Per-sketch tag lists, the same way.
+        sketches: Vec<SketchTagTransition>,
+        /// Per-guide tag lists, the same way.
+        guides: Vec<GuideTagTransition>,
     },
     /// [`Document::follow_me_face`] swept a solid FACE profile into a new
     /// object (design §3a), OR [`Document::extrude_face_as_new_object`]
@@ -1623,15 +1705,26 @@ enum DocAction {
         /// (with their hidden flags). Undo unregisters exactly these; tags
         /// that already existed before the import are untouched.
         tags: Vec<(Vec<String>, bool)>,
-        /// Created `SketchId`s — definition-owned drafting surfaces a
-        /// library insert ([`Document::insert_document`]) carried in with
-        /// their definitions. Always empty for a format import (`ingest`):
-        /// `ImportScene` has no sketch channel. Undo moves these into
-        /// `hidden_sketches` (redo removes them again) — without that, a
-        /// tombstoned definition's live sketch would serialize with an
-        /// `owner` pointing at a definition the save excludes, a dangling
-        /// reference no conforming reader accepts.
+        /// Created `SketchId`s — drafting surfaces an import's
+        /// [`crate::import::ImportSceneExtra::sketches`] drew, or
+        /// definition-owned ones a library insert
+        /// ([`Document::insert_document`]) carried in with their
+        /// definitions. Undo moves these into `hidden_sketches` (redo
+        /// removes them again) — without that, a tombstoned definition's
+        /// live sketch would serialize with an `owner` pointing at a
+        /// definition the save excludes, a dangling reference no
+        /// conforming reader accepts.
         sketches: Vec<SketchId>,
+        /// Created annotations (an import's
+        /// [`crate::import::ImportSceneExtra::annotations`]). Undo hides
+        /// them, redo shows them again.
+        annotations: Vec<AnnotationId>,
+        /// Attribute namespaces the import set: `(target, namespace, the
+        /// value before, the value set)`. Undo restores each prior value
+        /// (removing the namespace where there was none), redo sets them
+        /// again — the document's own dictionary and a tag's are not
+        /// tombstoned with any entity, so they must be put back exactly.
+        attrs: Vec<ImportedAttr>,
     },
     /// `delete_def_member` hid one object from a component definition —
     /// component-edit-parity.md phase K1. Unlike [`DocAction::Deleted`] on a
@@ -1646,6 +1739,11 @@ enum DocAction {
     DeletedDefMember {
         component: ComponentId,
         object: ObjectId,
+        /// A member inside a group within the definition: the group and the
+        /// position it was spliced out of (a group may list only live
+        /// members), so undo puts it back exactly there. `None` for a direct
+        /// member, which stays listed in `ComponentDef.members`, hidden.
+        from_group: Option<(GroupId, usize)>,
     },
     /// [`Document::place_text`]'s final cleanup: after every selected FILL
     /// region has been extruded, any edges still standing in the sketch
@@ -1834,12 +1932,20 @@ impl DocAction {
                 v.extend(results.iter().copied());
                 v
             }
+            DocAction::Repaired {
+                object, split_off, ..
+            } => {
+                let mut v = vec![*object];
+                v.extend(split_off.iter().copied());
+                v
+            }
             DocAction::Transform { objects, .. } => objects.iter().map(|&(id, _)| id).collect(),
             DocAction::TransformSketch { .. }
             | DocAction::TransformSketchIsland { .. }
             | DocAction::DetachedSketchIsland { .. }
             | DocAction::CopiedSketchIslands { .. }
-            | DocAction::SketchOwnerChanged { .. } => Vec::new(),
+            | DocAction::SketchOwnerChanged { .. }
+            | DocAction::SketchGroupChanged { .. } => Vec::new(),
             DocAction::TransformSelection { objects, .. } => {
                 objects.iter().map(|&(id, _)| id).collect()
             }
@@ -1890,17 +1996,25 @@ impl DocAction {
             DocAction::SetObjectMaterial { object, .. } => vec![*object],
             DocAction::SetFaceUvFrame { object, .. } => vec![*object],
             DocAction::ReplaceMaterial {
-                faces, defaults, ..
+                faces,
+                back_faces,
+                defaults,
+                ..
             } => {
                 let mut v: Vec<ObjectId> = faces.iter().map(|&(o, _)| o).collect();
+                v.extend(back_faces.iter().map(|&(o, _)| o));
                 v.extend(defaults.iter().copied());
                 v
             }
             DocAction::SetMaterialAlpha { .. } | DocAction::MaterialRenamed { .. } => Vec::new(),
             DocAction::MaterialDeleted {
-                faces, defaults, ..
+                faces,
+                back_faces,
+                defaults,
+                ..
             } => {
                 let mut v: Vec<ObjectId> = faces.iter().map(|&(o, _)| o).collect();
+                v.extend(back_faces.iter().map(|&(o, _)| o));
                 v.extend(defaults.iter().copied());
                 v
             }
@@ -1956,7 +2070,8 @@ impl DocAction {
             DocAction::Boolean { .. }
             | DocAction::BooleanNodes { .. }
             | DocAction::Sliced { .. }
-            | DocAction::PushThrough { .. } => Vec::new(),
+            | DocAction::PushThrough { .. }
+            | DocAction::Repaired { .. } => Vec::new(),
             // A transformed object's owned sketches ride with it.
             DocAction::Transform { sketches, .. } => sketches.iter().map(|&(id, _)| id).collect(),
             DocAction::TransformSketch { sketch, .. } => vec![*sketch],
@@ -1967,7 +2082,8 @@ impl DocAction {
                 vec![*source, *detached]
             }
             DocAction::CopiedSketchIslands { copy } => vec![*copy],
-            DocAction::SketchOwnerChanged { sketch, .. } => vec![*sketch],
+            DocAction::SketchOwnerChanged { sketch, .. }
+            | DocAction::SketchGroupChanged { sketch, .. } => vec![*sketch],
             DocAction::TransformSelection { sketches, .. } => {
                 sketches.iter().map(|&(id, _)| id).collect()
             }
@@ -2027,6 +2143,21 @@ impl DocAction {
     /// construction (a wildcard arm covers every variant that never
     /// creates) — only variants that mint a fresh `ObjectId`/`SketchId` are
     /// named.
+    /// The sketches this action released from a group to the top
+    /// (`SketchGroupChanged` to no group): a mid-session ungroup's drawing,
+    /// which the group close folds in.
+    fn released_sketches(&self) -> Vec<SketchId> {
+        match self {
+            DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
+                actions.iter().flat_map(|a| a.released_sketches()).collect()
+            }
+            DocAction::SketchGroupChanged {
+                sketch, next: None, ..
+            } => vec![*sketch],
+            _ => Vec::new(),
+        }
+    }
+
     fn created_objects_and_sketches(&self) -> (Vec<ObjectId>, Vec<SketchId>) {
         match self {
             DocAction::Compound { actions, .. } | DocAction::PlaceTextCompound(actions) => {
@@ -2044,6 +2175,7 @@ impl DocAction {
             DocAction::BooleanNodes { result_objects, .. } => (result_objects.clone(), Vec::new()),
             DocAction::Sliced { a, b, .. } => (vec![*a, *b], Vec::new()),
             DocAction::PushThrough { results, .. } => (results.clone(), Vec::new()),
+            DocAction::Repaired { split_off, .. } => (split_off.clone(), Vec::new()),
             DocAction::DetachedSketchIsland { detached, .. } => (Vec::new(), vec![*detached]),
             DocAction::CopiedSketchIslands { copy } => (Vec::new(), vec![*copy]),
             DocAction::SketchGesture {
@@ -2089,6 +2221,7 @@ impl DocAction {
             DocAction::BooleanNodes { result_objects, .. } => objects_only(result_objects),
             DocAction::Sliced { a, b, .. } => vec![NodeId::Object(*a), NodeId::Object(*b)],
             DocAction::PushThrough { results, .. } => objects_only(results),
+            DocAction::Repaired { split_off, .. } => objects_only(split_off),
             DocAction::FollowMeFace { result, .. } => vec![NodeId::Object(*result)],
             DocAction::Exploded {
                 created,
@@ -2243,6 +2376,15 @@ fn merge_doc_change(into: &mut DocChange, from: DocChange) {
 /// [`Document::extract_item`]'s re-origin step and
 /// [`visible_world_bottom_center`]: an anchor/shift derived from invisible
 /// geometry would float the VISIBLE part off the cursor (round-3 review).
+/// The face rows of a material action, front references then back ones
+/// (a face can appear in both).
+fn with_backs(
+    faces: &[(ObjectId, FaceId)],
+    back_faces: &[(ObjectId, FaceId)],
+) -> Vec<(ObjectId, FaceId)> {
+    faces.iter().chain(back_faces).copied().collect()
+}
+
 fn visibly_hidden(doc: &Document, node: NodeId) -> bool {
     if doc.node_user_hidden(node) {
         return true;
@@ -2362,6 +2504,9 @@ pub enum DocumentError {
     UnknownGuide,
     /// The annotation handle is stale, hidden, or from another Document.
     UnknownAnnotation,
+    /// Attributes were written to an annotation, which carries none (the
+    /// file format persists no dictionary for a dimension or a label).
+    AnnotationHasNoAttrs,
     /// Annotation geometry is degenerate: a non-finite anchor/offset/curve
     /// value, a zero-length linear dimension (its two anchors coincide), or a
     /// non-positive radial-dimension radius. Nothing is silently repaired or
@@ -2461,6 +2606,9 @@ pub enum DocumentError {
     Transform(TransformError),
     /// A per-Object op failed to apply.
     Op(KernelOpError),
+    /// A Model Health repair ([`Document::cap_rims`],
+    /// [`Document::delete_faces`]) refused.
+    Repair(crate::repair::RepairError),
     /// Undo with an empty document undo stack.
     NothingToUndo,
     /// Redo with an empty document redo stack.
@@ -2647,6 +2795,9 @@ impl std::fmt::Display for DocumentError {
             DocumentError::UnknownInstance => write!(f, "no such instance in this document"),
             DocumentError::UnknownGuide => write!(f, "no such guide in this document"),
             DocumentError::UnknownAnnotation => write!(f, "no such annotation in this document"),
+            DocumentError::AnnotationHasNoAttrs => {
+                write!(f, "a dimension or label carries no attributes")
+            }
             DocumentError::DegenerateAnnotation => write!(
                 f,
                 "annotation geometry is degenerate (non-finite value, coincident dimension \
@@ -2726,6 +2877,7 @@ impl std::fmt::Display for DocumentError {
             DocumentError::Slice(e) => write!(f, "{e}"),
             DocumentError::Transform(e) => write!(f, "{e}"),
             DocumentError::Op(e) => write!(f, "{e}"),
+            DocumentError::Repair(e) => write!(f, "{e}"),
             DocumentError::NothingToUndo => write!(f, "nothing to undo"),
             DocumentError::NothingToRedo => write!(f, "nothing to redo"),
             DocumentError::InverseFailed(e) => write!(f, "inverse op failed (kernel bug): {e}"),
@@ -3019,6 +3171,21 @@ pub struct Document {
     /// into sessions, and folds back exactly like any definition sketch.
     /// Persisted as the sketch record's `owner_object` (manifest v17+).
     object_sketches: BTreeMap<SketchId, ObjectId>,
+    /// Sketches drawn in a group (a `.skp` group of edges, or lines drawn
+    /// while editing a group, which join it when the session closes): the
+    /// group they belong to. Such a sketch stays in its group's frame
+    /// (world coordinates for a world group, the definition's for a group
+    /// inside one — then it is in `def_sketches` too), hides with the
+    /// group, lives and dies with it (`sketch_tombstoned`), is copied with
+    /// it and is released to the group around it by an ungroup. Persisted
+    /// as the sketch record's `owner_group` (manifest v19+).
+    group_sketches: BTreeMap<SketchId, GroupId>,
+    /// The tag paths a sketch carries (a `.skp` edge's layer), root-first,
+    /// for sketches that carry any: one is not shown while one of its tags,
+    /// or a tag above one, is hidden ([`Document::sketch_shown`]). Set by an
+    /// import, rewritten by a tag rename or delete, copied with the sketch.
+    /// Persisted as the sketch record's `tags` (manifest v20+).
+    sketch_tags: BTreeMap<SketchId, Vec<Vec<String>>>,
     /// Sketches added by [`Document::add_sketch`] that no gesture has recorded
     /// into yet: the first gesture on one of these folds the sketch's creation
     /// into its undo step ([`DocAction::SketchGesture::created`]). Session-only
@@ -3079,6 +3246,10 @@ pub struct Document {
     /// manifest v16+): non-undoable, persisted view state, captured by value
     /// into Scenes. `None` when no plane is placed.
     pub(crate) section_plane: Option<crate::scenes::SectionPlaneState>,
+    /// How the document asks to be shown (`style.rs`; manifest v19+):
+    /// `None` for Hew's own look. View state outside undo history, like
+    /// `camera`.
+    view_style: Option<crate::style::ViewStyle>,
     /// Persistent per-entity **stable ids** (manifest v14+; docs/agents/HEW_API.md
     /// §5.1): the identity that survives save/load, undo/redo, and the
     /// dense-id renumbering every save performs (HEW_FILE_FORMAT.md §4.2).
@@ -3220,6 +3391,13 @@ impl Document {
         id
     }
 
+    fn insert_annotation_record(&mut self, rec: AnnotationRecord) -> AnnotationId {
+        let id = self.annotations.insert(rec);
+        let sid = self.mint_sid();
+        self.sids.insert(EntityRef::Annotation(id), sid);
+        id
+    }
+
     fn insert_guide_record(&mut self, rec: GuideRecord) -> GuideId {
         let id = self.guides.insert(rec);
         let sid = self.mint_sid();
@@ -3265,6 +3443,10 @@ impl Document {
             EntityRef::Guide(id) => self.guides.get(*id).is_some_and(|r| !r.hidden),
             EntityRef::Material(id) => self.material_is_live(*id),
             EntityRef::Tag(path) => self.tag_meta.contains_key(path),
+            // An annotation carries no attributes: nothing would persist
+            // them (`AnnotationDto` has no dictionary), so a write is
+            // refused rather than vanishing on save.
+            EntityRef::Annotation(_) => return Err(DocumentError::AnnotationHasNoAttrs),
         };
         if live {
             Ok(())
@@ -3278,6 +3460,7 @@ impl Document {
                 EntityRef::Guide(_) => DocumentError::UnknownGuide,
                 EntityRef::Material(_) => DocumentError::UnknownMaterial,
                 EntityRef::Tag(_) => DocumentError::UnknownTag,
+                EntityRef::Annotation(_) => DocumentError::UnknownAnnotation,
             })
         }
     }
@@ -3642,6 +3825,22 @@ impl Document {
             .filter(|(id, _)| !self.sketch_tombstoned(id))
             .map(|(&id, &oid)| (id, oid))
             .collect();
+        // ── Per-sketch GROUP (manifest v19+), live sketches of live groups ─
+        let sketch_owner_group: BTreeMap<SketchId, GroupId> = self
+            .group_sketches
+            .iter()
+            .filter(|(id, g)| {
+                !self.sketch_tombstoned(id) && self.groups.get(**g).is_some_and(|r| !r.hidden)
+            })
+            .map(|(&id, &gid)| (id, gid))
+            .collect();
+        // ── Per-sketch tags (manifest v20+), live sketches only ───────────
+        let sketch_tags: BTreeMap<SketchId, Vec<Vec<String>>> = self
+            .sketch_tags
+            .iter()
+            .filter(|(id, tags)| !self.sketch_tombstoned(id) && !tags.is_empty())
+            .map(|(&id, tags)| (id, tags.clone()))
+            .collect();
 
         // ── Collect live guides (in slotmap key order) ─────────────────
         let guides: Vec<(GuideId, Guide)> = self
@@ -3650,6 +3849,13 @@ impl Document {
             .filter(|(_, rec)| !rec.hidden)
             .map(|(id, rec)| (id, rec.guide))
             .collect();
+        // Each guide's tags, parallel (manifest v21+).
+        let guide_tags: Vec<Vec<Vec<String>>> = self
+            .guides
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
+            .map(|(_, rec)| rec.tags.clone())
+            .collect();
 
         // ── Collect live annotations (in slotmap key order) ────────────────
         let annotations: Vec<(AnnotationId, Annotation, bool)> = self
@@ -3657,6 +3863,12 @@ impl Document {
             .iter()
             .filter(|(_, rec)| !rec.hidden)
             .map(|(id, rec)| (id, rec.annotation.clone(), rec.detached))
+            .collect();
+        let annotation_tags: Vec<Vec<Vec<String>>> = self
+            .annotations
+            .values()
+            .filter(|rec| !rec.hidden)
+            .map(|rec| rec.tags.clone())
             .collect();
 
         // ── Collect root nodes: top-level visible world nodes ─────────────
@@ -3679,8 +3891,12 @@ impl Document {
             sketches,
             sketch_owner,
             sketch_owner_object,
+            sketch_owner_group,
+            sketch_tags,
             guides,
+            guide_tags,
             annotations,
+            annotation_tags,
             roots,
             obj_names,
             obj_tags,
@@ -3689,6 +3905,7 @@ impl Document {
             group_hidden: self.user_hidden_groups.clone(),
             instance_hidden: self.user_hidden_instances.clone(),
             camera: self.camera,
+            view_style: self.view_style,
             axes: self.axes,
             sids: self.sids.clone(),
             attrs: self.attrs.clone(),
@@ -3796,10 +4013,12 @@ impl Document {
         // doesn't matter; after sketches is fine, and is deterministic since
         // `raw.guides` is already in dense (save-time) order.
         let mut guide_ids: Vec<GuideId> = Vec::with_capacity(raw.guides.len());
+        let mut raw_guide_tags = raw.guide_tags.into_iter();
         for guide in raw.guides {
             guide_ids.push(doc.guides.insert(GuideRecord {
                 guide,
                 hidden: false,
+                tags: raw_guide_tags.next().unwrap_or_default(),
             }));
         }
 
@@ -4153,6 +4372,36 @@ impl Document {
             }
         }
 
+        // ── Group-held sketches (manifest v19+): the group's definition
+        // must be the sketch's own `owner` (the sketch is in the group's
+        // frame) — a world group holds world sketches, a group inside C
+        // holds C's.
+        for (i, group_dense) in raw.sketch_owner_group.iter().enumerate() {
+            if let Some(gd) = group_dense {
+                let gid =
+                    *grp_ids
+                        .get(*gd as usize)
+                        .ok_or_else(|| LoadError::DanglingReference {
+                            what: format!("sketch {i} owner group dense id {gd} out of range"),
+                        })?;
+                let sid = sketch_ids[i];
+                if doc.groups[gid].owner_def != doc.sketch_owner_component(sid) {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "sketch {i} is held by group {gd} but lies in a different component"
+                        ),
+                    });
+                }
+                doc.group_sketches.insert(sid, gid);
+            }
+        }
+        // ── Sketch tags (manifest v20+), parallel to the sketches.
+        for (i, tags) in raw.sketch_tags.into_iter().enumerate() {
+            if !tags.is_empty() {
+                doc.sketch_tags.insert(sketch_ids[i], tags);
+            }
+        }
+
         // ── Insert annotations (manifest v13+) — after every node kind is
         // live, so an anchor's node reference resolves; order relative to
         // guides/roots doesn't matter (independent collections).
@@ -4163,6 +4412,8 @@ impl Document {
                 point: a.point,
             })
         };
+        let mut raw_tags = raw.annotation_tags.into_iter();
+        let mut annotation_ids: Vec<AnnotationId> = Vec::with_capacity(raw.annotations.len());
         for (raw_ann, detached) in raw.annotations {
             let annotation = match raw_ann {
                 RawAnnotation::Linear {
@@ -4201,11 +4452,13 @@ impl Document {
                     text,
                 },
             };
-            doc.annotations.insert(AnnotationRecord {
+            let id = doc.annotations.insert(AnnotationRecord {
                 annotation,
                 hidden: false,
                 detached,
+                tags: raw_tags.next().unwrap_or_default(),
             });
+            annotation_ids.push(id);
         }
 
         // ── Pre-v11 consumed index: becoming, retroactively ───────────────
@@ -4292,7 +4545,30 @@ impl Document {
         for (i, &gid) in grp_ids.iter().enumerate() {
             doc.restore_sid(EntityRef::Group(gid), raw.group_sids.get(i).copied());
         }
-        doc.next_sid = doc.sids.values().max().map_or(0, |m| m + 1);
+        // Annotations' ids came later (v19): a v14–v18 file records every
+        // other entity's, so theirs are minted past the maximum in use —
+        // scenes' included, which share the counter — never at 0, 1, 2…
+        // where recorded ids already sit.
+        let past = doc
+            .sids
+            .values()
+            .copied()
+            .chain(raw.scenes.iter().map(|s| s.sid))
+            .max()
+            .map_or(0, |m| m + 1);
+        doc.next_sid = doc.next_sid.max(past);
+        for (i, &aid) in annotation_ids.iter().enumerate() {
+            doc.restore_sid(
+                EntityRef::Annotation(aid),
+                raw.annotation_sids.get(i).copied(),
+            );
+        }
+        doc.next_sid = doc
+            .sids
+            .values()
+            .max()
+            .map_or(0, |m| m + 1)
+            .max(doc.next_sid);
 
         // ── Attribute dictionaries (manifest v14+, docs/agents/HEW_API.md §8) ────
         // Decode already validated shapes and values; only non-empty dicts
@@ -4366,6 +4642,7 @@ impl Document {
 
         // ── Camera view state (manifest v13; absent pre-v13) ──────────────
         doc.camera = raw.camera;
+        doc.view_style = raw.view_style;
 
         // ── Movable drawing axes (manifest v13+; identity for older files) ─
         doc.axes = raw.axes;
@@ -4446,6 +4723,7 @@ impl Document {
         &mut self,
         recipe: crate::import::ImportSceneRecipe,
         keys: &BTreeMap<u64, Vec<NodeId>>,
+        placements: &[(ObjectId, Transform)],
     ) {
         use crate::scenes::SceneProps;
         let base = if recipe.name.trim().is_empty() {
@@ -4464,11 +4742,21 @@ impl Document {
             hidden_nodes: recipe.hidden_keys.is_some(),
             hidden_tags: recipe.hidden_tags.is_some(),
             section: recipe.section.is_some(),
-            display: false,
+            display: recipe.display.is_some() || recipe.view_style.is_some(),
         };
-        let Ok(sid) = self.add_scene(Some(name), props, recipe.camera, None, None) else {
+        // (A SketchUp camera's target is moved onto the model; see
+        // `camera_retargeted_to_model`.)
+        let camera = recipe
+            .camera
+            .map(|c| self.camera_retargeted_to_model(c, placements));
+        let Ok(sid) = self.add_scene(Some(name), props, camera, recipe.display, None) else {
             return;
         };
+        // The scene's own look is the recipe's, not the document's at this
+        // moment (`add_scene` captured the latter).
+        if let Some(scene) = self.scenes.iter_mut().find(|s| s.sid == sid) {
+            scene.view_style = recipe.view_style;
+        }
         let hidden_nodes = recipe.hidden_keys.map(|ks| {
             ks.iter()
                 .filter_map(|k| keys.get(k))
@@ -4516,10 +4804,25 @@ impl Document {
         scene: ImportScene,
         textures_missing: Vec<String>,
     ) -> Result<(ImportReport, DocChange), DocumentError> {
+        let job = self.ingest_begin(scene, textures_missing)?;
+        Ok(self.ingest_finish(job))
+    }
+
+    /// Start an import: check the recipe, add its materials and allot its
+    /// definitions, touching the document only once the recipe passes.
+    /// The definitions' contents and the scene tree are then built by
+    /// [`Document::ingest_step`], as many at a time as the caller asks, so
+    /// a host can say how far an open has come, and
+    /// [`Document::ingest_finish`] does the rest and files the one undo
+    /// step. Until then the document is mid-import: nothing else edits it.
+    pub fn ingest_begin(
+        &mut self,
+        scene: ImportScene,
+        textures_missing: Vec<String>,
+    ) -> Result<IngestJob, DocumentError> {
         // An import's world-tree creations mid-session would all fold into
         // the open definition at close — never what an import means.
         self.refuse_during_component_session()?;
-        use crate::serialize::NO_MATERIAL;
 
         // ── 0. Validate the recipe's definition graph ─────────────────────
         // Definitions may nest (an `Instance` member referencing another
@@ -4531,6 +4834,7 @@ impl Document {
         // (built/removed-empty) is known first.
         let def_build_order = ingest_def_build_order(&scene.defs)?;
         ingest_refuse_expansion(&scene, &def_build_order)?;
+        let extra = scene.extra;
 
         // ── 1. Insert materials → build dense→MaterialId map ──────────────
         let mat_ids: Vec<MaterialId> = scene
@@ -4538,28 +4842,6 @@ impl Document {
             .into_iter()
             .map(|m| self.insert_material_record(m))
             .collect();
-        let dense_to_mat = |dense: u32| -> Option<MaterialId> {
-            if dense == NO_MATERIAL {
-                None
-            } else {
-                mat_ids.get(dense as usize).copied()
-            }
-        };
-
-        // Tracking collections for the DocAction + DocChange.
-        let mut all_objects: Vec<ObjectId> = Vec::new();
-        let mut all_components: Vec<ComponentId> = Vec::new();
-        let mut all_instances: Vec<InstanceId> = Vec::new();
-        let mut all_groups: Vec<GroupId> = Vec::new();
-        let mut top_roots: Vec<NodeId> = Vec::new();
-
-        let mut watertight_count = 0usize;
-        let mut leaky_count = 0usize;
-        let mut skipped: Vec<SkippedMesh> = Vec::new();
-        // Importer keys -> the nodes they became (scene hidden sets). One
-        // key can name several nodes: a shared definition's members are
-        // rebuilt per material variant of the definition.
-        let mut keys: BTreeMap<u64, Vec<NodeId>> = BTreeMap::new();
         // A saved view is adopted only into an empty document.
         let was_empty = self.top_level_nodes().is_empty() && self.sketches.is_empty();
 
@@ -4570,6 +4852,13 @@ impl Document {
         let mut def_cid: Vec<Option<ComponentId>> = Vec::with_capacity(scene.defs.len());
         let mut def_children: Vec<Option<Vec<crate::import::ImportNode>>> =
             Vec::with_capacity(scene.defs.len());
+        // A definition of drawing alone (a wire-frame component, a light
+        // rig of edges, a 2D symbol) has no member to build, and is a
+        // definition all the same: its sketches join it below, as a group
+        // of lines alone is a group.
+        let def_holds_drawing: Vec<bool> = (0..scene.defs.len())
+            .map(|di| extra.sketches.iter().any(|s| s.def == Some(di)))
+            .collect();
         for def_recipe in scene.defs {
             let cid = self.insert_component_record(ComponentDef {
                 members: Vec::new(),
@@ -4579,9 +4868,56 @@ impl Document {
             def_cid.push(Some(cid));
             def_children.push(Some(def_recipe.children));
         }
-        for &di in &def_build_order {
-            let cid = def_cid[di].expect("placeholder allocated above");
-            let children = def_children[di].take().expect("built exactly once");
+        let roots_total = scene.roots.len();
+        Ok(IngestJob {
+            build_order: def_build_order,
+            next_def: 0,
+            def_cid,
+            def_children,
+            def_holds_drawing,
+            roots: scene.roots.into_iter().collect(),
+            roots_total,
+            mat_ids,
+            all_objects: Vec::new(),
+            all_instances: Vec::new(),
+            all_groups: Vec::new(),
+            top_roots: Vec::new(),
+            watertight_count: 0,
+            leaky_count: 0,
+            skipped: Vec::new(),
+            keys: BTreeMap::new(),
+            was_empty,
+            guides: scene.guides,
+            tags: scene.tags,
+            camera: scene.camera,
+            view_style: scene.view_style,
+            section: scene.section,
+            scenes: scene.scenes,
+            extra,
+            textures_missing,
+        })
+    }
+
+    /// Build up to `items` more of a running import, its definitions
+    /// first (in dependency order, so a nested instance always finds its
+    /// definition's fate) and then the top-level nodes, and say how far
+    /// the import has come.
+    pub fn ingest_step(&mut self, job: &mut IngestJob, items: usize) -> IngestProgress {
+        use crate::serialize::NO_MATERIAL;
+        let mat_ids = std::mem::take(&mut job.mat_ids);
+        let dense_to_mat = |dense: u32| -> Option<MaterialId> {
+            if dense == NO_MATERIAL {
+                None
+            } else {
+                mat_ids.get(dense as usize).copied()
+            }
+        };
+        let mut built = 0usize;
+        while built < items && job.next_def < job.build_order.len() {
+            let di = job.build_order[job.next_def];
+            job.next_def += 1;
+            let cid = job.def_cid[di].expect("placeholder allocated at begin");
+            let children = job.def_children[di].take().expect("built exactly once");
             let mut def_members: Vec<NodeId> = Vec::new();
             for child in children {
                 if let Some(nid) = ingest_build_node(
@@ -4589,53 +4925,89 @@ impl Document {
                     child,
                     None,
                     Some(cid),
-                    &def_cid,
-                    &mut all_objects,
-                    &mut all_instances,
-                    &mut all_groups,
-                    &mut watertight_count,
-                    &mut leaky_count,
-                    &mut skipped,
+                    &job.def_cid,
+                    &mut job.all_objects,
+                    &mut job.all_instances,
+                    &mut job.all_groups,
+                    &mut job.watertight_count,
+                    &mut job.leaky_count,
+                    &mut job.skipped,
                     &dense_to_mat,
-                    &mut keys,
+                    &mut job.keys,
                 ) {
                     def_members.push(nid);
                 }
             }
-            if def_members.is_empty() {
+            if def_members.is_empty() && !job.def_holds_drawing[di] {
                 // Every member rejected → remove the placeholder def; later
                 // instances referencing it (nested or world) skip likewise.
                 self.components.remove(cid);
-                def_cid[di] = None;
+                job.def_cid[di] = None;
             } else {
                 self.components[cid].members = def_members;
             }
+            built += 1;
         }
-        // Surviving definitions, back in recipe order.
-        all_components.extend(def_cid.iter().flatten().copied());
-
-        // ── 3. Recursively build the scene tree ───────────────────────────
-        for root_node in scene.roots {
+        while built < items {
+            let Some(root_node) = job.roots.pop_front() else {
+                break;
+            };
             if let Some(nid) = ingest_build_node(
                 self,
                 root_node,
                 None,
                 None,
-                &def_cid,
-                &mut all_objects,
-                &mut all_instances,
-                &mut all_groups,
-                &mut watertight_count,
-                &mut leaky_count,
-                &mut skipped,
+                &job.def_cid,
+                &mut job.all_objects,
+                &mut job.all_instances,
+                &mut job.all_groups,
+                &mut job.watertight_count,
+                &mut job.leaky_count,
+                &mut job.skipped,
                 &dense_to_mat,
-                &mut keys,
+                &mut job.keys,
             ) {
-                top_roots.push(nid);
+                job.top_roots.push(nid);
             }
+            built += 1;
         }
+        job.mat_ids = mat_ids;
+        job.progress()
+    }
+
+    /// Finish a running import: build whatever [`Document::ingest_step`]
+    /// has not, then the guides, tags, drawing, annotations, attributes
+    /// and scenes, adopt the saved view into an empty document, and file
+    /// the whole import as one undo step.
+    pub fn ingest_finish(&mut self, mut job: IngestJob) -> (ImportReport, DocChange) {
+        self.ingest_step(&mut job, usize::MAX);
+        let IngestJob {
+            def_cid,
+            mat_ids,
+            all_objects,
+            all_instances,
+            all_groups,
+            top_roots,
+            watertight_count,
+            leaky_count,
+            mut skipped,
+            keys,
+            was_empty,
+            guides,
+            tags,
+            camera,
+            view_style,
+            section,
+            scenes,
+            extra,
+            textures_missing,
+            ..
+        } = job;
+        // Surviving definitions, back in recipe order.
+        let all_components: Vec<ComponentId> = def_cid.iter().flatten().copied().collect();
 
         let objects_created = all_objects.len();
+        let health = self.health_report(Some(&all_objects)).counts();
 
         // ── 4. Construction guides ─────────────────────────────────
         // Inserted directly (not via add_guide_line/point, which would push
@@ -4643,32 +5015,43 @@ impl Document {
         // action below. Degenerate inputs are skipped and reported, never
         // fixed up (DEVELOPMENT.md rule 4).
         let mut all_guides: Vec<GuideId> = Vec::new();
-        for g in scene.guides {
+        for g in guides {
             match g {
-                crate::import::ImportGuide::Line { origin, direction } => {
+                crate::import::ImportGuide::Line {
+                    origin,
+                    direction,
+                    span,
+                    tags,
+                } => {
                     let dir = direction.normalized().ok();
                     match dir {
-                        Some(d) if point_is_finite(origin) && vec_is_finite(d) => {
+                        Some(d)
+                            if point_is_finite(origin) && vec_is_finite(d) && span.is_valid() =>
+                        {
                             all_guides.push(self.insert_guide_record(GuideRecord {
                                 guide: Guide::Line {
                                     origin,
                                     direction: d,
+                                    span,
                                 },
                                 hidden: false,
+                                tags,
                             }));
                         }
                         _ => skipped.push(SkippedMesh {
                             name: "construction guide".into(),
-                            reason: "degenerate guide line (non-finite origin or zero direction)"
+                            reason: "degenerate guide line (non-finite origin, zero direction, \
+                                     or a stretch of no length)"
                                 .into(),
                         }),
                     }
                 }
-                crate::import::ImportGuide::Point { position } => {
+                crate::import::ImportGuide::Point { position, tags } => {
                     if point_is_finite(position) {
                         all_guides.push(self.insert_guide_record(GuideRecord {
                             guide: Guide::Point { position },
                             hidden: false,
+                            tags,
                         }));
                     } else {
                         skipped.push(SkippedMesh {
@@ -4685,7 +5068,7 @@ impl Document {
         // already exists keeps its current hidden flag — an import must not
         // flip visibility the user already chose.
         let mut tags_added: Vec<(Vec<String>, bool)> = Vec::new();
-        for t in scene.tags {
+        for t in tags {
             if !t.path.is_empty() && !self.tag_meta.contains_key(&t.path) {
                 self.register_tag(t.path.clone(), t.hidden);
                 tags_added.push((t.path, t.hidden));
@@ -4698,16 +5081,194 @@ impl Document {
         // created after the geometry so their hidden sets resolve to the
         // nodes and tags this import just made; like palette materials they
         // are not undone with the import.
+        // What the file's cameras can look at (`camera_retargeted_to_model`),
+        // taken once for the working camera and every scene's.
+        let placements = self.shown_placements();
         if was_empty {
-            if let Some(cam) = scene.camera {
-                self.set_camera_state(cam);
+            if let Some(cam) = camera {
+                self.set_camera_state(self.camera_retargeted_to_model(cam, &placements));
             }
-            if let Some(section) = scene.section {
+            if let Some(style) = view_style {
+                self.view_style = Some(style);
+            }
+            if let Some(section) = section {
                 self.section_plane = Some(section);
             }
         }
-        for recipe in scene.scenes {
-            self.ingest_scene(recipe, &keys);
+        // ── 4c. Drawn sketches ────────────────────────────────────────────
+        // Built directly (not through the gesture API, which records its
+        // own undo steps): they belong to the single Imported action. A
+        // segment off the sketch plane refuses the whole sketch, reported,
+        // never forced onto the plane (DEVELOPMENT.md rule 4).
+        let mut all_sketches: Vec<SketchId> = Vec::new();
+        let mut sketch_ids: Vec<Option<SketchId>> = Vec::with_capacity(extra.sketches.len());
+        for (i, recipe) in extra.sketches.into_iter().enumerate() {
+            let owner = match recipe.def {
+                Some(d) => match def_cid.get(d).copied().flatten() {
+                    Some(c) => Some(c),
+                    None => {
+                        sketch_ids.push(None);
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            // The group the sketch is drawn in, when it is one this import
+            // made (a `.skp` group of edges), by the group's key.
+            // (One key can name a group once per material variant of its
+            // definition: the one in the sketch's own frame is its group.)
+            let group = recipe.group.and_then(|k| {
+                keys.get(&k)?.iter().find_map(|n| match n {
+                    NodeId::Group(g) if self.groups[*g].owner_def == owner => Some(*g),
+                    _ => None,
+                })
+            });
+            match ingest_build_sketch(&recipe) {
+                Ok(mut sketch) => {
+                    // The source's bare edges bound no face (edges that do
+                    // arrive as a solid), so a loop they close is a loop
+                    // alone — a wire frame, a light rig — until one of its
+                    // edges is drawn over (`sketch.rs` rule 6).
+                    sketch.make_regions_faceless();
+                    let id = self.insert_sketch_record(sketch);
+                    if let Some(c) = owner {
+                        self.def_sketches.insert(id, c);
+                    }
+                    if let Some(g) = group {
+                        self.group_sketches.insert(id, g);
+                    }
+                    // Tags ride as given: an import declares the ones it
+                    // uses (`ImportScene::tags`).
+                    if !recipe.tags.is_empty() {
+                        self.sketch_tags.insert(id, recipe.tags.clone());
+                    }
+                    all_sketches.push(id);
+                    sketch_ids.push(Some(id));
+                }
+                Err(e) => {
+                    skipped.push(SkippedMesh {
+                        name: format!("sketch {}", i + 1),
+                        reason: e.to_string(),
+                    });
+                    sketch_ids.push(None);
+                }
+            }
+        }
+
+        // ── 4c'. Annotations ──────────────────────────────────────────────
+        // Inserted directly, inside the import's own undo step. Only free
+        // anchors (an import cannot name nodes it is still building), and
+        // anything non-finite or degenerate is skipped and reported, never
+        // fixed up — the checks `add_linear_dimension` and friends make.
+        let mut all_annotations: Vec<AnnotationId> = Vec::new();
+        let mut report_annotations: Vec<Option<AnnotationId>> = Vec::new();
+        for (ai, a) in extra.annotations.into_iter().enumerate() {
+            let finite_anchor = |x: &Anchor| x.node.is_none() && point_is_finite(x.point);
+            let ok = match &a {
+                Annotation::LinearDimension { a, b, offset, .. } => {
+                    finite_anchor(a)
+                        && finite_anchor(b)
+                        && vec_is_finite(*offset)
+                        && (a.point - b.point).length() > tol::POINT_MERGE
+                }
+                Annotation::LeaderText { anchor, offset, .. } => {
+                    finite_anchor(anchor) && vec_is_finite(*offset)
+                }
+                Annotation::RadialDimension {
+                    anchor,
+                    curve,
+                    leader_dir,
+                    ..
+                } => {
+                    finite_anchor(anchor)
+                        && vec_is_finite(*leader_dir)
+                        && point_is_finite(curve.center)
+                        && curve.radius.is_finite()
+                        && curve.radius > tol::POINT_MERGE
+                }
+            };
+            if ok {
+                // Tags ride as given: an import declares the ones it uses
+                // (`ImportScene::tags`).
+                let tags = extra.annotation_tags.get(ai).cloned().unwrap_or_default();
+                let id = self.insert_annotation_record(AnnotationRecord {
+                    annotation: a,
+                    hidden: false,
+                    detached: false,
+                    tags,
+                });
+                all_annotations.push(id);
+                report_annotations.push(Some(id));
+            } else {
+                report_annotations.push(None);
+                skipped.push(SkippedMesh {
+                    name: "annotation".into(),
+                    reason: "degenerate or non-finite dimension or text".into(),
+                });
+            }
+        }
+
+        // ── 4d. Attribute dictionaries ────────────────────────────────────
+        // Part of the import, like the entities they hang on; an entity the
+        // import did not build (a rejected mesh) takes none.
+        let mut attrs_set = Vec::new();
+        for (target, dict) in extra.attrs {
+            let entity = |e: EntityRef| AttrTarget::Entity(e);
+            let targets: Vec<AttrTarget> = match target {
+                crate::import::ImportAttrTarget::Document => vec![AttrTarget::Document],
+                crate::import::ImportAttrTarget::Node(k) => keys
+                    .get(&k)
+                    .into_iter()
+                    .flatten()
+                    .map(|&n| entity(entity_ref_of_node(n)))
+                    .collect(),
+                crate::import::ImportAttrTarget::Def(d) => def_cid
+                    .get(d)
+                    .copied()
+                    .flatten()
+                    .map(|c| entity(EntityRef::Component(c)))
+                    .into_iter()
+                    .collect(),
+                crate::import::ImportAttrTarget::Material(m) => mat_ids
+                    .get(m)
+                    .map(|&id| entity(EntityRef::Material(id)))
+                    .into_iter()
+                    .collect(),
+                crate::import::ImportAttrTarget::Tag(path) => {
+                    if self.tag_meta.contains_key(&path) {
+                        vec![entity(EntityRef::Tag(path))]
+                    } else {
+                        Vec::new()
+                    }
+                }
+            };
+            // A value the document would refuse through `attr_set` is
+            // refused here too (its whole namespace, typed in `skipped`).
+            let mut valid = crate::attr::AttrDict::new();
+            for (ns, entries) in dict {
+                if !ns.is_empty() && entries.values().all(|v| v.validate().is_ok()) {
+                    valid.insert(ns, entries);
+                } else {
+                    skipped.push(SkippedMesh {
+                        name: format!("attribute dictionary '{ns}'"),
+                        reason: "holds a value Hew cannot store".into(),
+                    });
+                }
+            }
+            if valid.is_empty() {
+                continue;
+            }
+            for t in targets {
+                let slot = self.attrs.entry(t.clone()).or_default();
+                for (ns, entries) in &valid {
+                    let prior = slot.insert(ns.clone(), entries.clone());
+                    attrs_set.push((t.clone(), ns.clone(), prior, entries.clone()));
+                }
+            }
+        }
+
+        for recipe in scenes {
+            self.ingest_scene(recipe, &keys, &placements);
         }
 
         // ── 5. Push action + clear redo ───────────────────────────────────
@@ -4719,16 +5280,20 @@ impl Document {
             groups: all_groups.clone(),
             guides: all_guides.clone(),
             tags: tags_added,
-            // `ImportScene` has no sketch channel; only a library insert
-            // ([`Document::insert_document`]) populates this.
-            sketches: Vec::new(),
+            sketches: all_sketches.clone(),
+            annotations: all_annotations,
+            attrs: attrs_set,
         });
         self.commit_new_action();
         self.debug_validate();
 
+        let lines_added: usize = all_sketches
+            .iter()
+            .map(|s| self.sketches.get(*s).map_or(0, |sk| sk.edges().len()))
+            .sum();
         let change = DocChange {
             objects_touched: all_objects,
-            sketches_touched: Vec::new(),
+            sketches_touched: all_sketches,
             groups_touched: all_groups,
             instances_touched: all_instances,
             components_touched: all_components,
@@ -4737,13 +5302,19 @@ impl Document {
 
         let report = ImportReport {
             objects_created,
+            lines_added,
             watertight: watertight_count,
             leaky: leaky_count,
+            health,
             skipped,
             textures_missing,
+            keys,
+            defs: def_cid,
+            sketches: sketch_ids,
+            annotations: report_annotations,
         };
 
-        Ok((report, change))
+        (report, change)
     }
 
     // ---------------------------------------------------- definition graph
@@ -5115,7 +5686,7 @@ impl Document {
         for iid in self.instance_ids() {
             let rec = &self.instances[iid];
             tmp.clear();
-            self.expand_def_core(rec.def, &rec.pose, &mut tmp);
+            self.expand_def_core(rec.def, &rec.pose, &mut tmp, None);
             out.extend(tmp.iter().map(|&(o, p)| (o, p, iid)));
         }
         out
@@ -5131,28 +5702,59 @@ impl Document {
     /// of one leaf are two entries).
     pub fn expanded_def_placements(&self, def: ComponentId) -> Vec<(ObjectId, Transform)> {
         let mut out = Vec::new();
-        self.expand_def_core(def, &Transform::IDENTITY, &mut out);
+        self.expand_def_core(def, &Transform::IDENTITY, &mut out, None);
         out
+    }
+
+    /// Whether each of [`Document::expanded_def_placements`]'s entries is
+    /// shown, parallel to it: an entry is hidden when a member node on its
+    /// path through the definition — the leaf object, a member group, a
+    /// nested member instance — is user-hidden or carries a hidden tag (a
+    /// tag is hidden when it or a tag above it is). The placing instance's
+    /// own state is not counted: a renderer hides whole instances itself.
+    /// A hidden member is hidden in every placement of its definition, as a
+    /// `.skp` file's hidden entities and layers inside a component are.
+    pub fn expanded_def_placements_shown(&self, def: ComponentId) -> Vec<bool> {
+        let mut out = Vec::new();
+        let mut shown = Vec::new();
+        self.expand_def_core(def, &Transform::IDENTITY, &mut out, Some(&mut shown));
+        shown
+    }
+
+    /// A member node hides itself and what it holds: user-hidden, or one
+    /// of its tags (or a tag above one) hidden.
+    fn member_node_hidden(&self, node: NodeId) -> bool {
+        self.node_user_hidden(node)
+            || self
+                .node_tags(node)
+                .iter()
+                .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
     }
 
     /// The shared iterative expansion: pre-order over `def`'s subtree with
     /// `base` composed in, instance edges depth-bounded (the loader
     /// enforces the bound, so nothing legitimate is ever truncated), group
     /// edges free (explicit stack — no recursion to overflow).
+    /// With `shown`, also whether each entry is shown (see
+    /// [`Document::expanded_def_placements_shown`]), parallel to `out`.
     fn expand_def_core(
         &self,
         def: ComponentId,
         base: &Transform,
         out: &mut Vec<(ObjectId, Transform)>,
+        mut shown: Option<&mut Vec<bool>>,
     ) {
         enum Item {
-            Def(ComponentId, Transform, usize),
-            Node(NodeId, Transform, usize),
+            Def(ComponentId, Transform, usize, bool),
+            Node(NodeId, Transform, usize, bool),
         }
-        let mut stack = vec![Item::Def(def, *base, 0)];
+        let track = shown.is_some();
+        let visible =
+            |node: NodeId, parent: bool| parent && !(track && self.member_node_hidden(node));
+        let mut stack = vec![Item::Def(def, *base, 0, true)];
         while let Some(item) = stack.pop() {
             match item {
-                Item::Def(d, pose, depth) => {
+                Item::Def(d, pose, depth, vis) => {
                     if depth > MAX_COMPONENT_DEPTH {
                         continue;
                     }
@@ -5169,26 +5771,30 @@ impl Document {
                         continue;
                     };
                     for &m in c.members.iter().rev() {
-                        stack.push(Item::Node(m, pose, depth));
+                        stack.push(Item::Node(m, pose, depth, vis));
                     }
                 }
-                Item::Node(node, pose, depth) => match node {
+                Item::Node(node, pose, depth, vis) => match node {
                     NodeId::Object(oid) => {
                         if self.objects.get(oid).is_some_and(|r| !r.hidden) {
                             out.push((oid, pose));
+                            if let Some(s) = shown.as_deref_mut() {
+                                s.push(visible(node, vis));
+                            }
                         }
                     }
                     NodeId::Group(gid) => {
                         if let Some(g) = self.groups.get(gid).filter(|r| !r.hidden) {
+                            let vis = visible(node, vis);
                             for &child in g.members.iter().rev() {
-                                stack.push(Item::Node(child, pose, depth));
+                                stack.push(Item::Node(child, pose, depth, vis));
                             }
                         }
                     }
                     NodeId::Instance(iid) => {
                         if let Some(rec) = self.instances.get(iid).filter(|r| !r.hidden) {
                             let composed = rec.pose.then(&pose);
-                            stack.push(Item::Def(rec.def, composed, depth + 1));
+                            stack.push(Item::Def(rec.def, composed, depth + 1, visible(node, vis)));
                         }
                     }
                 },
@@ -5293,27 +5899,40 @@ impl Document {
         }
 
         // ── 3. Construction guides, carried through the pose ──────────────
-        let live_guides: Vec<Guide> = item
+        let live_guides: Vec<(Guide, Vec<Vec<String>>)> = item
             .guides
             .iter()
             .filter(|(_, r)| !r.hidden)
-            .map(|(_, r)| r.guide)
+            .map(|(_, r)| (r.guide, r.tags.clone()))
             .collect();
-        for g in live_guides {
+        for (g, tags) in live_guides {
             let guide = match g {
-                Guide::Line { origin, direction } => {
+                Guide::Line {
+                    origin,
+                    direction,
+                    span,
+                } => {
                     // An invertible pose cannot map a unit direction to
                     // ZERO, but an extreme anisotropic scale can shrink it
                     // below the normalization tolerance — skip such a guide
                     // (one omitted alignment helper) rather than panic
                     // mid-mutation (adversarial review S2; the strong
                     // guarantee forbids a half-inserted document).
-                    let Ok(dir) = options.pose.apply_vector(direction).normalized() else {
+                    let posed = options.pose.apply_vector(direction);
+                    let Ok(dir) = posed.normalized() else {
                         continue;
                     };
+                    // The stretch moves with the line: a point `t` along
+                    // the unit direction lands `t` times the posed
+                    // direction's length along the new one.
+                    let span = span.scaled(posed.length());
+                    if !span.is_valid() {
+                        continue;
+                    }
                     Guide::Line {
                         origin: options.pose.apply_point(origin),
                         direction: dir,
+                        span,
                     }
                 }
                 Guide::Point { position } => Guide::Point {
@@ -5323,6 +5942,7 @@ impl Document {
             ctx.all_guides.push(self.insert_guide_record(GuideRecord {
                 guide,
                 hidden: false,
+                tags,
             }));
         }
         ctx.report.guides_added = ctx.all_guides.len();
@@ -5340,10 +5960,14 @@ impl Document {
 
         // ── 5. v1-scope skips, counted honestly ───────────────────────────
         // Object-owned sketches travelled with their objects.
+        // Object-owned sketches travelled with their objects, group-held
+        // ones with their groups.
         ctx.report.world_sketches_skipped = item
             .sketch_ids()
             .into_iter()
-            .filter(|s| !item.object_sketches.contains_key(s))
+            .filter(|s| {
+                !item.object_sketches.contains_key(s) && !item.group_sketches.contains_key(s)
+            })
             .count();
         ctx.report.annotations_skipped = item.annotations.iter().filter(|(_, r)| !r.hidden).count();
 
@@ -5357,6 +5981,8 @@ impl Document {
             guides: ctx.all_guides.clone(),
             tags: tags_added,
             sketches: ctx.all_sketches.clone(),
+            annotations: Vec::new(),
+            attrs: Vec::new(),
         });
         self.commit_new_action();
         self.debug_validate();
@@ -6164,6 +6790,28 @@ impl Document {
                 .def_sketches
                 .get(id)
                 .is_some_and(|&c| self.components.get(c).is_none_or(|r| r.hidden))
+            // A group's drawing lives and dies with the group — except
+            // while the group is open for editing, when its record is
+            // hidden only to lend its members to the world.
+            || self
+                .group_sketches
+                .get(id)
+                .is_some_and(|&g| self.group_gone(g))
+    }
+
+    /// Whether group `g` is deleted (or never was): its record is missing
+    /// or hidden, and the hiding is not an open group session's loan.
+    fn group_gone(&self, g: GroupId) -> bool {
+        self.groups.get(g).is_none_or(|r| r.hidden) && !self.group_in_session(g)
+    }
+
+    /// Whether `g` is the group an open session (any frame of the stack)
+    /// is editing: its record is hidden while its members are on loan to
+    /// the world, but the group is live.
+    fn group_in_session(&self, g: GroupId) -> bool {
+        self.sessions
+            .iter()
+            .any(|f| matches!(f, SessionFrame::Group(s) if s.group == g))
     }
 
     /// Re-derives each object-owned sketch's definition membership from its
@@ -6179,6 +6827,22 @@ impl Document {
                 continue;
             }
             match self.object_owner_component(o) {
+                Some(c) => {
+                    self.def_sketches.insert(s, c);
+                }
+                None => {
+                    self.def_sketches.remove(&s);
+                }
+            }
+        }
+        // A group's drawing lives in the group's frame the same way.
+        let held: Vec<(SketchId, GroupId)> =
+            self.group_sketches.iter().map(|(&s, &g)| (s, g)).collect();
+        for (s, g) in held {
+            let Some(rec) = self.groups.get(g) else {
+                continue;
+            };
+            match rec.owner_def {
                 Some(c) => {
                     self.def_sketches.insert(s, c);
                 }
@@ -6264,6 +6928,143 @@ impl Document {
         })
     }
 
+    /// The group a live sketch belongs to, or `None` for one in no group
+    /// (or a stale id).
+    pub fn sketch_owner_group(&self, id: SketchId) -> Option<GroupId> {
+        if self.sketch_tombstoned(&id) {
+            return None;
+        }
+        self.group_sketches.get(&id).copied()
+    }
+
+    /// The live sketches a group holds, in id order.
+    pub fn group_member_sketches(&self, group: GroupId) -> Vec<SketchId> {
+        self.group_sketches
+            .iter()
+            .filter(|&(s, &g)| g == group && !self.sketch_tombstoned(s))
+            .map(|(&s, _)| s)
+            .collect()
+    }
+
+    /// A live sketch's tag paths, root-first (empty for none, or a stale
+    /// id).
+    pub fn sketch_tags(&self, id: SketchId) -> &[Vec<String>] {
+        if self.sketch_tombstoned(&id) {
+            return &[];
+        }
+        self.sketch_tags.get(&id).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether one of a sketch's own tags, or a tag above one, is hidden:
+    /// the sketch is not drawn, wherever it lives (a definition's sketch is
+    /// left out of every instance). `false` for an untagged or stale id.
+    pub fn sketch_tags_hidden(&self, id: SketchId) -> bool {
+        self.sketch_tags.get(&id).is_some_and(|tags| {
+            tags.iter()
+                .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
+        })
+    }
+
+    /// Whether a live world sketch is shown: none of its own tags (nor a
+    /// tag above one) is hidden ([`Document::sketch_tags_hidden`]), and it
+    /// is not drawn into a group that is user-hidden or whose tag (or a tag
+    /// above it) is hidden, nor into one inside such a group. A
+    /// definition's sketch answers `false` here (it reaches the scene
+    /// through instances).
+    pub fn sketch_shown(&self, id: SketchId) -> bool {
+        if self.sketch_tombstoned(&id) || self.def_sketches.contains_key(&id) {
+            return false;
+        }
+        if self.sketch_tags_hidden(id) {
+            return false;
+        }
+        let mut at = self.group_sketches.get(&id).copied();
+        while let Some(g) = at {
+            let Some(rec) = self.groups.get(g) else {
+                return false;
+            };
+            if (rec.hidden && !self.group_in_session(g))
+                || self.user_hidden_groups.contains(&g)
+                || rec
+                    .tags
+                    .iter()
+                    .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
+            {
+                return false;
+            }
+            at = rec.parent;
+        }
+        true
+    }
+
+    /// [`Document::sketch_ids`] without the sketches a hidden group hides
+    /// ([`Document::sketch_shown`]): what the viewport draws and picks.
+    pub fn visible_sketch_ids(&self) -> Vec<SketchId> {
+        self.sketch_ids()
+            .into_iter()
+            .filter(|&s| self.sketch_shown(s))
+            .collect()
+    }
+
+    /// Puts `sketch` in `group`, or (with `None`) in no group. Undoable
+    /// ([`DocAction::SketchGroupChanged`]). The sketch keeps its frame, so
+    /// the group's definition ownership must match the sketch's: a world
+    /// sketch for a world group, a sketch of definition `C` for a group
+    /// inside `C`.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownSketch`] — stale or dead sketch.
+    /// - [`DocumentError::UnknownGroup`] — stale or hidden group.
+    /// - [`DocumentError::SketchOwnerMismatch`] — the group lies in a
+    ///   different definition than the sketch.
+    pub fn set_sketch_group(
+        &mut self,
+        sketch: SketchId,
+        group: Option<GroupId>,
+    ) -> Result<DocChange, DocumentError> {
+        if !self.sketches.contains_key(sketch) || self.sketch_tombstoned(&sketch) {
+            return Err(DocumentError::UnknownSketch);
+        }
+        if let Some(g) = group {
+            let rec = self
+                .groups
+                .get(g)
+                .filter(|r| !r.hidden)
+                .ok_or(DocumentError::UnknownGroup)?;
+            if rec.owner_def != self.sketch_owner_component(sketch) {
+                return Err(DocumentError::SketchOwnerMismatch);
+            }
+        }
+        let prev = self.group_sketches.get(&sketch).copied();
+        if prev == group {
+            return Ok(DocChange::default());
+        }
+        self.apply_sketch_group(sketch, group);
+        self.undo.push(DocAction::SketchGroupChanged {
+            sketch,
+            prev,
+            next: group,
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        Ok(DocChange {
+            sketches_touched: vec![sketch],
+            ..Default::default()
+        })
+    }
+
+    /// Sets or clears `sketch`'s group in the side table.
+    fn apply_sketch_group(&mut self, sketch: SketchId, group: Option<GroupId>) {
+        match group {
+            Some(g) => {
+                self.group_sketches.insert(sketch, g);
+            }
+            None => {
+                self.group_sketches.remove(&sketch);
+            }
+        }
+    }
+
     /// Sets or clears `sketch`'s object owner in the side table.
     fn apply_sketch_owner(&mut self, sketch: SketchId, object: Option<ObjectId>) {
         match object {
@@ -6333,16 +7134,22 @@ impl Document {
         })
     }
 
-    /// The extrudable regions of `sketch`: simply its closed regions. Every
-    /// closed region extrudes — Hew's solids interpenetrate freely, so
-    /// re-extruding occupied ground is allowed like every other overlap
-    /// (the sketch-solid-model design). `Err` if the sketch is stale.
+    /// The extrudable regions of `sketch`: its closed regions that have a
+    /// face (a loop of edges alone, `sketch.rs` rule 6, has no profile to
+    /// extrude). Every such region extrudes — Hew's solids interpenetrate
+    /// freely, so re-extruding occupied ground is allowed like every other
+    /// overlap (the sketch-solid-model design). `Err` if the sketch is
+    /// stale.
     pub fn extrudable_regions(
         &self,
         sketch: SketchId,
     ) -> Result<Vec<SketchRegionId>, DocumentError> {
         let s = self.sketch(sketch).ok_or(DocumentError::UnknownSketch)?;
-        Ok(s.regions().keys().collect())
+        Ok(s.regions()
+            .iter()
+            .filter(|(_, r)| !r.faceless)
+            .map(|(id, _)| id)
+            .collect())
     }
 
     // -------------------------------------------------------------- materials
@@ -6464,12 +7271,13 @@ impl Document {
         if !self.material_is_live(id) {
             return Err(DocumentError::UnknownMaterial);
         }
-        let (faces, defaults) = self.clear_material_references(id);
+        let (faces, back_faces, defaults) = self.clear_material_references(id);
         self.deleted_materials.insert(id);
-        let change = self.material_delete_change(&faces, &defaults);
+        let change = self.material_delete_change(&with_backs(&faces, &back_faces), &defaults);
         self.undo.push(DocAction::MaterialDeleted {
             material: id,
             faces,
+            back_faces,
             defaults,
         });
         self.redo.clear();
@@ -6480,11 +7288,17 @@ impl Document {
     /// Clears every reference to `id` over every object row (live or
     /// tombstoned) and returns exactly what was cleared, in slotmap order,
     /// so a replay can restore or re-clear the same set.
+    #[allow(clippy::type_complexity)]
     fn clear_material_references(
         &mut self,
         id: MaterialId,
-    ) -> (Vec<(ObjectId, FaceId)>, Vec<ObjectId>) {
+    ) -> (
+        Vec<(ObjectId, FaceId)>,
+        Vec<(ObjectId, FaceId)>,
+        Vec<ObjectId>,
+    ) {
         let mut faces = Vec::new();
+        let mut back_faces = Vec::new();
         let mut defaults = Vec::new();
         for (oid, rec) in self.objects.iter_mut() {
             if rec.object.default_material == Some(id) {
@@ -6496,9 +7310,13 @@ impl Document {
                     face.material = None;
                     faces.push((oid, fid));
                 }
+                if face.back_material == Some(id) {
+                    face.back_material = None;
+                    back_faces.push((oid, fid));
+                }
             }
         }
-        (faces, defaults)
+        (faces, back_faces, defaults)
     }
 
     /// [`Document::replace_material_change`] restricted to the rows that
@@ -6562,7 +7380,7 @@ impl Document {
                     + r.object
                         .faces
                         .iter()
-                        .filter(|(_, f)| f.material == Some(id))
+                        .filter(|(_, f)| f.material == Some(id) || f.back_material == Some(id))
                         .count()
             })
             .sum()
@@ -6580,9 +7398,8 @@ impl Document {
                 referenced.insert(m);
             }
             for (_, face) in rec.object.faces.iter() {
-                if let Some(m) = face.material {
-                    referenced.insert(m);
-                }
+                referenced.extend(face.material);
+                referenced.extend(face.back_material);
             }
         }
         self.material_ids()
@@ -6859,6 +7676,7 @@ impl Document {
         }
 
         let mut faces: Vec<(ObjectId, FaceId)> = Vec::new();
+        let mut back_faces: Vec<(ObjectId, FaceId)> = Vec::new();
         let mut defaults: Vec<ObjectId> = Vec::new();
         for oid in object_ids {
             let rec = self
@@ -6875,19 +7693,27 @@ impl Document {
                         face.material = to;
                         faces.push((oid, fid));
                     }
+                    // A back painted `from` is repainted too; a back is
+                    // never set to "unpainted" by a replace, since an
+                    // unpainted back shows the front.
+                    if face.back_material == Some(from_id) && to.is_some() {
+                        face.back_material = to;
+                        back_faces.push((oid, fid));
+                    }
                 }
             }
         }
 
-        if faces.is_empty() && defaults.is_empty() {
+        if faces.is_empty() && back_faces.is_empty() && defaults.is_empty() {
             return Ok(DocChange::default());
         }
 
-        let change = self.replace_material_change(&faces, &defaults);
+        let change = self.replace_material_change(&with_backs(&faces, &back_faces), &defaults);
         self.undo.push(DocAction::ReplaceMaterial {
             from,
             to,
             faces,
+            back_faces,
             defaults,
         });
         self.commit_new_action();
@@ -6999,10 +7825,15 @@ impl Document {
         let direction = direction
             .normalized()
             .map_err(|_: MathError| DocumentError::DegenerateGuide)?;
-        let guide = Guide::Line { origin, direction };
+        let guide = Guide::Line {
+            origin,
+            direction,
+            span: crate::guide::GuideSpan::INFINITE,
+        };
         let id = self.insert_guide_record(GuideRecord {
             guide,
             hidden: false,
+            tags: Vec::new(),
         });
         self.undo.push(DocAction::CreatedGuide { guide: id });
         self.commit_new_action();
@@ -7026,6 +7857,7 @@ impl Document {
         let id = self.insert_guide_record(GuideRecord {
             guide,
             hidden: false,
+            tags: Vec::new(),
         });
         self.undo.push(DocAction::CreatedGuide { guide: id });
         self.commit_new_action();
@@ -7061,7 +7893,13 @@ impl Document {
     /// and NO undo entry pushed. Otherwise pushes one
     /// [`DocAction::DeletedGuides`].
     pub fn delete_all_guides(&mut self) -> Result<DocChange, DocumentError> {
-        let live: Vec<GuideId> = self.guide_ids();
+        // (One hidden through a tag is not on view, so it is not cleared;
+        // it comes back with its tag.)
+        let live: Vec<GuideId> = self
+            .guide_ids()
+            .into_iter()
+            .filter(|&g| self.guide_shown(g))
+            .collect();
         if live.is_empty() {
             return Ok(DocChange::default());
         }
@@ -7094,6 +7932,32 @@ impl Document {
             .get(id)
             .filter(|rec| !rec.hidden)
             .map(|rec| &rec.guide)
+    }
+
+    /// A live guide's tag paths, root-first (empty for none, or a stale id).
+    pub fn guide_tags(&self, id: GuideId) -> &[Vec<String>] {
+        self.guides
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map_or(&[], |rec| rec.tags.as_slice())
+    }
+
+    /// Whether one of a guide's tags, or a tag above one, is hidden: the
+    /// guide is not drawn or snapped to. `false` for an untagged or stale
+    /// id.
+    pub fn guide_tags_hidden(&self, id: GuideId) -> bool {
+        self.guides.get(id).is_some_and(|rec| {
+            rec.tags
+                .iter()
+                .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
+        })
+    }
+
+    /// Whether a guide is live and none of its tags hides it
+    /// ([`Document::guide_tags_hidden`]): what is drawn and snapped to.
+    /// A save keeps a live guide whether or not it is shown.
+    pub fn guide_shown(&self, id: GuideId) -> bool {
+        self.guide(id).is_some() && !self.guide_tags_hidden(id)
     }
 
     // ------------------------------------------------------------- annotations
@@ -7150,10 +8014,11 @@ impl Document {
             plane,
             text_override,
         };
-        let id = self.annotations.insert(AnnotationRecord {
+        let id = self.insert_annotation_record(AnnotationRecord {
             annotation,
             hidden: false,
             detached: false,
+            tags: Vec::new(),
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
@@ -7197,10 +8062,11 @@ impl Document {
             leader_dir,
             text_override,
         };
-        let id = self.annotations.insert(AnnotationRecord {
+        let id = self.insert_annotation_record(AnnotationRecord {
             annotation,
             hidden: false,
             detached: false,
+            tags: Vec::new(),
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
@@ -7235,10 +8101,11 @@ impl Document {
             offset,
             text,
         };
-        let id = self.annotations.insert(AnnotationRecord {
+        let id = self.insert_annotation_record(AnnotationRecord {
             annotation,
             hidden: false,
             detached: false,
+            tags: Vec::new(),
         });
         self.undo
             .push(DocAction::CreatedAnnotation { annotation: id });
@@ -7337,6 +8204,26 @@ impl Document {
             .filter(|(_, rec)| !rec.hidden)
             .map(|(id, _)| id)
             .collect()
+    }
+
+    /// A live annotation's tag paths (empty for a stale id).
+    pub fn annotation_tags(&self, id: AnnotationId) -> &[Vec<String>] {
+        self.annotations
+            .get(id)
+            .filter(|rec| !rec.hidden)
+            .map_or(&[], |rec| rec.tags.as_slice())
+    }
+
+    /// Whether a live annotation is shown: none of its tags, nor a tag
+    /// above one of them, is hidden. `false` for a stale id.
+    pub fn annotation_shown(&self, id: AnnotationId) -> bool {
+        self.annotations.get(id).is_some_and(|rec| {
+            !rec.hidden
+                && !rec
+                    .tags
+                    .iter()
+                    .any(|t| (1..=t.len()).any(|n| self.tag_hidden(&t[..n])))
+        })
     }
 
     /// The annotation behind a live (visible) id, else `None`.
@@ -7563,6 +8450,199 @@ impl Document {
         self.camera
     }
 
+    /// Every solid on view, as `(object, world pose)`: a live world object
+    /// that no user hide, hidden tag or hidden ancestor hides, and each
+    /// placement of a definition member through a shown instance (the
+    /// placement itself shown). What a camera's view line can meet, in the
+    /// document's visibility as it stands (at an open, the file's saved
+    /// state; a scene's own hidden sets apply when the scene is activated).
+    fn shown_placements(&self) -> Vec<(ObjectId, Transform)> {
+        let shown_in_tree = |mut node: NodeId| -> bool {
+            loop {
+                if self.member_node_hidden(node) {
+                    return false;
+                }
+                match self.node_parent(node) {
+                    Some(g) => node = NodeId::Group(g),
+                    None => return true,
+                }
+            }
+        };
+        let mut out: Vec<(ObjectId, Transform)> = self
+            .objects
+            .iter()
+            .filter(|(id, rec)| !rec.hidden && rec.is_world() && shown_in_tree(NodeId::Object(*id)))
+            .map(|(id, _)| (id, Transform::IDENTITY))
+            .collect();
+        let mut placed = Vec::new();
+        let mut shown = Vec::new();
+        for iid in self.instance_ids() {
+            if !shown_in_tree(NodeId::Instance(iid)) {
+                continue;
+            }
+            let rec = &self.instances[iid];
+            placed.clear();
+            shown.clear();
+            self.expand_def_core(rec.def, &rec.pose, &mut placed, Some(&mut shown));
+            out.extend(
+                placed
+                    .iter()
+                    .zip(&shown)
+                    .filter(|(_, s)| **s)
+                    .map(|(&(o, p), _)| (o, p)),
+            );
+        }
+        out
+    }
+
+    /// The depth along `dir` from `eye` at which the view line first meets
+    /// a face of `placements` ([`Document::shown_placements`]), or `None`
+    /// when it meets nothing. A face is met where the ray crosses its
+    /// plane inside its outer loop (a hit on the loop itself, within the
+    /// merge tolerance, counts, so a seam between two faces lets nothing
+    /// through) and outside its holes.
+    fn view_depth_to_model(
+        &self,
+        eye: Point3,
+        dir: Vec3,
+        placements: &[(ObjectId, Transform)],
+    ) -> Option<f64> {
+        let mut best: Option<f64> = None;
+        for &(o, ref pose) in placements {
+            let Some(rec) = self.objects.get(o) else {
+                continue;
+            };
+            let obj = &rec.object;
+            for face in obj.faces().values() {
+                let Ok(plane) = pose.apply_plane(&face.plane) else {
+                    continue;
+                };
+                let n = plane.normal();
+                let denom = n.dot(dir);
+                if denom.abs() < 1e-12 {
+                    continue;
+                }
+                let t = -plane.signed_distance(eye) / denom;
+                if t <= tol::POINT_MERGE || best.is_some_and(|b| t >= b) {
+                    continue;
+                }
+                let hit = eye + dir * t;
+                let ring = |l: crate::ids::LoopId| -> Vec<Point3> {
+                    obj.loop_positions(l).map(|p| pose.apply_point(p)).collect()
+                };
+                let outer = ring(face.outer_loop);
+                let on_loop = outer
+                    .iter()
+                    .zip(outer.iter().cycle().skip(1))
+                    .any(|(&a, &b)| crate::geom2d::point_near_segment(hit, a, b, tol::POINT_MERGE));
+                if !on_loop && !crate::geom2d::point_inside_polygon(hit, &outer, n) {
+                    continue;
+                }
+                if !on_loop
+                    && face
+                        .inner_loops
+                        .iter()
+                        .any(|&l| crate::geom2d::point_inside_polygon(hit, &ring(l), n))
+                {
+                    continue;
+                }
+                best = Some(t);
+            }
+        }
+        best
+    }
+
+    /// The axis-aligned bounds of the vertices of `placements`
+    /// ([`Document::shown_placements`]): `(low, high)`, or `None` when
+    /// there is no solid.
+    fn model_bounds(&self, placements: &[(ObjectId, Transform)]) -> Option<(Point3, Point3)> {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for &(o, ref pose) in placements {
+            let Some(rec) = self.objects.get(o) else {
+                continue;
+            };
+            for v in rec.object.vertices().values() {
+                let p = pose.apply_point(v.position);
+                for (i, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+                    lo[i] = lo[i].min(c);
+                    hi[i] = hi[i].max(c);
+                }
+            }
+        }
+        (lo[0] <= hi[0]).then(|| {
+            (
+                Point3::new(lo[0], lo[1], lo[2]),
+                Point3::new(hi[0], hi[1], hi[2]),
+            )
+        })
+    }
+
+    /// A camera read from a `.skp`, its target moved to where the view
+    /// line meets the model. SketchUp keeps a camera's target only for the
+    /// direction it looks in (its own pan and zoom work from the model
+    /// under the cursor), so a file's target can sit a hand's width from
+    /// the eye or in mid-air above a plan; Hew pans and dollies against the
+    /// target, and would barely move. The eye, the direction, the up vector
+    /// and a parallel view's height stay exactly the file's; a perspective
+    /// camera's height is re-measured at the new target. The target is put
+    /// on the first face the view line meets, as a wheel step would put it
+    /// (a view Hew itself saved into a `.skp` is a `.skp` camera again at
+    /// the next open); with no face on the line, a target already in among
+    /// the model stays, and one outside it moves to the depth of the
+    /// model's center. `placements` is [`Document::shown_placements`],
+    /// taken once for every camera an open brings in.
+    fn camera_retargeted_to_model(
+        &self,
+        cam: CameraState,
+        placements: &[(ObjectId, Transform)],
+    ) -> CameraState {
+        let Ok(dir) = (cam.target - cam.eye).normalized() else {
+            return cam;
+        };
+        let depth = match self.view_depth_to_model(cam.eye, dir, placements) {
+            Some(d) => d,
+            None => {
+                let Some((lo, hi)) = self.model_bounds(placements) else {
+                    return cam;
+                };
+                let t = cam.target;
+                // (In among it within a tenth of the model's size: a view
+                // framing the model from just outside its bounds keeps its
+                // own depth too.)
+                let margin = (hi - lo).length() * 0.1;
+                let inside = (lo.x - margin..=hi.x + margin).contains(&t.x)
+                    && (lo.y - margin..=hi.y + margin).contains(&t.y)
+                    && (lo.z - margin..=hi.z + margin).contains(&t.z);
+                if inside {
+                    return cam;
+                }
+                let center = Point3::new(
+                    (lo.x + hi.x) / 2.0,
+                    (lo.y + hi.y) / 2.0,
+                    (lo.z + hi.z) / 2.0,
+                );
+                let d = (center - cam.eye).dot(dir);
+                if d <= tol::POINT_MERGE {
+                    return cam;
+                }
+                d
+            }
+        };
+        let target = cam.eye + dir * depth;
+        let parallel_height = match cam.projection {
+            CameraProjection::Parallel => cam.parallel_height,
+            CameraProjection::Perspective => {
+                CameraState::height_at_target(cam.eye, target, cam.fov_deg)
+            }
+        };
+        CameraState {
+            target,
+            parallel_height,
+            ..cam
+        }
+    }
+
     /// Records the camera's current working view.
     ///
     /// View state, deliberately NOT undoable — matching how SketchUp treats
@@ -7571,7 +8651,19 @@ impl Document {
     /// posture. Serialized with the document (manifest v13); saved on
     /// document save, applied on load.
     pub fn set_camera_state(&mut self, state: CameraState) {
-        self.camera = Some(state);
+        self.camera = Some(state.usable());
+    }
+
+    /// How the document asks to be shown (`style.rs`; manifest v19+), or
+    /// `None` for Hew's own look.
+    pub fn view_style(&self) -> Option<crate::style::ViewStyle> {
+        self.view_style
+    }
+
+    /// Sets the document's view style; `None` returns it to Hew's own
+    /// look. View state, not undoable, like [`Document::set_camera_state`].
+    pub fn set_view_style(&mut self, style: Option<crate::style::ViewStyle>) {
+        self.view_style = style;
     }
 
     /// Whether a node is USER-hidden (view state; persisted, manifest v6).
@@ -7855,6 +8947,21 @@ impl Document {
                 existing.extend(rec.tags.iter().cloned());
             }
         }
+        for rec in self.annotations.values() {
+            if !rec.hidden {
+                existing.extend(rec.tags.iter().cloned());
+            }
+        }
+        for (id, tags) in &self.sketch_tags {
+            if !self.sketch_tombstoned(id) {
+                existing.extend(tags.iter().cloned());
+            }
+        }
+        for rec in self.guides.values() {
+            if !rec.hidden {
+                existing.extend(rec.tags.iter().cloned());
+            }
+        }
         for tag in existing.iter().filter(|t| covers(t)) {
             let target = rewrite(tag);
             if existing.contains(&target) && !covers(&target) {
@@ -7914,12 +9021,52 @@ impl Document {
             nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
             change.instances_touched.push(id);
         }
+        let mut annotations: Vec<AnnotationTagTransition> = Vec::new();
+        for (id, rec) in self.annotations.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags = rewrite_list(&prev);
+            annotations.push((id, prev, rec.tags.clone()));
+        }
+        let mut sketches: Vec<SketchTagTransition> = Vec::new();
+        for (&id, tags) in self.sketch_tags.iter_mut() {
+            if self.hidden_sketches.contains(&id) || !tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = tags.clone();
+            *tags = rewrite_list(&prev);
+            sketches.push((id, prev, tags.clone()));
+            change.sketches_touched.push(id);
+        }
+        let mut guides: Vec<GuideTagTransition> = Vec::new();
+        for (id, rec) in self.guides.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags = rewrite_list(&prev);
+            guides.push((id, prev, rec.tags.clone()));
+            change.guides_touched.push(id);
+        }
 
-        if registry.is_empty() && nodes.is_empty() {
+        if registry.is_empty()
+            && nodes.is_empty()
+            && annotations.is_empty()
+            && sketches.is_empty()
+            && guides.is_empty()
+        {
             // Unknown tag — nothing changed, no undo entry.
             return Ok(DocChange::default());
         }
-        self.undo.push(DocAction::TagRenamed { registry, nodes });
+        self.undo.push(DocAction::TagRenamed {
+            registry,
+            nodes,
+            annotations,
+            sketches,
+            guides,
+        });
         self.commit_new_action();
         self.debug_validate();
         Ok(change)
@@ -8025,8 +9172,42 @@ impl Document {
             nodes.push((NodeId::Instance(id), prev, rec.tags.clone()));
             change.instances_touched.push(id);
         }
+        let mut annotations: Vec<AnnotationTagTransition> = Vec::new();
+        for (id, rec) in self.annotations.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags.retain(|t| !covers(t));
+            annotations.push((id, prev, rec.tags.clone()));
+        }
+        let mut sketches: Vec<SketchTagTransition> = Vec::new();
+        for (&id, tags) in self.sketch_tags.iter_mut() {
+            if self.hidden_sketches.contains(&id) || !tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = tags.clone();
+            tags.retain(|t| !covers(t));
+            sketches.push((id, prev, tags.clone()));
+            change.sketches_touched.push(id);
+        }
+        let mut guides: Vec<GuideTagTransition> = Vec::new();
+        for (id, rec) in self.guides.iter_mut() {
+            if rec.hidden || !rec.tags.iter().any(|t| covers(t)) {
+                continue;
+            }
+            let prev = rec.tags.clone();
+            rec.tags.retain(|t| !covers(t));
+            guides.push((id, prev, rec.tags.clone()));
+            change.guides_touched.push(id);
+        }
 
-        if registry.is_empty() && nodes.is_empty() {
+        if registry.is_empty()
+            && nodes.is_empty()
+            && annotations.is_empty()
+            && sketches.is_empty()
+            && guides.is_empty()
+        {
             // Unknown tag — nothing changed, no undo entry.
             return Ok(DocChange::default());
         }
@@ -8034,10 +9215,47 @@ impl Document {
             registry,
             identities,
             nodes,
+            annotations,
+            sketches,
+            guides,
         });
         self.commit_new_action();
         self.debug_validate();
         Ok(change)
+    }
+
+    /// Write only the tag list of an annotation (undo/redo replay of a tag
+    /// rename or delete).
+    fn apply_annotation_tags(&mut self, id: AnnotationId, tags: Vec<Vec<String>>) {
+        if let Some(rec) = self.annotations.get_mut(id) {
+            rec.tags = tags;
+        }
+    }
+
+    /// Write only the tag list of a guide (undo/redo replay of a tag
+    /// rename or delete).
+    fn apply_guide_tags(&mut self, id: GuideId, tags: Vec<Vec<String>>) {
+        if let Some(rec) = self.guides.get_mut(id) {
+            rec.tags = tags;
+        }
+    }
+
+    /// Give `to` the tags of `from` (a sketch copied, split or detached
+    /// keeps its layer); nothing for an untagged source.
+    fn carry_sketch_tags(&mut self, from: SketchId, to: SketchId) {
+        if let Some(tags) = self.sketch_tags.get(&from).cloned() {
+            self.sketch_tags.insert(to, tags);
+        }
+    }
+
+    /// Write only the tag list of a sketch (undo/redo replay of a tag
+    /// rename or delete); an empty list drops the entry.
+    fn apply_sketch_tags(&mut self, id: SketchId, tags: Vec<Vec<String>>) {
+        if tags.is_empty() {
+            self.sketch_tags.remove(&id);
+        } else {
+            self.sketch_tags.insert(id, tags);
+        }
     }
 
     /// Write only the tag list of a node (no guards — undo/redo replay of
@@ -8171,6 +9389,20 @@ impl Document {
         self.objects
             .iter()
             .filter(|(_, rec)| !rec.hidden && rec.is_world())
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    /// Handles of every live Object — world objects AND component-definition
+    /// members (undone creations are hidden, not listed), in unspecified but
+    /// stable order. What a whole-document check walks
+    /// ([`Document::health_report`]); renderers want
+    /// [`Document::visible_object_ids`] instead, since members are drawn
+    /// only through instances.
+    pub fn live_object_ids(&self) -> Vec<ObjectId> {
+        self.objects
+            .iter()
+            .filter(|(_, rec)| !rec.hidden)
             .map(|(id, _)| id)
             .collect()
     }
@@ -10280,6 +11512,7 @@ impl Document {
                     if let Some(c) = self.def_sketches.get(&sid).copied() {
                         self.def_sketches.insert(copy, c);
                     }
+                    self.carry_sketch_tags(sid, copy);
                     self.object_sketches.insert(copy, object);
                     actions.push(DocAction::CopiedSketchIslands { copy });
                     touched.push(sid);
@@ -10345,6 +11578,7 @@ impl Document {
                     if let Some(c) = self.def_sketches.get(&sid).copied() {
                         self.def_sketches.insert(copy, c);
                     }
+                    self.carry_sketch_tags(sid, copy);
                     match holder {
                         Some(r) => {
                             self.object_sketches.insert(copy, r);
@@ -11189,6 +12423,214 @@ impl Document {
         ))
     }
 
+    /// Close open rims of a visible open object with planar faces (Model
+    /// Health, the import-health design R1; [`Object::cap_rims`] has the
+    /// geometry). `rims` indexes the object's rims as
+    /// [`crate::health::diagnose`] lists them; `None` caps every rim that
+    /// can take a face (closed, planar, not branching), and when there is
+    /// none, every rim, so the refusal names what is wrong. A world object
+    /// or a component-definition member: a member's repair reaches every
+    /// instance. The object keeps its handle; one undo step restores it.
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] — stale or hidden.
+    /// - [`DocumentError::UnknownComponent`] — the member's definition is
+    ///   stale or hidden.
+    /// - [`DocumentError::ExplodeSessionScope`] — a world object outside
+    ///   the open edit session.
+    /// - [`DocumentError::Repair`] — the cap refused (see
+    ///   [`crate::repair::RepairError`]).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn cap_rims(
+        &mut self,
+        object: ObjectId,
+        rims: Option<&[usize]>,
+    ) -> Result<(crate::repair::CapReport, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "cap_rims");
+        self.repair_target(object)?;
+        let mut after = self.objects[object].object.clone();
+        let rims: Vec<usize> = match rims {
+            Some(r) => r.to_vec(),
+            None => {
+                let ok = crate::repair::cappable_rims(&after);
+                if ok.is_empty() {
+                    (0..crate::health::diagnose(&after).rims.len()).collect()
+                } else {
+                    ok
+                }
+            }
+        };
+        let report = after.cap_rims(&rims).map_err(DocumentError::Repair)?;
+        let kind = RepairKind::Cap { rims: rims.len() };
+        let change = self.commit_repair(object, kind, after, Vec::new());
+        Ok((report, change))
+    }
+
+    /// Remove `faces` from a visible open object (Model Health, the
+    /// import-health design R2; [`Object::delete_faces`] has the geometry).
+    /// Islands the deletion cuts loose become objects of their own beside
+    /// it (same group or definition, same name and tags); their ids are
+    /// returned. Removing every face deletes the object
+    /// ([`Document::delete_node`], or [`Document::delete_def_member`] for a
+    /// definition member, nested in a group within the definition or not).
+    /// A solid refuses: deleting a face would make it leaky (ARCHITECTURE.md
+    /// §2.10).
+    ///
+    /// # Errors
+    /// As [`Document::cap_rims`], with [`crate::repair::RepairError`]'s
+    /// face variants; plus [`DocumentError::LastDefinitionMember`] when
+    /// every face of a definition's only member would go.
+    ///
+    /// On `Err` the document is untouched.
+    pub fn delete_faces(
+        &mut self,
+        object: ObjectId,
+        faces: &[crate::ids::FaceId],
+    ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "delete_faces", faces = faces.len());
+        self.repair_target(object)?;
+        let rec = &self.objects[object];
+        let mut after = rec.object.clone();
+        match after.delete_faces(faces) {
+            Ok(report) => {
+                let kind = RepairKind::DeleteFaces {
+                    faces: faces.iter().collect::<BTreeSet<_>>().len(),
+                };
+                let change = self.commit_repair(object, kind, after, report.pieces);
+                let split_off = change.objects_touched[1..].to_vec();
+                Ok((split_off, change))
+            }
+            Err(crate::repair::RepairError::RemovesEverything) => {
+                let change = match rec.owner {
+                    ObjectOwner::World { .. } => self.delete_node(NodeId::Object(object))?,
+                    ObjectOwner::Definition { def, .. } => self.delete_def_member(def, object)?,
+                };
+                Ok((Vec::new(), change))
+            }
+            Err(e) => Err(DocumentError::Repair(e)),
+        }
+    }
+
+    /// Pull a visible flat sheet into a solid (Model Health, the
+    /// import-health design R4; [`Object::thicken_sheet`] has the geometry
+    /// and the meaning of `start`/`end`). The object keeps its handle and
+    /// becomes the solid of its largest island; any other island becomes a
+    /// solid of its own beside it (same group or definition, name and
+    /// tags), whose ids are returned. One undo step.
+    ///
+    /// # Errors
+    /// As [`Document::cap_rims`], with the thicken refusals
+    /// ([`crate::repair::RepairError::NotAFlatSheet`],
+    /// [`crate::repair::RepairError::ThicknessTooSmall`]).
+    ///
+    /// On `Err` the document is untouched.
+    pub fn thicken_sheet(
+        &mut self,
+        object: ObjectId,
+        start: f64,
+        end: f64,
+    ) -> Result<(Vec<ObjectId>, DocChange), DocumentError> {
+        info!(target: "kernel::op", op = "thicken_sheet", start, end);
+        self.repair_target(object)?;
+        let mut solids = self.objects[object]
+            .object
+            .thicken_sheet(start, end)
+            .map_err(DocumentError::Repair)?;
+        let first = solids.remove(0);
+        let change = self.commit_repair(object, RepairKind::Thicken, first, solids);
+        let split_off = change.objects_touched[1..].to_vec();
+        Ok((split_off, change))
+    }
+
+    /// The checks every repair makes before touching `object`: live, and
+    /// either a world object inside any open edit session or a member of a
+    /// live definition.
+    fn repair_target(&self, object: ObjectId) -> Result<(), DocumentError> {
+        let rec = self
+            .objects
+            .get(object)
+            .filter(|r| !r.hidden)
+            .ok_or(DocumentError::UnknownObject)?;
+        match rec.owner {
+            ObjectOwner::World { .. } => self.explode_scope_object(object),
+            ObjectOwner::Definition { def, .. } => match self.components.get(def) {
+                Some(c) if !c.hidden => Ok(()),
+                _ => Err(DocumentError::UnknownComponent),
+            },
+        }
+    }
+
+    /// Commit a repair: `object` takes `after`, each of `pieces` becomes a
+    /// new object beside it (same owner, group, name and tags), and one
+    /// [`DocAction::Repaired`] records it. The change lists `object` first,
+    /// then the pieces.
+    fn commit_repair(
+        &mut self,
+        object: ObjectId,
+        kind: RepairKind,
+        after: Object,
+        pieces: Vec<Object>,
+    ) -> DocChange {
+        let rec = &mut self.objects[object];
+        let before = std::mem::replace(&mut rec.object, after.clone());
+        let (owner, name, tags) = (rec.owner, rec.name.clone(), rec.tags.clone());
+        let parent = match owner {
+            ObjectOwner::World { parent } | ObjectOwner::Definition { parent, .. } => parent,
+        };
+        let mut split_off = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            let id = self.insert_object_record(ObjectRecord {
+                object: piece,
+                history: History::new(),
+                hidden: false,
+                owner,
+                name: name.clone(),
+                tags: tags.clone(),
+            });
+            match (owner, parent) {
+                (_, Some(g)) => self.groups[g].members.push(NodeId::Object(id)),
+                (ObjectOwner::Definition { def, .. }, None) => {
+                    self.components[def].members.push(NodeId::Object(id));
+                }
+                (ObjectOwner::World { .. }, None) => {}
+            }
+            split_off.push(id);
+        }
+        self.undo.push(DocAction::Repaired {
+            object,
+            kind,
+            before,
+            after,
+            split_off: split_off.clone(),
+            parent,
+        });
+        self.commit_new_action();
+        self.debug_validate();
+        self.repair_change(object, &split_off, parent)
+    }
+
+    /// The change a repair (or its undo/redo) reports: the object and its
+    /// split-off pieces, their group, and for a definition member the
+    /// definition and every instance placing it.
+    fn repair_change(
+        &self,
+        object: ObjectId,
+        split_off: &[ObjectId],
+        parent: Option<GroupId>,
+    ) -> DocChange {
+        let (components_touched, instances_touched) = self.def_owner_change(object);
+        let mut objects_touched = vec![object];
+        objects_touched.extend_from_slice(split_off);
+        DocChange {
+            objects_touched,
+            groups_touched: parent.into_iter().collect(),
+            components_touched,
+            instances_touched,
+            ..Default::default()
+        }
+    }
+
     /// Move / rotate / scale a visible object by baking `t` into its geometry.
     /// Undo restores the recorded pre-transform snapshot verbatim (rule 9
     /// posture — see [`DocAction::Transform`]'s doc comment); the object
@@ -11424,6 +12866,29 @@ impl Document {
         for &(sketch, island) in islands {
             by_sketch.entry(sketch).or_default().push(island);
         }
+        // A definition's group moved whole (every leaf object of it listed)
+        // takes the drawing it holds along, as a world group does.
+        let listed: BTreeSet<ObjectId> = objects.iter().copied().collect();
+        let mut sketches: Vec<SketchId> = sketches.to_vec();
+        if let Some(def) = self.instances.get(instance).map(|r| r.def) {
+            let groups: Vec<GroupId> = self
+                .groups
+                .iter()
+                .filter(|(_, r)| r.owner_def == Some(def) && !r.hidden)
+                .map(|(g, _)| g)
+                .collect();
+            for g in groups {
+                let leaves = self.leaf_objects_under(NodeId::Group(g));
+                if !leaves.is_empty() && leaves.iter().all(|o| listed.contains(o)) {
+                    for s in self.group_member_sketches(g) {
+                        if !sketches.contains(&s) {
+                            sketches.push(s);
+                        }
+                    }
+                }
+            }
+        }
+        let sketches = &sketches[..];
         let result = (|| {
             for (&sketch, group) in &by_sketch {
                 merge_doc_change(
@@ -11715,6 +13180,7 @@ impl Document {
         if let Some(component) = self.sketch_owner_component(source) {
             self.def_sketches.insert(detached, component);
         }
+        self.carry_sketch_tags(source, detached);
         self.undo.push(DocAction::DetachedSketchIsland {
             source,
             detached,
@@ -11792,6 +13258,7 @@ impl Document {
 
         // Nothing left can fail; commit. The source is not touched.
         let copy = self.insert_sketch_record(fresh);
+        self.carry_sketch_tags(source, copy);
         self.undo.push(DocAction::CopiedSketchIslands { copy });
         self.commit_new_action();
         self.debug_validate();
@@ -12312,8 +13779,16 @@ impl Document {
         // Bake into copies, then commit: a leaf refusing (a shrink that would
         // leave one of its faces too small to reopen) leaves every leaf as
         // it was.
-        // The leaves' object-owned sketches ride along.
-        let owned = self.owned_sketches_of(&leaves);
+        // The leaves' object-owned sketches ride along, and the drawing the
+        // group and its subgroups hold.
+        let mut owned = self.owned_sketches_of(&leaves);
+        let mut subgroups = Vec::new();
+        self.collect_groups(NodeId::Group(group), &mut subgroups);
+        for s in self.group_held_sketches_of(&subgroups) {
+            if !owned.contains(&s) {
+                owned.push(s);
+            }
+        }
         let pre_sketches: Vec<(SketchId, Sketch)> = owned
             .iter()
             .map(|&s| (s, self.sketches[s].clone()))
@@ -12345,8 +13820,6 @@ impl Document {
 
         let mut touched: Vec<NodeId> = leaves.iter().map(|&o| NodeId::Object(o)).collect();
         touched.extend(instances.iter().map(|&i| NodeId::Instance(i)));
-        let mut subgroups = Vec::new();
-        self.collect_groups(NodeId::Group(group), &mut subgroups);
         touched.extend(subgroups.iter().map(|&g| NodeId::Group(g)));
         let reanchored = self.reanchor_touched(&touched, t);
         self.undo.push(DocAction::TransformSelection {
@@ -12465,8 +13938,18 @@ impl Document {
                 sketch_targets.push(s);
             }
         }
-        // The leaf objects' owned sketches ride along with them.
+        // The leaf objects' owned sketches ride along with them, and the
+        // drawing held by every group listed or beneath one.
         for s in self.owned_sketches_of(&objects) {
+            if sketch_set.insert(s) {
+                sketch_targets.push(s);
+            }
+        }
+        let mut groups = Vec::new();
+        for &node in nodes {
+            self.collect_groups(node, &mut groups);
+        }
+        for s in self.group_held_sketches_of(&groups) {
             if sketch_set.insert(s) {
                 sketch_targets.push(s);
             }
@@ -12901,6 +14384,20 @@ impl Document {
         let mut out = Vec::new();
         for &o in objects {
             for s in self.object_owned_sketches(o) {
+                if !out.contains(&s) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// The live sketches the listed groups hold (`group_sketches`), each
+    /// once, in group order: a group's drawing moves with the group.
+    fn group_held_sketches_of(&self, groups: &[GroupId]) -> Vec<SketchId> {
+        let mut out = Vec::new();
+        for &g in groups {
+            for s in self.group_member_sketches(g) {
                 if !out.contains(&s) {
                     out.push(s);
                 }
@@ -13592,28 +15089,49 @@ impl Document {
         object: ObjectId,
     ) -> Result<DocChange, DocumentError> {
         info!(target: "kernel::op", op = "delete_def_member");
-        let comp = match self.components.get(component) {
-            Some(c) if !c.hidden => c,
-            _ => return Err(DocumentError::UnknownComponent),
-        };
-        if !comp.members.contains(&NodeId::Object(object)) {
+        if self.components.get(component).is_none_or(|c| c.hidden) {
+            return Err(DocumentError::UnknownComponent);
+        }
+        // Any member of the definition: a direct one, or one inside a group
+        // within it (nested components). Either way the tombstone stays
+        // listed where it was, hidden, exactly as an undone birth would.
+        let owned = |r: &ObjectRecord| matches!(r.owner, ObjectOwner::Definition { def, .. } if def == component);
+        if self
+            .objects
+            .get(object)
+            .is_none_or(|r| r.hidden || !owned(r))
+        {
             return Err(DocumentError::UnknownObject);
         }
-        if self.objects.get(object).is_none_or(|r| r.hidden) {
-            return Err(DocumentError::UnknownObject);
-        }
-        let live_members = comp
-            .object_members()
-            .filter(|&o| self.objects.get(o).is_some_and(|r| !r.hidden))
+        let live_members = self
+            .objects
+            .values()
+            .filter(|r| !r.hidden && owned(r))
             .count();
         if live_members <= 1 {
             return Err(DocumentError::LastDefinitionMember);
         }
 
         self.objects[object].hidden = true;
+        let from_group = match self.objects[object].owner {
+            ObjectOwner::Definition {
+                parent: Some(g), ..
+            } => {
+                let members = &mut self.groups[g].members;
+                let at = members.iter().position(|&n| n == NodeId::Object(object));
+                at.map(|i| {
+                    members.remove(i);
+                    (g, i)
+                })
+            }
+            _ => None,
+        };
 
-        self.undo
-            .push(DocAction::DeletedDefMember { component, object });
+        self.undo.push(DocAction::DeletedDefMember {
+            component,
+            object,
+            from_group,
+        });
         self.commit_new_action();
         self.debug_validate();
 
@@ -13748,8 +15266,10 @@ impl Document {
         let mut created_instances: Vec<InstanceId> = Vec::new();
         let mut created_roots: Vec<NodeId> = Vec::with_capacity(member_nodes.len());
         // Old member -> its baked world copy, so a copied object-owned
-        // sketch stays owned by the copy of its owner.
+        // sketch stays owned by the copy of its owner; old group -> its
+        // copy, so a sketch a group held is held by the copy.
         let mut member_copies: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
+        let mut group_copies: BTreeMap<GroupId, GroupId> = BTreeMap::new();
         for m in member_nodes {
             match m {
                 NodeId::Object(o) => {
@@ -13791,6 +15311,7 @@ impl Document {
                         &mut created_groups,
                         &mut created_instances,
                         &mut member_copies,
+                        &mut group_copies,
                     )?;
                     created_roots.push(NodeId::Group(gid));
                 }
@@ -13826,6 +15347,17 @@ impl Document {
                 .and_then(|owner| member_copies.get(owner))
             {
                 self.object_sketches.insert(new_sid, copy);
+            }
+            // A sketch one of the copied groups held is held by its copy.
+            if let Some(&copy) = self
+                .group_sketches
+                .get(&sid)
+                .and_then(|g| group_copies.get(g))
+            {
+                self.group_sketches.insert(new_sid, copy);
+            }
+            if let Some(tags) = self.sketch_tags.get(&sid).cloned() {
+                self.sketch_tags.insert(new_sid, tags);
             }
             created_sketches.push(new_sid);
         }
@@ -13899,6 +15431,7 @@ impl Document {
         new_def: ComponentId,
         parent: Option<GroupId>,
         member_copies: &mut BTreeMap<ObjectId, ObjectId>,
+        group_copies: &mut BTreeMap<GroupId, GroupId>,
     ) -> GroupId {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -13916,6 +15449,7 @@ impl Document {
         if self.user_hidden_groups.contains(&src) {
             self.user_hidden_groups.insert(gid);
         }
+        group_copies.insert(src, gid);
         let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
         for m in src_members {
             match m {
@@ -13944,7 +15478,8 @@ impl Document {
                     if self.groups.get(g).is_none_or(|r| r.hidden) {
                         continue;
                     }
-                    let child = self.unique_copy_group(g, new_def, Some(gid), member_copies);
+                    let child =
+                        self.unique_copy_group(g, new_def, Some(gid), member_copies, group_copies);
                     members.push(NodeId::Group(child));
                 }
                 NodeId::Instance(i) => {
@@ -14046,6 +15581,7 @@ impl Document {
         created_groups: &mut Vec<GroupId>,
         created_instances: &mut Vec<InstanceId>,
         member_copies: &mut BTreeMap<ObjectId, ObjectId>,
+        group_copies: &mut BTreeMap<GroupId, GroupId>,
     ) -> Result<GroupId, DocumentError> {
         let (name, tags, src_members) = {
             let rec = &self.groups[src];
@@ -14063,6 +15599,7 @@ impl Document {
         if self.user_hidden_groups.contains(&src) {
             self.user_hidden_groups.insert(gid);
         }
+        group_copies.insert(src, gid);
         created_groups.push(gid);
         let mut members: Vec<NodeId> = Vec::with_capacity(src_members.len());
         for m in src_members {
@@ -14101,6 +15638,7 @@ impl Document {
                         created_groups,
                         created_instances,
                         member_copies,
+                        group_copies,
                     )?;
                     members.push(NodeId::Group(child));
                 }
@@ -14210,6 +15748,7 @@ impl Document {
         // Old member -> its private copy, so a copied object-owned sketch
         // stays owned by the copy of its owner.
         let mut member_copies: BTreeMap<ObjectId, ObjectId> = BTreeMap::new();
+        let mut group_copies: BTreeMap<GroupId, GroupId> = BTreeMap::new();
         for m in members {
             match m {
                 NodeId::Object(o) => {
@@ -14230,7 +15769,13 @@ impl Document {
                     new_members.push(NodeId::Object(id));
                 }
                 NodeId::Group(g) => {
-                    let gid = self.unique_copy_group(g, new_def, None, &mut member_copies);
+                    let gid = self.unique_copy_group(
+                        g,
+                        new_def,
+                        None,
+                        &mut member_copies,
+                        &mut group_copies,
+                    );
                     new_members.push(NodeId::Group(gid));
                 }
                 NodeId::Instance(i) => {
@@ -14268,6 +15813,17 @@ impl Document {
             let new_sid = self.insert_sketch_record(clone);
             self.copy_attrs(&EntityRef::Sketch(sid), EntityRef::Sketch(new_sid));
             self.def_sketches.insert(new_sid, new_def);
+            // A sketch held by one of the copied groups is held by its copy.
+            if let Some(ng) = self
+                .group_sketches
+                .get(&sid)
+                .and_then(|g| group_copies.get(g).copied())
+            {
+                self.group_sketches.insert(new_sid, ng);
+            }
+            if let Some(tags) = self.sketch_tags.get(&sid).cloned() {
+                self.sketch_tags.insert(new_sid, tags);
+            }
             if let Some(&copy) = self
                 .object_sketches
                 .get(&sid)
@@ -14945,7 +16501,14 @@ impl Document {
         // never independently deletable mid-session (nothing in this
         // session touches instances but the open/close bracket itself), so
         // every entry here is still exactly the tombstone `open` recorded.
-        let emptied = self.components[session.component].members.is_empty();
+        // (A definition of lines alone is not empty, as a group of lines
+        // alone is not.)
+        let holds_drawing = self.def_sketches.iter().any(|(s, &c)| {
+            c == session.component
+                && !self.hidden_sketches.contains(s)
+                && self.sketches.contains_key(*s)
+        });
+        let emptied = self.components[session.component].members.is_empty() && !holds_drawing;
         if emptied {
             self.components[session.component].hidden = true;
         } else {
@@ -15243,14 +16806,38 @@ impl Document {
             self.set_node_parent(m, Some(session.group));
         }
         self.groups[session.group].members = members.clone();
+        // Drawing made while the group was open joins it, like SketchUp's
+        // lines drawn inside a group: every live free sketch created since
+        // the open, and any a mid-session ungroup released to the top.
+        let mut folded: Vec<SketchId> = Vec::new();
+        for action in &self.undo.actions[session.undo_len_at_open..] {
+            folded.extend(action.created_objects_and_sketches().1);
+            folded.extend(action.released_sketches());
+        }
+        for s in folded {
+            if self.sketches.contains_key(s)
+                && !self.sketch_tombstoned(&s)
+                && !self.object_sketches.contains_key(&s)
+                && !self.def_sketches.contains_key(&s)
+                && !self.group_sketches.contains_key(&s)
+            {
+                self.group_sketches.insert(s, session.group);
+            }
+        }
 
         // An emptied group (every member deleted or consumed mid-session,
-        // nothing folded in) does not survive the close: it stays hidden —
-        // deleted outright, tombstone-style, the ungroup posture's own
-        // deletion — matching the component close's emptied-definition
-        // rule. Otherwise the group returns and a fresh liveness recompute
+        // nothing folded in, no drawing of its own) does not survive the
+        // close: it stays hidden — deleted outright, tombstone-style, the
+        // ungroup posture's own deletion — matching the component close's
+        // emptied-definition rule. A group of lines alone is not empty.
+        // Otherwise the group returns and a fresh liveness recompute
         // reattaches annotations whose anchors are all live again.
-        let emptied = members.is_empty();
+        let holds_drawing = self.group_sketches.iter().any(|(s, &g)| {
+            g == session.group
+                && !self.hidden_sketches.contains(s)
+                && self.sketches.contains_key(*s)
+        });
+        let emptied = members.is_empty() && !holds_drawing;
         let reanchored = if emptied {
             Vec::new()
         } else {
@@ -15940,12 +17527,12 @@ impl Document {
                 // The object's own sketches are copied with it (placed the
                 // same way) before anything is inserted, so a refusal leaves
                 // nothing behind.
-                let owned: Vec<Sketch> = self
+                let owned: Vec<(SketchId, Sketch)> = self
                     .object_owned_sketches(id)
                     .into_iter()
                     .map(|s| {
                         let mut sk = self.sketches[s].clone();
-                        sk.apply_transform(placement).map(|()| sk)
+                        sk.apply_transform(placement).map(|()| (s, sk))
                     })
                     .collect::<Result<_, _>>()
                     .map_err(DocumentError::Transform)?;
@@ -15961,9 +17548,10 @@ impl Document {
                 self.copy_attrs(&EntityRef::Object(id), EntityRef::Object(new_id));
                 // The copies live and die with the new object (hidden with
                 // it on undo), so they need no undo record of their own.
-                for sk in owned {
+                for (s, sk) in owned {
                     let copy = self.insert_sketch_record(sk);
                     self.object_sketches.insert(copy, new_id);
+                    self.carry_sketch_tags(s, copy);
                 }
                 Ok(NodeId::Object(new_id))
             }
@@ -16008,6 +17596,26 @@ impl Document {
                     new_members.push(child);
                 }
                 self.groups[new_gid].members = new_members;
+                // The group's drawing goes with it; a copy lives and dies
+                // with the new group (derived liveness, like an object's
+                // owned sketches), so it needs no undo record of its own.
+                let held: Vec<(Sketch, Vec<Vec<String>>)> = self
+                    .group_member_sketches(id)
+                    .into_iter()
+                    .map(|s| {
+                        let mut sk = self.sketches[s].clone();
+                        let tags = self.sketch_tags.get(&s).cloned().unwrap_or_default();
+                        sk.apply_transform(placement).map(|()| (sk, tags))
+                    })
+                    .collect::<Result<_, _>>()
+                    .map_err(DocumentError::Transform)?;
+                for (sk, tags) in held {
+                    let copy = self.insert_sketch_record(sk);
+                    self.group_sketches.insert(copy, new_gid);
+                    if !tags.is_empty() {
+                        self.sketch_tags.insert(copy, tags);
+                    }
+                }
                 Ok(NodeId::Group(new_gid))
             }
         }
@@ -16172,6 +17780,81 @@ impl Document {
         self.redo.clear();
     }
 
+    /// Keeps a group's drawing with its group after the action just
+    /// pushed, in the same undo step: a sketch whose group was ungrouped is
+    /// released (free drawing again), one whose group was deleted goes
+    /// with it. Appended to the action as [`DocAction::Compound`]
+    /// followups, like [`Document::reconcile_owned_drawing`]'s repairs.
+    fn reconcile_group_drawing(&mut self) {
+        if self.group_sketches.is_empty() {
+            return;
+        }
+        let Some(top) = self.undo.last() else {
+            return;
+        };
+        // An ungrouped group releases its drawing to the group it was in
+        // (free drawing at the top).
+        let ungrouped: BTreeMap<GroupId, Option<GroupId>> = match top {
+            DocAction::Ungrouped { group, parent, .. } => [(*group, *parent)].into(),
+            DocAction::Compound { actions, .. } => actions
+                .iter()
+                .filter_map(|a| match a {
+                    DocAction::Ungrouped { group, parent, .. } => Some((*group, *parent)),
+                    _ => None,
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        let gone: Vec<(SketchId, GroupId)> = self
+            .group_sketches
+            .iter()
+            .filter(|&(s, g)| {
+                !self.hidden_sketches.contains(s)
+                    && !self.object_sketches.contains_key(s)
+                    && self.group_gone(*g)
+            })
+            .map(|(&s, &g)| (s, g))
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        let mut followups = Vec::new();
+        for (sid, g) in gone {
+            if let Some(&parent) = ungrouped.get(&g) {
+                self.apply_sketch_group(sid, parent);
+                followups.push(DocAction::SketchGroupChanged {
+                    sketch: sid,
+                    prev: Some(g),
+                    next: parent,
+                });
+            } else {
+                self.hidden_sketches.insert(sid);
+                followups.push(DocAction::DeletedSketch { sketch: sid });
+            }
+        }
+        let top = self
+            .undo
+            .actions
+            .pop()
+            .expect("the top action was read above");
+        let wrapped = match top {
+            DocAction::Compound { mut actions, meta } => {
+                actions.extend(followups);
+                DocAction::Compound { actions, meta }
+            }
+            other => {
+                let mut actions = Vec::with_capacity(followups.len() + 1);
+                actions.push(other);
+                actions.extend(followups);
+                DocAction::Compound {
+                    actions,
+                    meta: None,
+                }
+            }
+        };
+        self.undo.actions.push(wrapped);
+    }
+
     /// Keeps object-owned drawing true to its owner after the action just
     /// pushed (invariants I7 and I8), in the same undo step. Every owned
     /// sketch of an object the action touched, or that the action touched
@@ -16188,7 +17871,14 @@ impl Document {
         let Some(top) = self.undo.last() else {
             return;
         };
-        if top.is_bookkeeping() || self.object_sketches.is_empty() {
+        if top.is_bookkeeping() {
+            return;
+        }
+        self.reconcile_group_drawing();
+        let Some(top) = self.undo.last() else {
+            return;
+        };
+        if self.object_sketches.is_empty() {
             return;
         }
         let mut owners: BTreeSet<ObjectId> = top.touched_objects().into_iter().collect();
@@ -16320,6 +18010,25 @@ impl Document {
         self.saved = SavedMark(Some(self.content_depth()));
     }
 
+    /// Forget the undo and redo history, keeping the document as it
+    /// stands, and mark it saved: what opening a file means when the file
+    /// was built by an import into a fresh document (a `.skp` opened as the
+    /// document's own file), so that Undo cannot take the open back.
+    /// Entities tombstoned for redo stay tombstoned; a save drops them.
+    ///
+    /// # Errors
+    /// [`DocumentError::ExplodeSessionScope`] while an editing session is
+    /// open (its frames refer to the history); the document is untouched.
+    pub fn forget_history(&mut self) -> Result<(), DocumentError> {
+        if !self.sessions.is_empty() {
+            return Err(DocumentError::ExplodeSessionScope);
+        }
+        self.undo.clear();
+        self.redo.clear();
+        self.mark_saved();
+        Ok(())
+    }
+
     /// True when the undo stack sits exactly at the depth recorded by the
     /// last [`Document::mark_saved`] — every undoable change made since
     /// the save has been undone (or redone back), so as far as the
@@ -16416,6 +18125,14 @@ impl Document {
             },
             DocAction::Sliced { .. } => "Slice".to_string(),
             DocAction::PushThrough { .. } => "Push/Pull through".to_string(),
+            DocAction::Repaired { kind, .. } => match *kind {
+                RepairKind::Cap { rims: 1 } => "Close an opening".to_string(),
+                RepairKind::Cap { rims } => format!("Close {rims} openings"),
+                RepairKind::DeleteFaces { faces } => {
+                    format!("Delete {}", count_label(faces, "face"))
+                }
+                RepairKind::Thicken => "Add thickness".to_string(),
+            },
             DocAction::Transform {
                 objects, forward, ..
             } => format!(
@@ -16430,6 +18147,7 @@ impl Document {
             DocAction::DetachedSketchIsland { .. } => "Move sketch off its plane".to_string(),
             DocAction::CopiedSketchIslands { .. } => "Copy sketch".to_string(),
             DocAction::SketchOwnerChanged { .. } => "Attach sketch".to_string(),
+            DocAction::SketchGroupChanged { .. } => "Group sketch".to_string(),
             DocAction::TransformSelection {
                 objects,
                 sketches,
@@ -17590,6 +19308,13 @@ impl Document {
             DocAction::ConsumedScaffolding { .. } => unreachable!(
                 "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
             ),
+            &DocAction::SketchGroupChanged { sketch, prev, .. } => {
+                self.apply_sketch_group(sketch, prev);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
             &DocAction::SketchOwnerChanged { sketch, prev, .. } => {
                 self.apply_sketch_owner(sketch, prev);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -17850,6 +19575,24 @@ impl Document {
                     components_touched,
                     guides_touched: Vec::new(),
                 }
+            }
+            DocAction::Repaired {
+                object,
+                before,
+                split_off,
+                parent,
+                ..
+            } => {
+                self.objects[*object].object = before.clone();
+                for &o in split_off {
+                    self.objects[o].hidden = true;
+                }
+                if let Some(g) = *parent {
+                    self.groups[g]
+                        .members
+                        .retain(|n| !matches!(n, NodeId::Object(o) if split_off.contains(o)));
+                }
+                self.repair_change(*object, split_off, *parent)
             }
             DocAction::Transform {
                 objects,
@@ -18116,11 +19859,20 @@ impl Document {
                 }
                 delete_change(node, parent, hidden_subtree)
             }
-            &DocAction::DeletedDefMember { component, object } => {
-                // Undo delete_def_member: unhide the member. It never left
-                // `ComponentDef.members` (see the action's doc comment), so
-                // there is nothing else to restore.
+            &DocAction::DeletedDefMember {
+                component,
+                object,
+                from_group,
+            } => {
+                // Undo delete_def_member: unhide the member. A direct member
+                // never left `ComponentDef.members` (see the action's doc
+                // comment); a nested one goes back into its group's list
+                // where it was.
                 self.objects[object].hidden = false;
+                if let Some((g, i)) = from_group {
+                    let members = &mut self.groups[g].members;
+                    members.insert(i.min(members.len()), NodeId::Object(object));
+                }
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
@@ -18762,26 +20514,32 @@ impl Document {
             DocAction::ReplaceMaterial {
                 from,
                 faces,
+                back_faces,
                 defaults,
                 ..
             } => {
                 let from = *from;
-                let (faces, defaults) = (faces.clone(), defaults.clone());
+                let (faces, back_faces, defaults) =
+                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let all = with_backs(&faces, &back_faces);
                 // All-or-nothing (rule 9): a face/default a later structural
                 // op consumed refuses the WHOLE batch typed rather than
                 // silently dropping just that entry and partially restoring
                 // the rest — see `DocAction::ReplaceMaterial`'s doc comment.
-                if let Err(e) = self.replace_material_targets_live(&faces, &defaults) {
+                if let Err(e) = self.replace_material_targets_live(&all, &defaults) {
                     self.undo.push(action);
                     return Err(e);
                 }
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = from;
                 }
+                for &(oid, fid) in &back_faces {
+                    self.objects[oid].object.faces[fid].back_material = from;
+                }
                 for &oid in &defaults {
                     self.objects[oid].object.default_material = from;
                 }
-                self.replace_material_change(&faces, &defaults)
+                self.replace_material_change(&all, &defaults)
             }
             &DocAction::SetMaterialAlpha { material, prev, .. } => {
                 if let Some(mat) = self.materials.get_mut(material) {
@@ -18798,11 +20556,14 @@ impl Document {
             DocAction::MaterialDeleted {
                 material,
                 faces,
+                back_faces,
                 defaults,
             } => {
                 let material = *material;
-                let (faces, defaults) = (faces.clone(), defaults.clone());
-                if let Err(e) = self.material_delete_targets_exist(&faces, &defaults) {
+                let (faces, back_faces, defaults) =
+                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let all = with_backs(&faces, &back_faces);
+                if let Err(e) = self.material_delete_targets_exist(&all, &defaults) {
                     self.undo.push(action);
                     return Err(e);
                 }
@@ -18810,10 +20571,13 @@ impl Document {
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = Some(material);
                 }
+                for &(oid, fid) in &back_faces {
+                    self.objects[oid].object.faces[fid].back_material = Some(material);
+                }
                 for &oid in &defaults {
                     self.objects[oid].object.default_material = Some(material);
                 }
-                self.material_delete_change(&faces, &defaults)
+                self.material_delete_change(&all, &defaults)
             }
             DocAction::DefinitionDeleted {
                 component,
@@ -18864,7 +20628,13 @@ impl Document {
                 registry,
                 identities,
                 nodes,
+                annotations,
+                sketches,
+                guides,
             } => {
+                for (id, prev, _) in annotations.clone() {
+                    self.apply_annotation_tags(id, prev);
+                }
                 // Undo: re-register the removed entries (restoring their
                 // hidden flags, ORIGINAL stable ids, and dictionaries) and
                 // restore every affected node's tag list. A path the user
@@ -18887,6 +20657,14 @@ impl Document {
                     }
                 }
                 let mut change = DocChange::default();
+                for (id, prev, _) in sketches.clone() {
+                    self.apply_sketch_tags(id, prev);
+                    change.sketches_touched.push(id);
+                }
+                for (id, prev, _) in guides.clone() {
+                    self.apply_guide_tags(id, prev);
+                    change.guides_touched.push(id);
+                }
                 for (node, prev_tags, _) in nodes.clone() {
                     self.apply_node_tags(node, prev_tags);
                     match node {
@@ -18897,13 +20675,30 @@ impl Document {
                 }
                 change
             }
-            DocAction::TagRenamed { registry, nodes } => {
+            DocAction::TagRenamed {
+                registry,
+                nodes,
+                annotations,
+                sketches,
+                guides,
+            } => {
+                for (id, prev, _) in annotations.clone() {
+                    self.apply_annotation_tags(id, prev);
+                }
                 // Undo: move the entries back (identity travels with them)
                 // and restore every affected node's previous tag list.
                 for (from, to) in registry.iter().rev() {
                     self.move_tag_identity(to, from);
                 }
                 let mut change = DocChange::default();
+                for (id, prev, _) in sketches.clone() {
+                    self.apply_sketch_tags(id, prev);
+                    change.sketches_touched.push(id);
+                }
+                for (id, prev, _) in guides.clone() {
+                    self.apply_guide_tags(id, prev);
+                    change.guides_touched.push(id);
+                }
                 for (node, prev_tags, _) in nodes.clone() {
                     self.apply_node_tags(node, prev_tags);
                     match node {
@@ -18922,8 +20717,31 @@ impl Document {
                 guides,
                 tags,
                 sketches,
+                annotations,
+                attrs,
                 ..
             } => {
+                for &a in annotations.iter() {
+                    if let Some(rec) = self.annotations.get_mut(a) {
+                        rec.hidden = true;
+                    }
+                }
+                // Put every namespace the import set back as it was, last
+                // set first.
+                for (target, ns, prior, _) in attrs.iter().rev() {
+                    let dict = self.attrs.entry(target.clone()).or_default();
+                    match prior {
+                        Some(p) => {
+                            dict.insert(ns.clone(), p.clone());
+                        }
+                        None => {
+                            dict.remove(ns);
+                        }
+                    }
+                    if dict.is_empty() {
+                        self.attrs.remove(target);
+                    }
+                }
                 // Undo import: hide every created entity (ids stay stable).
                 // Materials added to the palette are not hidden. Tags this
                 // import registered are unregistered.
@@ -19071,6 +20889,13 @@ impl Document {
             DocAction::ConsumedScaffolding { .. } => unreachable!(
                 "ConsumedScaffolding only ever appears inside a PlaceTextCompound — place_text is its only producer"
             ),
+            &DocAction::SketchGroupChanged { sketch, next, .. } => {
+                self.apply_sketch_group(sketch, next);
+                DocChange {
+                    sketches_touched: vec![sketch],
+                    ..Default::default()
+                }
+            }
             &DocAction::SketchOwnerChanged { sketch, next, .. } => {
                 self.apply_sketch_owner(sketch, next);
                 let (components_touched, instances_touched) = self.def_sketch_owner_change(sketch);
@@ -19326,6 +21151,24 @@ impl Document {
                     components_touched,
                     guides_touched: Vec::new(),
                 }
+            }
+            DocAction::Repaired {
+                object,
+                after,
+                split_off,
+                parent,
+                ..
+            } => {
+                self.objects[*object].object = after.clone();
+                for &o in split_off {
+                    self.objects[o].hidden = false;
+                }
+                if let Some(g) = *parent {
+                    self.groups[g]
+                        .members
+                        .extend(split_off.iter().map(|&o| NodeId::Object(o)));
+                }
+                self.repair_change(*object, split_off, *parent)
             }
             DocAction::Transform {
                 objects,
@@ -19617,9 +21460,19 @@ impl Document {
                 }
                 delete_change(node, parent, hidden_subtree)
             }
-            &DocAction::DeletedDefMember { component, object } => {
-                // Redo delete_def_member: re-hide the member.
+            &DocAction::DeletedDefMember {
+                component,
+                object,
+                from_group,
+            } => {
+                // Redo delete_def_member: re-hide the member (and take a
+                // nested one out of its group's list again).
                 self.objects[object].hidden = true;
+                if let Some((g, _)) = from_group {
+                    self.groups[g]
+                        .members
+                        .retain(|&n| n != NodeId::Object(object));
+                }
                 DocChange {
                     objects_touched: vec![object],
                     components_touched: vec![component],
@@ -20074,23 +21927,29 @@ impl Document {
             DocAction::ReplaceMaterial {
                 to,
                 faces,
+                back_faces,
                 defaults,
                 ..
             } => {
                 let to = *to;
-                let (faces, defaults) = (faces.clone(), defaults.clone());
+                let (faces, back_faces, defaults) =
+                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let all = with_backs(&faces, &back_faces);
                 // All-or-nothing (rule 9) — same posture as undo above.
-                if let Err(e) = self.replace_material_targets_live(&faces, &defaults) {
+                if let Err(e) = self.replace_material_targets_live(&all, &defaults) {
                     self.redo.push(action);
                     return Err(e);
                 }
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = to;
                 }
+                for &(oid, fid) in &back_faces {
+                    self.objects[oid].object.faces[fid].back_material = to;
+                }
                 for &oid in &defaults {
                     self.objects[oid].object.default_material = to;
                 }
-                self.replace_material_change(&faces, &defaults)
+                self.replace_material_change(&all, &defaults)
             }
             &DocAction::SetMaterialAlpha { material, next, .. } => {
                 if let Some(mat) = self.materials.get_mut(material) {
@@ -20107,22 +21966,28 @@ impl Document {
             DocAction::MaterialDeleted {
                 material,
                 faces,
+                back_faces,
                 defaults,
             } => {
                 let material = *material;
-                let (faces, defaults) = (faces.clone(), defaults.clone());
-                if let Err(e) = self.material_delete_targets_exist(&faces, &defaults) {
+                let (faces, back_faces, defaults) =
+                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let all = with_backs(&faces, &back_faces);
+                if let Err(e) = self.material_delete_targets_exist(&all, &defaults) {
                     self.redo.push(action);
                     return Err(e);
                 }
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = None;
                 }
+                for &(oid, fid) in &back_faces {
+                    self.objects[oid].object.faces[fid].back_material = None;
+                }
                 for &oid in &defaults {
                     self.objects[oid].object.default_material = None;
                 }
                 self.deleted_materials.insert(material);
-                self.material_delete_change(&faces, &defaults)
+                self.material_delete_change(&all, &defaults)
             }
             DocAction::DefinitionDeleted {
                 component,
@@ -20170,8 +22035,16 @@ impl Document {
                 self.component_change(component)
             }
             DocAction::TagDeleted {
-                registry, nodes, ..
+                registry,
+                nodes,
+                annotations,
+                sketches,
+                guides,
+                ..
             } => {
+                for (id, _, next) in annotations.clone() {
+                    self.apply_annotation_tags(id, next);
+                }
                 // Redo: unregister the entries — retiring whatever identity
                 // each path holds NOW (the restored original, or a fresh
                 // post-delete registration) — and strip the tag lists again.
@@ -20182,6 +22055,14 @@ impl Document {
                         .remove(&AttrTarget::Entity(EntityRef::Tag(path.clone())));
                 }
                 let mut change = DocChange::default();
+                for (id, _, next) in sketches.clone() {
+                    self.apply_sketch_tags(id, next);
+                    change.sketches_touched.push(id);
+                }
+                for (id, _, next) in guides.clone() {
+                    self.apply_guide_tags(id, next);
+                    change.guides_touched.push(id);
+                }
                 for (node, _, next_tags) in nodes.clone() {
                     self.apply_node_tags(node, next_tags);
                     match node {
@@ -20192,13 +22073,30 @@ impl Document {
                 }
                 change
             }
-            DocAction::TagRenamed { registry, nodes } => {
+            DocAction::TagRenamed {
+                registry,
+                nodes,
+                annotations,
+                sketches,
+                guides,
+            } => {
+                for (id, _, next) in annotations.clone() {
+                    self.apply_annotation_tags(id, next);
+                }
                 // Redo: move the entries forward again and re-apply the
                 // rewritten tag lists.
                 for (from, to) in registry.iter() {
                     self.move_tag_identity(from, to);
                 }
                 let mut change = DocChange::default();
+                for (id, _, next) in sketches.clone() {
+                    self.apply_sketch_tags(id, next);
+                    change.sketches_touched.push(id);
+                }
+                for (id, _, next) in guides.clone() {
+                    self.apply_guide_tags(id, next);
+                    change.guides_touched.push(id);
+                }
                 for (node, _, next_tags) in nodes.clone() {
                     self.apply_node_tags(node, next_tags);
                     match node {
@@ -20217,8 +22115,21 @@ impl Document {
                 guides,
                 tags,
                 sketches,
+                annotations,
+                attrs,
                 ..
             } => {
+                for &a in annotations.iter() {
+                    if let Some(rec) = self.annotations.get_mut(a) {
+                        rec.hidden = false;
+                    }
+                }
+                for (target, ns, _, value) in attrs.iter() {
+                    self.attrs
+                        .entry(target.clone())
+                        .or_default()
+                        .insert(ns.clone(), value.clone());
+                }
                 // Redo import: unhide every created entity; re-register the
                 // import's tags with their original hidden flags (their
                 // stable ids survived the undo and are kept).
@@ -20311,6 +22222,23 @@ impl Document {
     /// the owner (I7 — drawing the solid already holds is topology, never
     /// sketch).
     fn debug_validate_owned_sketches(&self) {
+        for (&sid, &gid) in &self.group_sketches {
+            if self.sketch_tombstoned(&sid) {
+                continue;
+            }
+            let rec = self
+                .groups
+                .get(gid)
+                .expect("a group-held sketch names a stale group — kernel bug");
+            if rec.hidden {
+                continue;
+            }
+            assert_eq!(
+                rec.owner_def,
+                self.sketch_owner_component(sid),
+                "group-held sketch {sid:?} is in a different frame than its group {gid:?} — kernel bug"
+            );
+        }
         for (&sid, &oid) in &self.object_sketches {
             if self.sketch_tombstoned(&sid) {
                 continue;
@@ -20362,7 +22290,7 @@ impl Document {
                 );
             }
             for (fid, face) in rec.object.faces.iter() {
-                if let Some(m) = face.material {
+                for m in face.material.into_iter().chain(face.back_material) {
                     debug_assert!(
                         !self.deleted_materials.contains(&m),
                         "face {fid:?} of {oid:?} references a deleted material"
@@ -20408,6 +22336,9 @@ impl Document {
         }
         for path in self.tag_meta.keys() {
             check(EntityRef::Tag(path.clone()));
+        }
+        for id in self.annotations.keys() {
+            check(EntityRef::Annotation(id));
         }
         let mut seen = BTreeSet::new();
         for (entity, &sid) in &self.sids {
@@ -20571,6 +22502,61 @@ impl Document {
 /// roots' total, refusing BEFORE any document mutation. Mesh counts are
 /// upper bounds (a mesh that later fails to build only shrinks the real
 /// number).
+/// An import under way, between [`Document::ingest_begin`] and
+/// [`Document::ingest_finish`]: the recipe's definitions and top-level
+/// nodes still to build, and what the finished import reports.
+pub struct IngestJob {
+    build_order: Vec<usize>,
+    next_def: usize,
+    def_cid: Vec<Option<ComponentId>>,
+    def_children: Vec<Option<Vec<crate::import::ImportNode>>>,
+    def_holds_drawing: Vec<bool>,
+    roots: std::collections::VecDeque<crate::import::ImportNode>,
+    roots_total: usize,
+    mat_ids: Vec<MaterialId>,
+    all_objects: Vec<ObjectId>,
+    all_instances: Vec<InstanceId>,
+    all_groups: Vec<GroupId>,
+    top_roots: Vec<NodeId>,
+    watertight_count: usize,
+    leaky_count: usize,
+    skipped: Vec<SkippedMesh>,
+    keys: BTreeMap<u64, Vec<NodeId>>,
+    was_empty: bool,
+    guides: Vec<crate::import::ImportGuide>,
+    tags: Vec<crate::import::ImportTag>,
+    camera: Option<CameraState>,
+    view_style: Option<crate::style::ViewStyle>,
+    section: Option<crate::SectionPlaneState>,
+    scenes: Vec<crate::import::ImportSceneRecipe>,
+    extra: crate::import::ImportSceneExtra,
+    textures_missing: Vec<String>,
+}
+
+/// How far an import has come: the definitions and top-level nodes
+/// built so far, out of all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngestProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+impl IngestProgress {
+    pub fn finished(&self) -> bool {
+        self.done >= self.total
+    }
+}
+
+impl IngestJob {
+    /// How far the import has come.
+    pub fn progress(&self) -> IngestProgress {
+        IngestProgress {
+            done: self.next_def + (self.roots_total - self.roots.len()),
+            total: self.build_order.len() + self.roots_total,
+        }
+    }
+}
+
 fn ingest_refuse_expansion(
     scene: &crate::import::ImportScene,
     order: &[usize],
@@ -20683,6 +22669,57 @@ fn ingest_def_build_order(defs: &[crate::import::DefRecipe]) -> Result<Vec<usize
     Ok(order)
 }
 
+/// One imported sketch, built on its plane: plain segments first, then
+/// each welded curve inside its own curve bracket (a circle claim when the
+/// chain carries one). Any segment the sketch refuses (off the plane,
+/// degenerate) refuses the whole sketch.
+fn ingest_build_sketch(recipe: &crate::import::ImportSketch) -> Result<Sketch, SketchError> {
+    // What adding the lines one by one builds (the lines outside every
+    // curve first, then each curve's members inside its bracket), in one
+    // bulk insertion: a file's drawing can hold thousands of welded arcs
+    // on one plane, and one-by-one insertion copies and scans the whole
+    // sketch for each segment (an apartment's 10,000 took minutes).
+    let mut sketch = Sketch::on_plane(recipe.plane);
+    let mut in_curve = vec![false; recipe.segments.len()];
+    for (members, _) in &recipe.curves {
+        for &i in members {
+            if let Some(slot) = in_curve.get_mut(i) {
+                *slot = true;
+            }
+        }
+    }
+    let mut segs: Vec<(Point3, Point3, Option<crate::sketch::SketchCurveId>)> = recipe
+        .segments
+        .iter()
+        .zip(&in_curve)
+        .filter(|(_, curved)| !**curved)
+        .map(|(seg, _)| (seg[0], seg[1], None))
+        .collect();
+    for (members, analytic) in &recipe.curves {
+        // Curves are made in the one-by-one order, so they keep their ids;
+        // a curve refused stops the build where one-by-one stops it, with
+        // a refusal among the segments before it reported first.
+        let curve = match analytic {
+            Some(a) => match sketch.begin_curve_with_kind(a.geom, a.kind) {
+                Ok(c) => c,
+                Err(e) => {
+                    sketch.add_segments_on_curves(&segs)?;
+                    return Err(e);
+                }
+            },
+            None => sketch.begin_curve(),
+        };
+        sketch.end_curve();
+        for &i in members {
+            if let Some(seg) = recipe.segments.get(i) {
+                segs.push((seg[0], seg[1], Some(curve)));
+            }
+        }
+    }
+    sketch.add_segments_on_curves(&segs)?;
+    Ok(sketch)
+}
+
 /// Build one `MeshRecipe` into an `Object`, insert it, and tally stats.
 /// Returns the `ObjectId` on success, or `None` + pushes `SkippedMesh` on
 /// `TopologyError` (no silent repair — DEVELOPMENT.md rule 4).
@@ -20725,6 +22762,19 @@ fn ingest_build_mesh(
         }
         Ok(mut obj) => {
             obj.default_material = dense_to_mat(recipe.base_material);
+            // The builder keeps the recipe's faces, in order.
+            if !recipe.extra.face_back_materials.is_empty()
+                && obj.faces().len() == recipe.faces.len()
+            {
+                let backs: Vec<crate::material::FaceMaterial> = recipe
+                    .extra
+                    .face_back_materials
+                    .iter()
+                    .map(|&d| dense_to_mat(d))
+                    .collect();
+                obj.set_built_back_materials(&backs);
+            }
+            obj.adopt_import_claims(&recipe.extra);
             match obj.watertight() {
                 WatertightState::Watertight => *watertight_count += 1,
                 WatertightState::Open => *leaky_count += 1,
@@ -20734,7 +22784,8 @@ fn ingest_build_mesh(
                 history: History::new(),
                 hidden: false,
                 owner,
-                name: Some(recipe.name),
+                // An empty name is no name, as for an imported group.
+                name: (!recipe.name.is_empty()).then_some(recipe.name),
                 tags: recipe.tags,
             });
             all_objects.push(oid);
@@ -20774,6 +22825,8 @@ fn ingest_build_node(
                 Some(def) => ObjectOwner::Definition { def, parent },
                 None => ObjectOwner::World { parent },
             };
+            let key = recipe.extra.key;
+            let hidden = recipe.extra.hidden;
             let oid = ingest_build_mesh(
                 doc,
                 recipe,
@@ -20784,6 +22837,12 @@ fn ingest_build_node(
                 skipped,
                 dense_to_mat,
             )?;
+            if let Some(k) = key {
+                keys.entry(k).or_default().push(NodeId::Object(oid));
+            }
+            if hidden {
+                doc.user_hidden_objects.insert(oid);
+            }
             Some(NodeId::Object(oid))
         }
         crate::import::ImportNode::Instance {
@@ -20928,6 +22987,14 @@ impl LibraryCopy {
 /// copy's own handle — the cross-document sibling of [`Document::copy_attrs`].
 /// Client data (part numbers, plugin state) travels with the geometry it
 /// annotates.
+/// Carry a sketch's tag paths from `src` to its copy in `dst` (verbatim,
+/// as a node's tags travel).
+fn library_copy_sketch_tags(dst: &mut Document, src: &Document, from: SketchId, to: SketchId) {
+    if let Some(tags) = src.sketch_tags.get(&from) {
+        dst.sketch_tags.insert(to, tags.clone());
+    }
+}
+
 fn library_copy_entity_attrs(dst: &mut Document, src: &Document, from: &EntityRef, to: EntityRef) {
     if let Some(dict) = src.attrs.get(&AttrTarget::Entity(from.clone()))
         && !dict.is_empty()
@@ -20970,7 +23037,11 @@ fn library_copy_object(
     // content-equal palette entries are reused, first live match in
     // deterministic slotmap order — repeated inserts never grow the palette
     // with duplicates).
-    let mut referenced: Vec<MaterialId> = obj.faces().values().filter_map(|f| f.material).collect();
+    let mut referenced: Vec<MaterialId> = obj
+        .faces()
+        .values()
+        .flat_map(|f| f.material.into_iter().chain(f.back_material))
+        .collect();
     if let Some(m) = obj.default_material() {
         referenced.push(m);
     }
@@ -21047,6 +23118,7 @@ fn library_copy_object(
         }
         let new_s = dst.insert_sketch_record(sk);
         library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
+        library_copy_sketch_tags(dst, src, s, new_s);
         dst.object_sketches.insert(new_s, new_oid);
         if let ObjectOwner::Definition { def, .. } = dst.objects[new_oid].owner {
             dst.def_sketches.insert(new_s, def);
@@ -21126,13 +23198,18 @@ fn library_copy_def(
         .def_sketches
         .iter()
         .filter(|&(s, &c)| {
-            // Object-owned sketches were copied with their owner above.
-            c == cid && !src.sketch_tombstoned(s) && !src.object_sketches.contains_key(s)
+            // Object-owned sketches were copied with their owner above,
+            // group-held ones with their group.
+            c == cid
+                && !src.sketch_tombstoned(s)
+                && !src.object_sketches.contains_key(s)
+                && !src.group_sketches.contains_key(s)
         })
         .map(|(&s, _)| s)
         .collect();
     for s in def_sketches {
         let new_s = dst.insert_sketch_record(src.sketches[s].clone());
+        library_copy_sketch_tags(dst, src, s, new_s);
         library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
         dst.def_sketches.insert(new_s, new_cid);
         ctx.all_sketches.push(new_s);
@@ -21299,6 +23376,15 @@ fn library_copy_def_group(
         }
     }
     dst.groups[new_gid].members = members;
+    // The group's own drawing comes with it, in the definition's frame.
+    for s in src.group_member_sketches(gid) {
+        let new_s = dst.insert_sketch_record(src.sketches[s].clone());
+        library_copy_entity_attrs(dst, src, &EntityRef::Sketch(s), EntityRef::Sketch(new_s));
+        library_copy_sketch_tags(dst, src, s, new_s);
+        dst.def_sketches.insert(new_s, owner);
+        dst.group_sketches.insert(new_s, new_gid);
+        ctx.all_sketches.push(new_s);
+    }
     new_gid
 }
 
@@ -21387,6 +23473,26 @@ fn library_copy_node(
                 members.push(library_copy_node(dst, src, child, Some(new_gid), pose, ctx));
             }
             dst.groups[new_gid].members = members;
+            // The group's own drawing comes with it, placed as its members.
+            // A bake that cannot map a sketch's plane (an extreme
+            // anisotropic scale) omits that one drawing aid rather than
+            // panicking mid-mutation, as an object's owned sketch does.
+            for s in src.group_member_sketches(gid) {
+                let mut sk = src.sketches[s].clone();
+                if sk.apply_transform(pose).is_err() {
+                    continue;
+                }
+                let new_s = dst.insert_sketch_record(sk);
+                library_copy_entity_attrs(
+                    dst,
+                    src,
+                    &EntityRef::Sketch(s),
+                    EntityRef::Sketch(new_s),
+                );
+                library_copy_sketch_tags(dst, src, s, new_s);
+                dst.group_sketches.insert(new_s, new_gid);
+                ctx.all_sketches.push(new_s);
+            }
             NodeId::Group(new_gid)
         }
     }
@@ -21411,12 +23517,22 @@ fn vec_is_finite(v: Vec3) -> bool {
 /// origin/position point moves like any other point; `direction` is left
 /// exactly as-is rather than run through `apply_vector` — a POSITIVE scale
 /// never rotates or flips it, and renormalizing a vector that is already
-/// unit-length would only add a spurious rounding step.
+/// unit-length would only add a spurious rounding step. A line's stretch
+/// scales with it; an infinite one stays as it is.
 fn scale_guide(guide: Guide, scale: &Transform) -> Guide {
     match guide {
-        Guide::Line { origin, direction } => Guide::Line {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => Guide::Line {
             origin: scale.apply_point(origin),
             direction,
+            span: if span.is_infinite() {
+                span
+            } else {
+                span.scaled(scale.apply_vector(direction).length())
+            },
         },
         Guide::Point { position } => Guide::Point {
             position: scale.apply_point(position),

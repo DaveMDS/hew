@@ -193,6 +193,38 @@ export class CameraRig {
     this.orthographic.updateProjectionMatrix()
   }
 
+  /**
+   * The height the view spans at the orbit target, in world meters: the
+   * orthographic frustum's own height under parallel projection, else what
+   * the perspective camera spans at `dist` with its fov — the quantity a
+   * saved camera carries as `parallelHeight` (kernel `CameraState`), so a
+   * parallel view reopens at the height it was saved at whatever its eye
+   * distance (a SketchUp parallel view keeps exactly this).
+   */
+  heightAtTarget(dist: number): number {
+    if (this.projection === 'parallel') {
+      return (this.orthographic.top - this.orthographic.bottom) / this.orthographic.zoom
+    }
+    return 2 * dist * tanHalfFovRad(this.perspective.fov)
+  }
+
+  /**
+   * Size the orthographic frustum to span `height` world meters top to
+   * bottom (zoom reset to 1, width from the aspect), leaving its pose
+   * alone. The parallel half of restoring a saved `parallelHeight`
+   * (`Viewport.applyCameraState`); a no-op on the perspective camera.
+   */
+  setParallelHeight(height: number): void {
+    const halfH = Math.max(height, 1e-6) / 2
+    const halfW = halfH * this.perspective.aspect
+    this.orthographic.left = -halfW
+    this.orthographic.right = halfW
+    this.orthographic.top = halfH
+    this.orthographic.bottom = -halfH
+    this.orthographic.zoom = 1
+    this.orthographic.updateProjectionMatrix()
+  }
+
   /** Set the perspective vertical fov (degrees), clamped to
    * [`MIN_FOV_DEG`, `MAX_FOV_DEG`]. No-op on the orthographic frustum — fov
    * only ever applies to (and persists across toggles on) `perspective`. */

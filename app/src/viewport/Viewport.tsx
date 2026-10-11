@@ -18,6 +18,7 @@
  *   - : context path navigation, group-aware picking
  */
 
+import { shownAnnotationIds } from './shownAnnotations'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
@@ -36,6 +37,7 @@ import {
 import { prefersReducedMotion, isMac } from '../platform'
 import { DEPTH_BIAS } from './depthPolicy'
 import type { Scene as WasmScene, DocChangeJs } from '../wasm/loader'
+import type { HealthOverlay } from '../health/healthReport'
 import { CueLayer } from './CueLayer'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import type { DrawPlane } from '../tools/drawPlane'
@@ -102,6 +104,7 @@ import {
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
 import { CameraRig, type Projection, isBehindCamera } from './cameraRig'
+import { guideSpanOf, stretchToUse } from './guideWindow'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
 import {
@@ -112,6 +115,8 @@ import {
   type FovDragState,
 } from './fovDrag'
 import { shouldSkipToolSwitch } from './toolSwitchGuard'
+import { effectiveHidden, isPickHidden, isolationBaseline, resolveIsolation, sameTargets, sameView, type IsolationBaseline, type IsolationTarget, type IsolationView } from './isolation'
+import { worldBoundsForSelection } from '../panels/objectBounds'
 import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
@@ -161,6 +166,13 @@ import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
+
+/** The backdrop part of a document's view style (`view_style_json`). */
+export interface ViewStyleColors {
+  background: [number, number, number]
+  sky: [number, number, number] | null
+  ground: [number, number, number] | null
+}
 import { SketchHoverGate } from './sketchHoverGate'
 import { isRenderStatsActive, recordRender } from './renderStats'
 import {
@@ -436,6 +448,10 @@ interface Props {
   onEnterContext?: (node: NodeRef) => void
   /** Request popping one level off the context path (Esc). */
   onExitContext?: () => void
+  /** View-only isolation changed: how many objects are shown, or null when
+   *  isolation ended (`ViewportApi.isolate` / `clearIsolation`, Escape, a
+   *  document change that removed every target). */
+  onIsolationChange?: (shown: number | null) => void
   /** Request clearing the WHOLE context path back to the top level — the
    *  undo/redo reconcile uses this when the kernel reports an explode
    *  session re-opened by a history step while the app still stands inside
@@ -790,6 +806,12 @@ export interface ViewportApi {
    */
   refreshScene: () => void
   /**
+   * Rebuild the drafting lines and region fills alone (`refreshAllSketches`)
+   * and draw a frame: what a visibility change needs, since a sketch hides
+   * with its own tags and its group's without any geometry changing.
+   */
+  refreshSketches: () => void
+  /**
    * Re-derive the open session stack's scope and labels from the live
    * document and push them up via `onSessionChange` if they changed. Every
    * commit already does this through `refreshScene`; a panel mutation that
@@ -836,9 +858,17 @@ export interface ViewportApi {
    * outside the viewport or teaching `zoomExtents` about a single-object
    * mode. A degenerate (zero-volume) box is still framed — unlike
    * `zoomExtents`'s empty-scene no-op, a single point is a legitimate
-   * target here (e.g. a thin sketch edge).
+   * target here (e.g. a thin sketch edge). The box fits in the part of the
+   * viewport the framing inset leaves uncovered (`setFramingInset`).
    */
   zoomToWorldBounds: (min: [number, number, number], max: [number, number, number]) => void
+  /**
+   * Model Health's rim overlay: draw the rims of the listed objects (and the
+   * current finding's rim brighter) over the model, or `null` to clear it.
+   * Reads rim geometry from the live document, so it is re-sent on every
+   * document change while the Model Health window is open.
+   */
+  setHealthOverlay: (overlay: HealthOverlay | null) => void
   /**
    * Reposition the orbit camera to a standard axis-aligned or isometric view
    * (Camera ▸ Standard Views), re-framing the scene each time. The current
@@ -913,8 +943,35 @@ export interface ViewportApi {
   ) => ViewPlaneExtent
   /** Selected object / instance ids as the renderer knows them. */
   getSelectedIds: () => { objects: bigint[]; instances: bigint[] }
-  /** The renderer's hidden leaf ids (eye-hidden ∪ tag-hidden). */
+  /** The hidden leaf ids the app pushed (eye-hidden ∪ tag-hidden) — never
+   *  including what isolation hides on top. */
   getHiddenIds: () => { objects: bigint[]; instances: bigint[] }
+  /** What is really hidden right now: `getHiddenIds` plus everything outside
+   *  the isolated set. The app hands THIS to the kernel's inference-hide. */
+  getEffectiveHiddenIds: () => { objects: bigint[]; instances: bigint[] }
+  /**
+   * View-only isolation (docs/design/import-health.md, "Isolation"): show
+   * just `targets`. Everything else is hidden — not drawn, not picked,
+   * hovered, marqueed or snapped to — except the rest of a containing group
+   * or component instance, which draws faded as context (and is just as
+   * unpickable). Replaces any isolation already on. Frames the isolated set
+   * unless `opts.frame` is false. Never a document change: no undo entry,
+   * nothing saved, no `docRev`, the Outliner's eyes untouched. Returns the
+   * number of objects shown (0 and no isolation when no target exists).
+   */
+  isolate: (targets: IsolationTarget[], opts?: { frame?: boolean }) => number
+  /** End isolation (Show everything). A no-op when none is active. */
+  clearIsolation: () => void
+  /** How many pixels on the viewport's right and left a window covers (the
+   *  Make Solid wizard, the Model Health window), so framing an isolated set
+   *  or a box fits it in the part left visible; 0 when nothing covers a side. */
+  setFramingInset: (rightPx: number, leftPx?: number) => void
+  /** Re-resolve the isolation after a document change: drop targets that no
+   *  longer exist (clearing it when none are left) and re-hide anything new.
+   *  Returns whether anything changed; when not, nothing was re-applied. */
+  refreshIsolation: () => boolean
+  /** The live isolation targets, or null when nothing is isolated. */
+  getIsolation: () => IsolationTarget[] | null
   /** Annotation line work + labels in world space (vector prints). */
   collectAnnotationDrawing: () => { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] }
 
@@ -954,6 +1011,9 @@ export interface ViewportApi {
   getCameraState: () => {
     projection: Projection
     fovDeg: number
+    /** The height the view spans at `target`, world meters (the parallel
+     * frustum's height under parallel) — kernel `CameraState.parallel_height`. */
+    parallelHeight: number
     eye: [number, number, number]
     target: [number, number, number]
     up: [number, number, number]
@@ -966,6 +1026,9 @@ export interface ViewportApi {
   applyCameraState: (state: {
     projection: Projection
     fovDeg: number
+    /** Omitted by a caller that has none (an older saved view): the
+     * height the perspective view spans at `target` stands in. */
+    parallelHeight?: number
     eye: [number, number, number]
     target: [number, number, number]
     up: [number, number, number]
@@ -984,6 +1047,7 @@ export interface ViewportApi {
     state: {
       projection: Projection
       fovDeg: number
+      parallelHeight?: number
       eye: [number, number, number]
       target: [number, number, number]
       up: [number, number, number]
@@ -1036,6 +1100,14 @@ export interface ViewportApi {
   setAxesVisible: (visible: boolean) => void
   /** Show/hide the ground grid (View ▸ Grid). */
   setGridVisible: (visible: boolean) => void
+  /**
+   * The document's view style (kernel `ViewStyle`, a `.skp`'s backdrop):
+   * the clear color becomes the sky color above the horizon (else the
+   * background), and the ground plane paints the ground color, or only
+   * its grid lines when the style has no ground. `null` returns to Hew's
+   * own theme-driven look.
+   */
+  setViewStyle: (style: ViewStyleColors | null) => void
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
@@ -2138,6 +2210,7 @@ export default function Viewport({
   onOpenAnnotationEditor,
   onEnterContext,
   onExitContext,
+  onIsolationChange,
   onExitAllContexts,
   onSessionChange,
   onDocumentChanged,
@@ -2189,6 +2262,8 @@ export default function Viewport({
   onEnterContextRef.current = onEnterContext
   const onExitContextRef = useRef(onExitContext)
   onExitContextRef.current = onExitContext
+  const onIsolationChangeRef = useRef(onIsolationChange)
+  onIsolationChangeRef.current = onIsolationChange
   const onExitAllContextsRef = useRef(onExitAllContexts)
   onExitAllContextsRef.current = onExitAllContexts
   const onSessionChangeRef = useRef(onSessionChange)
@@ -2426,7 +2501,18 @@ export default function Viewport({
     // `prefers-color-scheme` flip while 'auto' is in effect, since that flip
     // never fires the settings-change subscription.
     let currentTheme: ResolvedTheme = getResolvedTheme()
-    renderer.setClearColor(CANVAS_CLEAR_COLOR[currentTheme])
+    // The document's view style, when it has one: its backdrop replaces
+    // the theme's clear color and ground tint (`setViewStyle`).
+    let viewStyle: ViewStyleColors | null = null
+    const rgb = (c: [number, number, number]): number => (c[0] << 16) | (c[1] << 8) | c[2]
+    function applyBackdrop(): void {
+      if (viewStyle === null) {
+        renderer.setClearColor(CANVAS_CLEAR_COLOR[currentTheme])
+        return
+      }
+      renderer.setClearColor(rgb(viewStyle.sky ?? viewStyle.background))
+    }
+    applyBackdrop()
     renderer.setSize(el.clientWidth, el.clientHeight)
     el.appendChild(renderer.domElement)
 
@@ -2560,6 +2646,15 @@ export default function Viewport({
     // `showGrid` prop's doc comment.
     infiniteGrid.mesh.visible = showGrid
     threeScene.add(infiniteGrid.mesh)
+    // The ground's colors: the theme's, or the view style's ground over
+    // the theme's line colors — and no fill at all for a style without a
+    // ground, where the lines alone draw over the backdrop.
+    function applyGridColors(): void {
+      const gridColors = GROUND_GRID_COLORS[currentTheme]
+      const ground = viewStyle === null ? gridColors.ground : viewStyle.ground === null ? gridColors.ground : rgb(viewStyle.ground)
+      infiniteGrid.setColors(ground, gridColors.minor, gridColors.major)
+      infiniteGrid.setGroundFilled(viewStyle === null || viewStyle.ground !== null)
+    }
 
     function disposeOriginAxes(group: THREE.Group): void {
       group.traverse((child) => {
@@ -2593,12 +2688,11 @@ export default function Viewport({
     const unsubscribeTheme = subscribeTheme(() => {
       const theme = getResolvedTheme()
       currentTheme = theme
-      renderer.setClearColor(CANVAS_CLEAR_COLOR[theme])
+      applyBackdrop()
       const rig = MODEL_LIGHT_RIG[theme]
       ambient.intensity = rig.ambient
       dirLight.intensity = rig.directional
-      const gridColors = GROUND_GRID_COLORS[theme]
-      infiniteGrid.setColors(gridColors.ground, gridColors.minor, gridColors.major)
+      applyGridColors()
       rebuildOriginAxes(theme)
       applyShopGradientBackground()
       // The edit-context dim opacity is theme-tuned too (component-edit-
@@ -2697,8 +2791,7 @@ export default function Viewport({
         // eligibility the draw tools use for that context.
         imprintEligible: faceDrawEligible,
         resolveObject: (objectId, instanceId) => {
-          if (instanceId !== undefined && hiddenInstanceIdsRef.current.has(instanceId)) return null
-          if (hiddenObjectIdsRef.current.has(objectId)) return null
+          if (isPickHidden(hiddenObjectIdsRef.current, hiddenInstanceIdsRef.current, objectId, instanceId)) return null
           return resolvePickToSelectable(
             wasmScene, objectId, activeContextRef.current, instanceId, sessionScopeFor(activeContextRef.current),
           )
@@ -4344,6 +4437,15 @@ export default function Viewport({
       return { objectIds, instanceIds }
     }
 
+    // Drafting alone (ViewportApi.refreshSketches): what hides with a tag
+    // or a hidden group changes without the solids changing. Guides hide
+    // with their tags too, so their overlay follows.
+    function refreshSketches(): void {
+      sceneRenderer.refreshAllSketches()
+      sceneRenderer.refreshGuides()
+      scheduleRender()
+    }
+
     // Re-tessellate after a harness-driven kernel mutation (ViewportApi.refreshScene).
     function refreshScene(): void {
       handleSceneRefresh()
@@ -4357,6 +4459,11 @@ export default function Viewport({
     // Apply a committed palette-opacity edit in place (ViewportApi.
     // syncMaterialOpacity) — no re-tessellation; alpha lives on the
     // already-built THREE materials.
+    function setHealthOverlay(overlay: HealthOverlay | null): void {
+      sceneRenderer.setHealthOverlay(overlay)
+      scheduleRender()
+    }
+
     function syncMaterialOpacity(): void {
       sceneRenderer.syncPaletteOpacity()
       onDocumentChangedRef.current?.()
@@ -5035,6 +5142,12 @@ export default function Viewport({
       // handling of the same pair.
       cancelTapeLoupe()
       deferredTapDrag = null
+      // Isolation targets name the outgoing document's ids — and so does the
+      // hidden base it was layered on (the app re-seeds it right after a load).
+      if (isolation !== null) {
+        baseHidden = { objects: [], instances: [] }
+        clearIsolation()
+      }
       // A new/loaded document replaced the Scene — any explode session the
       // PREVIOUS scene had open is meaningless against this one (`Scene.save()`
       // always serializes as-if-closed, so a freshly loaded document never
@@ -5317,7 +5430,11 @@ export default function Viewport({
      * steps `zoomExtents` runs (fit distance, view-limit resync, re-target),
      * against an explicit box instead of one measured from the rendered
      * scene groups. */
-    function zoomToWorldBounds(min: [number, number, number], max: [number, number, number]): void {
+    function zoomToWorldBounds(
+      min: [number, number, number],
+      max: [number, number, number],
+      inset: { left: number; right: number } = framingInset,
+    ): void {
       const box = new THREE.Box3(
         new THREE.Vector3(min[0], min[1], min[2]),
         new THREE.Vector3(max[0], max[1], max[2]),
@@ -5325,7 +5442,20 @@ export default function Viewport({
       const center = new THREE.Vector3()
       box.getCenter(center)
       const halfDiag = Math.max(box.getBoundingSphere(new THREE.Sphere()).radius, 1e-6)
-      const distance = rig.perspectiveFramingDistance(halfDiag, 1.2)
+      // Windows over either side leave `w - left - right` pixels: fit the
+      // sphere across that width too (the framing distance alone fits the
+      // height). Together they never take more than 80% of the width.
+      const w = Math.max(el.clientWidth, 1)
+      const h = Math.max(el.clientHeight, 1)
+      let left = Math.max(inset.left, 0)
+      let right = Math.max(inset.right, 0)
+      const covered = left + right
+      if (covered > w * 0.8) {
+        left *= (w * 0.8) / covered
+        right *= (w * 0.8) / covered
+      }
+      const widthFit = left + right > 0 ? Math.max(1, h / (w - left - right)) : 1
+      const distance = rig.perspectiveFramingDistance(halfDiag, 1.2) * widthFit
 
       const limits = zoomExtentsViewLimits(distance)
       const ratio = limits.far / worldLimits.far
@@ -5333,10 +5463,25 @@ export default function Viewport({
 
       const dir = new THREE.Vector3()
       dir.subVectors(camera.position, controls.target).normalize()
-      controls.target.copy(center)
-      camera.position.copy(center).addScaledVector(dir, distance)
+      // Center the set in the uncovered part: move the target by half the
+      // difference between the covered widths (world units at the set's
+      // depth), so the set shows that far off the canvas center.
+      const target = center.clone()
+      const shift = (right - left) / 2
+      if (shift !== 0) {
+        const rightDir = new THREE.Vector3().crossVectors(dir.clone().negate(), new THREE.Vector3(0, 0, 1))
+        if (rightDir.lengthSq() < 1e-12) rightDir.set(1, 0, 0).applyQuaternion(camera.quaternion)
+        rightDir.normalize()
+        const halfH =
+          rig.projection === 'parallel'
+            ? halfDiag * 1.2 * widthFit
+            : distance * Math.tan(THREE.MathUtils.degToRad(rig.perspective.fov) / 2)
+        target.addScaledVector(rightDir, shift * ((2 * halfH) / h))
+      }
+      controls.target.copy(target)
+      camera.position.copy(target).addScaledVector(dir, distance)
       if (rig.projection === 'parallel') {
-        rig.frameOrthoToRadius(halfDiag, 1.2, el.clientWidth / el.clientHeight)
+        rig.frameOrthoToRadius(halfDiag * widthFit, 1.2, el.clientWidth / el.clientHeight)
       }
       camera.updateProjectionMatrix()
       controls.update()
@@ -5505,7 +5650,9 @@ export default function Viewport({
       },
     ): ViewPlaneExtent {
       const override = opts.hiddenOverride ?? null
-      if (opts.restrictTo === null && override === null) return computeViewPlaneExtent(sceneRenderer, dir, up, opts)
+      // Isolation never reaches a print: measure the document as the person
+      // hid it, which `beginPrintPass` restores for the walk.
+      if (opts.restrictTo === null && override === null && isolation === null) return computeViewPlaneExtent(sceneRenderer, dir, up, opts)
       // Selection extent / a Scene's hidden set: measure with the pass's
       // visibility applied (begun and ended around the walk — no render).
       sceneRenderer.beginPrintPass({ style: 'shaded', restrictTo: opts.restrictTo, includeGuides: true, hiddenOverride: override })
@@ -5661,38 +5808,34 @@ export default function Viewport({
      * while a walkthrough tool (Position Camera/Look Around/Walk, design
      * §4) has OrbitControls disabled and never touches it mid-gesture.
      *
-     * The synthesized `target`'s DISTANCE from `eye` is deliberately NOT
-     * `CameraRig.effectiveDistance()` — that normalizes against a fixed
-     * REFERENCE fov (45°) for a different purpose entirely (keeping guide-
-     * dash/grid LOD continuous across a projection toggle) and is the
-     * WRONG quantity to persist: `applyCameraState`'s restore re-derives
-     * the ortho frustum via `CameraRig.toggleProjection`, whose own
-     * `matchOrthoToPerspective` sizes it as `distance · tan(halfFov)` using
-     * the camera's ACTUAL fov, not the reference one. Feeding an
-     * effectiveDistance-scaled target back through that math would size the
-     * restored ortho frustum off by `tan(actualFov/2)/tan(45°/2)` — this
-     * computes the matching inverse directly instead: under parallel, the
-     * exact distance `matchOrthoToPerspective` needs to reproduce the
-     * CURRENT ortho frustum height when this state is later restored and
-     * re-toggled; under perspective, the plain orbit distance (which
-     * IS what a perspective→parallel toggle already uses verbatim).
+     * The target sits at the plain orbit distance under either
+     * projection; the parallel frame's height travels separately as
+     * `parallelHeight` (kernel `CameraState.parallel_height`), which
+     * `applyCameraState` sets on the orthographic frustum directly after
+     * its toggle. (Before the field existed the parallel target encoded
+     * the frustum height as a distance, which made an imported SketchUp
+     * parallel view, whose eye sits far from its target, read as drifted
+     * from the Scene it came from.)
      */
     function getCameraState(): {
       projection: Projection
       fovDeg: number
+      parallelHeight: number
       eye: [number, number, number]
       target: [number, number, number]
       up: [number, number, number]
     } {
       const forward = currentForward()
       const eye = currentEye()
-      const dist =
-        rig.projection === 'parallel'
-          ? (rig.orthographic.top - rig.orthographic.bottom) / (2 * rig.orthographic.zoom) / tanHalfFovRad(rig.perspective.fov)
-          : controls.getDistance()
+      // The orbit distance under either projection: the parallel frame's
+      // height travels as `parallelHeight`, so the target no longer has
+      // to encode it (a saved parallel view keeps its real target, and a
+      // Scene captured from one compares equal to itself).
+      const dist = controls.getDistance()
       return {
         projection: rig.projection,
         fovDeg: rig.perspective.fov,
+        parallelHeight: rig.heightAtTarget(dist),
         eye,
         target: [eye[0] + forward[0] * dist, eye[1] + forward[1] * dist, eye[2] + forward[2] * dist],
         up: [camera.up.x, camera.up.y, camera.up.z],
@@ -5718,6 +5861,7 @@ export default function Viewport({
     function applyCameraState(state: {
       projection: Projection
       fovDeg: number
+      parallelHeight?: number
       eye: [number, number, number]
       target: [number, number, number]
       up: [number, number, number]
@@ -5736,6 +5880,12 @@ export default function Viewport({
       if (state.projection === 'parallel') {
         rig.toggleProjection(targetVec)
         rebindControlsForProjectionChange()
+        // The toggle sized the frustum from the eye distance; a saved
+        // parallel view spans its own height at the target, whatever that
+        // distance (an imported SketchUp plan sits far above its floor).
+        if (state.parallelHeight !== undefined && Number.isFinite(state.parallelHeight) && state.parallelHeight > 0) {
+          rig.setParallelHeight(state.parallelHeight)
+        }
       }
       controls.target.copy(targetVec)
       rig.syncInactiveCamera(targetVec)
@@ -5769,6 +5919,7 @@ export default function Viewport({
       state: {
         projection: Projection
         fovDeg: number
+        parallelHeight?: number
         eye: [number, number, number]
         target: [number, number, number]
         up: [number, number, number]
@@ -5808,6 +5959,10 @@ export default function Viewport({
       const q1 = probe.quaternion.clone()
       const fov0 = start.fovDeg
       const fov1 = state.fovDeg
+      // Under parallel the frame's height tweens on its own (the pose math
+      // below would size it from the eye distance instead).
+      const h0 = start.parallelHeight
+      const h1 = state.parallelHeight ?? 2 * dist1 * tanHalfFovRad(fov1)
       const t0 = performance.now()
       const ease = (t: number): number => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
       const q = new THREE.Quaternion()
@@ -5826,6 +5981,7 @@ export default function Viewport({
         const dist = dist0 + (dist1 - dist0) * t
         target.copy(eye).addScaledVector(forward, dist)
         rig.applyPose(eye, target, up, fov0 + (fov1 - fov0) * t)
+        if (rig.projection === 'parallel') rig.setParallelHeight(h0 + (h1 - h0) * t)
         controls.target.copy(target)
         controls.update()
         scheduleRender()
@@ -5890,16 +6046,119 @@ export default function Viewport({
       scheduleRender()
     }
 
-    function setHidden(objectIds: bigint[], instanceIds: bigint[], opts?: { fadeMs?: number }): void {
-      hiddenObjectIdsRef.current = new Set(objectIds)
-      hiddenInstanceIdsRef.current = new Set(instanceIds)
+    // The user's own hidden leaves (eye ∪ tag), as the app pushed them, and
+    // the live view-only isolation on top. The renderer, the pick filters and
+    // (through `getEffectiveHiddenIds`) the kernel all see the merge.
+    let baseHidden: { objects: bigint[]; instances: bigint[] } = { objects: [], instances: [] }
+    let isolation: { targets: IsolationTarget[]; view: IsolationView; baseline: IsolationBaseline } | null = null
+
+    function applyHidden(opts?: { fadeMs?: number }): void {
+      const eff = effectiveHidden(baseHidden, isolation === null ? null : isolation.view)
+      hiddenObjectIdsRef.current = new Set(eff.objects)
+      hiddenInstanceIdsRef.current = new Set(eff.instances)
+      sceneRenderer.setIsolationFade(isolation === null ? null : isolation.view.fade, {
+        objects: baseHidden.objects,
+        instances: baseHidden.instances,
+      })
       const fadeMs = opts?.fadeMs
-      if (fadeMs !== undefined && fadeMs > 0) {
-        sceneRenderer.setHiddenFaded(objectIds, instanceIds, fadeMs)
+      if (fadeMs !== undefined && fadeMs > 0 && isolation === null) {
+        sceneRenderer.setHiddenFaded(eff.objects, eff.instances, fadeMs)
       } else {
-        sceneRenderer.setHidden(objectIds, instanceIds)
+        sceneRenderer.setHidden(eff.objects, eff.instances)
       }
       scheduleRender()
+    }
+
+    function setHidden(objectIds: bigint[], instanceIds: bigint[], opts?: { fadeMs?: number }): void {
+      baseHidden = { objects: [...objectIds], instances: [...instanceIds] }
+      // The user's own hidden leaves are never drawn as faded context, so a
+      // change to them changes what the isolation fades.
+      if (isolation !== null) {
+        const view = resolveIsolation(wasmScene, isolation.targets, isolation.baseline, baseHidden)
+        if (view === null) {
+          isolation = null
+          onIsolationChangeRef.current?.(null)
+        } else {
+          isolation = { targets: view.targets, view, baseline: isolation.baseline }
+        }
+      }
+      applyHidden(opts)
+    }
+
+    function getEffectiveHiddenIds(): { objects: bigint[]; instances: bigint[] } {
+      return effectiveHidden(baseHidden, isolation === null ? null : isolation.view)
+    }
+
+    /** Frame the isolated set (a member target frames its whole instance). */
+    /** Pixels windows cover on each side (setFramingInset). */
+    let framingInset = { left: 0, right: 0 }
+
+    function frameIsolation(targets: IsolationTarget[]): void {
+      // A member frames at its own placement in that instance, never the
+      // whole (often much bigger) instance around it.
+      const min: [number, number, number] = [Infinity, Infinity, Infinity]
+      const max: [number, number, number] = [-Infinity, -Infinity, -Infinity]
+      const grow = (lo: ArrayLike<number>, hi: ArrayLike<number>): void => {
+        for (let k = 0; k < 3; k++) {
+          min[k] = Math.min(min[k], lo[k])
+          max[k] = Math.max(max[k], hi[k])
+        }
+      }
+      const others: NodeRef[] = []
+      const members = targets.filter((t): t is Extract<IsolationTarget, { kind: 'member' }> => t.kind === 'member')
+      // One call for every member: the placements are walked once.
+      const b = members.length > 0
+        ? wasmScene.objects_world_bounds(
+            BigUint64Array.from(members.map((t) => t.object)),
+            BigUint64Array.from(members.map((t) => t.instance)),
+          )
+        : new Float64Array()
+      if (b.length === 6) grow([b[0], b[1], b[2]], [b[3], b[4], b[5]])
+      else for (const t of members) others.push({ kind: 'instance', id: t.instance })
+      for (const t of targets) if (t.kind !== 'member') others.push(t)
+      const rest = others.length > 0 ? worldBoundsForSelection(wasmScene, others) : null
+      if (rest !== null) grow(rest.min, rest.max)
+      if (min[0] <= max[0]) zoomToWorldBounds(min, max)
+    }
+
+    function isolate(targets: IsolationTarget[], opts?: { frame?: boolean }): number {
+      const baseline = isolationBaseline(wasmScene)
+      const view = resolveIsolation(wasmScene, targets, baseline, baseHidden)
+      if (view === null) {
+        clearIsolation()
+        return 0
+      }
+      isolation = { targets: view.targets, view, baseline }
+      applyHidden()
+      onIsolationChangeRef.current?.(view.count)
+      if (opts?.frame !== false) frameIsolation(view.targets)
+      return view.count
+    }
+
+    function clearIsolation(): void {
+      if (isolation === null) return
+      isolation = null
+      applyHidden()
+      onIsolationChangeRef.current?.(null)
+    }
+
+    /** Re-resolve against the live document. True when what draws or hides
+     *  changed (the caller then re-pushes the kernel's hidden set); an edit
+     *  that leaves the resolved view alone costs no renderer or kernel work. */
+    function refreshIsolation(): boolean {
+      if (isolation === null) return false
+      const view = resolveIsolation(wasmScene, isolation.targets, isolation.baseline, baseHidden)
+      if (view === null) {
+        clearIsolation()
+        return true
+      }
+      if (sameView(view, isolation.view)) return false
+      const countChanged = !sameTargets(view.targets, isolation.targets) || view.count !== isolation.view.count
+      isolation = { targets: view.targets, view, baseline: isolation.baseline }
+      // Objects made while isolated are not in the baseline: they stay shown.
+      applyHidden()
+      if (countChanged) onIsolationChangeRef.current?.(view.count)
+      return true
     }
 
     function setAxesVisible(visible: boolean): void {
@@ -5914,6 +6173,13 @@ export default function Viewport({
 
     function setGridVisible(visible: boolean): void {
       infiniteGrid.mesh.visible = visible
+      scheduleRender()
+    }
+
+    function setViewStyle(style: ViewStyleColors | null): void {
+      viewStyle = style
+      applyBackdrop()
+      applyGridColors()
       scheduleRender()
     }
 
@@ -6191,7 +6457,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => sceneRenderer.getHiddenIds(), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -7477,9 +7743,19 @@ export default function Viewport({
       retargetToCursorDepth(ev.clientX, ev.clientY)
     }
     function onRetargetPointerDownCapture(ev: PointerEvent): void {
-      // Middle button = orbit (configureControls). The right button is Fly
-      // (its own block below), which has no pivot to retarget.
-      if (ev.button !== 1) return
+      // Middle button = orbit (configureControls), and the left button
+      // drives OrbitControls while a camera tool is active; the right button
+      // is Fly (its own block below), which has no pivot to retarget. A pan
+      // moves by the eye-to-target distance per pixel, so it too needs the
+      // target at the depth under the cursor: a camera whose target sits a
+      // hand's width from the eye (a SketchUp scene placed with Look Around)
+      // would otherwise barely pan.
+      // (Zoom Window draws its own rectangle and scales from the distance it
+      // finds afterwards; OrbitControls does not drive that press.)
+      const drivesControls =
+        ev.button === 1 ||
+        (ev.button === 0 && activeCameraTool !== null && activeCameraTool !== 'ZoomWindow')
+      if (!drivesControls) return
       retargetToCursorDepth(ev.clientX, ev.clientY)
     }
 
@@ -8688,14 +8964,18 @@ export default function Viewport({
           if (len < 1e-9) continue
           const ux = dx / len, uy = dy / len, uz = dz / len
           // Sample along the line and measure pixel distance segment-by-segment
-          // between consecutive IN-FRONT samples. (Projecting the bare ±50 m
+          // between consecutive IN-FRONT samples, over the part of the guide's
+          // own span within the sample range. (Projecting the bare ±50 m
           // endpoints breaks when one is behind the camera — its projection is
           // garbage — so a near guide could never be picked.)
           const N = 64
+          const { lo, hi } = guideSpanOf(geom)
+          const sampled = stretchToUse(-GUIDE_LINE_SAMPLE_HALF, GUIDE_LINE_SAMPLE_HALF, lo, hi)
+          if (sampled === null) continue
           d = Infinity
           let prev: { x: number; y: number; behind: boolean } | null = null
           for (let i = 0; i <= N; i++) {
-            const t = -GUIDE_LINE_SAMPLE_HALF + (2 * GUIDE_LINE_SAMPLE_HALF) * (i / N)
+            const t = sampled[0] + (sampled[1] - sampled[0]) * (i / N)
             const p = worldToPixels(new THREE.Vector3(ox + ux * t, oy + uy * t, oz + uz * t))
             if (!p.behind) {
               const dp = Math.hypot(p.x - clickX, p.y - clickY)
@@ -8738,7 +9018,7 @@ export default function Viewport({
       const clickY = (-ndcY * 0.5 + 0.5) * h
       let best: bigint | null = null
       let bestDist = ANNOTATION_PICK_PX
-      for (const id of wasmScene.annotation_ids()) {
+      for (const id of shownAnnotationIds(wasmScene)) {
         const kind = wasmScene.annotation_kind(id)
         if (kind === undefined) continue
         let p0: V3 | undefined
@@ -9250,6 +9530,15 @@ export default function Viewport({
       // the preview without committing anything.
       if (ev.key === 'Escape' && annotationDrag !== null) {
         _cancelAnnotationDrag()
+        return
+      }
+
+      // Esc ends view-only isolation ("Show everything") — unless a tool
+      // gesture is armed, which consumes the key first (below). Isolation
+      // outranks popping an editing context: it is the outermost, most
+      // recently asked-for view state.
+      if (ev.key === 'Escape' && isolation !== null && !toolHasArmedGesture(toolController.activeTool)) {
+        clearIsolation()
         return
       }
 

@@ -75,6 +75,7 @@ describe('installLiveBridge', () => {
     api_connection_open: ReturnType<typeof vi.fn>
     api_connection_close: ReturnType<typeof vi.fn>
     api_dispatch: ReturnType<typeof vi.fn>
+    set_display_units: ReturnType<typeof vi.fn>
     api_method_mutates: ReturnType<typeof vi.fn>
     take_pending_view_directive: ReturnType<typeof vi.fn>
   }
@@ -101,6 +102,7 @@ describe('installLiveBridge', () => {
       api_connection_open: vi.fn(() => 7),
       api_connection_close: vi.fn(),
       api_dispatch: vi.fn(),
+      set_display_units: vi.fn(),
       // Stands in for the real registry lookup (crates/api): the shapes
       // this suite dispatches are all mutating except the query/meta/attr
       // reads and the hew.view.* host effects (mutates_document = false)
@@ -151,6 +153,20 @@ describe('installLiveBridge', () => {
     scene.api_dispatch.mockReturnValue('{"jsonrpc":"2.0","id":0,"result":{}}')
     fire('hew://api-frame', { connId: 3, frame: '{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello"}' })
     expect(scene.api_dispatch).toHaveBeenCalledWith(7, expect.stringContaining('hew.meta.hello'))
+  })
+
+  it('tells the scene the app\'s display units before each dispatch, for a .skp export to open in', async () => {
+    installLiveBridge(deps)
+    await flush()
+    fire('hew://api-connection-open', { connId: 3 })
+    setLengthUnit('cm')
+    scene.api_dispatch.mockImplementation(() => {
+      expect(scene.set_display_units).toHaveBeenLastCalledWith('cm')
+      return '{"jsonrpc":"2.0","id":0,"result":{}}'
+    })
+    fire('hew://api-frame', { connId: 3, frame: '{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello"}' })
+    expect(scene.api_dispatch).toHaveBeenCalledTimes(1)
+    setLengthUnit('m')
   })
 
   it('forwards the reply back over hew://api-reply', async () => {

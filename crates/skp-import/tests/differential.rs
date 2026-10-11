@@ -100,13 +100,41 @@ fn dae_flat(name: &str) -> Flat {
 /// World-space AABBs agree to a millimetre.
 const AABB_TOL: f64 = 1e-3;
 
+/// Every face SketchUp itself holds, each placed definition's once per
+/// placement.
+fn sketchup_faces(name: &str) -> usize {
+    let m = skp_import::openskp::Model::parse(&fixture(name)).expect(name);
+    fn walk(nodes: &[skp_import::openskp::Node], m: &skp_import::openskp::Model) -> usize {
+        nodes
+            .iter()
+            .map(|n| n.run.map_or(0, |r| m.geometry[r].mesh.faces.len()) + walk(&n.children, m))
+            .sum()
+    }
+    let root: usize = m
+        .geometry
+        .iter()
+        .filter(|r| r.def_index.is_none())
+        .map(|r| r.mesh.faces.len())
+        .sum();
+    walk(&m.scene(), &m) + root
+}
+
 fn assert_pair(stem: &str) {
     let d = dae_flat(&format!("{stem}.dae"));
     for skp in [format!("{stem}.skp"), format!("2026/{stem}.skp")] {
         let s = skp_flat(&skp);
+        // The `.skp` path keeps every face SketchUp holds; the `.dae` path
+        // re-merges SketchUp's triangulated export, which also merges
+        // coplanar faces SketchUp keeps apart (house's), so it may count
+        // fewer.
         assert_eq!(
-            s.faces, d.faces,
-            "{skp}: flattened world face totals differ (skp {s:?} vs dae {d:?})"
+            s.faces,
+            sketchup_faces(&skp),
+            "{skp}: flattened world face total is not SketchUp's own"
+        );
+        assert!(
+            d.faces <= s.faces,
+            "{skp}: the .dae holds faces the .skp lacks (skp {s:?} vs dae {d:?})"
         );
         for i in 0..3 {
             assert!(
@@ -183,7 +211,7 @@ fn theater(file: &str) {
     let out = skp_import::import(&bytes).expect("theater parses");
     // A clean production file produces NO parser-recovery warnings. It DOES
     // produce non-manifold split notices (rule 4: decomposition is loud):
-    // theater carries 28 non-manifold source meshes (ceiling speakers,
+    // theater carries 32 non-manifold source meshes (ceiling speakers,
     // La-Z-Boy chair sides, the projector body, PVC fittings).
     assert!(
         !out.warnings
@@ -195,9 +223,12 @@ fn theater(file: &str) {
     assert_eq!(
         out.warnings
             .iter()
-            .filter(|w| w.contains("is non-manifold; imported as"))
+            .filter(|w| w.contains("separate piece"))
             .count(),
-        28
+        // Four more than when coplanar faces merged on import: merging
+        // removed the edges that made them non-manifold, but none of the
+        // four was a closed solid either way.
+        32
     );
 
     // Nothing missing: theater's shared-texture records (four, across three
@@ -228,15 +259,22 @@ fn theater(file: &str) {
     // 13 user-hidden nodes are untouched: hidden carries identically for
     // both node kinds. If an OpenSKP or heal improvement moves these,
     // update deliberately with the rev bump.
-    assert_eq!(report.objects_created, 979);
+    // Coplanar faces stay apart as SketchUp holds them, so non-manifold
+    // meshes split into 16 more open pieces (979 -> 995, leaky 139 -> 155,
+    // placements 692 -> 700, four more split meshes' groups 29 -> 33);
+    // every watertight solid stays one (840).
+    // Edges bounding no face are drafting now, held by their group: 12
+    // world groups of lines alone arrive that used to be dropped
+    // (33 -> 45).
+    assert_eq!(report.objects_created, 995);
     assert_eq!(report.watertight, 840);
-    assert_eq!(report.leaky, 139);
+    assert_eq!(report.leaky, 155);
     assert_eq!(report.skipped.len(), 0);
     assert_eq!(doc.instance_ids().len(), 295);
-    assert_eq!(doc.group_ids().len(), 29);
+    assert_eq!(doc.group_ids().len(), 45);
     assert_eq!(doc.user_hidden_nodes().len(), 13);
     assert_eq!(doc.component_ids().len(), 151);
-    assert_eq!(doc.expanded_placements().len(), 692);
+    assert_eq!(doc.expanded_placements().len(), 700);
     assert_eq!(
         doc.component_ids()
             .iter()

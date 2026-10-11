@@ -9,9 +9,21 @@
  * without re-prompting the user.
  */
 
+import type { HealthCounts } from '../health/healthReport'
+
+/**
+ * The on-disk format a document is bound to. `hew` is the native format;
+ * `skp2026` / `skp2017` are the two SketchUp containers a `.skp` document
+ * is saved back in (the format of the file that was opened, or the one
+ * Save As picked). A persisted ref that predates this field is `hew`.
+ */
+export type DocFormat = 'hew' | 'skp2026' | 'skp2017'
+
 export interface FileRef {
   /** Display name (filename without directory). */
   name: string
+  /** The format Save writes this file in. */
+  format: DocFormat
   /**
    * Opaque per-host handle for in-place Save.
    * WebFileHost: FileSystemFileHandle | null (null = fallback mode).
@@ -29,8 +41,15 @@ export interface ImageEntry {
 /** Result of a successful import (mirrors the kernel ImportReport). */
 export interface ImportReport {
   objects_created: number
+  /** Drawing segments that came in: lines bounding no face in the source. */
+  lines_added: number
   watertight: number
+  /** Open objects, surfaces included — kept for API compatibility; the
+   *  report's wording comes from `health`. */
   leaky: number
+  /** Per-verdict counts (Model Health): solids, surfaces (flat / bent
+   *  sheets) and the open objects that need attention. */
+  health: HealthCounts
   skipped: Array<{ name: string; reason: string }>
   textures_missing: string[]
   /** Parser recovery notes — only the SketchUp (.skp) importer populates this today. */
@@ -53,7 +72,7 @@ export interface ImportReport {
 export type ImportPick =
   | { kind: 'dae'; name: string; bytes: Uint8Array; images: Record<string, ImageEntry>; path?: string }
   | { kind: 'gltf'; name: string; bytes: Uint8Array; path?: string }
-  | { kind: 'skp'; name: string; bytes: Uint8Array; path?: string }
+  | { kind: 'skp'; name: string; bytes: Uint8Array; path?: string; handle?: unknown }
   | { kind: 'stl'; name: string; bytes: Uint8Array; path?: string }
 
 /**
@@ -63,7 +82,9 @@ export type ImportPick =
  * `FileRef` for `afterOpen`/subsequent `save()`. Every other kind is an
  * `ImportPick`, routed through the same post-pick steps (STL's units
  * prompt, the blank-then-import replace, the import report) that
- * `openForImport()` already feeds.
+ * `openForImport()` already feeds. A `kind: 'skp'` pick from `openAny` also
+ * carries the per-host `handle` (when the host has one), because Open makes
+ * the `.skp` the document's own file; File ▸ Import ignores it.
  */
 export type OpenPick = { kind: 'hew'; name: string; bytes: Uint8Array; handle: unknown } | ImportPick
 
@@ -76,16 +97,20 @@ export interface FileHost {
 
   /**
    * Save bytes to the file identified by `ref` (in-place overwrite if the
-   * host supports it), or prompt for a new location when `ref` is null.
+   * host supports it), or prompt for a new location when `ref` is null. The
+   * bytes are in `ref.format`; a prompt (null ref, denied permission, no
+   * in-place support) uses that format's filter and extension.
    * Returns the (possibly updated) FileRef on success, or null on cancel.
    */
   save(bytes: Uint8Array, ref: FileRef | null): Promise<FileRef | null>
 
   /**
    * Always prompt the user for a save location ("Save As").
-   * Returns the new FileRef on success, or null on cancel.
+   * `bytes` are in `format` (default `hew`); the picker's filter and the
+   * forced extension follow it. Returns the new FileRef on success, or null
+   * on cancel.
    */
-  saveAs(bytes: Uint8Array, suggestedName: string): Promise<FileRef | null>
+  saveAs(bytes: Uint8Array, suggestedName: string, format?: DocFormat): Promise<FileRef | null>
 
   /**
    * Prompt the user to choose a model file to import — COLLADA (`.dae`),
@@ -120,6 +145,14 @@ export interface FileHost {
    * user cancels.
    */
   openAny(): Promise<OpenPick | null>
+
+  /**
+   * Write `bytes` to a path the native save panel (`io/savePanel.ts`)
+   * already picked and approved — no dialog. A `.hew` goes through the
+   * same writer `save` uses. Desktop only: the browser has no such panel,
+   * so `WebFileHost` leaves it out.
+   */
+  writeTo?(path: string, bytes: Uint8Array, format?: DocFormat): Promise<FileRef>
 
   /**
    * Write arbitrary bytes out to a user-chosen location (e.g. a `.glb`).
@@ -176,11 +209,12 @@ export function makeFileHost(): FileHost {
     return {
       open: () => hostPromise.then((h) => h.open()),
       save: (bytes, ref) => hostPromise.then((h) => h.save(bytes, ref)),
-      saveAs: (bytes, name) => hostPromise.then((h) => h.saveAs(bytes, name)),
+      saveAs: (bytes, name, format) => hostPromise.then((h) => h.saveAs(bytes, name, format)),
       openForImport: () => hostPromise.then((h) => h.openForImport()),
       openAny: () => hostPromise.then((h) => h.openAny()),
       exportBinary: (bytes, name, fileType) =>
         hostPromise.then((h) => h.exportBinary(bytes, name, fileType)),
+      writeTo: (path, bytes, format) => hostPromise.then((h) => h.writeTo(path, bytes, format)),
     }
   }
   return new WebFileHost()

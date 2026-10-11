@@ -26,10 +26,19 @@ pub(crate) struct RawCamera {
     pub projection: Option<String>,
     #[serde(default)]
     pub fov_deg: Option<f64>,
+    #[serde(default)]
+    pub parallel_height: Option<f64>,
 }
 
 impl RawCamera {
     fn validate(self) -> Result<SnapshotCamera, CmdError> {
+        if let Some(h) = self.parallel_height
+            && !(h.is_finite() && h > 0.0)
+        {
+            return Err(CmdError::Params(
+                "camera.parallel_height must be a finite positive number".to_string(),
+            ));
+        }
         let projection = match self.projection.as_deref() {
             None => None,
             Some("perspective") => Some(SnapshotProjection::Perspective),
@@ -46,6 +55,7 @@ impl RawCamera {
             up: self.up,
             projection,
             fov_deg: self.fov_deg,
+            parallel_height: self.parallel_height,
         })
     }
 }
@@ -61,13 +71,17 @@ pub(crate) fn to_kernel_camera(cam: &SnapshotCamera) -> kernel::CameraState {
         SnapshotProjection::Perspective => kernel::CameraProjection::Perspective,
         SnapshotProjection::Parallel => kernel::CameraProjection::Parallel,
     };
-    kernel::CameraState {
+    let mut state = kernel::CameraState::framed(
         projection,
-        fov_deg: cam.fov_deg.unwrap_or(35.0),
-        eye: kernel::Point3::new(cam.eye[0], cam.eye[1], cam.eye[2]),
-        target: kernel::Point3::new(cam.target[0], cam.target[1], cam.target[2]),
-        up: kernel::Vec3::new(up[0], up[1], up[2]),
+        cam.fov_deg.unwrap_or(35.0),
+        kernel::Point3::new(cam.eye[0], cam.eye[1], cam.eye[2]),
+        kernel::Point3::new(cam.target[0], cam.target[1], cam.target[2]),
+        kernel::Vec3::new(up[0], up[1], up[2]),
+    );
+    if let Some(h) = cam.parallel_height {
+        state.parallel_height = h;
     }
+    state.usable()
 }
 
 /// Validates the shared `camera`/`view` vocabulary: mutually exclusive, an

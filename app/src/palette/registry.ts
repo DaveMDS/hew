@@ -27,6 +27,7 @@
  * commands (visible, greyed out when the selection doesn't qualify).
  */
 
+import { MENU } from '../health/healthCopy'
 import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
 
 /** 'Model' entries are dynamic (built per-document by App.tsx from the
@@ -250,6 +251,8 @@ const ACTION_ENTRIES: PaletteEntry[] = [
   { id: 'open-library', label: 'Library', description: 'Browse and insert saved components, materials, and models', group: 'Actions', synonyms: ['library', 'components', 'insert'] },
   { id: 'save-to-library', label: 'Save Selection to Library…', description: 'Save the selected object, group, or component as a library item.', group: 'Actions', synonyms: ['library', 'component', 'save selection'], gate: 'canSaveSelectionToLibrary' },
   { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },
+  { id: 'make-solid', label: MENU.makeSolid, description: MENU.makeSolidHelp, group: 'Actions', synonyms: ['health', 'repair', 'fix', 'make solid', 'close openings', 'solid', 'watertight', 'check', 'import', 'thickness'] },
+  { id: 'model-health', label: MENU.modelHealthItem, description: MENU.modelHealthHelp, group: 'Actions', synonyms: ['health', 'openings', 'panels', 'solid', 'check', 'import'] },
   { id: 'purge-unused', label: 'Purge Unused…', description: 'Delete every unused palette material and component definition.', group: 'Actions', synonyms: ['cleanup', 'clean up', 'materials', 'components'] },
   { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
   { id: 'report-bug', label: 'Report Bug…', description: 'Review and send a bug report, or save it to a file.', group: 'Actions' },

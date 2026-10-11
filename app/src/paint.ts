@@ -16,8 +16,26 @@
  */
 export function nextPaint(): Promise<void> {
   return new Promise((resolve) => {
+    // A hidden page (a background tab, a window covered or minimized)
+    // runs no animation frames, so waiting for a paint would wait until
+    // someone looks: an open stepping between paints would stand still.
+    // Nothing is painted there anyway, so go on at once, and stop waiting
+    // if the page is hidden while the frames are pending.
+    const doc = typeof document === 'undefined' ? null : document
+    if (doc?.visibilityState === 'hidden') {
+      resolve()
+      return
+    }
+    const done = () => {
+      doc?.removeEventListener('visibilitychange', onVisibility)
+      resolve()
+    }
+    const onVisibility = () => {
+      if (doc?.visibilityState === 'hidden') done()
+    }
+    doc?.addEventListener('visibilitychange', onVisibility)
     requestAnimationFrame(() => {
-      requestAnimationFrame(() => resolve())
+      requestAnimationFrame(done)
     })
   })
 }
