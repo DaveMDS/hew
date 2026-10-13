@@ -553,7 +553,7 @@ palette it indexes, so you can answer "which object is at pixel
 image model wants as conditioning: a grayscale depth image (near is white,
 background black; `depth_bits: 16` for finer steps) and a camera-space
 normals image. The depth result carries `depth_near` and `depth_far` in
-metres so a pixel value converts back to a distance (HEW_API.md §7 has the
+meters so a pixel value converts back to a distance (HEW_API.md §7 has the
 formula). With `path`, each lands beside the snapshot as
 `<path>.depth.png` and `<path>.normals.png`. They come from the same render
 and camera as the color image, so the three line up pixel for pixel.

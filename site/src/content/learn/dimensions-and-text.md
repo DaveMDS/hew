@@ -16,7 +16,7 @@ Dimensions and leader text annotate a model without becoming part of it. They're
 2. Click the two points you want to measure between — endpoints, midpoints, and every other snap works here.
 3. Move away from the line and click again to place the dimension where you want it.
 
-The plane is already decided by the time you place the second point, not just the third. Hew reads the first click — the face it landed on, or, lacking that, whichever axis-aligned plane most squarely faces the way you're looking — and holds the second point to it. A real snap elsewhere in space (an endpoint, a midpoint, a curve's centre) lands exactly where it is as long as you could actually see it move there — sighting straight down on a framed wall, a stud top a few centimeters under the top plates reads as the same point on screen, so it's carried onto the wall's own plane instead of a measurement quietly picking up the wrong one. Anything looser gets carried onto that same plane too. Measuring a wall's top edge from straight above used to be able to slide the second point down onto the ground underneath it — now it stays at the wall's own height.
+The plane is already decided by the time you place the second point, not just the third. Hew reads the first click — the face it landed on, or, lacking that, whichever axis-aligned plane most squarely faces the way you're looking — and holds the second point to it. A real snap elsewhere in space (an endpoint, a midpoint, a curve's center) lands exactly where it is as long as you could actually see it move there — sighting straight down on a framed wall, a stud top a few centimeters under the top plates reads as the same point on screen, so it's carried onto the wall's own plane instead of a measurement quietly picking up the wrong one. Anything looser gets carried onto that same plane too. Measuring a wall's top edge from straight above used to be able to slide the second point down onto the ground underneath it — now it stays at the wall's own height.
 
 That third click still matters. It sets the plane the dimension is finally drawn in, and Hew picks that plane from where you drag: the sketch plane both points share if they share one, otherwise the axis-aligned plane through the measured line that best matches the drag — pull up from a horizontal edge and the dimension stands in the vertical plane above it, pull sideways and it lies down flat. The plane is anchored to the model, not the camera, so a dimension placed from one view reads the same from every other. A dimension drawn above the ground stays above the ground.
 
@@ -31,13 +31,13 @@ Type a value before the final click and the dimension takes that text instead of
 Circles and arcs get their own callouts, and which one you get depends on what you click:
 
 - **Click the curve, then move off it** and click in space — you get a radius on an arc, a diameter on a full circle. Press `Tab` to switch between them.
-- **Click the curve, then its centre** (or the centre first, then the curve) — a radius, drawn along the actual radius from the centre out to the rim.
-- **Click two points across the curve, through the centre** — a diameter, drawn rim to rim.
+- **Click the curve, then its center** (or the center first, then the curve) — a radius, drawn along the actual radius from the center out to the rim.
+- **Click two points across the curve, through the center** — a diameter, drawn rim to rim.
 - **Click two arbitrary points on the curve** — an ordinary linear dimension of that chord, because that's what you measured. It isn't a radius and won't claim to be one.
 
-Circles, arcs, and polygons drawn on a solid's face are measured and snapped the same way as those on the ground, including a polygon's centre snap.
+Circles, arcs, and polygons drawn on a solid's face are measured and snapped the same way as those on the ground, including a polygon's center snap.
 
-The drawn line always shows what's being measured: a radius runs from the centre mark to the rim, a diameter spans the full width through the centre.
+The drawn line always shows what's being measured: a radius runs from the center mark to the rim, a diameter spans the full width through the center.
 
 ## Leader text
 

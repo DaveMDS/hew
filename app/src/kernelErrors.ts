@@ -155,7 +155,7 @@ const DESCRIPTIONS: Record<string, string> = {
   PathTooTight:
     'The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.',
   ProfileCrossesAxis:
-    "This profile crosses the circle's centre axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.",
+    "This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.",
   PartialSweepOnPole:
     "A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.",
   SweepSelfIntersects:

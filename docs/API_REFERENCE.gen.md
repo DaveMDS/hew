@@ -7106,7 +7106,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `path_detached_from_profile` — The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner.
 - `path_reverses` — The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.
 - `path_too_tight` — The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.
-- `profile_crosses_axis` — This profile crosses the circle's centre axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
+- `profile_crosses_axis` — This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
 - `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
 - `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.
 - `sweep_degenerate` — This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.
@@ -8309,7 +8309,7 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
 - **Class:** solitary
 - **Served:** host
 
-Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
 
 **Params schema:**
 
@@ -8342,7 +8342,7 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
       "type": "string"
     },
     "scale": {
-      "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale",
+      "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimeters at that scale",
       "type": "number"
     },
     "scene": {
@@ -8373,7 +8373,7 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
 {
   "properties": {
     "bounds": {
-      "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty",
+      "description": "[min_x, min_y, max_x, max_y] in view-plane meters; null when empty",
       "items": {
         "type": "number"
       },
@@ -8409,7 +8409,7 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
       "type": "string"
     },
     "segments": {
-      "description": "format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target",
+      "description": "format segments: [ax, ay, bx, by] in view-plane meters, y up, origin at the camera target",
       "items": {
         "items": {
           "type": "number"
@@ -8520,7 +8520,7 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
       "type": "integer"
     },
     "include_depth": {
-      "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect",
+      "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (meters from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect",
       "type": "boolean"
     },
     "include_ids": {
@@ -8578,7 +8578,7 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
       "type": "number"
     },
     "depth_near": {
-      "description": "with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface",
+      "description": "with a depth pass: meters from the eye, along the view axis, of the nearest drawn surface",
       "type": "number"
     },
     "depth_path": {

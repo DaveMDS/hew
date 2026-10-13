@@ -7,7 +7,7 @@ order: 1
 
 You know SketchUp — and Hew works the way SketchUp taught you: draw on a face, push/pull it into shape, inference snapping everywhere, mostly the same keyboard shortcuts. Your muscle memory carries over almost untouched. The reflexes you had to *learn*, though, you can drop: in Hew every push/pull produces a discrete, watertight object. Nothing welds to a neighbor because you forgot to group it, nothing goes hollow because one face got deleted, and Union/Subtract/Intersect only run when you ask. It's Select All + Make Group as the data model instead of a habit.
 
-The practical differences are about money and reach. Hew is free and open source — native apps for macOS, Windows, and Linux, plus a browser app that is the full modeler, not a reduced tier. It opens your `.skp` files (the current 2026 format and the 2017 one) through a clean-room reader, and saves to an open, documented format.
+The practical differences are about money and reach. Hew is free and open source — native apps for macOS, Windows, and Linux, plus a browser app that is the full modeler, not a reduced tier. It opens and saves your `.skp` files (the current 2026 format and the 2017 one) through a clean-room reader, and keeps its own work in an open, documented format.
 
 Because the two are so alike, whether Hew works *for you* comes down to whether your particular tools and workflows are there. So instead of a broad-strokes table, here is the tool-by-tool accounting — including the places where SketchUp is ahead, the places where Hew is ahead (paper output and the phone, mostly), and where the most popular extensions land, since Hew has no extension system to port them to.
 
@@ -89,7 +89,7 @@ Because the two are so alike, whether Hew works *for you* comes down to whether 
 | Standard views | Yes | Same set, one click above the viewport |
 | Parallel projection | Yes | Yes |
 | Field of view | Typed FOV | Through the Zoom tool: Shift-drag, or type degrees or a 35mm focal length; no separate FOV command |
-| Position Camera / Look Around / Walk | Yes, with collision in Walk | Yes; no collision detection |
+| Position Camera / Look Around / Walk | Yes, with collision in Walk | Yes; no collision detection. Plus Fly: hold the right mouse button and steer with W, A, S, D |
 | Section planes | Several planes, fills in newer versions | One section plane at a time, no cut fill; saved with the file and captured by Scenes |
 | Styles | Sketchy edges, profiles, watermarks… | No style system — one clean draw style, light and dark themes |
 | Shadows, geolocation, fog | Yes | No |
@@ -118,7 +118,7 @@ Because the two are so alike, whether Hew works *for you* comes down to whether 
 | | SketchUp | Hew |
 | --- | --- | --- |
 | Native format | `.skp`, proprietary | `.hew` — an open, documented zip of JSON and geometry buffers |
-| Reading the other's files | — | Imports `.skp` (the current 2026 format and the 2017 one); does not write `.skp` |
+| Reading the other's files | — | Opens and saves `.skp` (the current 2026 format and the 2017 one) |
 | DWG / DXF | Import and export (paid tiers) | No |
 | COLLADA (`.dae`) | Import and export | Import, including a healing pass for SketchUp's exporter's quirks |
 | STL | Import and export | Import and export — export re-facets curves at your chosen smoothness and is gated on solidity |

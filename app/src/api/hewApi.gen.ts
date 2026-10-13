@@ -1687,7 +1687,7 @@ export interface ViewCameraParams {
 export interface ViewCameraResult {}
 
 /**
- * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.
+ * `hew.view.line_drawing` (v1) — Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, nothing_to_render, too_complex, save_failed, unknown_scene
  */
@@ -1702,7 +1702,7 @@ export interface ViewLineDrawingParams {
   include_soft?: boolean
   /** svg only: write the file here instead of returning it inline (hosts with filesystem access) */
   path?: string
-  /** svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale */
+  /** svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimeters at that scale */
   scale?: number
   /** a Scene's id: its camera and hidden sets, as hew.view.snapshot */
   scene?: string
@@ -1711,7 +1711,7 @@ export interface ViewLineDrawingParams {
 }
 
 export interface ViewLineDrawingResult {
-  /** [min_x, min_y, max_x, max_y] in view-plane metres; null when empty */
+  /** [min_x, min_y, max_x, max_y] in view-plane meters; null when empty */
   bounds?: [number, number, number, number]
   count: number
   /** public id of the entity each segment belongs to */
@@ -1719,7 +1719,7 @@ export interface ViewLineDrawingResult {
   kinds?: ("hard" | "silhouette" | "soft" | "section" | "hidden")[]
   /** format svg with path */
   path?: string
-  /** format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target */
+  /** format segments: [ax, ay, bx, by] in view-plane meters, y up, origin at the camera target */
   segments?: [number, number, number, number][]
   /** format svg without path */
   svg?: string
@@ -1737,7 +1737,7 @@ export interface ViewSnapshotParams {
   depth_bits?: 8 | 16
   /** defaults to 512; out-of-range values are clamped, not refused */
   height?: number
-  /** defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect */
+  /** defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (meters from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect */
   include_depth?: boolean
   /** defaults to false; when true, also returns a per-pixel id-buffer and its palette */
   include_ids?: boolean
@@ -1758,7 +1758,7 @@ export interface ViewSnapshotResult {
   depth_bits?: number
   /** with a depth pass: the farthest drawn surface */
   depth_far?: number
-  /** with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface */
+  /** with a depth pass: meters from the eye, along the view axis, of the nearest drawn surface */
   depth_near?: number
   /** present only when include_depth and path were both given: "<path>.depth.png" */
   depth_path?: string

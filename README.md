@@ -64,10 +64,12 @@ planned.
 - Materials with texturing, per-face painting, and translucency
 - Tags, an object tree, and per-Object solid/watertight reporting
 - SketchUp 2017 keyboard shortcuts
-- Import: SketchUp `.skp` (the current 2026 format and the 2017 one),
-  COLLADA `.dae`, glTF, STL — with names, hierarchy, materials, tags, and
-  scenes preserved where the format carries them
-- Export: glTF, STL, 3MF, USDZ, SVG line drawings — see
+- Open and save SketchUp `.skp` files as documents (the current 2026
+  format and the 2017 one), with names, hierarchy, materials, tags,
+  guides, and scenes carried both ways; Model Health and Make Solid
+  show and close what an imported model has that isn't solid
+- Import: COLLADA `.dae`, glTF, STL, and `.skp` into an open document
+- Export: SketchUp `.skp`, glTF, STL, 3MF, USDZ, SVG line drawings — see
   [docs/INTEROP.md](docs/INTEROP.md)
 - Print to paper or PDF: what you see, or a drawing at an exact scale
   tiled across sheets with trim marks and a scale bar, as a bitmap or as

@@ -1764,7 +1764,7 @@ impl Registry {
                     },
                     "include_depth": {
                         "type": "boolean",
-                        "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (metres from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect"
+                        "description": "defaults to false; when true, also returns a depth pass as a grayscale PNG — NEAR is WHITE, background 0 — with depth_near/depth_far (meters from the eye along the view axis) so absolute depth is recoverable: depth = depth_far - (v - 1) / (max - 1) * (depth_far - depth_near), max = 255 or 65535. The conditioning input depth-aware image models expect"
                     },
                     "depth_bits": {
                         "type": "integer",
@@ -1821,7 +1821,7 @@ impl Registry {
                         "type": "string",
                         "description": "present only when include_depth and path were both given: \"<path>.depth.png\""
                     },
-                    "depth_near": { "type": "number", "description": "with a depth pass: metres from the eye, along the view axis, of the nearest drawn surface" },
+                    "depth_near": { "type": "number", "description": "with a depth pass: meters from the eye, along the view axis, of the nearest drawn surface" },
                     "depth_far": { "type": "number", "description": "with a depth pass: the farthest drawn surface" },
                     "depth_bits": { "type": "integer", "description": "with a depth pass: 8 or 16" },
                     "normals_png_base64": {
@@ -1847,7 +1847,7 @@ impl Registry {
                 .get_mut("hew.view.line_drawing")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane metres.";
+            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1857,7 +1857,7 @@ impl Registry {
                     "include_hidden": { "type": "boolean", "description": "defaults to false; when true, hidden pieces are returned too (kind \"hidden\", dashed in SVG)" },
                     "include_soft": { "type": "boolean", "description": "defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind \"soft\")" },
                     "format": { "type": "string", "enum": ["svg", "segments"], "description": "defaults to svg" },
-                    "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimetres at that scale" },
+                    "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimeters at that scale" },
                     "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" }
                 },
                 "additionalProperties": false
@@ -1867,11 +1867,11 @@ impl Registry {
                 "properties": {
                     "svg": { "type": "string", "description": "format svg without path" },
                     "path": { "type": "string", "description": "format svg with path" },
-                    "segments": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }, "description": "format segments: [ax, ay, bx, by] in view-plane metres, y up, origin at the camera target" },
+                    "segments": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4 }, "description": "format segments: [ax, ay, bx, by] in view-plane meters, y up, origin at the camera target" },
                     "kinds": { "type": "array", "items": { "type": "string", "enum": ["hard", "silhouette", "soft", "section", "hidden"] } },
                     "ids": { "type": "array", "items": { "type": "string" }, "description": "public id of the entity each segment belongs to" },
                     "count": { "type": "integer" },
-                    "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[min_x, min_y, max_x, max_y] in view-plane metres; null when empty" }
+                    "bounds": { "type": "array", "items": { "type": "number" }, "minItems": 4, "maxItems": 4, "description": "[min_x, min_y, max_x, max_y] in view-plane meters; null when empty" }
                 },
                 "required": ["count"]
             });

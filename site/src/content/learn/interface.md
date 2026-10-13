@@ -20,11 +20,11 @@ The small chip row in the viewport's top-left corner offers an **Orbit** button 
 
 The left rail lists the everyday tools in three groups, each with its keyboard shortcut:
 
-- **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Arc `A`
+- **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Polygon, Arc `A`
 - **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`
-- **Inspect** — Tape Measure `T`, Paint `B`, Section Plane
+- **Inspect** — Tape Measure `T`, Dimension, Paint `B`, Section Plane
 
-Six more tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**, and the dedicated camera tools **Orbit** `O`, **Pan** `H`, and **Zoom** `Z`. Reach them from the **Tools** and **Camera** menus, or from the command palette.
+More tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**, **Text**, **Drawing Axes**, and **Position Texture**, plus the camera tools **Orbit** `O`, **Pan** `H`, **Zoom** `Z`, **Zoom Window**, **Position Camera**, **Look Around**, and **Walk**. Reach them from the **Tools** and **Camera** menus, or from the command palette.
 
 Once the shortcuts are second nature, the names can go. Click the chevron at the top of the rail, or choose **View ▸ Compact Tool Rail**, and the rail shrinks to a column of icons. Hover an icon to see its name and key; the search field becomes a magnifier that opens the same command palette. Click the chevron again to bring the names back.
 
@@ -36,7 +36,7 @@ The search field at the top of the tool rail opens the command palette. Or press
 
 Press `↑`/`↓` to navigate, `Enter` to run, `Esc` to close. With an empty query the palette shows your recently used commands.
 
-Commands that need a particular selection — the booleans, Group, Make Component, and friends — are always listed but shown greyed out with a "needs a selection" note until the selection qualifies, the same way the Object menu greys them.
+Commands that need a particular selection — the booleans, Group, Make Component, and friends — are always listed but shown grayed out with a "needs a selection" note until the selection qualifies, the same way the Object menu grays them.
 
 ## The contextual dock
 

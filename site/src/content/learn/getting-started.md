@@ -138,7 +138,7 @@ Hew's fundamental nature is to work with independent solids. It's why you could 
 We are starting with our bin that has a cylinder lying across it, from the previous step.
 
 1. Choose the **Select** (`Space`) tool and select the bin. Then press the `Shift` key and select the cylinder. It's critical to do it in this order and to press `Shift` since this selects both and does it in the right order.
-2. Choose the **Subtract** tool either via **Object ▸ Subtract** or do a search in the command palette (`Cmd-/` or `Ctrl-/`) and type in "sub" to filter it down.
+2. Choose the **Subtract** tool either via **Object ▸ Subtract** or do a search in the command palette (`⌘/` or `Ctrl+/`) and type in "sub" to filter it down.
 
 ![The command palette filtered down to the Subtract tool](/docs/command-palette-sub.webp)
 

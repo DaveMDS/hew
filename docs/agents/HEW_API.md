@@ -990,7 +990,7 @@ Semantics notes, normative:
   background is 0, every drawn surface maps linearly into `1..=max`
   (`max` is 255, or 65535 with `depth_bits: 16`) between the farthest and
   nearest drawn surface — together with `depth_near`/`depth_far`, the
-  metres from the eye along the view axis (not radial distance) those two
+  meters from the eye along the view axis (not radial distance) those two
   ends stand for, so absolute depth is `depth_far - (v - 1) / (max - 1) *
   (depth_far - depth_near)`; and `include_normals: true` a camera-space
   normals image, `(n * 0.5 + 0.5) * 255` per axis with x right, y up, z
@@ -1348,8 +1348,8 @@ drawing's extent, which is also all `bounds` ever covers.
 **`hew.view.line_drawing`** takes a camera, a named standard view, or a
 Scene's id (the same three mutually-exclusive forms `hew.view.snapshot`
 accepts) and returns either an SVG string — a true-size drawing in
-millimetres at a given paper/model `scale` (default 1, full size) — or
-raw 2D segments in view-plane metres, each tagged with its kind (`hard`,
+millimeters at a given paper/model `scale` (default 1, full size) — or
+raw 2D segments in view-plane meters, each tagged with its kind (`hard`,
 `silhouette`, `soft`, `section`, `hidden`) and the public id of the
 entity it belongs to. `include_hidden`/`include_soft` opt into hidden and
 non-silhouette curved-wall lines, both off by default. A model too

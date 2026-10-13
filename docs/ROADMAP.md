@@ -15,14 +15,17 @@ circles, arcs, polygons — and push/pull the result into a solid. A face
 behaves exactly like the ground: loose lines stay, a shape hanging over a
 face's edge splits into a part that grows the solid and a part that makes
 a new one, and moving a shape onto another arranges them.
-Orbit, pan, and zoom, same mouse buttons. Inference snapping everywhere,
+Orbit, pan, and zoom, same mouse buttons, and fly through a model by
+holding the right mouse button and steering with W, A, S, D. Inference snapping everywhere,
 mostly the same shortcuts. Follow Me sweeps profiles into moldings,
 spheres, and goblets. Offset, Slice, through-cuts, and Move/Rotate/Scale
 with copy and `3x` arrays.
 
 **Solids that stay solid.** Every extrusion is a discrete, watertight
 object. Nothing welds to a neighbor by accident, nothing goes hollow;
-Union, Subtract, and Intersect run only when you ask. A drawn circle
+Union, Subtract, and Intersect run only when you ask. Model Health
+lists what an imported model holds that isn't solid, and the Make Solid
+wizard closes what can be closed. A drawn circle
 stays a true circle underneath its facets, so exports can re-facet it
 at any smoothness.
 
@@ -48,12 +51,13 @@ puts the model on any phone via a QR code: tap a part for its size,
 check the parts list, view it in AR on an iPhone or iPad.
 
 **Files that are yours.** The native `.hew` format is an open,
-documented container.
+documented container. A SketchUp `.skp` opens as a document and saves
+back in the format it came in, scenes and tags included.
 
 | Format | Import | Export |
 |---|---|---|
 | `.hew` (native) | yes | yes |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | — |
+| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
 | STL | yes | yes |
@@ -75,7 +79,6 @@ explains in plain language and leaves your geometry untouched.
   diagrams among the known gaps; the
   [SketchUp comparison](https://hew3d.com/compare/sketchup/) is the
   complete accounting, and its "no" cells are the to-do list
-- SketchUp `.skp` export in addition to the existing read support
 - STEP/IGES import and export, for interchange with engineering CAD
 - DWG/DXF for the architectural crowd
 - Chamfer/fillet

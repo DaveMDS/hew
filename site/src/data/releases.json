@@ -5,7 +5,7 @@
     {
       "id": "macos",
       "label": "macOS",
-      "requires": "macOS 11 or later — one universal app for Apple Silicon and Intel",
+      "requires": "macOS 13 or later — one universal app for Apple Silicon and Intel",
       "primary": {
         "label": "Download for macOS",
         "asset": "Hew_{version}_universal.dmg",

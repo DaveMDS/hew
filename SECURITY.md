@@ -30,6 +30,5 @@ reported the same way in that repository; if you are not sure where a
 
 ## Supported versions
 
-Hew has not yet cut its first public release. Security fixes land on
-`main` and ship in the next release; once releases exist, only the
-latest release is supported.
+Only the latest release is supported. Security fixes land on `main`
+and ship in the next release.

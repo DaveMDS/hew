@@ -8,6 +8,47 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [1.2.0] (2026-10-12) - The "Going Native" Release
+
+SketchUp files become a *working format* in this release and no longer just a
+format that can be imported. Open a 2017 or 2026 `.skp` file as a document, see
+that it looks the way it does in SketchUp, then save it back in the format it
+came in. This does mean both read and write for both formats (imported 3D
+Warehouse components now work) and features not yet supported in Hew are
+persisted as-is, so those bits aren't lost. You can essentially treat Hew as an
+app for editing SketchUp files natively.
+
+Also, drawing on a solid's face now works the way drawing on the ground does,
+and you can fly through a model with classic WASD controls.
+
+### Added
+
+- **SketchUp files:** A `.skp` opens as a document and Save writes it back in the format it came in: the 2026 format every current SketchUp saves, or the 2017 one. Save As and Export write either. Open Recent and drag-and-drop take `.skp` too, and on macOS Hew appears under Open With.
+- **SketchUp files:** An opened model looks as it does in SketchUp, scene by scene: cameras, hidden objects and tags, section cuts, the style's backdrop and axes, guides, dimensions and leader text, images, paint on a face's back, and lines that bound no face.
+- **SketchUp files:** The first save to `.skp` that has to simplify something lists what changed, once per document, with a button that saves a `.hew` copy.
+- **SketchUp files:** Large models open in steps behind a progress bar, and much faster than before.
+- **Make Solid:** Object ▸ Make Solid… and the Model Health window show which imported objects aren't solid and why, then close openings, rejoin split shapes, and thicken panels, one kind at a time.
+- **Fly:** Hold the right mouse button to fly: the mouse looks, W, A, S, and D move, E and Q climb and descend, Shift sprints, and the wheel sets the speed. Camera ▸ Fly keeps flying without the button. A tool in the middle of a shape keeps going underneath.
+- **Draw:** A solid's face works like the ground. Shapes drawn there can touch, cross, or overhang its edges and split the face into regions, and a shape hanging over the edge becomes a part that pushes or pulls the solid plus a part that makes a new object.
+- **Layout:** The tool rail shrinks to icons, the tray hides, and the contextual dock can be turned off, from the View menu or the command palette. [#22]
+- **API:** The live API reaches every open window: list, open, close, focus, and attach documents by id, and address one call with `--document` in hew-cli. `hew.doc.import` works live.
+- **API:** Create textured materials, position a texture on a face, replace one material with another, and save materials to the Library and insert them.
+- **API:** `hew.doc.health` and `hew.solid.cap`, `thicken`, `delete_faces`, and `mark_surface` do what Make Solid does.
+
+### Changed
+
+- **Format:** The `.hew` format moves from manifest version 17 to 22 and from geometry version 7 to 8. Hew 1.2 opens every older file, but a file saved by 1.2 needs Hew 1.2 or later.
+- **Camera:** Right-drag flies instead of panning. Pan with Shift and a middle drag, or with the Pan tool.
+- **SketchUp files:** A `.skp` from a release the reader can't decode yet (anything but 2017 or 2026) is refused with its version and both ways to re-save it: in any current SketchUp, or as SketchUp 2017.
+
+### Fixed
+
+- **Rectangle:** On a face or a wall, the W,D readout and a typed pair read width across the surface, then height up it, in the order typing them back builds. A rectangle typed on a wall grows right and up as the wall reads on screen. [#20]
+- **Object Info:** Changing a circle's Segments repaints at once, and an object given a hidden tag hides at once instead of after the next unrelated change. [#31]
+- **Command palette:** Enter runs the highlighted row, hovering no longer steals the selection after a re-rank, and clicking empty space in the dialog keeps the keyboard in the search field. [#38]
+- **Draw:** A value clicked on a face is exactly the value the measurements box showed.
+- **API:** `hew.meta.documents` listed no documents.
+
 ## [1.1.0] (2026-09-16) - The "User Feedback" Release
 
 Hew had no users before 1.0 and so this is the first one incorporating
@@ -359,6 +400,7 @@ modeling tools working and builds for every platform.
 
 - **Linux:** The AppImage can fail to load on newer distributions. Fixed in 0.1.1.
 
+[1.2.0]: https://github.com/hew3d/hew/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/hew3d/hew/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/hew3d/hew/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/hew3d/hew/compare/v0.9.0...v0.10.0
@@ -384,3 +426,7 @@ modeling tools working and builds for every platform.
 [#14]: https://github.com/hew3d/hew/issues/14
 [#15]: https://github.com/hew3d/hew/issues/15
 [#18]: https://github.com/hew3d/hew/issues/18
+[#20]: https://github.com/hew3d/hew/pull/20
+[#22]: https://github.com/hew3d/hew/issues/22
+[#31]: https://github.com/hew3d/hew/pull/31
+[#38]: https://github.com/hew3d/hew/issues/38
