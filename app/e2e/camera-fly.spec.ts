@@ -16,8 +16,9 @@ declare global {
  * stopping motion — plus the latched trackpad mode (§10): Camera ▸ Fly,
  * scroll-to-look, pinch-for-speed, Escape to exit — and the cursor lock
  * (§10 "Cursor lock"), driven through a stubbed Pointer Lock API because
- * headless Chromium and WebKit both deny the real one (verified: a headed
- * Chromium grants it, freezes `clientX` and reports raw deltas).
+ * headless browsers either deny the real one (Chromium on macOS, WebKit) or
+ * grant it with movement no mouse produces (Chromium on Linux). A headed
+ * Chromium grants it, freezes `clientX` and reports raw deltas.
  */
 
 type Vec3 = [number, number, number]
@@ -27,6 +28,16 @@ async function setup(page: Page): Promise<void> {
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
     timeout: 15_000,
   })
+}
+
+/** {@link setup}, with the real Pointer Lock API denied. The hold tests
+ * drive the unlocked path. Headless Chromium on macOS denies
+ * the lock by itself, but on Linux it grants it, and then Playwright's moves
+ * arrive as absolute jumps with a jump back between them, not a real mouse's
+ * deltas. The locked path has its own tests below, on a stubbed lock. */
+async function setupUnlocked(page: Page): Promise<void> {
+  await setup(page)
+  await stubPointerLock(page, { denyAll: true })
 }
 
 async function canvasCenter(page: Page): Promise<{ x: number; y: number }> {
@@ -67,7 +78,7 @@ const flyHint = (page: Page) => page.getByTestId('fly-hint')
 
 test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.md §3)', () => {
   test('W flies the eye forward along the view direction; releasing the button ends the flight', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     const { x, y } = await canvasCenter(page)
     const before = await readCameraState(page)
@@ -110,7 +121,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('E climbs along world Z with the look direction unchanged, even while pitched', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     // Pitched down ~20°: forward has a −Z component, so "along the view
     // direction" and "along world Z" are distinguishable.
     await page.evaluate(() => {
@@ -137,7 +148,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('moving the mouse while held looks around; the eye stays put; right-drag no longer pans', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     const { x, y } = await canvasCenter(page)
     const before = await readCameraState(page)
@@ -159,7 +170,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('a wheel notch while held changes the speed readout and the flight speed', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     const { x, y } = await canvasCenter(page)
 
@@ -194,7 +205,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('a Line gesture armed before the hold survives it, and a chorded left click during the hold completes it', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await page.evaluate(() => {
       window.__hew_test!.setCamera({ position: [3, -3, 4], target: [0, 0, 0], up: [0, 0, 1], fovDeg: 45 })
     })
@@ -237,7 +248,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('Q and S during a hold move the camera and never switch to Rotate or Scale', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     const { x, y } = await canvasCenter(page)
     const select = page.getByRole('radio', { name: 'Select' })
@@ -246,11 +257,14 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
 
     await page.mouse.move(x, y)
     await page.mouse.down({ button: 'right' })
+    // Each key is held until the camera has gone far enough, not for a
+    // fixed time: software-GL frame rates vary, and the per-frame step is
+    // clamped, so a fixed hold covers less ground on a slow runner.
     await page.keyboard.down('q')
-    await page.waitForTimeout(800)
+    await expect.poll(async () => (await readCameraState(page)).eye[2]).toBeLessThan(before.eye[2] - 0.15)
     await page.keyboard.up('q')
     await page.keyboard.down('s')
-    await page.waitForTimeout(800)
+    await expect.poll(async () => (await readCameraState(page)).eye[0]).toBeLessThan(before.eye[0] - 0.15)
     await page.keyboard.up('s')
     await page.mouse.up({ button: 'right' })
     await page.waitForTimeout(100)
@@ -269,7 +283,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('a hold under parallel projection switches to perspective and leaves it there (§3.5)', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     await page.getByRole('button', { name: 'Camera' }).click()
     await page.getByText('Parallel Projection', { exact: true }).click()
@@ -287,7 +301,7 @@ test.describe('Fly ▸ hold the right mouse button (docs/design/fly-navigation.m
   })
 
   test('a window blur during a hold stops the flight and releases the keys', async ({ page }) => {
-    await setup(page)
+    await setupUnlocked(page)
     await poseLookingAlongX(page)
     const { x, y } = await canvasCenter(page)
 
@@ -310,9 +324,9 @@ test.describe('Fly ▸ latched from Camera ▸ Fly, for trackpads (docs/design/f
   test('Camera ▸ Fly latches flight on: keys move, scrolling looks, pinching sets speed, Esc exits', async ({ page }) => {
     await setup(page)
     await poseLookingAlongX(page)
-    // The no-lock contract, made deterministic: headless browsers happen to
-    // deny the Pointer Lock API, but the scroll-looks fallback must not
-    // depend on that.
+    // The no-lock contract, made deterministic: headless browsers differ on
+    // the Pointer Lock API, and the scroll-looks fallback must not depend
+    // on what this one does.
     await stubPointerLock(page, { denyAll: true })
     const { x, y } = await canvasCenter(page)
     const before = await readCameraState(page)
