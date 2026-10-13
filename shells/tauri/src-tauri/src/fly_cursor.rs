@@ -20,15 +20,20 @@
 //! cursor would stay hidden and frozen over whatever app comes to the
 //! front — the page releases on blur too, and the two are idempotent.
 
+#[cfg(target_os = "macos")]
 use std::sync::Mutex;
 
+/// Only the macOS lock reads these; elsewhere the state is an empty
+/// placeholder so `main.rs` can manage it on every platform.
 #[derive(Default)]
 pub struct FlyCursorState {
+    #[cfg(target_os = "macos")]
     hidden: Mutex<bool>,
     /// Lock and unlock run strictly one at a time, so two concurrent
     /// commands from a quick tap can never apply unlock-then-lock and
     /// leave the cursor frozen and hidden (review finding). The page
     /// serializes its calls too; this guards the command itself.
+    #[cfg(target_os = "macos")]
     serial: tauri::async_runtime::Mutex<()>,
 }
 
