@@ -34,6 +34,7 @@ export const W = 1920, H = 1080;
 // re-layout fails loudly here instead of producing a half-cropped reel.
 const CHROME_CSS = `
   [data-testid="menu-bar"],
+  [role="complementary"][aria-label="Tool rail"],
   [role="radiogroup"][aria-label="Tools"],
   [data-testid="contextual-dock"],
   [role="separator"][aria-label="Resize panels"],
