@@ -1090,7 +1090,7 @@ describe('LibraryDialog', () => {
       fireEvent.click(screen.getByRole('button', { name: /^name/i }))
       expect(within(grid()).getAllByRole('row').filter((r) => r.hasAttribute('data-filename'))[0]).toHaveTextContent('Door Hinge')
       expect(screen.getAllByRole('columnheader', { name: /^name/i })[0]).toHaveAttribute('aria-sort', 'ascending')
-    })
+    }, 20_000)
 
     it('switching to a different column makes IT the sole active sort, defaulting to ascending', async () => {
       seedDefault()

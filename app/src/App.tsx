@@ -7385,7 +7385,11 @@ export default function App() {
             const startX = ev.clientX
             const startWidth = trayWidth
             const el = ev.currentTarget
-            el.setPointerCapture(ev.pointerId)
+            try {
+              el.setPointerCapture(ev.pointerId)
+            } catch {
+              /* a recovered press can name a pointer the engine has already dropped */
+            }
             const drag = { width: startWidth }
             const onMove = (mv: PointerEvent) => {
               drag.width = clampTrayWidth(startWidth + (startX - mv.clientX))
@@ -7397,11 +7401,14 @@ export default function App() {
             // listener attached with its stale startX — merely hovering the
             // handle afterwards keeps resizing with no button held, and the
             // width never persists.
+            // Window-level, because pointer events bubble: this hears the
+            // drag whether or not capture held (capture failing above must
+            // not strand the move listener).
             const endDrag = () => {
-              el.removeEventListener('pointermove', onMove)
-              el.removeEventListener('pointerup', endDrag)
-              el.removeEventListener('pointercancel', endDrag)
-              el.removeEventListener('lostpointercapture', endDrag)
+              window.removeEventListener('pointermove', onMove)
+              window.removeEventListener('pointerup', endDrag)
+              window.removeEventListener('pointercancel', endDrag)
+              window.removeEventListener('lostpointercapture', endDrag)
               try {
                 el.releasePointerCapture(ev.pointerId)
               } catch {
@@ -7409,10 +7416,10 @@ export default function App() {
               }
               window.localStorage.setItem(TRAY_WIDTH_KEY, String(drag.width))
             }
-            el.addEventListener('pointermove', onMove)
-            el.addEventListener('pointerup', endDrag)
-            el.addEventListener('pointercancel', endDrag)
-            el.addEventListener('lostpointercapture', endDrag)
+            window.addEventListener('pointermove', onMove)
+            window.addEventListener('pointerup', endDrag)
+            window.addEventListener('pointercancel', endDrag)
+            window.addEventListener('lostpointercapture', endDrag)
           }}
           style={{
             width: '5px',

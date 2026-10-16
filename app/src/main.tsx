@@ -7,7 +7,7 @@ import { ShopApp } from './shop/ShopApp.tsx'
 import { ErrorBoundary } from './ErrorBoundary.tsx'
 import { SettingsWindow } from './settings/SettingsWindow.tsx'
 import { resolveShellMode, readShellModeOverride } from './shop/shellMode'
-import { isCoarsePointer } from './platform'
+import { isCoarsePointer, isLinux } from './platform'
 
 // Lazy: LibraryWindow statically imports @tauri-apps/api modules; loading
 // it eagerly would drag them into the WEB bundle's entry chunk for a
@@ -21,6 +21,7 @@ import { i18n } from '@lingui/core'
 import { I18nProvider } from '@lingui/react'
 import { startI18n } from './i18n/activate'
 import { seedLocaleLengthUnit } from './shop/localeUnits'
+import { installStrandedPressFix } from './strandedPress'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
@@ -66,6 +67,11 @@ if (isTauri) {
     if (!editable) ev.preventDefault()
   })
 }
+
+// A press the window manager took (title-bar move, resize grip) leaves
+// WebKitGTK reporting the next click as a move; give it back as a press.
+// Only the Linux desktop webview does this, so the fix is limited to it.
+if (isTauri && isLinux) installStrandedPressFix(window)
 
 // Clear any panic recorded by a previous session so the error boundary only
 // ever shows a panic from the *current* run (the wasm hook re-records on panic).
