@@ -8,6 +8,27 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [1.2.1] (2026-10-17) - The "File That Didn't Open" Release
+
+A bug report about a SketchUp file that wouldn't open arrived without the file,
+and with no way to ask for it. Now a file that won't open goes with the report,
+and a file that only half-downloaded says so instead of failing in confusing
+ways.
+
+### Added
+
+- **Report Bug:** When a file won't open, Help ▸ Report Bug lists it as **File that didn't open** and sends it byte for byte unless you untick it. That covers a `.skp`, an imported file, and your own `.hew`. After an internal error, the banner offers Report Bug next to Reload, since reloading forgets the file.
+
+### Fixed
+
+- **Open:** A file cut short by a download or copy that didn't finish says so and asks for a fresh copy. A cut-short 2017 `.skp` used to open as an empty model. Now it's refused when none of it can be read, and opens with a notice that parts may be missing when some of it can. A cut-short 2026 `.skp` or `.hew` no longer says it isn't a SketchUp file or a Hew document.
+- **Format:** A saved `.hew` records the Hew release that saved it. Every release through 1.2.0 wrote 0.1.0. The format is otherwise unchanged, so 1.2.0 opens files saved by 1.2.1.
+
+### Security
+
+- **All:** Updated the zip crate to 9 for RUSTSEC-2026-0367, -0368, and -0369. The desktop updater no longer carries the older zip at all.
+- **Desktop:** Updated rustls to 0.23.46 for RUSTSEC-2026-0346 through -0349.
+
 ## [1.2.0] (2026-10-12) - The "Going Native" Release
 
 SketchUp files become a *working format* in this release and no longer just a
@@ -400,6 +421,7 @@ modeling tools working and builds for every platform.
 
 - **Linux:** The AppImage can fail to load on newer distributions. Fixed in 0.1.1.
 
+[1.2.1]: https://github.com/hew3d/hew/compare/v1.2.0...v1.2.1
 [1.2.0]: https://github.com/hew3d/hew/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/hew3d/hew/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/hew3d/hew/compare/v0.10.0...v1.0.0
