@@ -1074,10 +1074,10 @@ fn v2_manifest_loads_with_empty_tags() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -1149,10 +1149,10 @@ fn patch_manifest(bytes: &[u8], patch: impl FnOnce(&mut serde_json::Value)) -> V
     let mut zip2 = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -1525,10 +1525,10 @@ fn load_rejects_line_guide_missing_direction() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -1639,10 +1639,10 @@ fn load_rejects_line_guide_with_non_unit_direction() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -1703,10 +1703,10 @@ fn pre_v4_manifest_loads_with_no_guides() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes2)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -1923,10 +1923,10 @@ fn load_rejects_annotation_with_unknown_kind() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
@@ -2306,10 +2306,10 @@ fn with_patched_manifest(bytes: &[u8], patch: impl FnOnce(&mut serde_json::Value
     let mut zip2 = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()

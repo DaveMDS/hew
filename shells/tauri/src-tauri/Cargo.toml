@@ -32,7 +32,13 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-single-instance = "2"
 # In-app auto-updater (see the `updater` feature below). Optional so
 # package-manager builds can compile it out — they must own updates.
-tauri-plugin-updater = { version = "2", optional = true }
+#
+# Without the plugin's default `zip` feature: that feature only unpacks
+# zipped Windows installers and gzipped AppImages, and Hew publishes neither
+# (Windows updates are the raw -setup.exe, Linux the raw .AppImage; the
+# macOS .app.tar.gz path does not depend on it). Leaving it on would compile
+# in an older `zip` with open extraction advisories for code that never runs.
+tauri-plugin-updater = { version = "2", optional = true, default-features = false, features = ["rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

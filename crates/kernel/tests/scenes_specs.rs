@@ -121,10 +121,10 @@ fn patch_manifest(bytes: &[u8], edit: impl FnOnce(&mut serde_json::Value)) -> Ve
     out.write_all(&patched).unwrap();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         out.start_file(&name, opts).unwrap();

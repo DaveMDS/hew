@@ -2539,7 +2539,7 @@ mod tests {
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
         assert_eq!(zip.len(), 1, "a single usda layer entry");
         let entry = zip.by_index(0).unwrap();
-        assert_eq!(entry.name(), "model.usda");
+        assert_eq!(entry.name().unwrap(), "model.usda");
         drop(entry);
 
         let usda = usda_layer(bytes);
@@ -2735,7 +2735,7 @@ mod tests {
                 file.compression(),
                 zip::CompressionMethod::Stored,
                 "entry {} must be stored, not compressed",
-                file.name()
+                file.name().unwrap()
             );
             let offset = file
                 .data_start()
@@ -2744,7 +2744,7 @@ mod tests {
                 offset % 64,
                 0,
                 "entry {}'s data must start 64-byte aligned, got offset {offset}",
-                file.name()
+                file.name().unwrap()
             );
         }
     }
@@ -2766,7 +2766,7 @@ mod tests {
         assert!(!zip.is_empty());
         for i in 0..zip.len() {
             let file = zip.by_index(i).expect("entry readable");
-            let name = file.name().to_string();
+            let name = file.name().unwrap().to_string();
             let header_start = file.header_start() as usize;
             let data_start = file.data_start().expect("data_start known") as usize;
             drop(file);

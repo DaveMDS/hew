@@ -304,10 +304,10 @@ fn attrs_smuggled_into_a_v13_file_are_rejected() {
     let mut zip2 = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
     for i in 0..zip2.len() {
         let mut entry = zip2.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         new_zip.start_file(&name, opts).unwrap();

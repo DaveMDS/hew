@@ -9776,10 +9776,10 @@ fn downgrade_manifest_version_keeping_annotations(bytes: &[u8], to_version: u32)
     new_zip.write_all(&patched_manifest).unwrap();
     for i in 0..zip.len() {
         let mut entry = zip.by_index(i).unwrap();
-        if entry.name() == "manifest.json" {
+        if entry.name().unwrap() == "manifest.json" {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry.name().unwrap().to_string();
         let mut buf = Vec::new();
         entry.read_to_end(&mut buf).unwrap();
         let opts2 = zip::write::SimpleFileOptions::default()
