@@ -54,6 +54,10 @@ export interface ImportReport {
   textures_missing: string[]
   /** Parser recovery notes — only the SketchUp (.skp) importer populates this today. */
   warnings: string[]
+  /** A `.skp` that looks incomplete or damaged (cut short, most often) but
+   *  of which something was read: parts of the model may be missing. Set
+   *  only by the `.skp` open and import. */
+  incomplete?: boolean
 }
 
 /**

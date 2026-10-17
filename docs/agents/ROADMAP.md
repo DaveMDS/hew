@@ -694,6 +694,12 @@ below.
   last did in SketchUp. Production-scale
   files (hundreds of megabytes, millions of faces, renderer-plugin
   attribute dictionaries) walk exactly on the continuous archive path.
+  A file cut short (a download or copy that didn't finish) is refused as
+  incomplete or damaged when nothing of it can be read, rather than
+  opening as an empty model, and opens with a plain notice that parts may
+  be missing when something can: the 2017 whole-file grammar reads every
+  complete file and refuses every cut one, and a 2026 file loses its ZIP
+  end record first.
   Soft and smooth edges, welded arcs and circles, every placement's own
   name, guide points, and attribute dictionaries (dynamic components',
   plugins') come across too, and so do a material's transparency, the
@@ -951,8 +957,8 @@ below.
 - Session recording and replay, so a captured session becomes both a bug
   reproducer and a permanent regression test
 - Help ▸ Report Bug: a dialog that previews what a report contains (system
-  details, recorded steps, imported files, the model, and a log tail, each
-  one untickable) and sends it privately to Hew's bug-report intake service
+  details, recorded steps, imported files, a file that failed to open, the
+  model, and a log tail, each one untickable) and sends it privately to Hew's bug-report intake service
   (`workers/bug-intake`) or saves it to a file
 - Automated testing at every level — unit, component, and end-to-end — plus
   visual-regression checks against reference renders, run on every change

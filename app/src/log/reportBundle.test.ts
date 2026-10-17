@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import * as Diag from './diagnosticLog'
 import * as inputRecorder from '../recording/inputRecorder'
+import * as failedOpenStore from './failedOpen'
+import type { FailedOpen } from './failedOpen'
 import {
   buildReportBundle,
   buildReportFile,
@@ -28,8 +30,24 @@ function fakeScene(overrides: Partial<ReportableScene> = {}): ReportableScene {
   }
 }
 
-const ALL_ON: ReportFlags = { system: true, recording: true, imports: true, model: true, log: true, input: true }
-const ALL_OFF: ReportFlags = { system: false, recording: false, imports: false, model: false, log: false, input: false }
+const ALL_ON: ReportFlags = {
+  system: true,
+  recording: true,
+  imports: true,
+  failedFile: true,
+  model: true,
+  log: true,
+  input: true,
+}
+const ALL_OFF: ReportFlags = {
+  system: false,
+  recording: false,
+  imports: false,
+  failedFile: false,
+  model: false,
+  log: false,
+  input: false,
+}
 
 /** A recording whose second step imports a SketchUp file, in the recorder's
  *  real shape: internally tagged, bytes as a JSON array, u64 golden hash. */
@@ -80,6 +98,7 @@ beforeEach(() => {
   Diag.clear()
   inputRecorder.stop()
   inputRecorder.take()
+  failedOpenStore.clearOpenAttempt()
 })
 
 afterEach(() => {
@@ -543,6 +562,97 @@ describe('buildReportBundle', () => {
       const opts = { fields: baseOpts.fields, flags: ALL_ON, signal: controller.signal }
       await expect(measureUpload(content, opts)).rejects.toBeInstanceOf(ReportBuildCancelled)
       await expect(encodeReportFile(content, opts)).rejects.toBeInstanceOf(ReportBuildCancelled)
+    })
+  })
+
+  describe('file that didn’t open', () => {
+    const skpBytes = new Uint8Array([0xff, 0xfe, 0xff, 0x0e, 0x53, 0x00])
+    const failed: FailedOpen = {
+      name: 'Kitchen.skp',
+      label: 'SketchUp model (.skp)',
+      bytes: skpBytes,
+      error: 'SKP: bad section at /Users/kurt/Kitchen.skp',
+    }
+
+    it('carries the file byte for byte, with its name, kind, size, and error', async () => {
+      const bundle = await saved({ ...baseOpts, failedOpen: failed, homeDir: '/Users/kurt', flags: ALL_ON })
+      expect(bundle.failedFile).toEqual({
+        name: 'Kitchen.skp',
+        label: 'SketchUp model (.skp)',
+        size: skpBytes.byteLength,
+        error: 'SKP: bad section at ~/Kitchen.skp',
+        bytes: btoa(String.fromCharCode(...skpBytes)),
+      })
+    })
+
+    it('writes the name, kind, size, and error ahead of the bytes', async () => {
+      const text = await savedText({ ...baseOpts, failedOpen: failed, flags: ALL_ON, segmentChars: 4 })
+      const at = text.indexOf('"failedFile":')
+      expect(text.slice(at)).toMatch(/^"failedFile":\{"name":"Kitchen\.skp","label":"[^"]*","size":6,"error":"[^"]*","bytes":"/)
+    })
+
+    it('keeps the file across piece boundaries', async () => {
+      const big = randomBytes(10_000)
+      const bundle = await saved({ ...baseOpts, failedOpen: { ...failed, bytes: big }, flags: ALL_ON, segmentChars: 64 })
+      expect(Uint8Array.from(atob(bundle.failedFile.bytes), (ch) => ch.charCodeAt(0))).toEqual(big)
+    })
+
+    it('says Hew stopped mid-open when the attempt never reported an error', async () => {
+      const result = await buildReportBundle({ ...baseOpts, failedOpen: { ...failed, error: null }, flags: ALL_ON })
+      expect(result.rows.failedFile.preview).toContain('Hew stopped while opening it.')
+      expect((await saved({ ...baseOpts, failedOpen: { ...failed, error: null }, flags: ALL_ON })).failedFile.error).toBeNull()
+    })
+
+    it('is left out when unticked, and unavailable when no file failed', async () => {
+      expect((await saved({ ...baseOpts, failedOpen: failed, flags: { ...ALL_ON, failedFile: false } })).failedFile).toBeUndefined()
+      const none = await buildReportBundle({ ...baseOpts, failedOpen: null, flags: ALL_ON })
+      expect(none.rows.failedFile.included).toBe(false)
+      expect(none.rows.failedFile.disabledReason).toBe('no file failed to open')
+      expect((await saved({ ...baseOpts, failedOpen: null, flags: ALL_ON })).failedFile).toBeUndefined()
+    })
+
+    it('reads the latest failed attempt when the caller passes none', async () => {
+      failedOpenStore.beginOpenAttempt({ name: 'Den.skp', label: 'SketchUp model (.skp)', bytes: skpBytes })
+      failedOpenStore.openAttemptFailed('SKP: no')
+      expect((await saved({ ...baseOpts, flags: ALL_ON })).failedFile.name).toBe('Den.skp')
+    })
+
+    it('rides along in crash mode, where the model can’t', async () => {
+      const bundle = await saved({
+        ...baseOpts,
+        scene: null,
+        crash: { at: '2026-01-01T00:00:00.000Z', message: 'recursive use of an object', recording: null },
+        failedOpen: { ...failed, error: null },
+        flags: ALL_ON,
+      })
+      expect(bundle.hew).toBeUndefined()
+      expect(bundle.failedFile.bytes).toBe(btoa(String.fromCharCode(...skpBytes)))
+      expect(Object.keys(bundle).slice(0, 4)).toEqual(['format', 'report', 'system', 'crash'])
+    })
+
+    it('is the last row Send drops, after the model and the imported files', async () => {
+      const UNCAPPED = Number.MAX_SAFE_INTEGER
+      const scene = fakeScene({ save: () => randomBytes(50_000), peek_recording: () => importRecording(randomByteList(20_000)) })
+      const file = { ...failed, bytes: randomBytes(50_000) }
+      const opts = { ...baseOpts, scene, failedOpen: file, maxSendBytes: UNCAPPED }
+      const keepsFile = await buildReportBundle({ ...opts, flags: { ...ALL_ON, model: false, imports: false } })
+      const bare = await buildReportBundle({ ...opts, flags: { ...ALL_ON, model: false, imports: false, failedFile: false } })
+
+      // A cap the file alone fits under once the model and imports are gone.
+      const fits = keepsFile.send.compressedBytes! + 16
+      const kept = await buildReportBundle({ ...opts, flags: ALL_ON, maxSendBytes: fits })
+      expect(kept.rows.model.droppedFromSend).toBe(true)
+      expect(kept.rows.imports.droppedFromSend).toBe(true)
+      expect(kept.rows.failedFile.droppedFromSend).toBe(false)
+      const sent = JSON.parse(await gunzipText((await buildReportUpload({ ...opts, flags: ALL_ON, maxSendBytes: fits })).gzip!))
+      expect(sent.failedFile.size).toBe(50_000)
+
+      // A cap only the bare report fits under drops the file too, but Save keeps it.
+      const cap = Math.floor((keepsFile.send.compressedBytes! + bare.send.compressedBytes!) / 2)
+      const dropped = await buildReportBundle({ ...opts, flags: ALL_ON, maxSendBytes: cap })
+      expect(dropped.rows.failedFile.droppedFromSend).toBe(true)
+      expect(dropped.send.unavailableReason).toBeNull()
+      expect((await saved({ ...opts, flags: ALL_ON, maxSendBytes: cap })).failedFile.size).toBe(50_000)
     })
   })
 

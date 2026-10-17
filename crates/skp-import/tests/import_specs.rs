@@ -34,6 +34,12 @@ fn ingest(name: &str) -> (kernel::ImportReport, Document) {
         "{name}: clean corpus files parse without recovery warnings; got {:?}",
         out.warnings
     );
+    assert!(
+        !out.warnings
+            .iter()
+            .any(|w| w == skp_import::INCOMPLETE_NOTE),
+        "{name}: a complete file is never called incomplete"
+    );
     let mut doc = Document::new();
     let (report, _) = doc.ingest(out.scene, out.textures_missing).unwrap();
     (report, doc)
@@ -121,12 +127,118 @@ fn a_current_release_header_with_no_model_behind_it_is_reported_as_damage() {
     cut.truncate(0x41 + 256);
     cut[0x41..].fill(0);
     match skp_import::import(&cut) {
-        Err(skp_import::SkpError::Parse(msg)) => {
-            assert!(msg.contains("{26."), "names the version: {msg}");
+        Err(e @ skp_import::SkpError::Damaged) => {
+            let msg = e.to_string();
             assert!(msg.contains("damaged"), "says it is damage: {msg}");
+            assert!(msg.contains("fresh copy"), "asks for a fresh copy: {msg}");
+            assert!(!msg.contains("Save As"), "no re-save advice: {msg}");
         }
-        other => panic!("expected Parse, got {other:?}", other = other.is_ok()),
+        other => panic!("expected Damaged, got {other:?}", other = other.is_ok()),
     }
+}
+
+/// `bytes` cut to `fraction` of their length.
+fn cut_to(mut bytes: Vec<u8>, fraction: f64) -> Vec<u8> {
+    bytes.truncate((bytes.len() as f64 * fraction) as usize);
+    bytes
+}
+
+#[test]
+fn a_2017_file_cut_short_with_nothing_readable_is_refused_as_damaged() {
+    // Cut this far, the walk fallback finds no shape at all: the open must
+    // not come in as an empty model.
+    let box_skp = fixture("box.skp");
+    let mut cuts = vec![box_skp[..4096].to_vec()];
+    cuts.extend([0.1, 0.25, 0.5].map(|f| cut_to(box_skp.clone(), f)));
+    for cut in cuts {
+        assert!(
+            matches!(skp_import::import(&cut), Err(skp_import::SkpError::Damaged)),
+            "{} of {} bytes: expected Damaged",
+            cut.len(),
+            box_skp.len()
+        );
+    }
+}
+
+#[test]
+fn a_2017_file_cut_short_that_still_reads_opens_with_the_incomplete_note() {
+    // Cut late, every shape is still there (only the trailing records are
+    // lost): the file opens, and says it is incomplete.
+    for fraction in [0.75, 0.9, 0.99] {
+        let out = skp_import::import(&cut_to(fixture("box.skp"), fraction))
+            .unwrap_or_else(|e| panic!("{fraction}: {e}"));
+        assert_eq!(
+            out.warnings.first().map(String::as_str),
+            Some(skp_import::INCOMPLETE_NOTE),
+            "{fraction}: the incomplete note leads the warnings"
+        );
+        let mut doc = Document::new();
+        let (report, _) = doc.ingest(out.scene, out.textures_missing).unwrap();
+        assert_eq!(report.objects_created, 1, "{fraction}: the box survives");
+    }
+}
+
+#[test]
+fn a_2017_file_cut_anywhere_is_never_opened_silently() {
+    // Every cut past the header either is refused as damaged or opens with
+    // the incomplete note: the grammar's three ways of running out of data
+    // (a read past the end, a count or a string longer than what is left)
+    // all count, wherever the cut lands.
+    for name in ["box.skp", "box-component-two-instances.skp"] {
+        let full = fixture(name);
+        for n in (2048..full.len()).step_by(997) {
+            match skp_import::import(&full[..n]) {
+                Err(skp_import::SkpError::Damaged) => {}
+                Ok(out) => assert_eq!(
+                    out.warnings.first().map(String::as_str),
+                    Some(skp_import::INCOMPLETE_NOTE),
+                    "{name} cut to {n} bytes opened without the incomplete note"
+                ),
+                Err(e) => panic!("{name} cut to {n} bytes: {e}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn a_2026_file_cut_short_is_refused_as_damaged() {
+    for fraction in [0.1, 0.5, 0.9, 0.999] {
+        assert!(
+            matches!(
+                skp_import::import(&cut_to(fixture("2026/box.skp"), fraction)),
+                Err(skp_import::SkpError::Damaged)
+            ),
+            "{fraction}: expected Damaged"
+        );
+    }
+}
+
+#[test]
+fn no_complete_fixture_is_called_incomplete() {
+    // The whole-file grammar reads every complete 2017 file, so the note
+    // never fires on one; a 2026 file never carries it.
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+    let mut checked = 0;
+    for sub in [dir.clone(), dir.join("2026")] {
+        for entry in std::fs::read_dir(&sub).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|e| e.to_str()) != Some("skp") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).unwrap();
+            if let Ok(out) = skp_import::import(&bytes) {
+                assert!(
+                    !out.warnings
+                        .iter()
+                        .any(|w| w == skp_import::INCOMPLETE_NOTE),
+                    "{}: a complete file is never called incomplete",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 20, "the sweep reached the fixtures ({checked})");
 }
 
 #[test]

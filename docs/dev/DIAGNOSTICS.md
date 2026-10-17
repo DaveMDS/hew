@@ -435,8 +435,9 @@ would just throw by then.
 **Help ▸ Report Bug…** (`log/reportBundle.ts`, `log/reportImports.ts`,
 `panels/ReportBugDialog.tsx`, docs/design/report-bug.md) opens a dialog
 rather than writing a file directly: a checklist of what a report would
-contain — app/system details, recorded steps, imported files, the model, a
-log tail, and (Debug Mode only) raw input events — each shown with its size
+contain — app/system details, recorded steps, imported files, the file
+that didn't open (when one didn't), the model, a log tail, and (Debug Mode
+only) raw input events — each shown with its size
 and a preview, any of which can be unticked before sending. Imported files
 are the user files recorded calls embed as byte arrays: the `import_*`
 calls, `add_texture_material`'s image, `insert_item` and
@@ -444,9 +445,33 @@ calls, `add_texture_material`'s image, `insert_item` and
 `reportImports.ts`). Unticking that row empties those arrays (and
 `import_dae`'s `images`) and marks the bundle `importsStripped`, so the
 steps no longer replay.
+A recorded call is written only once it succeeds, so a file that fails to
+open or import never reaches the recording, and a kernel that runs out of
+memory aborts without running the panic hook that hands the recording over
+at all. The app keeps that file itself instead (`log/failedOpen.ts`): every
+`.skp` open (`runOpenSkp`, and Shop Mode's `openSkpBytes`), every import
+(`runImportPick`), and every load of the user's own `.hew` (File ▸ Open,
+an opened path, a drop, a recent, a Library item opened as a document, a
+recovery snapshot, and Shop Mode's opens: `applyLoadedBytes` with a file,
+`loadUserHewBytes`) notes its file before the kernel sees it and drops it
+once the document lands, so a refusal, a panic, or an out-of-memory abort
+leaves it in place. Loads of Hew's own bytes (New's blank document, a
+bundled sample, an API load) note nothing and forget a failure that has
+settled, so a report about something else never carries it. The report lists it as **File that
+didn't open**, on by default, in both Help ▸ Report Bug… and the crash
+screen's report (the kernel-error banner offers **Report Bug…** beside
+**Reload**, since a reload forgets the file), and writes it under
+`failedFile`:
+`{"name", "label", "size", "error", "bytes"}`, where `bytes` is the file in
+base64 and `error` is null when the kernel stopped before it could report
+one. Extract it under its own name with
+`jq -r .failedFile.bytes report.json | base64 -d > "$(jq -r .failedFile.name report.json)"`. The log line
+for a failed open gives the file's size and the kernel's memory
+(`kernelMemoryBytes()` in `wasm/kernelMemory.ts`): wasm memory only grows,
+so a figure near 4 GB marks an out-of-memory abort.
 **Send report** gzips the bundle and submits it to a private intake service
-on Hew's Cloudflare account, leaving out the model and then imported files
-when it passes 90 MiB compressed, and returns a short report ID; **Save to
+on Hew's Cloudflare account, leaving out the model, then imported files,
+then the file that didn't open when it passes 90 MiB compressed, and returns a short report ID; **Save to
 file…** writes every ticked row as uncompressed JSON locally instead, for
 attaching to a manually-filed issue. A report after a large import runs to
 hundreds of megabytes, so the bundle is never held as one string: it is

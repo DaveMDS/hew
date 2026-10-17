@@ -495,6 +495,10 @@ impl std::error::Error for DecodeError {
 pub enum LoadError {
     /// Not a readable `.hew` container (bad zip, missing `manifest.json`).
     NotAContainer,
+    /// A zip that starts like a `.hew` container but has lost its end (the
+    /// central directory a zip keeps last): a file cut short, most often by
+    /// a download or copy that did not finish.
+    Incomplete,
     /// The manifest announces a `format_version` this build does not read.
     UnsupportedVersion {
         /// The version found in the manifest.
@@ -525,6 +529,7 @@ impl std::fmt::Display for LoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             LoadError::NotAContainer => write!(f, "not a readable .hew container"),
+            LoadError::Incomplete => write!(f, "the .hew container is cut short or damaged"),
             LoadError::UnsupportedVersion { found } => write!(
                 f,
                 "manifest format version {found} is not supported \
@@ -2472,6 +2477,9 @@ pub(crate) type InstanceSaveRow = (
 /// Data that document.rs extracts from its private fields and hands off to
 /// `encode_document` for serialization into zip bytes.
 pub(crate) struct DocSaveData {
+    /// The manifest's `app_version`: the writing release for a real save, a
+    /// fixed placeholder for `Document::state_hash`.
+    pub app_version: &'static str,
     pub materials: Vec<(MaterialId, Material)>,
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
@@ -2867,7 +2875,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         consumed: Vec::new(),
         geometry_version: GEOMETRY_FORMAT_VERSION,
         app: "hew".to_string(),
-        app_version: "0.1.0".to_string(),
+        app_version: data.app_version.to_string(),
         materials: mat_dtos,
         objects: obj_dtos,
         groups: group_dtos,
@@ -3271,8 +3279,19 @@ pub(crate) struct DocLoadRaw {
     pub scenes: Vec<crate::scenes::Scene>,
 }
 
+/// Why `bytes` did not open as a zip: [`LoadError::Incomplete`] when they
+/// start with a zip entry header (a container whose end is missing), else
+/// [`LoadError::NotAContainer`].
+fn container_error(bytes: &[u8]) -> LoadError {
+    if bytes.starts_with(b"PK\x03\x04") {
+        LoadError::Incomplete
+    } else {
+        LoadError::NotAContainer
+    }
+}
+
 pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| container_error(bytes))?;
 
     // Read manifest.
     let manifest_bytes = zip_read_entry(&mut zip, "manifest.json")?;
@@ -5044,10 +5063,11 @@ pub struct ItemSummary {
 /// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` (plus, for
 /// each material's swatch, its texture asset entry) only, never geometry
 /// buffers. Applies the same container and version gates as a full load
-/// ([`LoadError::NotAContainer`] / [`LoadError::UnsupportedVersion`] /
+/// ([`LoadError::NotAContainer`] / [`LoadError::Incomplete`] /
+/// [`LoadError::UnsupportedVersion`] /
 /// [`LoadError::MalformedManifest`]).
 pub fn read_item_summary(bytes: &[u8]) -> Result<ItemSummary, LoadError> {
-    let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    let zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| container_error(bytes))?;
     read_item_summary_impl(zip)
 }
 
@@ -5185,7 +5205,7 @@ fn read_item_summary_impl<R: Read + Seek>(
 /// fetch for an [`ItemSummary`]'s `texture_asset` paths (a material item's
 /// swatch image), with the same size cap every container read applies.
 pub fn read_item_asset(bytes: &[u8], path: &str) -> Result<Vec<u8>, LoadError> {
-    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| LoadError::NotAContainer)?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|_| container_error(bytes))?;
     zip_read_entry(&mut zip, path)
 }
 

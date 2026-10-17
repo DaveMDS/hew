@@ -232,6 +232,7 @@ import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } fr
 import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
+import { clearOpenAttempt, getFailedOpen } from './log/failedOpen'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1658,6 +1659,40 @@ describe('App — unified Open dialog', () => {
     expect(screen.queryByRole('dialog', { name: /stl import units/i })).not.toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: /import report/i })).not.toBeInTheDocument()
     expect(mockScene.import_stl).not.toHaveBeenCalled()
+  })
+
+  it('a .hew that fails to load is kept for a bug report, and the next open that lands drops it', async () => {
+    clearOpenAttempt()
+    mockScene.load = vi.fn(() => {
+      throw new Error('LoadError: bad manifest')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'broken.hew',
+      bytes: new Uint8Array([9, 9]),
+      handle: null,
+    })
+
+    await renderAndLoad()
+    triggerOpen()
+
+    await waitFor(() => expect(getFailedOpen()).not.toBeNull())
+    const held = getFailedOpen()!
+    expect(held.name).toBe('broken.hew')
+    expect(held.label).toBe('Hew document (.hew)')
+    expect(held.bytes).toEqual(new Uint8Array([9, 9]))
+    expect(held.error).toMatch(/bad manifest/)
+
+    mockScene.load = defaultLoad
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'good.hew',
+      bytes: new Uint8Array([7]),
+      handle: null,
+    })
+    triggerOpen()
+    await waitFor(() => expect(screen.getByText('good.hew')).toBeInTheDocument())
+    expect(getFailedOpen()).toBeNull()
   })
 
   it('records a successful .hew open into the web recents store (io/recents.ts)', async () => {

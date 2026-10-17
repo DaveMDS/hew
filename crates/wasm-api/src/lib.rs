@@ -284,12 +284,6 @@ fn records_itself(method: &str, frame: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Serialize a kernel `ImportReport` to the plain JS object the import UI
-/// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
-/// textures_missing: [string], warnings: [string] }`. Shared by `import_dae`,
-/// `import_gltf`, and `import_skp`; `warnings` carries each importer's
-/// conversion notes (non-manifold split decompositions, plus `.skp` parser
-/// recovery notes).
 /// A `.skp` open under way (see [`Scene::open_skp_begin`]).
 struct PendingOpen {
     bytes: Vec<u8>,
@@ -369,6 +363,33 @@ impl PendingOpen {
     }
 }
 
+/// [`import_report_to_js`] for a `.skp` open or import, plus `incomplete`:
+/// true when the file is incomplete or damaged but something of it was read
+/// ([`skp_import::INCOMPLETE_NOTE`]). That note leaves `warnings`, so the UI
+/// can say it out loud instead of folding it away with the rest.
+fn skp_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> JsValue {
+    let incomplete = warnings.iter().any(|w| w == skp_import::INCOMPLETE_NOTE);
+    let rest: Vec<String> = warnings
+        .iter()
+        .filter(|w| *w != skp_import::INCOMPLETE_NOTE)
+        .cloned()
+        .collect();
+    let js_report = import_report_to_js(report, &rest);
+    Reflect::set(
+        &js_report,
+        &JsValue::from_str("incomplete"),
+        &JsValue::from_bool(incomplete),
+    )
+    .unwrap();
+    js_report
+}
+
+/// Serialize a kernel `ImportReport` to the plain JS object the import UI
+/// consumes: `{ objects_created, watertight, leaky, skipped: [{name, reason}],
+/// textures_missing: [string], warnings: [string] }`. Shared by `import_dae`,
+/// `import_gltf`, and `import_skp`; `warnings` carries each importer's
+/// conversion notes (non-manifold split decompositions, plus `.skp` parser
+/// recovery notes).
 fn import_report_to_js(report: &kernel::ImportReport, warnings: &[String]) -> JsValue {
     let js_report = JsObject::new();
     Reflect::set(
@@ -782,7 +803,7 @@ fn triple(v: &[f64], name: &str) -> Result<[f64; 3], ApiError> {
 /// A manifest-only summary of `.hew` item bytes as a JSON string
 /// ([`kernel::read_item_summary`] — entity counts, `hew.library` document
 /// attrs, material swatch rows; never opens geometry buffers). Throws the
-/// typed load error (`NotAContainer` / `UnsupportedVersion` /
+/// typed load error (`NotAContainer` / `Incomplete` / `UnsupportedVersion` /
 /// `MalformedManifest`) for a file the browser must show as invalid.
 #[wasm_bindgen]
 pub fn read_item_summary_json(bytes: &[u8]) -> Result<String, JsError> {
@@ -8504,7 +8525,7 @@ impl Scene {
         let (report, warnings) = self
             .import_skp_core(skp_bytes)
             .map_err(|e| JsError::new(&e.0))?;
-        Ok(import_report_to_js(&report, &warnings))
+        Ok(skp_report_to_js(&report, &warnings))
     }
 
     /// Open a `.skp` file as this document's own file: [`Scene::import_skp`]
@@ -8709,7 +8730,7 @@ impl Scene {
             skp_bytes, &self.doc, provenance, &report,
         ));
         self.pending_skp_source = None;
-        let report = import_report_to_js(&report, warnings);
+        let report = skp_report_to_js(&report, warnings);
         Reflect::set(
             &report,
             &JsValue::from_str("container"),
@@ -10462,7 +10483,7 @@ impl Scene {
     /// # Errors
     /// Throws a `"CODE: message"` `JsError` on any parse/validation failure,
     /// where CODE is the [`LoadError`] variant name (`NotAContainer`,
-    /// `UnsupportedVersion`, `MalformedManifest`, `DanglingReference`,
+    /// `Incomplete`, `UnsupportedVersion`, `MalformedManifest`, `DanglingReference`,
     /// `MissingAsset`, `Geometry`) — the same boundary convention every
     /// other typed error uses, so the UI's plain-language copy table can
     /// key on it.

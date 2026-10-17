@@ -7,6 +7,7 @@
  *     normal for a SketchUp model, so the text is neutral. OK is always the
  *     primary button; when anything isn't solid a secondary Make Solid…
  *     button opens the Make Solid wizard on this import.
+ *   - a notice when a .skp looks incomplete or damaged (`incomplete`)
  *   - skipped meshes (name + reason), if any
  *   - missing texture URIs, if any
  *   - warnings, if any: parser recovery notes from damaged SketchUp files
@@ -156,6 +157,18 @@ export function ImportReportDialog({ report, opened = false, onClose, onMakeSoli
             </div>
           )}
         </div>
+
+        {/* A damaged or cut-short .skp that still yielded something: said
+            out loud, since what is missing can't be listed. */}
+        {report.incomplete === true && (
+          <div
+            style={{ ...SECTION_STYLE, fontSize: '13px', color: 'var(--status-warning)' }}
+            data-import-incomplete
+          >
+            This file looks incomplete or damaged, so parts of the model may be missing.
+            If it was downloaded or copied, a fresh copy may open whole.
+          </div>
+        )}
 
         {/* Skipped meshes */}
         {skipped.length > 0 && (

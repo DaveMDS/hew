@@ -5,11 +5,12 @@
  * bundle and per-row preview data; the dialog and its callers own where the
  * result goes.
  *
- * Six checklist rows, matching §2's table: `system`, `recording` (the
+ * Seven checklist rows, matching §2's table: `system`, `recording` (the
  * peeked/panic-captured session recording), `imports` (the user files the
- * recording's steps embed), `model` (the .hew bytes), `log` (the
- * diagnostic-log tail), and `input` (raw low-level events, listed only in
- * Debug Mode). Unticked or unavailable rows are OMITTED from the bundle
+ * recording's steps embed), `failedFile` (the file behind an open or import
+ * that did not land, from `failedOpen.ts`), `model` (the .hew bytes), `log`
+ * (the diagnostic-log tail), and `input` (raw low-level events, listed only
+ * in Debug Mode). Unticked or unavailable rows are OMITTED from the bundle
  * object, never nulled. Keys are written `format`, `report`, `system`, then
  * `crash` first: the intake service validates that head, and its admin page
  * shows it, without decompressing the rest.
@@ -29,8 +30,9 @@
  *   without keeping the bytes.
  * - `encodeReportFile`: every ticked row as UTF-8 JSON, what Save to file
  *   writes.
- * - `compressReportUpload`: the gzip Send uploads, which drops the model and
- *   then imported files when the compressed size passes the cap.
+ * - `compressReportUpload`: the gzip Send uploads, which drops the model,
+ *   then imported files, then the file that didn't open when the compressed
+ *   size passes the cap.
  * `buildReportBundle`, `buildReportFile`, and `buildReportUpload` gather and
  * build in one call.
  *
@@ -49,6 +51,7 @@
 import * as diagnosticLog from './diagnosticLog'
 import type { InputEvent } from '../recording/inputRecorder'
 import { analyzeRecording, canCompress, gzipChunks, yieldTask, type ImportedFile } from './reportImports'
+import { getFailedOpen, type FailedOpen } from './failedOpen'
 
 /** The minimal Scene surface this module needs — see crates/wasm-api/src/lib.rs. */
 export interface ReportableScene {
@@ -68,6 +71,7 @@ export interface ReportFlags {
   system: boolean
   recording: boolean
   imports: boolean
+  failedFile: boolean
   model: boolean
   log: boolean
   input: boolean
@@ -102,6 +106,9 @@ export interface GatherReportOptions {
    *  `@tauri-apps/api/path`), or null when there is none to scrub (web) or
    *  it could not be resolved. */
   homeDir: string | null
+  /** The file behind an open or import that did not land. Defaults to
+   *  `failedOpen.ts`'s; tests pass their own. */
+  failedOpen?: FailedOpen | null
   /** Aborting stops gathering between its steps with `ReportBuildCancelled`:
    *  closing the dialog mid-gather shouldn't keep the page busy. */
   signal?: AbortSignal
@@ -122,7 +129,7 @@ export interface ReportBuildOptions {
 
 export interface BuildReportBundleOptions extends Omit<GatherReportOptions, 'signal'>, Omit<ReportBuildOptions, 'signal'> {}
 
-export type ReportRowKey = 'system' | 'recording' | 'imports' | 'model' | 'log' | 'input'
+export type ReportRowKey = 'system' | 'recording' | 'imports' | 'failedFile' | 'model' | 'log' | 'input'
 
 export interface ReportRowInfo {
   /** Whether this row's data is in the saved file. False for an unticked
@@ -182,8 +189,8 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 /** §3's cap on the compressed upload: under the Cloudflare free plan's
- *  100 MB request body limit. Past it, the model and then imported files
- *  are dropped from the sent bundle. */
+ *  100 MB request body limit. Past it, the model, then imported files, then
+ *  the file that didn't open are dropped from the sent bundle. */
 export const MAX_SEND_BYTES = 90 * 1024 * 1024
 
 /** The largest piece the bundle is written in. Each piece is escaped,
@@ -419,6 +426,9 @@ export interface ReportContent {
   strippedRecording: string | null
   importScanFailed: boolean
   importedFiles: ImportedFile[]
+  /** The file behind an open or import that did not land, its error
+   *  scrubbed like the log; null when there is none. */
+  failedOpen: FailedOpen | null
   modelAvailable: boolean
   modelDisabledReason: string | null
   model: Uint8Array | null
@@ -439,6 +449,7 @@ export interface ReportContent {
  *  large import, and checks `signal` after each yield. */
 export async function gatherReport(opts: GatherReportOptions): Promise<ReportContent> {
   const { scene, documentName, platform, debugMode, crash, homeDir, signal } = opts
+  const failed = opts.failedOpen === undefined ? getFailedOpen() : opts.failedOpen
   throwIfAborted(signal)
 
   // ---- system (always gatherable; never depends on the scene) ----------
@@ -529,6 +540,12 @@ export async function gatherReport(opts: GatherReportOptions): Promise<ReportCon
     strippedRecording,
     importScanFailed,
     importedFiles,
+    // The name is the file's own, never a folder; the error can name a path
+    // the way a panic message can.
+    failedOpen:
+      failed !== null
+        ? { ...failed, error: failed.error !== null ? scrubHomeDir(failed.error, homeDir) : null }
+        : null,
     modelAvailable,
     modelDisabledReason:
       crash !== null ? 'unavailable after a crash' : scene === null ? 'unavailable — no document loaded' : null,
@@ -551,6 +568,7 @@ interface Inclusion {
   system: boolean
   recording: boolean
   imports: boolean
+  failedFile: boolean
   model: boolean
   log: boolean
   input: boolean
@@ -562,6 +580,7 @@ function inclusionOf(c: ReportContent, flags: ReportFlags): Inclusion {
     system: flags.system,
     recording,
     imports: recording && c.importedFiles.length > 0 && flags.imports,
+    failedFile: flags.failedFile && c.failedOpen !== null,
     model: flags.model && c.modelAvailable && c.model !== null,
     log: flags.log,
     input: c.debugMode && flags.input && c.input.length > 0,
@@ -610,6 +629,7 @@ function* bundleStrings(
   opts: ReportBuildOptions,
   includeModel: boolean,
   includeImports: boolean,
+  includeFailedFile: boolean,
 ): Generator<string> {
   const { fields } = opts
   const size = Math.max(1, opts.segmentChars ?? SEGMENT_CHARS)
@@ -625,6 +645,14 @@ function* bundleStrings(
     yield ',"recording":'
     yield* jsonStringPieces((includeImports ? c.recording : c.strippedRecording) as string, size)
     if (c.importedFiles.length > 0 && !includeImports) yield ',"importsStripped":true'
+  }
+  if (includeFailedFile && c.failedOpen !== null) {
+    const { name, label, bytes, error } = c.failedOpen
+    // Everything but the bytes first, so a reader that stops early still
+    // learns what the file was and how it failed.
+    yield `,"failedFile":{"name":${JSON.stringify(name)},"label":${JSON.stringify(label)},"size":${bytes.byteLength},"error":${JSON.stringify(error)},"bytes":"`
+    yield* base64Pieces(bytes, size)
+    yield '"}'
   }
   if (includeModel && c.model !== null) {
     yield ',"hew":"'
@@ -668,8 +696,10 @@ interface SendPlan {
   dropped: ReportRowKey[]
 }
 
-/** Compress the bundle Send would upload, dropping the model and then the
- *  imported files while it passes the cap. The cap is on the compressed
+/** Compress the bundle Send would upload, dropping the model, then the
+ *  imported files, then the file that didn't open while it passes the cap.
+ *  The file that didn't open goes last: it is the one a report about a file
+ *  that won't open exists to carry. The cap is on the compressed
  *  upload, so each drop is measured by compressing again; a report that fits
  *  keeps every ticked row. `keep` holds the bytes of a report that fits. */
 async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolean): Promise<SendPlan> {
@@ -689,8 +719,12 @@ async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolea
   try {
     let sendModel = inc.model
     let sendImports = inc.imports
+    let sendFailedFile = inc.failedFile
     const compress = () =>
-      gzipChunks(utf8Pieces(bundleStrings(c, inc, opts, sendModel, sendImports), opts.signal), keep ? maxSendBytes : 0)
+      gzipChunks(
+        utf8Pieces(bundleStrings(c, inc, opts, sendModel, sendImports, sendFailedFile), opts.signal),
+        keep ? maxSendBytes : 0,
+      )
     let result = await compress()
     if (result.length > maxSendBytes && sendModel) {
       sendModel = false
@@ -700,6 +734,11 @@ async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolea
     if (result.length > maxSendBytes && sendImports) {
       sendImports = false
       dropped.push('imports')
+      result = await compress()
+    }
+    if (result.length > maxSendBytes && sendFailedFile) {
+      sendFailedFile = false
+      dropped.push('failedFile')
       result = await compress()
     }
     if (result.length > maxSendBytes) {
@@ -731,7 +770,7 @@ export function describeReport(
   dropped: readonly ReportRowKey[] = [],
 ): ReportDescription {
   const inc = inclusionOf(c, flags)
-  const { system, recording, recordingSummary, importedFiles, input, debugMode } = c
+  const { system, recording, recordingSummary, importedFiles, failedOpen, input, debugMode } = c
   const hasImports = importedFiles.length > 0
 
   // The recording is ASCII apart from rare non-ASCII names, and encoding a
@@ -772,6 +811,18 @@ export function describeReport(
       preview: hasImports
         ? importedFiles.map((f) => `${f.label}, ${formatBytes(f.fileBytes)}`).join('\n')
         : 'No imported files.',
+    },
+    failedFile: {
+      included: inc.failedFile,
+      bytes: failedOpen?.bytes.byteLength ?? 0,
+      disabledReason: failedOpen === null ? 'no file failed to open' : null,
+      droppedFromSend: dropped.includes('failedFile'),
+      preview:
+        failedOpen === null
+          ? 'No file failed to open.'
+          : `${failedOpen.name} · ${failedOpen.label} · ${formatBytes(failedOpen.bytes.byteLength)}\n${
+              failedOpen.error ?? 'Hew stopped while opening it.'
+            }`,
     },
     model: {
       included: inc.model,
@@ -814,7 +865,7 @@ export async function measureUpload(c: ReportContent, opts: ReportBuildOptions):
  *  after every piece. */
 export async function encodeReportFile(c: ReportContent, opts: ReportBuildOptions): Promise<Uint8Array> {
   const inc = inclusionOf(c, opts.flags)
-  const pieces = () => bundleStrings(c, inc, opts, inc.model, inc.imports)
+  const pieces = () => bundleStrings(c, inc, opts, inc.model, inc.imports, inc.failedFile)
   let total = 0
   for (const s of pieces()) {
     total += utf8Length(s)
@@ -833,8 +884,9 @@ export async function encodeReportFile(c: ReportContent, opts: ReportBuildOption
   return out
 }
 
-/** The gzip Send uploads, with the model and then imported files dropped
- *  past the cap, or the reason it can't be sent. */
+/** The gzip Send uploads, with the model, then imported files, then the
+ *  file that didn't open dropped past the cap, or the reason it can't be
+ *  sent. */
 export async function compressReportUpload(c: ReportContent, opts: ReportBuildOptions): Promise<ReportUpload> {
   return (await planSend(c, opts, true)).upload
 }

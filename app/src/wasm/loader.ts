@@ -9,6 +9,7 @@ import init, {
 import { installKernelDrain, bridgeLogStore } from '../log/diagnosticLog'
 import { registerScene, installFailureHandlers } from '../log/reproducerDump'
 import { getDebugMode } from '../settings/debugMode'
+import { setKernelMemory } from './kernelMemory'
 
 // Memoize: only one initialization promise across the lifetime of the module.
 let initPromise: Promise<void> | null = null
@@ -23,7 +24,9 @@ function getInitPromise(): Promise<void> {
     // Single-object form: wasm-bindgen deprecated the bare-URL argument and
     // warns about it on every boot ("using deprecated parameters for the
     // initialization function").
-    initPromise = init({ module_or_path: wasmUrl }).then(() => undefined)
+    initPromise = init({ module_or_path: wasmUrl }).then((out) => {
+      setKernelMemory(out.memory)
+    })
   }
   return initPromise
 }

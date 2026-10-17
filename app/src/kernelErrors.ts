@@ -356,6 +356,8 @@ const DESCRIPTIONS: Record<string, string> = {
 
   // ------------------------------------------------------ file loading
   NotAContainer: "This file isn't a Hew document. Pick a .hew file saved by Hew.",
+  Incomplete:
+    'This Hew document looks incomplete or damaged. It may not have finished downloading or copying, so get a fresh copy and open that.',
   UnsupportedVersion:
     'This file needs a newer version of Hew than this one. Update Hew and try again.',
   MalformedManifest: "This file is damaged and can't be opened.",

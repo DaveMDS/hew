@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReportBugDialog } from './ReportBugDialog'
 import { ReportError } from '../io/reportClient'
 import type { ReportableScene } from '../log/reportBundle'
+import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/failedOpen'
 
 const mockCanSend = vi.hoisted(() => vi.fn(() => true))
 const mockSubmitReport = vi.hoisted(() => vi.fn())
@@ -115,6 +116,25 @@ describe('ReportBugDialog — default checklist', () => {
       expect(checkbox).toBeChecked()
     }
     expect(screen.queryByRole('checkbox', { name: 'Raw input events' })).not.toBeInTheDocument()
+  })
+
+  it('lists the file that didn’t open, ticked, only when there is one', async () => {
+    clearOpenAttempt()
+    const { unmount } = render(
+      <ReportBugDialog scene={fakeScene()} documentName="My Model.hew" crash={null} onClose={vi.fn()} />,
+    )
+    await screen.findByRole('checkbox', { name: 'Model file' })
+    expect(screen.queryByRole('checkbox', { name: 'File that didn’t open' })).not.toBeInTheDocument()
+    unmount()
+
+    beginOpenAttempt({ name: 'Kitchen.skp', label: 'SketchUp model (.skp)', bytes: new Uint8Array([1, 2, 3]) })
+    openAttemptFailed('SKP: unsupported version')
+    try {
+      render(<ReportBugDialog scene={fakeScene()} documentName="My Model.hew" crash={null} onClose={vi.fn()} />)
+      expect(await screen.findByRole('checkbox', { name: 'File that didn’t open' })).toBeChecked()
+    } finally {
+      clearOpenAttempt()
+    }
   })
 
   it('shows the geometry note', () => {

@@ -62,7 +62,7 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   "format_version": 22,
   "geometry_version": 8,
   "app": "hew",
-  "app_version": "0.1.0",
+  "app_version": "1.2.1",
 
   "materials": [
     { "id": 0, "sid": 0, "name": "Red", "color": [220, 50, 40, 255],
@@ -172,13 +172,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `20`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `22`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
   used by every entry under `geometry/` in this file. Current: `8`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
   identification, no semantic meaning. A reader MUST NOT branch on these.
+  Hew writes the release that saved the file (e.g. `"1.2.1"`). Releases up
+  to and including 1.2.0 wrote `"0.1.0"` whatever their own version.
 - **`materials`** — the material palette ().
 - **`objects`** — every live Object, both world-tree and component-definition
   members ().

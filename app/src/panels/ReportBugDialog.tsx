@@ -56,6 +56,7 @@ const ROW_ORDER: { key: ReportRowKey; label: string }[] = [
   { key: 'system', label: 'App version and system' },
   { key: 'recording', label: 'Recorded steps' },
   { key: 'imports', label: 'Imported files' },
+  { key: 'failedFile', label: 'File that didn’t open' },
   { key: 'model', label: 'Model file' },
   { key: 'log', label: 'Diagnostic log' },
   { key: 'input', label: 'Raw input events' },
@@ -265,7 +266,15 @@ const SUCCESS_STYLE: React.CSSProperties = {
   color: 'var(--text-secondary, #ddd)',
 }
 
-const DEFAULT_FLAGS: ReportFlags = { system: true, recording: true, imports: true, model: true, log: true, input: true }
+const DEFAULT_FLAGS: ReportFlags = {
+  system: true,
+  recording: true,
+  imports: true,
+  failedFile: true,
+  model: true,
+  log: true,
+  input: true,
+}
 
 const EMPTY_FIELDS = { description: '', expected: '', contact: '' }
 
@@ -673,10 +682,14 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
     openExternal(githubIssueUrl(description, system.appVersion, system.platform, sendState.id))
   }
 
-  // Raw input is listed only in Debug Mode, and Imported files only when a
-  // recorded step actually embeds a file.
+  // Raw input is listed only in Debug Mode, Imported files only when a
+  // recorded step actually embeds a file, and the file that didn't open only
+  // when there is one.
   const rowsToShow = ROW_ORDER.filter(
-    (r) => (r.key !== 'input' || debugMode) && (r.key !== 'imports' || (described?.importedFiles.length ?? 0) > 0),
+    (r) =>
+      (r.key !== 'input' || debugMode) &&
+      (r.key !== 'imports' || (described?.importedFiles.length ?? 0) > 0) &&
+      (r.key !== 'failedFile' || content?.failedOpen != null),
   )
 
   return (
@@ -793,8 +806,8 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
 
             <p style={NOTE_STYLE}>
               Recorded steps and the model file contain your model&rsquo;s geometry. Imported files are the files you
-              imported or opened and the textures and library items you added, byte for byte. Untick all three to send
-              only the description, system details, and log.
+              imported or opened and the textures and library items you added, and the file that didn&rsquo;t open is
+              that file, all byte for byte. Untick these to send only the description, system details, and log.
             </p>
 
             {/* A build that can't send has no destination to name; the line

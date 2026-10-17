@@ -403,6 +403,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "That attribute doesn't exist on this item, so there was nothing to remove."
         }
         "NotAContainer" => "This file isn't a Hew document. Pick a .hew file saved by Hew.",
+        "Incomplete" => {
+            "This Hew document looks incomplete or damaged. It may not have finished downloading or copying, so get a fresh copy and open that."
+        }
         "UnsupportedVersion" => {
             "This file needs a newer version of Hew than this one. Update Hew and try again."
         }

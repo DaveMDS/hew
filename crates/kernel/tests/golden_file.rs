@@ -3,15 +3,16 @@
 //! Builds a representative document exercising the full feature surface
 //! (a box, a group, a component with a mirrored instance, painted + textured +
 //! base-material objects, a sketch with a consumed region, a construction
-//! guide line + point), saves it, and asserts bytes equal a committed
-//! fixture. Also asserts it re-loads.
+//! guide line + point), saves it, and asserts its entries equal a committed
+//! fixture's byte for byte, apart from the manifest's `app_version` (it names
+//! the release). Also asserts it re-loads.
 //!
 //! The golden file is generated from the serializer itself on first run (via
 //! `REGENERATE_GOLDEN=1 cargo test`). From then on, any drift from the spec is
 //! caught by the byte comparison.
 //!
 //! Run with `REGENERATE_GOLDEN=1` to regenerate the fixture intentionally
-//! (on a version bump or spec change).
+//! (on a spec change; a version bump does not need it).
 
 use std::path::PathBuf;
 
@@ -243,6 +244,30 @@ fn build_representative_doc() -> Document {
     doc
 }
 
+/// The container's entries in order, as (name, bytes), with the value of the
+/// manifest's `app_version` blanked.
+fn entries_without_app_version(bytes: &[u8]) -> Vec<(String, Vec<u8>)> {
+    use std::io::{Cursor, Read as _};
+
+    const KEY: &str = "\"app_version\": \"";
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a .hew is a zip");
+    (0..zip.len())
+        .map(|i| {
+            let mut entry = zip.by_index(i).unwrap();
+            let name = entry.name().unwrap().to_string();
+            let mut data = Vec::new();
+            entry.read_to_end(&mut data).unwrap();
+            if name == "manifest.json" {
+                let text = String::from_utf8(data).expect("manifest is UTF-8");
+                let start = text.find(KEY).expect("manifest has app_version") + KEY.len();
+                let end = start + text[start..].find('"').unwrap();
+                data = format!("{}{}", &text[..start], &text[end..]).into_bytes();
+            }
+            (name, data)
+        })
+        .collect()
+}
+
 #[test]
 fn golden_file_save_load_and_determinism() {
     let doc = build_representative_doc();
@@ -261,10 +286,13 @@ fn golden_file_save_load_and_determinism() {
         std::fs::write(&golden, &bytes).expect("failed to write golden file");
         eprintln!("Wrote golden file: {}", golden.display());
     } else {
-        // Assert bytes match the golden file.
+        // Assert every entry matches the golden file byte for byte, apart from
+        // the manifest's `app_version`, which names the release and so moves
+        // with every version bump.
         let expected = std::fs::read(&golden).expect("failed to read golden file");
         assert_eq!(
-            bytes, expected,
+            entries_without_app_version(&bytes),
+            entries_without_app_version(&expected),
             "output differs from golden file — run with REGENERATE_GOLDEN=1 to update"
         );
     }

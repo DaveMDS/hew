@@ -21,6 +21,10 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
+import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, openAttemptFailed } from './log/failedOpen'
+import { getPanicCapture } from './log/panicCapture'
+import { kernelMemoryBytes } from './wasm/kernelMemory'
+import { formatBytes } from './log/reportBundle'
 
 /** How long one step of a `.skp` open works before the overlay repaints:
  * long enough that the paint between steps costs little, short enough
@@ -241,6 +245,37 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   'Position Camera': 'cam-position-camera',
   'Look Around': 'cam-look-around',
   Walk: 'cam-walk',
+}
+
+/** What a report calls each kind of file a user opens or imports. */
+const OPEN_FILE_LABELS = {
+  skp: 'SketchUp model (.skp)',
+  gltf: 'glTF model (.glb/.gltf)',
+  stl: 'STL model (.stl)',
+  dae: 'COLLADA model (.dae)',
+  hew: 'Hew document (.hew)',
+  recovered: 'Recovered document (.hew)',
+} as const
+
+/** The user's own `.hew` behind a load, for applyLoadedBytes to keep should
+ *  it fail (failedOpen.ts). Loads of Hew's own bytes (a blank document, a
+ *  bundled sample, an API load) pass none. */
+interface LoadedFile {
+  name: string
+  label: string
+}
+
+/** An open or import of `bytes` failed with `err`: keep the file for a bug
+ *  report (failedOpen.ts) and log the file's size and the kernel's memory
+ *  beside the toast's message. A kernel that runs out of memory stops
+ *  without a panic message, so those two figures are what tell it apart. */
+function noteOpenFailure(what: string, err: unknown, bytes: Uint8Array): void {
+  openAttemptFailed(friendlyErrorText(err))
+  const memory = kernelMemoryBytes()
+  LogStore.log.warn(
+    'app',
+    `${what} failed on a ${formatBytes(bytes.byteLength)} file${memory !== null ? `; kernel memory ${formatBytes(memory)}` : ''}`,
+  )
 }
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
@@ -1867,7 +1902,7 @@ export default function App() {
   // applyLoadedBytes is defined further down (it depends on later state setters);
   // the harness installs once on mount, so reach it through a ref (kept current
   // below, beside that definition) like reconcileRef.
-  const applyLoadedBytesRef = useRef<((bytes: Uint8Array) => boolean) | null>(null)
+  const applyLoadedBytesRef = useRef<((bytes: Uint8Array, file?: LoadedFile) => boolean) | null>(null)
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
     return installTestHarness({
@@ -2310,11 +2345,13 @@ export default function App() {
 
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
-  const applyLoadedBytes = useCallback((bytes: Uint8Array): boolean => {
+  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
+    if (file !== undefined) beginOpenAttempt({ name: file.name, label: file.label, bytes })
     const loaded = loadHewBytes(scene, bytes)
     if (!loaded.ok) {
+      if (file !== undefined) noteOpenFailure('Open', loaded.error, bytes)
       if (loaded.panicked) {
         setKernelPanicked(true)
       }
@@ -2327,6 +2364,8 @@ export default function App() {
     // is still awaiting its recovery check must also veto the offer it makes
     // at the end (the state setters alone can't — the later one wins).
     documentLoadedRef.current = true
+    if (file !== undefined) clearOpenAttempt()
+    else forgetSettledFailure()
     // `Scene.load` cleared the `.skp` source, and this is a new document:
     // the one-time `.skp` loss notice is due again (never reset on save).
     skpSourceGenRef.current += 1
@@ -2667,6 +2706,8 @@ export default function App() {
 
     let report: ImportReport
     try {
+      // First, so the catch below only ever blames this file.
+      beginOpenAttempt({ name: pick.name, label: OPEN_FILE_LABELS[pick.kind], bytes: pick.bytes })
       // Reset to a blank document first (replace semantics).
       //
       // applyLoadedBytes(blank) calls scene.load(), clears selection/context,
@@ -2674,10 +2715,16 @@ export default function App() {
       // suppressed — the afterImport state below owns the dirty flag.
       // We must bail if the blank load fails (should never happen in practice).
       const blank = blankBytesRef.current
-      if (blank === null) return
+      if (blank === null) {
+        clearOpenAttempt()
+        return
+      }
       const discardsUnsaved = docSessionRef.current.dirty
       const blankOk = applyLoadedBytes(blank)
-      if (!blankOk) return
+      if (!blankOk) {
+        clearOpenAttempt()
+        return
+      }
       // The previous document is gone as of the blank load above (even if
       // the import below fails) — drop its autosave snapshot with it.
       if (discardsUnsaved) void clearRecoverySnapshot()
@@ -2700,6 +2747,7 @@ export default function App() {
                 )
       ) as ImportReport
     } catch (err: unknown) {
+      noteOpenFailure('Import', err, pick.bytes)
       // A wasm trap mid-import (an out-of-memory abort on a model too big
       // for the browser kernel) reads as the borrow-lock error; handleToast
       // latches the kernel-panic banner for it like any other panic text.
@@ -2718,6 +2766,7 @@ export default function App() {
       // Always clear the overlay — even on throw, so it can never get stuck.
       setIsImporting(false)
     }
+    clearOpenAttempt()
 
     // Tessellate the imported objects and update session state.
     //
@@ -2797,10 +2846,15 @@ export default function App() {
     // at a time (see `Scene.open_skp_step`). The file is read before the
     // blank load, so one the reader refuses (a SketchUp version it does
     // not read, a damaged file) leaves the open document as it was.
+    // Noted before the kernel sees the file: a kernel that dies mid-open
+    // never gets as far as a catch below.
+    beginOpenAttempt({ name: pick.name, label: OPEN_FILE_LABELS.skp, bytes: pick.bytes })
+    LogStore.log.info('app', `Opening SKP: ${formatBytes(pick.bytes.byteLength)}`)
     let step: OpenStepProgress
     try {
       step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
     } catch (err: unknown) {
+      noteOpenFailure('SKP open', err, pick.bytes)
       handleToast(`Open failed: ${friendlyErrorText(err)}`)
       settle()
       return false
@@ -2810,6 +2864,7 @@ export default function App() {
     try {
       const discardsUnsaved = docSessionRef.current.dirty
       if (!applyLoadedBytes(blank)) {
+        clearOpenAttempt()
         settle()
         return false
       }
@@ -2829,7 +2884,9 @@ export default function App() {
       // (and Undo-to-clean would never land) right after opening.
       scene.mark_saved()
       skpSourceGenRef.current += 1
+      clearOpenAttempt()
     } catch (err: unknown) {
+      noteOpenFailure('SKP open', err, pick.bytes)
       handleToast(`Open failed: ${friendlyErrorText(err)}`)
       // The blank load committed even though the open failed: reflect a fresh
       // untitled document so the next Save can never write to a stale file
@@ -2941,7 +2998,7 @@ export default function App() {
 
       if (pick.kind === 'hew') {
         const discardsUnsaved = docSessionRef.current.dirty
-        const ok = applyLoadedBytes(pick.bytes)
+        const ok = applyLoadedBytes(pick.bytes, { name: pick.name, label: OPEN_FILE_LABELS.hew })
         if (!ok) return
         setDocSession(afterOpen({ name: pick.name, format: 'hew', handle: pick.handle }, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
@@ -3297,7 +3354,7 @@ export default function App() {
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
         const discardsUnsaved = docSessionRef.current.dirty
-        if (applyLoadedBytes(bytes)) {
+        if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })) {
           landed = true
           setDocSession(afterOpen({ name: basenameOf(path), format: 'hew', handle: path }, Date.now()))
           if (discardsUnsaved) void clearRecoverySnapshot()
@@ -3368,7 +3425,7 @@ export default function App() {
         const { invoke } = await import('@tauri-apps/api/core')
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
-        const ok = applyLoadedBytes(bytes)
+        const ok = applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
         if (ok) setDocSession(afterImport(name ?? 'Library Item', Date.now()))
       } catch (err) {
         handleToast(
@@ -3471,7 +3528,7 @@ export default function App() {
       if (scene !== null) void runOpenSkp(scene, { name: entry.name, bytes: entry.bytes, handle: null })
       return
     }
-    if (applyLoadedBytes(entry.bytes)) {
+    if (applyLoadedBytes(entry.bytes, { name: entry.name, label: OPEN_FILE_LABELS.hew })) {
       setDocSession(afterImport(entry.name, Date.now()))
       // Bumps the entry back to most-recently-used — the LRU behavior a
       // "recents" list is expected to have, matching ShopApp.tsx's
@@ -3486,7 +3543,12 @@ export default function App() {
    *  by the startup dialog (first/newest snapshot) and by recovery windows
    *  spawned for the remaining snapshots (take_pending_recovery below). */
   const adoptSnapshot = useCallback((snapshot: RecoverySnapshot): boolean => {
-    const ok = applyLoadedBytes(snapshot.bytes)
+    // The snapshot is .hew bytes whatever the document's display name is
+    // (an imported "house.skp", a Library item, "Untitled"); only a file
+    // extension comes off, so "Plan v1.2" stays whole.
+    const stem = snapshot.meta.name.replace(/\.(hew|skp|dae|stl|glb|gltf)$/i, '')
+    const name = `${stem === '' ? 'Untitled' : stem}.hew`
+    const ok = applyLoadedBytes(snapshot.bytes, { name, label: OPEN_FILE_LABELS.recovered })
     if (!ok) return false
     const scene = sceneRef.current
     if (scene === null) return false
@@ -4266,7 +4328,7 @@ export default function App() {
         if (scene === null) return
         const pristine = isPristineDocument(docSessionRef.current, scene)
         if (pristine) {
-          const ok = applyLoadedBytes(bytes)
+          const ok = applyLoadedBytes(bytes, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
           if (ok) setDocSession(afterImport(item.displayName, Date.now()))
           return
         }
@@ -5984,7 +6046,7 @@ export default function App() {
     if (!(await confirmDiscard())) return
     file.arrayBuffer().then((buf) => {
       const discardsUnsaved = docSessionRef.current.dirty
-      const ok = applyLoadedBytes(new Uint8Array(buf))
+      const ok = applyLoadedBytes(new Uint8Array(buf), { name: file.name, label: OPEN_FILE_LABELS.hew })
       if (ok) {
         setDocSession(afterOpen({ name: file.name, format: 'hew', handle: null }, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
@@ -6641,6 +6703,24 @@ export default function App() {
           <span style={{ flex: 1 }}>
             A kernel error occurred — the session is no longer usable. Reload the page to recover.
           </span>
+          {/* Before Reload, which forgets the file an open died on
+              (failedOpen.ts) and the steps that led here. */}
+          <button
+            onClick={handleReportBug}
+            style={{
+              padding: '4px 14px',
+              background: 'transparent',
+              color: '#fff',
+              border: '1px solid #fff',
+              borderRadius: '3px',
+              fontFamily: 'monospace',
+              fontSize: '13px',
+              fontWeight: 'bold',
+              cursor: 'pointer',
+            }}
+          >
+            Report Bug…
+          </button>
           <button
             onClick={() => window.location.reload()}
             style={{
@@ -7611,15 +7691,18 @@ export default function App() {
         />
       )}
 
-      {/* Help ▸ Report Bug… / palette / native Help menu (docs/design/
-          report-bug.md §2). Not the crash-mode dialog — that one renders
-          inside ErrorBoundary, since by the time it's needed this whole
-          tree is gone. */}
+      {/* Help ▸ Report Bug… / palette / native Help menu / the kernel-error
+          banner (docs/design/report-bug.md §2). The crash screen's dialog
+          renders inside ErrorBoundary instead, since by the time it's needed
+          this whole tree is gone. After a panic the banner can still be up
+          with the tree intact: report that panic as the crash screen would
+          (an out-of-memory abort leaves no capture, so it stays a plain
+          report). */}
       {reportBugOpen && (
         <ReportBugDialog
           scene={sceneRef.current}
           documentName={documentName(docSession)}
-          crash={null}
+          crash={kernelPanicked ? getPanicCapture() : null}
           onClose={() => setReportBugOpen(false)}
         />
       )}

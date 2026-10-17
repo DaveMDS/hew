@@ -3690,8 +3690,14 @@ impl Document {
     /// Pure (no I/O — DEVELOPMENT.md rule 1): bytes out, the shell writes the file.
     /// **Deterministic** — saving the same document twice yields identical bytes
     /// (golden-file contract). Persists only the live, visible state: undo/redo
-    /// logs and `hidden` (undone-creation) records are dropped.
+    /// logs and `hidden` (undone-creation) records are dropped. The manifest
+    /// names the release that wrote the file (`app_version`).
     pub fn save(&self) -> Vec<u8> {
+        self.encode(env!("CARGO_PKG_VERSION"))
+    }
+
+    /// [`save`](Document::save) with the manifest's `app_version` given.
+    fn encode(&self, app_version: &'static str) -> Vec<u8> {
         // ── Collect live, visible materials (in slotmap key order) ─────────
         let materials: Vec<(MaterialId, Material)> = self
             .materials
@@ -3882,6 +3888,7 @@ impl Document {
             self.tag_meta.iter().map(|(p, &h)| (p.clone(), h)).collect();
 
         encode_document(DocSaveData {
+            app_version,
             materials,
             world_objects,
             def_objects,
@@ -3930,13 +3937,20 @@ impl Document {
     /// into a committed replay fixture stays valid forever. 64 bits is ample for
     /// an equality oracle; this is never a security or anti-collision primitive.
     ///
+    /// The bytes hashed carry a fixed `app_version` rather than the running
+    /// release's, so a hash does not change with every version bump. The
+    /// placeholder is the value every save wrote before the manifest named
+    /// its release, which keeps the hashes frozen into replay fixtures and
+    /// into earlier bug-report recordings valid.
+    ///
     /// [`save`]: Document::save
     /// [FNV-1a/64]: https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
     pub fn state_hash(&self) -> u64 {
         const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
         const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+        const HASHED_APP_VERSION: &str = "0.1.0";
         let mut hash = FNV_OFFSET;
-        for byte in self.save() {
+        for byte in self.encode(HASHED_APP_VERSION) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(FNV_PRIME);
         }

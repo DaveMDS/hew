@@ -99,6 +99,17 @@ import {
   type ShopIconProps,
 } from './icons'
 import type { Snap } from '../tools/types'
+import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/failedOpen'
+
+/** `loadHewBytes` for a `.hew` the user opened, keeping the file for a bug
+ *  report should it fail to load (failedOpen.ts). */
+function loadUserHewBytes(scene: Scene, name: string, bytes: Uint8Array): ReturnType<typeof loadHewBytes> {
+  beginOpenAttempt({ name, label: 'Hew document (.hew)', bytes })
+  const loaded = loadHewBytes(scene, bytes)
+  if (loaded.ok) clearOpenAttempt()
+  else openAttemptFailed(friendlyErrorText(loaded.error))
+  return loaded
+}
 
 /** The 3-tool registry Shop Mode restricts `Viewport`'s `activeTool` to
  *  (design §"Composition") — Draw/Modify tools, Paint, Section Plane, etc.
@@ -1033,7 +1044,7 @@ export function ShopApp() {
     }
     const liveScene = sceneRef.current
     if (liveScene === null) return
-    const loaded = loadHewBytes(liveScene, bytes)
+    const loaded = loadUserHewBytes(liveScene, params.name, bytes)
     if (!loaded.ok) {
       showToast(friendlyErrorText(loaded.error))
       return
@@ -1154,12 +1165,16 @@ export function ShopApp() {
       showToast(friendlyErrorText(blankLoaded.error))
       return
     }
+    // Kept for a bug report until the open lands (failedOpen.ts).
+    beginOpenAttempt({ name, label: 'SketchUp model (.skp)', bytes: skpBytes })
     try {
       liveScene.open_skp(skpBytes)
     } catch (err: unknown) {
+      openAttemptFailed(friendlyErrorText(err))
       showToast(`Open failed: ${friendlyErrorText(err)}`)
       return
     }
+    clearOpenAttempt()
     applyOpenedBytes(liveScene, name, new Uint8Array(liveScene.save()))
   }, [showToast, applyOpenedBytes])
 
@@ -1190,7 +1205,7 @@ export function ShopApp() {
       showToast('Shop Mode can only open .hew and .skp files — use the full editor to import other formats.')
       return
     }
-    const loaded = loadHewBytes(liveScene, pick.bytes)
+    const loaded = loadUserHewBytes(liveScene, pick.name, pick.bytes)
     if (!loaded.ok) {
       showToast(friendlyErrorText(loaded.error))
       return
@@ -1209,7 +1224,7 @@ export function ShopApp() {
       void openSkpBytes(liveScene, entry.name, entry.bytes)
       return
     }
-    const loaded = loadHewBytes(liveScene, entry.bytes)
+    const loaded = loadUserHewBytes(liveScene, entry.name, entry.bytes)
     if (!loaded.ok) {
       showToast(friendlyErrorText(loaded.error))
       return

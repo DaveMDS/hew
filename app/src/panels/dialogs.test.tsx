@@ -351,6 +351,17 @@ describe('ImportReportDialog', () => {
     expect(screen.getByText(/^Opened 5 objects\./)).toBeInTheDocument()
   })
 
+  it('says out loud when the file looks incomplete or damaged, and only then', () => {
+    const { unmount } = render(<ImportReportDialog report={baseReport} opened onClose={vi.fn()} />)
+    expect(screen.queryByText(/looks incomplete or damaged/)).not.toBeInTheDocument()
+    unmount()
+    render(<ImportReportDialog report={{ ...baseReport, incomplete: true }} opened onClose={vi.fn()} />)
+    expect(screen.getByText(/looks incomplete or damaged/)).toHaveTextContent(
+      'This file looks incomplete or damaged, so parts of the model may be missing. If it was downloaded or copied, a fresh copy may open whole.',
+    )
+    expect(readableText(document.body)).not.toMatch(BANNED_RE)
+  })
+
   it('an all-solid import says so and shows a single OK', () => {
     const solid: ImportReport = { ...baseReport, watertight: 5, leaky: 0, health: { ...ALL_SOLID_HEALTH, objects: 5, solids: 5 } }
     render(<ImportReportDialog report={solid} onClose={vi.fn()} onMakeSolid={vi.fn()} />)

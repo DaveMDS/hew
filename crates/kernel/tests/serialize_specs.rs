@@ -2005,6 +2005,48 @@ fn state_hash_distinguishes_distinct_states() {
 }
 
 #[test]
+fn a_hew_cut_short_loads_as_incomplete_and_other_bytes_as_not_a_container() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let bytes = doc.save();
+    for keep in [bytes.len() / 10, bytes.len() / 2, bytes.len() - 1] {
+        assert_eq!(
+            Document::load(&bytes[..keep]).err(),
+            Some(kernel::LoadError::Incomplete),
+            "cut to {keep} of {} bytes",
+            bytes.len()
+        );
+    }
+    assert_eq!(
+        Document::load(b"not a zip at all").err(),
+        Some(kernel::LoadError::NotAContainer)
+    );
+}
+
+#[test]
+fn save_names_the_writing_release() {
+    use std::io::{Cursor, Read as _};
+
+    let bytes = Document::new().save();
+    let mut zip = zip::ZipArchive::new(Cursor::new(&bytes)).unwrap();
+    let mut manifest_bytes = Vec::new();
+    zip.by_name("manifest.json")
+        .unwrap()
+        .read_to_end(&mut manifest_bytes)
+        .unwrap();
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    assert_eq!(manifest["app_version"], env!("CARGO_PKG_VERSION"));
+}
+
+#[test]
+fn state_hash_does_not_follow_the_release_version() {
+    // Pinned from before the manifest named its release: the hashes frozen
+    // into replay fixtures and bug-report recordings must stay valid across
+    // version bumps.
+    assert_eq!(Document::new().state_hash(), 219_183_841_381_781_821);
+}
+
+#[test]
 fn state_hash_survives_save_load_round_trip() {
     // The oracle is replay-stable: deserializing canonical bytes and re-hashing
     // reproduces the original hash (dense-id remap is itself deterministic), so a

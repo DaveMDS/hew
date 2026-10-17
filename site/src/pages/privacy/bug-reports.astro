@@ -20,16 +20,21 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
         A report can include the description you write, an optional email
         address, your app version and system details, the current session's
         recorded steps, the files the session took in (imported or opened
-        files, and textures and library items you added), your model file,
-        and a tail of the diagnostic log. Each of those is a
-        separate checkbox in the dialog, on by default, with its size and a
-        preview shown next to it. Untick anything before sending.
+        files, and textures and library items you added), a file that
+        failed to open, your model file, and a tail of the diagnostic log.
+        Each of those is a separate checkbox in the dialog, on by default,
+        with its size and a preview shown next to it. Untick anything before
+        sending.
       </p>
       <p>
         Recorded steps and the model file carry your model's geometry.
         Imported files are those original files byte for byte, such as a
-        SketchUp <code>.skp</code> or a photo used as a texture. Untick all
-        three to send only your description, system details, and log.
+        SketchUp <code>.skp</code> or a photo used as a texture. When a file
+        won't open or import, the next report you make, including one from
+        the crash screen, offers that file too, byte for byte and under its
+        own name, ticked like the other rows, so the problem can be
+        reproduced. Untick all of these to send only your description,
+        system details, and log.
       </p>
       <p>
         On the desktop app, every mention of your home folder in the log
@@ -44,8 +49,9 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
       <p>
         Opening the dialog sends nothing by itself. Only clicking
         <strong>Send report</strong> submits it, compressed. A report over
-        90 MB after compression is sent without the model file, and then
-        without imported files; the dialog marks each one it leaves out.
+        90 MB after compression is sent without the model file, then
+        without imported files, then without the file that didn't open; the
+        dialog marks each one it leaves out.
         <strong>Save to file…</strong> writes everything you ticked to a file
         on your machine instead, and <strong>Cancel</strong> sends nothing at
         all.

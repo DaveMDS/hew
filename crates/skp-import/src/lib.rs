@@ -51,6 +51,14 @@ pub enum SkpError {
         /// How many parser recovery notes accompanied the empty result.
         recovery_notes: usize,
     },
+    /// The file is cut short or damaged and nothing of its model could be
+    /// read: a SketchUp header with no readable model behind it, a 2026
+    /// container missing its ZIP end record, or a 2017 stream the
+    /// whole-file grammar refused for running out of data that yielded
+    /// nothing. A file that is cut
+    /// short (a download or copy that did not finish) is the usual cause,
+    /// so the copy asks for a fresh copy rather than a re-save.
+    Damaged,
 }
 
 impl std::fmt::Display for SkpError {
@@ -72,6 +80,11 @@ impl std::fmt::Display for SkpError {
                 "no importable geometry survived parsing ({recovery_notes} \
                  malformed sections skipped) — the file may be damaged; \
                  re-saving it from SketchUp usually rewrites it cleanly"
+            ),
+            SkpError::Damaged => write!(
+                f,
+                "this .skp file looks incomplete or damaged. It may not have \
+                 finished downloading or copying, so get a fresh copy and open that"
             ),
         }
     }
@@ -190,18 +203,23 @@ pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
     match openskp::detect_container(bytes) {
         openskp::Container::Zip => {}
         openskp::Container::Carchive2017 if version_major(&version) == Some(17) => {}
-        openskp::Container::Unknown if decoded_release => {
-            return Err(SkpError::Parse(format!(
-                "SketchUp {version} header without a readable model behind it — \
-                 the file is truncated or damaged"
-            )));
-        }
+        openskp::Container::Unknown if decoded_release => return Err(SkpError::Damaged),
         openskp::Container::Carchive2017 | openskp::Container::Unknown => {
             return Err(SkpError::UnsupportedVersion { version });
         }
     }
 
-    let model = openskp::Model::parse(bytes).map_err(|e| SkpError::Parse(e.to_string()))?;
+    let model = openskp::Model::parse(bytes).map_err(|e| {
+        // A 2026 container keeps its ZIP directory at the very end, so a
+        // file cut short loses it first.
+        if matches!(openskp::detect_container(bytes), openskp::Container::Zip)
+            && !has_zip_end_record(bytes)
+        {
+            SkpError::Damaged
+        } else {
+            SkpError::Parse(e.to_string())
+        }
+    })?;
     // A DAMAGED parse that composes NOTHING importable is a loud failure,
     // not a silent empty success (the failure mode that motivated this: a
     // 57 MB house model desyncing 32k times and importing as an empty
@@ -209,9 +227,55 @@ pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
     // empty models and guide-only files exist, and their uninstanced
     // template-figure faces are correctly not imported.
     let recovery_notes = model.diagnostics.iter().filter(|d| d.is_desync()).count();
+    // The whole-file grammar reads every complete 2017 file it can decode
+    // from header to last byte, and refuses a file cut short for running out
+    // of data, often after the walk fallback has already found every shape
+    // in it. The refusal is informational to the reader, not a desync, but
+    // that one means the file is incomplete: refused outright when nothing
+    // came of it, said out loud when something did. A refusal for anything
+    // else (a structure the grammar does not decode, in a healthy file)
+    // leaves the walk's result as it was.
+    let incomplete = model.diagnostics.iter().any(|d| {
+        matches!(d, openskp::Diagnostic::WholeFileRefused { detail } if ran_out_of_data(detail))
+    });
     Ok(ImportJob {
         job: convert::ConvertJob::begin(std::rc::Rc::new(model)),
         recovery_notes,
+        incomplete,
+    })
+}
+
+/// The first of [`SkpScene::warnings`] when the file is incomplete or damaged
+/// but something of it was read: the 2017 whole-file grammar refused it for
+/// running out of data and the walk fallback served it (see [`import_begin`]). Exported so a caller
+/// can tell this note from the rest and show it on its own.
+pub const INCOMPLETE_NOTE: &str = "this .skp file looks incomplete or damaged, so parts \
+     of the model may be missing. If it was downloaded or copied, a fresh copy may \
+     open whole";
+
+/// True when a whole-file refusal's `detail` says the stream ran out: a
+/// read past the last byte, a declared count larger than the bytes left, or
+/// a string longer than them. These are OpenSKP 0.5's three wordings (its
+/// `ar17` reader); the cut-short specs in `tests/import_specs.rs` fail if a
+/// later release rewords them.
+fn ran_out_of_data(detail: &str) -> bool {
+    detail.contains("stream ends at")
+        || detail.contains("bytes that remain")
+        || detail.contains("runs past the stream")
+}
+
+/// True when `bytes` end with a ZIP end-of-central-directory record: its
+/// signature 22 bytes plus the record's own comment length before the end.
+/// (The signature alone also turns up inside compressed entries.)
+fn has_zip_end_record(bytes: &[u8]) -> bool {
+    const SIG: [u8; 4] = [0x50, 0x4b, 0x05, 0x06];
+    const FIXED: usize = 22;
+    let lowest = bytes.len().saturating_sub(FIXED + 0xffff);
+    (lowest..=bytes.len().saturating_sub(FIXED)).rev().any(|p| {
+        bytes.len() >= FIXED
+            && bytes[p..p + 4] == SIG
+            && p + FIXED + usize::from(u16::from_le_bytes([bytes[p + 20], bytes[p + 21]]))
+                == bytes.len()
     })
 }
 
@@ -222,6 +286,9 @@ pub fn import_begin(bytes: &[u8]) -> Result<ImportJob, SkpError> {
 pub struct ImportJob {
     job: convert::ConvertJob,
     recovery_notes: usize,
+    /// The 2017 whole-file grammar refused the file for running out of
+    /// data (see [`import_begin`]).
+    incomplete: bool,
 }
 
 impl ImportJob {
@@ -243,16 +310,21 @@ impl ImportJob {
 
     /// Build whatever is left and hand the recipe over.
     pub fn finish(self) -> Result<SkpScene, SkpError> {
-        let out = self.job.finish();
-        if self.recovery_notes > 0
-            && out.scene.roots.is_empty()
+        let mut out = self.job.finish();
+        let empty = out.scene.roots.is_empty()
             && out.scene.defs.is_empty()
             && out.scene.guides.is_empty()
-            && out.scene.extra.sketches.is_empty()
-        {
+            && out.scene.extra.sketches.is_empty();
+        if empty && self.incomplete {
+            return Err(SkpError::Damaged);
+        }
+        if empty && self.recovery_notes > 0 {
             return Err(SkpError::EmptyScene {
                 recovery_notes: self.recovery_notes,
             });
+        }
+        if self.incomplete {
+            out.warnings.insert(0, INCOMPLETE_NOTE.to_string());
         }
         Ok(SkpScene {
             scene: out.scene,
