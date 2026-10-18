@@ -8,7 +8,12 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
-## [Unreleased]
+## [1.2.2] (2026-10-18) - The "Big Files Too" Release
+
+A bug report about a SketchUp file that wouldn't open specifically because it
+was too big would never arrive, since there was an arbitrary 90 MB limit. A file
+that big typically means Hew ran out of memory opening it, and Hew didn't make
+that clear either. It does now.
 
 ### Fixed
 
