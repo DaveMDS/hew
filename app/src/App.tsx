@@ -22,7 +22,7 @@ import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
 import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, openAttemptFailed } from './log/failedOpen'
-import { getPanicCapture } from './log/panicCapture'
+import { getPanicCapture, recordKernelStop } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
 import { formatBytes } from './log/reportBundle'
 
@@ -265,17 +265,59 @@ interface LoadedFile {
   label: string
 }
 
-/** An open or import of `bytes` failed with `err`: keep the file for a bug
+/** Kernel memory this close to the 4 GiB a wasm32 kernel can address, when
+ *  a trap ends an open, means the open ran out of memory rather than hitting
+ *  some other abort. The bar sits well under the ceiling because a browser
+ *  may refuse the last growth before it. */
+const KERNEL_MEMORY_NEAR_CEILING = 3 * 1024 * 1024 * 1024
+
+/** An open or import of `file` failed with `err`: keep the file for a bug
  *  report (failedOpen.ts) and log the file's size and the kernel's memory
- *  beside the toast's message. A kernel that runs out of memory stops
- *  without a panic message, so those two figures are what tell it apart. */
-function noteOpenFailure(what: string, err: unknown, bytes: Uint8Array): void {
-  openAttemptFailed(friendlyErrorText(err))
+ *  beside the toast's message.
+ *
+ *  A wasm trap (`WebAssembly.RuntimeError`, not a typed refusal) means the
+ *  kernel is gone: its stack unwound without running anything, so the Scene
+ *  stays borrowed and every later call throws "recursive use of an object".
+ *  Rust's out-of-memory abort runs no panic hook, so nothing on the kernel
+ *  side ever names the cause; this is where the page does, from the memory
+ *  the kernel had reached, and hands over to the crash screen with that
+ *  explanation instead of letting the next render trip over the borrow. */
+function noteOpenFailure(what: string, err: unknown, file: { name: string; bytes: Uint8Array }): void {
+  const size = formatBytes(file.bytes.byteLength)
   const memory = kernelMemoryBytes()
-  LogStore.log.warn(
-    'app',
-    `${what} failed on a ${formatBytes(bytes.byteLength)} file${memory !== null ? `; kernel memory ${formatBytes(memory)}` : ''}`,
+  const memoryNote = memory !== null ? `; kernel memory ${formatBytes(memory)}` : ''
+  // A Rust panic ends in the same trap, but its hook has already captured
+  // the real message (and fired the crash screen) by the time the trap
+  // reaches this catch: that capture names the cause, not the memory.
+  const panic = getPanicCapture()
+  const trapped = panic === null && err instanceof WebAssembly.RuntimeError
+  const outOfMemory = trapped && memory !== null && memory >= KERNEL_MEMORY_NEAR_CEILING
+  openAttemptFailed(
+    panic !== null
+      ? `Hew hit an internal error opening it (${panic.message}${memoryNote}).`
+      : outOfMemory
+        ? `Hew ran out of memory opening it${memoryNote}.`
+        : trapped
+          ? `Hew stopped while opening it (${err.message}${memoryNote}).`
+          : friendlyErrorText(err),
   )
+  const cause = panic !== null ? '; kernel panic' : outOfMemory ? '; out of memory' : trapped ? '; kernel trap' : ''
+  LogStore.log.warn('app', `${what} failed on a ${size} file${memoryNote}${cause}`)
+  if (!trapped) return
+  if (outOfMemory) {
+    recordKernelStop(`Out of memory opening ${file.name} (${size})${memoryNote}`, {
+      headline: 'This model is too large for Hew to open',
+      detail:
+        `Hew ran out of memory opening ${file.name} (${size}). Hew can use up to 4 GB of memory, and this model needs more. ` +
+        'A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. ' +
+        'Reload to keep working.',
+    })
+  } else {
+    recordKernelStop(`Kernel trap opening ${file.name} (${size}): ${err.message}${memoryNote}`, {
+      headline: 'Hew stopped while opening the file',
+      detail: `Hew stopped while opening ${file.name} (${size}) and can't continue. Reload to keep working, and use Report this crash to send the file.`,
+    })
+  }
 }
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
@@ -2351,7 +2393,7 @@ export default function App() {
     if (file !== undefined) beginOpenAttempt({ name: file.name, label: file.label, bytes })
     const loaded = loadHewBytes(scene, bytes)
     if (!loaded.ok) {
-      if (file !== undefined) noteOpenFailure('Open', loaded.error, bytes)
+      if (file !== undefined) noteOpenFailure('Open', loaded.error, { name: file.name, bytes })
       if (loaded.panicked) {
         setKernelPanicked(true)
       }
@@ -2747,10 +2789,10 @@ export default function App() {
                 )
       ) as ImportReport
     } catch (err: unknown) {
-      noteOpenFailure('Import', err, pick.bytes)
+      noteOpenFailure('Import', err, pick)
       // A wasm trap mid-import (an out-of-memory abort on a model too big
-      // for the browser kernel) reads as the borrow-lock error; handleToast
-      // latches the kernel-panic banner for it like any other panic text.
+      // for the browser kernel) hands the page to the crash screen inside
+      // noteOpenFailure; the toast below is for ordinary refusals.
       handleToast(`Import failed: ${friendlyErrorText(err)}`)
       // The blank-document replace above already committed (applyLoadedBytes
       // mutates the live scene directly, with no rollback), even though the
@@ -2854,7 +2896,7 @@ export default function App() {
     try {
       step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
     } catch (err: unknown) {
-      noteOpenFailure('SKP open', err, pick.bytes)
+      noteOpenFailure('SKP open', err, pick)
       handleToast(`Open failed: ${friendlyErrorText(err)}`)
       settle()
       return false
@@ -2886,7 +2928,7 @@ export default function App() {
       skpSourceGenRef.current += 1
       clearOpenAttempt()
     } catch (err: unknown) {
-      noteOpenFailure('SKP open', err, pick.bytes)
+      noteOpenFailure('SKP open', err, pick)
       handleToast(`Open failed: ${friendlyErrorText(err)}`)
       // The blank load committed even though the open failed: reflect a fresh
       // untitled document so the next Save can never write to a stale file

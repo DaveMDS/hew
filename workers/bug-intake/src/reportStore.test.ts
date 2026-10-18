@@ -66,7 +66,7 @@ describe('ReportStore: upload round trip', () => {
     assert.equal(head?.reportId, 'HEW-AAAA-BBBB')
   })
 
-  test('a multi-piece upload at the 90 MiB boundary round-trips exactly (one piece per row, no rechunking)', async () => {
+  test('a 90 MiB multi-piece upload round-trips exactly (one piece per row, no rechunking)', async () => {
     const store = makeStore()
     const tokenHash = await hashToken('t')
     const bytes = randomBytes(90 * 1024 * 1024)

@@ -14,8 +14,9 @@
  * client isn't a browser, so there is nothing here for CORS to gate.
  *
  * The upload is chunked (§4 "Chunked upload"): the Workers Free plan caps
- * CPU time at 10 ms per request, and copying a 60–90 MiB upload through one
- * request doesn't fit — so the client splits it into pieces of at most
+ * CPU time at 10 ms per request, and copying an upload of tens or hundreds
+ * of megabytes through one request doesn't fit — so the client splits it
+ * into pieces of at most
  * `PIECE_BYTES` (1.9 MB) and sends START (this handles the first piece and
  * opens the upload), then PIECE for each following piece, then COMMIT. Each
  * of those three is its own exported handler below.

@@ -153,6 +153,14 @@ vi.mock('./wasm/loader', () => ({
   ),
 }))
 
+// wasm/kernelMemory — the real module reads the memory loader.ts hands it,
+// which the mocked loader never does; null (not loaded) is the default here
+// and the out-of-memory open test sets a figure at the wasm32 ceiling.
+vi.mock('./wasm/kernelMemory', () => ({
+  kernelMemoryBytes: vi.fn((): number | null => null),
+  setKernelMemory: vi.fn(),
+}))
+
 // Viewport — renders nothing; viewportApi.current stays null (App guards
 // all viewportApi calls with optional chaining).
 vi.mock('./viewport/Viewport', () => ({
@@ -233,6 +241,8 @@ import type { DocSessionState } from './io/documentSession'
 import type { Scene } from './wasm/loader'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { clearOpenAttempt, getFailedOpen } from './log/failedOpen'
+import { clearKernelStop, getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
+import { kernelMemoryBytes } from './wasm/kernelMemory'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1630,6 +1640,11 @@ describe('App — unified Open dialog', () => {
     mockScene.import_stl = defaultImportStl
     mockScene.load = defaultLoad
     vi.mocked(makeFileHost).mockReset()
+    // The kernel-stop tests below leave module state behind if an
+    // assertion fails partway; clear it here so one failure stays one.
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    clearKernelStop()
+    vi.mocked(kernelMemoryBytes).mockReturnValue(null)
   })
 
   const triggerOpen = () => {
@@ -1693,6 +1708,141 @@ describe('App — unified Open dialog', () => {
     triggerOpen()
     await waitFor(() => expect(screen.getByText('good.hew')).toBeInTheDocument())
     expect(getFailedOpen()).toBeNull()
+  })
+
+  it('an open that runs the kernel out of memory names the cause and hands the page to the crash screen', async () => {
+    clearOpenAttempt()
+    clearKernelStop()
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    // Rust's out-of-memory abort is a bare wasm trap with memory at the
+    // 4 GiB wasm32 ceiling: no panic hook runs, so the page is what names it.
+    vi.mocked(kernelMemoryBytes).mockReturnValue(4095.9 * 1024 * 1024)
+    mockScene.load = vi.fn(() => {
+      throw new WebAssembly.RuntimeError('unreachable')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'Big.hew',
+      bytes: new Uint8Array(1024),
+      handle: null,
+    })
+    const panicEvent = vi.fn()
+    window.addEventListener(KERNEL_PANIC_EVENT, panicEvent)
+
+    try {
+      await renderAndLoad()
+      triggerOpen()
+      await waitFor(() => expect(panicEvent).toHaveBeenCalledTimes(1))
+    } finally {
+      window.removeEventListener(KERNEL_PANIC_EVENT, panicEvent)
+      vi.mocked(kernelMemoryBytes).mockReturnValue(null)
+    }
+
+    // The file is kept for the report, with the cause as its error.
+    const held = getFailedOpen()!
+    expect(held.name).toBe('Big.hew')
+    expect(held.error).toMatch(/ran out of memory opening it; kernel memory 4095\.9 MB/)
+    // The crash screen gets the explanation; the capture reads like the hook's.
+    expect(getKernelStop()?.headline).toBe('This model is too large for Hew to open')
+    expect(getKernelStop()?.detail).toMatch(/opening Big\.hew \(1\.0 KB\)/)
+    expect(getPanicCapture()?.message).toBe('Out of memory opening Big.hew (1.0 KB); kernel memory 4095.9 MB')
+    expect(getPanicCapture()?.recording).toBeNull()
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    clearKernelStop()
+  })
+
+  it('an open that traps with memory to spare is a stop, not an out-of-memory', async () => {
+    clearOpenAttempt()
+    clearKernelStop()
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    vi.mocked(kernelMemoryBytes).mockReturnValue(512 * 1024 * 1024)
+    mockScene.load = vi.fn(() => {
+      throw new WebAssembly.RuntimeError('memory access out of bounds')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'Odd.hew',
+      bytes: new Uint8Array(16),
+      handle: null,
+    })
+    const panicEvent = vi.fn()
+    window.addEventListener(KERNEL_PANIC_EVENT, panicEvent)
+
+    try {
+      await renderAndLoad()
+      triggerOpen()
+      await waitFor(() => expect(panicEvent).toHaveBeenCalledTimes(1))
+    } finally {
+      window.removeEventListener(KERNEL_PANIC_EVENT, panicEvent)
+      vi.mocked(kernelMemoryBytes).mockReturnValue(null)
+    }
+
+    expect(getFailedOpen()!.error).toMatch(/Hew stopped while opening it \(memory access out of bounds; kernel memory 512\.0 MB\)/)
+    expect(getKernelStop()?.headline).toBe('Hew stopped while opening the file')
+    expect(getPanicCapture()?.message).toMatch(/^Kernel trap opening Odd\.hew \(16 B\): memory access out of bounds/)
+    delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    clearKernelStop()
+  })
+
+  it('a trap after a real panic keeps the panic as the cause, not the memory', async () => {
+    clearOpenAttempt()
+    // The Rust panic hook runs before the trap reaches the catch: by then
+    // the capture (with the real message) exists and the crash screen is up.
+    ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = {
+      at: '2026-01-01T00:00:00.000Z',
+      message: 'panicked at crates/kernel/src/document.rs:42: capacity overflow',
+      recording: '{"version":2,"calls":[],"golden_hash":0}',
+    }
+    vi.mocked(kernelMemoryBytes).mockReturnValue(4095.9 * 1024 * 1024)
+    mockScene.load = vi.fn(() => {
+      throw new WebAssembly.RuntimeError('unreachable')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'Big.hew',
+      bytes: new Uint8Array(1024),
+      handle: null,
+    })
+    const panicEvent = vi.fn()
+    window.addEventListener(KERNEL_PANIC_EVENT, panicEvent)
+    try {
+      await renderAndLoad()
+      triggerOpen()
+      await waitFor(() => expect(getFailedOpen()?.error).not.toBeNull())
+    } finally {
+      window.removeEventListener(KERNEL_PANIC_EVENT, panicEvent)
+    }
+
+    expect(getFailedOpen()!.error).toMatch(/internal error opening it \(panicked at .*capacity overflow; kernel memory 4095\.9 MB\)/)
+    expect(getKernelStop()).toBeNull()
+    expect(panicEvent).not.toHaveBeenCalled()
+    // The hook's capture, recording included, is left alone.
+    expect(getPanicCapture()?.recording).toBe('{"version":2,"calls":[],"golden_hash":0}')
+  })
+
+  it('a typed refusal leaves the kernel running: no stop, no panic event', async () => {
+    clearOpenAttempt()
+    mockScene.load = vi.fn(() => {
+      throw new Error('LoadError: bad manifest')
+    })
+    vi.mocked(fakeFileHost.openAny).mockResolvedValue({
+      kind: 'hew',
+      name: 'broken.hew',
+      bytes: new Uint8Array([9, 9]),
+      handle: null,
+    })
+    const panicEvent = vi.fn()
+    window.addEventListener(KERNEL_PANIC_EVENT, panicEvent)
+    try {
+      await renderAndLoad()
+      triggerOpen()
+      await waitFor(() => expect(getFailedOpen()).not.toBeNull())
+    } finally {
+      window.removeEventListener(KERNEL_PANIC_EVENT, panicEvent)
+    }
+    expect(panicEvent).not.toHaveBeenCalled()
+    expect(getKernelStop()).toBeNull()
+    expect(getPanicCapture()).toBeNull()
   })
 
   it('records a successful .hew open into the web recents store (io/recents.ts)', async () => {

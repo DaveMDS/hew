@@ -8,7 +8,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ErrorBoundary, LAST_ERROR_KEY } from './ErrorBoundary'
-import { KERNEL_PANIC_EVENT } from './log/panicCapture'
+import { clearKernelStop, KERNEL_PANIC_EVENT, recordKernelStop } from './log/panicCapture'
 
 describe('ErrorBoundary', () => {
   beforeEach(() => {
@@ -17,6 +17,33 @@ describe('ErrorBoundary', () => {
   afterEach(() => {
     vi.restoreAllMocks()
     delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+    clearKernelStop()
+  })
+
+  it('shows a recorded kernel stop in its own words — the out-of-memory open', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(
+      <ErrorBoundary>
+        <p>still running</p>
+      </ErrorBoundary>,
+    )
+    act(() => {
+      recordKernelStop('Out of memory opening Big.skp (137.0 MB); kernel memory 4095.9 MB', {
+        headline: 'This model is too large for Hew to open',
+        detail: 'Hew ran out of memory opening Big.skp (137.0 MB). Reload to keep working.',
+      })
+    })
+
+    expect(screen.getByRole('heading', { name: 'This model is too large for Hew to open' })).toBeInTheDocument()
+    expect(screen.getByText(/ran out of memory opening Big\.skp/)).toBeInTheDocument()
+    expect(screen.queryByText('still running')).not.toBeInTheDocument()
+    expect(screen.queryByText(/hew hit an error/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/render error/i)).not.toBeInTheDocument()
+    // The underlying-error list names it a stop, not a panic.
+    expect(screen.getByText(/kernel stopped — /)).toBeInTheDocument()
+    expect(screen.queryByText(/kernel panic — /)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^report this crash$/i })).toBeInTheDocument()
+    expect(localStorage.getItem(LAST_ERROR_KEY)).toContain('Out of memory opening Big.skp')
   })
 
   it('renders children when nothing throws', () => {

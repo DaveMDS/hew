@@ -147,7 +147,8 @@ function reportErrorFromResponse(status: number, body: unknown): ReportError {
 
 /** Desktop path: the gzip bytes ride the invoke as a RAW body (the same
  *  convention `relayClient.ts`'s `relayPut` uses), never a JSON array — a
- *  90 MiB upload must not be serialized as tens of millions of numbers.
+ *  report of hundreds of megabytes must not be serialized as hundreds of
+ *  millions of numbers.
  *  Rust runs the piece-by-piece upload and reports progress as
  *  `report-progress` events. */
 async function submitDesktop(

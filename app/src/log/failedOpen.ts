@@ -11,8 +11,11 @@
  *
  * An attempt is noted before the kernel sees the file and cleared once the
  * document lands. Until then it stays: a refusal marks it with the error, and
- * a trap that kills the kernel mid-open leaves it in place with no error at
- * all, which is itself the clue ("Hew stopped while opening it"). Only the
+ * a trap that kills the kernel mid-open is marked with the cause the page
+ * works out for it (out of memory, a panic, or the bare trap — App.tsx's
+ * `noteOpenFailure`). A kernel that dies where no catch site records
+ * anything leaves it in place with no error at all, which is itself the
+ * clue ("Hew stopped while opening it"). Only the
  * latest attempt is kept, and any document that replaces the one it failed
  * in (New, a `.hew` open, a later open or import that lands) drops it, so a
  * report about something else never carries it and its memory is let go.
@@ -29,8 +32,9 @@ export interface FailedOpen {
   label: string
   /** The file, byte for byte. */
   bytes: Uint8Array
-  /** The error the open or import ended with, or null when Hew stopped
-   *  before it could report one (a kernel trap mid-open). */
+  /** The error the open or import ended with — a refusal's message, or the
+   *  cause the page named for a trap — or null when Hew stopped where
+   *  nothing could record one. */
   error: string | null
 }
 

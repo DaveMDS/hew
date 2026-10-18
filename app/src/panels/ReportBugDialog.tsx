@@ -789,7 +789,11 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                       </div>
                       {disabled && <div style={HINT_STYLE}>{row?.disabledReason}</div>}
                       {!disabled && checked && sendAvailable && row?.droppedFromSend === true && (
-                        <div style={HINT_STYLE}>Too large to send; still included in Save to file.</div>
+                        <div style={HINT_STYLE}>
+                          {key === 'failedFile'
+                            ? 'Too large to send; its name, size, and error go instead. Save to file includes the file itself.'
+                            : 'Too large to send; still included in Save to file.'}
+                        </div>
                       )}
                       {expanded.has(key) && row && <div style={PREVIEW_STYLE}>{row.preview}</div>}
                     </div>

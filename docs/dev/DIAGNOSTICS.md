@@ -367,6 +367,21 @@ a reload): it exists purely so the current page session can still recover a
 recording after the instance is poisoned, which is also why it doesn't
 survive a reload itself.
 
+A kernel can also stop without a panic: Rust's out-of-memory abort runs no
+panic hook, and the page sees only a bare `WebAssembly.RuntimeError`
+("unreachable") from the call, then "recursive use of an object" from every
+call after it. The open and import paths catch that trap (`noteOpenFailure`
+in `App.tsx`) and write the same capture from the page side
+(`recordKernelStop` in `log/panicCapture.ts`): `__hewLastPanic` with a null
+recording, the `localStorage` record, and the `hew:kernel-panic` event. The
+message names the cause from the memory the kernel had reached — "Out of
+memory opening X (137.0 MB); kernel memory 4095.9 MB" when it is at the
+wasm32 ceiling, "Kernel trap opening X: …" otherwise — and the crash screen
+shows that stop's own heading and explanation ("This model is too large for
+Hew to open", with what to do) instead of the generic internal-error copy.
+`recordKernelStop` stands down when the hook already captured a panic, so a
+panic's recording is never overwritten by the page's thinner record.
+
 ### Replaying a recording
 
 `tools/replay-runner` is a small, dependency-free Node program that loads the
@@ -423,7 +438,9 @@ the case the automatic dump can't cover: a kernel panic. The crash screen
 appears either on an uncaught render error or, for a panic, as soon as the
 panic hook fires `hew:kernel-panic` — the handler that hit the panic usually
 catches the trap, so no render error follows, and the screen shows only the
-underlying panic. Once a panic has been captured the automatic dump stands
+underlying panic. A kernel that stopped on a trap the hook never saw (an
+out-of-memory open) reaches it the same way through `recordKernelStop` (§2
+above), with that stop's own heading in place of "Hew hit an error". Once a panic has been captured the automatic dump stands
 down (every later uncaught error is the poisoned instance's symptom), and
 the button is the way to send or save a bundle instead. It opens
 `ReportBugDialog` (below) in crash mode, rendered inside the boundary itself
@@ -468,10 +485,18 @@ one. Extract it under its own name with
 `jq -r .failedFile.bytes report.json | base64 -d > "$(jq -r .failedFile.name report.json)"`. The log line
 for a failed open gives the file's size and the kernel's memory
 (`kernelMemoryBytes()` in `wasm/kernelMemory.ts`): wasm memory only grows,
-so a figure near 4 GB marks an out-of-memory abort.
+so a figure near 4 GB marks an out-of-memory abort, and the line says
+`; out of memory` (or `; kernel trap`, or `; kernel panic` when the hook
+had already captured one) when a wasm trap ended the open.
+A sent report that had to leave the file out still carries `failedFile`
+without `bytes` — `{"name", "label", "size", "error", "omitted": "too large
+to send"}` — and a top-level `dropped` array naming every ticked row Send
+left out (`"model"`, `"imports"`, `"failedFile"`, in drop order), right
+after the fixed-order head keys. Neither appears in a saved file or in a
+report that fit.
 **Send report** gzips the bundle and submits it to a private intake service
 on Hew's Cloudflare account, leaving out the model, then imported files,
-then the file that didn't open when it passes 90 MiB compressed, and returns a short report ID; **Save to
+then the file that didn't open when it passes 1 GiB compressed, and returns a short report ID; **Save to
 file…** writes every ticked row as uncompressed JSON locally instead, for
 attaching to a manually-filed issue. A report after a large import runs to
 hundreds of megabytes, so the bundle is never held as one string: it is

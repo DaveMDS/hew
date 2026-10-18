@@ -188,10 +188,14 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw new ReportBuildCancelled()
 }
 
-/** §3's cap on the compressed upload: under the Cloudflare free plan's
- *  100 MB request body limit. Past it, the model, then imported files, then
- *  the file that didn't open are dropped from the sent bundle. */
-export const MAX_SEND_BYTES = 90 * 1024 * 1024
+/** §3's cap on the compressed upload, the intake service's
+ *  `MAX_UPLOAD_BYTES`: 1 GiB, enough for the SketchUp files that run the
+ *  kernel out of memory, which are what a report most needs to carry. The
+ *  upload goes in small pieces, so no request-size limit sets this; the
+ *  service's storage budget does. Past it, the model, then imported files,
+ *  then the file that didn't open are dropped from the sent bundle, which
+ *  then says so (`dropped`, and a `failedFile` kept without its bytes). */
+export const MAX_SEND_BYTES = 1024 * 1024 * 1024
 
 /** The largest piece the bundle is written in. Each piece is escaped,
  *  encoded, and compressed in one stretch before the page gets a turn, so a
@@ -641,18 +645,33 @@ function* bundleStrings(
   yield `{"format":1,"report":${JSON.stringify(report)}`
   if (inc.system) yield `,"system":${JSON.stringify(c.system)}`
   if (c.crash !== null) yield `,"crash":${JSON.stringify(c.crash)}`
+  // Rows the user ticked that Send left out to fit the cap, so the reader
+  // learns a report arrived short — and short of what — rather than taking
+  // a missing row for an unticked one. Absent from a report that fits.
+  const dropped: ReportRowKey[] = []
+  if (inc.model && !includeModel) dropped.push('model')
+  if (inc.imports && !includeImports) dropped.push('imports')
+  if (inc.failedFile && !includeFailedFile) dropped.push('failedFile')
+  if (dropped.length > 0) yield `,"dropped":${JSON.stringify(dropped)}`
   if (inc.recording) {
     yield ',"recording":'
     yield* jsonStringPieces((includeImports ? c.recording : c.strippedRecording) as string, size)
     if (c.importedFiles.length > 0 && !includeImports) yield ',"importsStripped":true'
   }
-  if (includeFailedFile && c.failedOpen !== null) {
+  if (inc.failedFile && c.failedOpen !== null) {
     const { name, label, bytes, error } = c.failedOpen
     // Everything but the bytes first, so a reader that stops early still
-    // learns what the file was and how it failed.
-    yield `,"failedFile":{"name":${JSON.stringify(name)},"label":${JSON.stringify(label)},"size":${bytes.byteLength},"error":${JSON.stringify(error)},"bytes":"`
-    yield* base64Pieces(bytes, size)
-    yield '"}'
+    // learns what the file was and how it failed. A file too large to send
+    // still goes by name, size, and error: that much a reader can act on
+    // (a 137 MB .skp that ran the kernel out of memory tells its own story).
+    yield `,"failedFile":{"name":${JSON.stringify(name)},"label":${JSON.stringify(label)},"size":${bytes.byteLength},"error":${JSON.stringify(error)}`
+    if (includeFailedFile) {
+      yield ',"bytes":"'
+      yield* base64Pieces(bytes, size)
+      yield '"}'
+    } else {
+      yield ',"omitted":"too large to send"}'
+    }
   }
   if (includeModel && c.model !== null) {
     yield ',"hew":"'

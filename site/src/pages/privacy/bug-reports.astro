@@ -49,9 +49,11 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
       <p>
         Opening the dialog sends nothing by itself. Only clicking
         <strong>Send report</strong> submits it, compressed. A report over
-        90 MB after compression is sent without the model file, then
+        1 GB after compression is sent without the model file, then
         without imported files, then without the file that didn't open; the
-        dialog marks each one it leaves out.
+        dialog marks each one it leaves out, and the report says which. A
+        file that didn't open and was left out still goes by name, size, and
+        the error it failed with, never its contents.
         <strong>Save to file…</strong> writes everything you ticked to a file
         on your machine instead, and <strong>Cancel</strong> sends nothing at
         all.

@@ -14,8 +14,9 @@
 //! be pointed at an attacker-controlled endpoint via the environment.
 //!
 //! The webview gzips the bundle, and the bytes ride the invoke as a raw body
-//! (`tauri::ipc::Request`), the same reason `relay_put` does: an upload of up
-//! to 90 MiB must not be serialized as tens of millions of numbers first.
+//! (`tauri::ipc::Request`), the same reason `relay_put` does: an upload of
+//! hundreds of megabytes must not be serialized as hundreds of millions of
+//! numbers first.
 //! This command then uploads them in pieces of `PIECE_BYTES` — start with the
 //! first piece, each following piece in order, commit — because the intake
 //! service gives each request only 10 ms of CPU (design §4). It emits
@@ -50,7 +51,7 @@ pub enum ReportErrorKind {
     /// 400 — not gzip, a head that doesn't parse, `format` ≠ 1, or
     /// description length out of range.
     Invalid,
-    /// 413 — over the 90 MiB compressed cap.
+    /// 413 — over the 1 GiB compressed cap.
     TooLarge,
     /// 429 — per-client rate limit.
     RateLimited,

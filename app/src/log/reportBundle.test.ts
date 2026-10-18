@@ -638,8 +638,9 @@ describe('buildReportBundle', () => {
       const keepsFile = await buildReportBundle({ ...opts, flags: { ...ALL_ON, model: false, imports: false } })
       const bare = await buildReportBundle({ ...opts, flags: { ...ALL_ON, model: false, imports: false, failedFile: false } })
 
-      // A cap the file alone fits under once the model and imports are gone.
-      const fits = keepsFile.send.compressedBytes! + 16
+      // A cap the file alone fits under once the model and imports are gone
+      // (with room for the `dropped` marker naming those two).
+      const fits = keepsFile.send.compressedBytes! + 128
       const kept = await buildReportBundle({ ...opts, flags: ALL_ON, maxSendBytes: fits })
       expect(kept.rows.model.droppedFromSend).toBe(true)
       expect(kept.rows.imports.droppedFromSend).toBe(true)
@@ -653,6 +654,38 @@ describe('buildReportBundle', () => {
       expect(dropped.rows.failedFile.droppedFromSend).toBe(true)
       expect(dropped.send.unavailableReason).toBeNull()
       expect((await saved({ ...opts, flags: ALL_ON, maxSendBytes: cap })).failedFile.size).toBe(50_000)
+    })
+
+    it('sent without the file, the report still says what the file was and that it was dropped', async () => {
+      const scene = fakeScene({ save: () => randomBytes(50_000), peek_recording: () => importRecording(randomByteList(20_000)) })
+      const file = { ...failed, bytes: randomBytes(50_000) }
+      const opts = { ...baseOpts, scene, failedOpen: file }
+      const bare = await buildReportBundle({ ...opts, flags: { ...ALL_ON, model: false, imports: false, failedFile: false } })
+      const cap = bare.send.compressedBytes! + 256
+
+      const sent = JSON.parse(await gunzipText((await buildReportUpload({ ...opts, flags: ALL_ON, maxSendBytes: cap })).gzip!))
+      expect(sent.dropped).toEqual(['model', 'imports', 'failedFile'])
+      expect(sent.failedFile).toEqual({
+        name: 'Kitchen.skp',
+        label: 'SketchUp model (.skp)',
+        size: 50_000,
+        error: failed.error,
+        omitted: 'too large to send',
+      })
+      expect(sent.hew).toBeUndefined()
+      expect(sent.importsStripped).toBe(true)
+      // `dropped` sits in the head, right after the fixed-order keys.
+      expect(Object.keys(sent).slice(0, 3)).toEqual(['format', 'report', 'system'])
+      expect(Object.keys(sent)[3]).toBe('dropped')
+
+      // A report that fits, and every saved file, carries neither marker.
+      const whole = await saved({ ...opts, flags: ALL_ON, maxSendBytes: cap })
+      expect(whole.dropped).toBeUndefined()
+      expect(whole.failedFile.omitted).toBeUndefined()
+      expect(whole.failedFile.bytes).toBeTypeOf('string')
+      const fits = JSON.parse(await gunzipText((await buildReportUpload({ ...opts, flags: ALL_ON, maxSendBytes: Number.MAX_SAFE_INTEGER })).gzip!))
+      expect(fits.dropped).toBeUndefined()
+      expect(fits.failedFile.omitted).toBeUndefined()
     })
   })
 

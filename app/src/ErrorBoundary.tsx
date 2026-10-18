@@ -20,7 +20,7 @@
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 import { getEntries } from './log/LogStore'
-import { getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
+import { getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT, type KernelStop } from './log/panicCapture'
 import { ReportBugDialog } from './panels/ReportBugDialog'
 import type { ReportCrashInfo } from './log/reportBundle'
 
@@ -43,6 +43,10 @@ interface State {
   /** What stopped the app: a render/lifecycle throw, or a kernel panic the
    *  wasm hook reported (no render error exists to show as the symptom). */
   source: 'render' | 'panic'
+  /** Set when the kernel stopped on a trap rather than a panic (an
+   *  out-of-memory abort mid-open): the screen's heading and explanation
+   *  come from here instead of the generic internal-error copy. */
+  stop: KernelStop | null
   componentStack: string
   /** Recent captured console errors — includes the kernel `panicked at …` line
    *  that poisons the wasm instance (the thrown error is only the symptom). */
@@ -58,6 +62,7 @@ export class ErrorBoundary extends Component<Props, State> {
   state: State = {
     error: null,
     source: 'render',
+    stop: null,
     componentStack: '',
     recentErrors: [],
     copied: false,
@@ -84,9 +89,10 @@ export class ErrorBoundary extends Component<Props, State> {
    *  render to trip over the poisoned instance, which may never happen. */
   private handleKernelPanic = () => {
     if (this.state.error !== null) return
+    const stop = getKernelStop()
     const error = new Error(getPanicCapture()?.message ?? 'kernel panic')
-    this.setState({ error, source: 'panic' })
-    this.recordCrash(error, '', 'Hew stopped on a kernel panic:')
+    this.setState({ error, source: 'panic', stop })
+    this.recordCrash(error, '', stop !== null ? 'Hew stopped:' : 'Hew stopped on a kernel panic:')
   }
 
   private recordCrash(error: Error, stack: string, label: string) {
@@ -103,7 +109,10 @@ export class ErrorBoundary extends Component<Props, State> {
     const capture = getPanicCapture()
     if (capture !== null) {
       panicMessage = capture.message
-      recentErrors.push(`kernel panic — ${capture.at}\n${capture.message}`)
+      // A stop recorded from the page (recordKernelStop) is a trap, not a
+      // panic; label it as what it is.
+      const kind = getKernelStop() !== null ? 'kernel stopped' : 'kernel panic'
+      recentErrors.push(`${kind} — ${capture.at}\n${capture.message}`)
     } else {
       try {
         const panic = localStorage.getItem('hew:lastPanic')
@@ -172,7 +181,7 @@ export class ErrorBoundary extends Component<Props, State> {
   private handleOpenReport = () => this.setState({ reportOpen: true })
 
   render() {
-    const { error, source, componentStack, recentErrors, copied, reportOpen } = this.state
+    const { error, source, stop, componentStack, recentErrors, copied, reportOpen } = this.state
     if (error === null) return this.props.children
 
     return (
@@ -194,10 +203,11 @@ export class ErrorBoundary extends Component<Props, State> {
           userSelect: 'text',
         }}
       >
-        <h2 style={{ margin: '0 0 8px' }}>Hew hit an error</h2>
+        <h2 style={{ margin: '0 0 8px' }}>{stop !== null ? stop.headline : 'Hew hit an error'}</h2>
         <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0 }}>
-          The app stopped to avoid a blank window. Reload to recover — your most
-          recent autosave will be offered.
+          {stop !== null
+            ? stop.detail
+            : 'The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered.'}
         </p>
         <button
           onClick={() => location.reload()}

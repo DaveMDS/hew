@@ -234,7 +234,7 @@ describe('submitReport — web upload', () => {
 
   it.each([
     [400, { error: 'invalid' }, 'invalid'],
-    [413, { error: 'too-large', maxBytes: 94371840 }, 'tooLarge'],
+    [413, { error: 'too-large', maxBytes: 1073741824 }, 'tooLarge'],
     [429, { error: 'rate-limited' }, 'rateLimited'],
     [507, { error: 'full' }, 'full'],
     [500, { error: 'unavailable' }, 'unreachable'],

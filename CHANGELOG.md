@@ -8,6 +8,13 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [Unreleased]
+
+### Fixed
+
+- **Open:** A model that needs more memory than Hew can use (4 GB) used to end on an internal-error screen quoting "recursive use of an object". Now the screen says the model is too large to open, how big the file was, and what may bring it down to size in SketchUp. The same goes for an import.
+- **Report Bug:** A report can now carry up to 1 GB compressed, up from 90 MB, so the SketchUp files large enough to run Hew out of memory arrive with the report about them. A report that still has to leave out the file that didn't open now says so, and names the file, its size, and the error it failed with. Such a report used to arrive with no sign that anything had been left out.
+
 ## [1.2.1] (2026-10-17) - The "File That Didn't Open" Release
 
 A bug report about a SketchUp file that wouldn't open arrived without the file,

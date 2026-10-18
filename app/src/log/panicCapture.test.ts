@@ -1,5 +1,8 @@
-import { describe, it, expect, afterEach } from 'vitest'
-import { getPanicCapture } from './panicCapture'
+// @vitest-environment jsdom
+// (recordKernelStop fires a page event and writes localStorage, which the
+// default node environment for .ts tests has neither of.)
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { clearKernelStop, getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT, recordKernelStop } from './panicCapture'
 
 function setGlobal(value: unknown): void {
   ;(globalThis as { __hewLastPanic?: unknown }).__hewLastPanic = value
@@ -7,6 +10,44 @@ function setGlobal(value: unknown): void {
 
 afterEach(() => {
   delete (globalThis as { __hewLastPanic?: unknown }).__hewLastPanic
+  clearKernelStop()
+  localStorage.clear()
+})
+
+describe('recordKernelStop', () => {
+  const copy = { headline: 'This model is too large for Hew to open', detail: 'Hew ran out of memory opening Big.skp (137.0 MB).' }
+
+  it('writes the capture the panic hook would, keeps the copy, and fires the panic event', () => {
+    const fired = vi.fn()
+    globalThis.addEventListener(KERNEL_PANIC_EVENT, fired)
+    try {
+      recordKernelStop('Out of memory opening Big.skp (137.0 MB); kernel memory 4095.9 MB', copy)
+    } finally {
+      globalThis.removeEventListener(KERNEL_PANIC_EVENT, fired)
+    }
+    expect(fired).toHaveBeenCalledTimes(1)
+    const capture = getPanicCapture()
+    expect(capture?.message).toBe('Out of memory opening Big.skp (137.0 MB); kernel memory 4095.9 MB')
+    expect(capture?.recording).toBeNull()
+    expect(Date.parse(capture!.at)).not.toBeNaN()
+    expect(getKernelStop()).toEqual(copy)
+    expect(localStorage.getItem('hew:lastPanic')).toBe(`${capture!.at}\nOut of memory opening Big.skp (137.0 MB); kernel memory 4095.9 MB`)
+  })
+
+  it('stands down when the panic hook already captured a panic on this page', () => {
+    setGlobal({ at: '2026-01-01T00:00:00.000Z', message: 'panicked at document.rs:42', recording: '{"calls":[]}' })
+    const fired = vi.fn()
+    globalThis.addEventListener(KERNEL_PANIC_EVENT, fired)
+    try {
+      recordKernelStop('Kernel trap opening Big.skp', copy)
+    } finally {
+      globalThis.removeEventListener(KERNEL_PANIC_EVENT, fired)
+    }
+    expect(fired).not.toHaveBeenCalled()
+    expect(getKernelStop()).toBeNull()
+    expect(getPanicCapture()?.recording).toBe('{"calls":[]}')
+    expect(localStorage.getItem('hew:lastPanic')).toBeNull()
+  })
 })
 
 describe('getPanicCapture', () => {

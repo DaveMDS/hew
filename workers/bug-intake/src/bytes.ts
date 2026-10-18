@@ -3,8 +3,8 @@
  * bounded piece (`PIECE_BYTES`, 1.9 MB) — docs/design/report-bug.md §4
  * "Chunked upload" — so there is no streaming-without-buffering concern on
  * the write side any more: a single piece is trivially safe to read whole,
- * which is the entire reason chunking exists (a 60–90 MiB upload never
- * arrives as one request in the first place). `readBodyCapped` is that
+ * which is the entire reason chunking exists (an upload of hundreds of
+ * megabytes never arrives as one request in the first place). `readBodyCapped` is that
  * bounded whole-piece read; `concatChunks` is a small test helper for
  * reassembling a batch-read report back into one buffer (`reportStore.test.ts`)
  * — production code no longer reassembles a report at all: the admin

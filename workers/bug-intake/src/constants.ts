@@ -7,14 +7,20 @@
  */
 
 /** The whole compressed report (`Hew-Upload-Length`) can't exceed this —
- *  90 MiB, under Cloudflare's 100 MB request body limit. It's also
- *  `GET /report/`'s reported `maxBytes`. */
-export const MAX_UPLOAD_BYTES = 90 * 1024 * 1024
+ *  1 GiB. It's also `GET /report/`'s reported `maxBytes`. Cloudflare's
+ *  100 MB request body limit does not bound it: the upload arrives in
+ *  `PIECE_BYTES` pieces, one request each. What does bound it is
+ *  `STORE_CEILING_BYTES` below, which a few reports at this cap would fill;
+ *  the cap is set for the largest SketchUp file a report has to carry (a
+ *  model that runs the kernel out of memory is hundreds of megabytes), and
+ *  the ceiling is accepted as the price. */
+export const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 
 /** The Workers FREE plan caps CPU time at a hard, non-configurable 10 ms
  *  per request (docs/design/report-bug.md §4 "Chunked upload"), and a
- *  Worker isolate has only 128 MB of memory — copying a 60–90 MiB upload
- *  through a SINGLE request fits neither. So the client splits the
+ *  Worker isolate has only 128 MB of memory — copying a report of tens of
+ *  megabytes, let alone one near `MAX_UPLOAD_BYTES`, through a SINGLE
+ *  request fits neither. So the client splits the
  *  compressed report into pieces of at most this many bytes and uploads
  *  each in its own request (`POST /report/` for the first, `PUT
  *  /report/<id>/<index>` for the rest): every request handles exactly ONE
@@ -22,7 +28,7 @@ export const MAX_UPLOAD_BYTES = 90 * 1024 * 1024
  *  cheap enough in CPU time to stay on Free, and small enough (comfortably
  *  under the 2 MB SQLite row/BLOB cap) to store as-is with no
  *  rechunking and no multi-piece batching. A 90 MiB report is about 50
- *  requests. */
+ *  requests; one at the 1 GiB cap is about 565. */
 export const PIECE_BYTES = 1_900_000
 
 /** How much DECOMPRESSED head data `headScan.ts`'s `HeadDecompressor` reads
@@ -49,7 +55,11 @@ export const RETENTION_MS = RETENTION_DAYS * 24 * 60 * 60 * 1000
  *  ceiling (507) — the account's 5 GB of free Durable Object storage is
  *  shared with share-relay's ten-minute drops, so this Worker claims a
  *  fixed slice rather than the whole thing. 3 GiB fits about 34 reports the
- *  size of the design's 59.9 MB worked example, or 32 at the 90 MiB cap. */
+ *  size of the design's 59.9 MB worked example, but only 3 at the 1 GiB
+ *  `MAX_UPLOAD_BYTES` cap: a run of reports carrying huge files, or a
+ *  deliberate one, fills the store until the admin page deletes them or
+ *  retention does. Accepted — the reports that matter most are the ones
+ *  with a file that would not open, and those files are big. */
 export const STORE_CEILING_BYTES = 3 * 1024 * 1024 * 1024
 
 /** A `ReportDrop` mid-upload arms its alarm for this long after every piece
@@ -67,16 +77,17 @@ export const ABANDON_TIMEOUT_MS = 10 * 60 * 1000
  *  upload still uncommitted this long after it started is abandoned (its
  *  alarm is never armed past this bound, `putPiece` refuses the next piece
  *  as `expired`, and the index prune drops it) so a client cannot hold a
- *  reservation open indefinitely by trickling pieces. Two hours is far past
- *  the slowest legitimate upload: `MAX_UPLOAD_BYTES` in `PIECE_BYTES` pieces
- *  at the clients' two-minute per-request timeout is about 100 minutes. */
-export const UPLOAD_LIFETIME_MS = 2 * 60 * 60 * 1000
+ *  reservation open indefinitely by trickling pieces. Eight hours is far
+ *  past the slowest legitimate upload: `MAX_UPLOAD_BYTES` takes about two
+ *  and a half hours on a 1 Mbit/s uplink, and `ABANDON_TIMEOUT_MS` ends a
+ *  stalled one long before this does. */
+export const UPLOAD_LIFETIME_MS = 8 * 60 * 60 * 1000
 
 /** `ReportIndex`'s own backstop, independent of any one `ReportDrop`'s
  *  alarm: any uncommitted row whose `lastActivity` is older than this gets
  *  pruned (its bytes given back to the ceiling, and its drop destroyed) the
  *  next time a reservation is attempted. This is ACTIVITY time, not age
- *  since the upload started — a legitimate 90 MiB upload can take longer
+ *  since the upload started — a legitimate upload near the cap takes longer
  *  than this to finish piece by piece, but it keeps touching `lastActivity`
  *  the whole time, so it's never at risk; only an upload that's genuinely
  *  gone quiet is. Longer than `ABANDON_TIMEOUT_MS` on purpose: the
