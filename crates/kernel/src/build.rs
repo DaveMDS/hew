@@ -124,6 +124,18 @@ impl Object {
         // (run on every later mutation and on load) holds it to the same bar —
         // strict for native, wider for imports.
         obj.planarity_tol = plane_tol;
+        // Storage sized to the recipe up front: an element map that grew by
+        // doubling would end up to twice the size its elements need, and
+        // an imported document holds millions of them.
+        let rings: usize = faces.iter().map(Vec::len).sum::<usize>()
+            + holes
+                .map(|h| h.iter().flatten().map(Vec::len).sum::<usize>())
+                .unwrap_or(0);
+        let inner: usize = holes.map(|h| h.iter().map(Vec::len).sum()).unwrap_or(0);
+        obj.vertices.reserve(positions.len());
+        obj.half_edges.reserve(rings);
+        obj.loops.reserve(faces.len() + inner);
+        obj.faces.reserve(faces.len());
 
         let vertex_ids: Vec<VertexId> = positions
             .iter()
@@ -235,6 +247,13 @@ impl Object {
 
         // Pair twins: the directed edge (a, b) matches (b, a) on the
         // neighbouring face. Unpaired half-edges sit on the mesh boundary.
+        // One edge per unordered pair: a twinned pair counts once.
+        obj.edges.reserve(
+            directed
+                .keys()
+                .filter(|&&(a, b)| a < b || !directed.contains_key(&(b, a)))
+                .count(),
+        );
         for (&(a, b), &h) in &directed {
             match directed.get(&(b, a)) {
                 Some(&t) => {
@@ -758,7 +777,9 @@ impl Object {
         // Vertices bucketed on a grid of the tolerance, so a lookup checks
         // its own and the neighboring cells.
         let cell = |p: Point3| -> [i64; 3] {
-            [p.x, p.y, p.z].map(|c| (c / tol.max(1e-12)).floor() as i64)
+            // Clamped so a neighboring cell of an absurd coordinate can
+            // still be named without overflowing.
+            [p.x, p.y, p.z].map(|c| (c / tol.max(1e-12)).floor().clamp(-1e15, 1e15) as i64)
         };
         let mut grid: std::collections::BTreeMap<[i64; 3], Vec<VertexId>> =
             std::collections::BTreeMap::new();

@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 727483a0119b3d5e4b50b5ec710894c7ae4bef9dfb926ebc12985041a4c5b1b5 # shrinks to seed = 1, mutations = [(9856899173626370617, 67)], truncate = None
+cc abf2ee1fd7935d1fd676c4a72cf3154069bad5ccb118f5506ef56c771e7bd575 # shrinks to seed = 2, mutations = [(15281498378249684953, 196)], truncate = None

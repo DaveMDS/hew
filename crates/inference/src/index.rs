@@ -18,9 +18,9 @@
 
 use std::collections::BTreeMap;
 
-use kernel::{ObjectId, Point3, Transform, Vec3, tol};
+use kernel::{Object, ObjectId, Point3, Transform, Vec3, tol};
 
-use crate::{DefMember, Placement, SceneFace, ScenePoint, SceneSegment};
+use crate::{DefGeometry, DefMember, Placement, SceneFace, ScenePoint, SceneSegment};
 
 /// Maximum primitives per BVH leaf: small enough that a leaf visit stays
 /// cheap, large enough to keep the tree shallow. A structural knob, not a
@@ -521,32 +521,97 @@ fn build_node(
     this
 }
 
-/// Per-definition-member spatial data: one definition-space BVH per
-/// candidate class, plus the class root boxes a placement's world box is
-/// derived from. Built once per member by
-/// [`crate::InferenceScene::set_def_member`] and shared by every placement —
-/// the "one copy per definition" half of the two-level index. Persists
-/// across [`SceneIndex`] rebuilds, which is the point: a committed mutation
-/// re-derives only placement-level boxes, never the per-member trees.
+/// The definition members a query sees: every registered member, and
+/// the geometry of those the query's source can provide (see
+/// `InferenceScene::geometry`).
+pub(crate) struct Members<'g> {
+    pub(crate) map: &'g BTreeMap<ObjectId, DefMember>,
+    pub(crate) geometry: &'g dyn Fn(ObjectId) -> Option<&'g DefGeometry>,
+}
+
+/// A definition member's class boxes, from which every placement's world
+/// boxes derive (`SceneIndex::build`): known from the member's object
+/// alone, before — and whether or not — its snap geometry is extracted
+/// (see [`crate::DefMember`]). The same per-element boxes
+/// [`DefIndex::build`] puts in its trees, folded.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DefBounds {
+    point_box: Aabb,
+    segment_box: Aabb,
+    face_box: Aabb,
+    /// The off-plane extent of the member's faces (see `face_map`).
+    face_slack: f64,
+}
+
+impl DefBounds {
+    /// The bounds of `object`: the same element walk `DefGeometry::extract`
+    /// makes, folded into boxes as it goes, nothing kept.
+    pub(crate) fn of(object: &Object) -> DefBounds {
+        let mut point_box = Aabb::EMPTY;
+        for (_, v) in object.vertices() {
+            point_box = Aabb::union(point_box, Aabb::of_point(v.position).padded());
+        }
+        let mut segment_box = Aabb::EMPTY;
+        let half_edges = object.half_edges();
+        for (_, e) in object.edges() {
+            let he = &half_edges[e.half_edge];
+            let a = object.vertices()[he.origin].position;
+            let b = object.vertices()[half_edges[he.next].origin].position;
+            let mut bx = Aabb::of_point(a);
+            bx.include(b);
+            segment_box = Aabb::union(segment_box, bx.padded());
+        }
+        // Face boxes cover boundary vertices only. The world index's
+        // `face_aabb` also covers each vertex's projection onto the fitted
+        // plane (the exact hit region), but projection along the normal does
+        // NOT commute with an affine pose — under non-uniform scale the
+        // world-plane projection of a transformed vertex is not the
+        // transform of the definition-plane projection. So the off-plane
+        // extent is carried as one scalar (`face_slack`) and re-applied in
+        // world space, where the bound is provable (see `face_map`).
+        let mut face_box = Aabb::EMPTY;
+        let mut face_slack = 0.0_f64;
+        for (_, f) in object.faces() {
+            let mut bx = Aabb::EMPTY;
+            for p in object.loop_positions(f.outer_loop) {
+                bx.include(p);
+                face_slack = face_slack.max(f.plane.signed_distance(p).abs());
+            }
+            face_box = Aabb::union(face_box, bx.padded());
+        }
+        DefBounds {
+            point_box,
+            segment_box,
+            face_box,
+            face_slack,
+        }
+    }
+
+    fn face_map<'a>(&self, pose: &'a Transform) -> impl Fn(Aabb) -> Aabb + 'a {
+        let world_slack = linear_frobenius(pose) * self.face_slack;
+        move |aabb| aabb.transformed(pose).inflated(world_slack)
+    }
+
+    fn placement_boxes(&self, pose: &Transform) -> (Aabb, Aabb, Aabb) {
+        (
+            self.point_box.transformed(pose),
+            self.segment_box.transformed(pose),
+            self.face_map(pose)(self.face_box),
+        )
+    }
+}
+
+/// Per-member spatial trees in definition space, over a member's extracted
+/// candidates ([`crate::DefGeometry`]); a query maps each tree's boxes
+/// through the placement's pose (`DefIndex::map`, `DefBounds::face_map`).
 #[derive(Debug, Clone)]
 pub(crate) struct DefIndex {
     points: Bvh,
     segments: Bvh,
     faces: Bvh,
-    point_box: Aabb,
-    segment_box: Aabb,
-    face_box: Aabb,
-    /// Max distance of any face-boundary vertex off its face's fitted plane,
-    /// in definition-space meters. Zero for native geometry; imported
-    /// definitions may carry up to [`tol::IMPORT_PLANE_DIST`]. See
-    /// [`DefIndex::face_map`] for how it re-enters the node tests.
-    face_slack: f64,
 }
 
 impl DefIndex {
-    /// Builds the per-member trees from freshly extracted definition-space
-    /// candidates (same box construction as the world-candidate index,
-    /// except faces — see below).
     pub(crate) fn build(
         points: &[crate::DefPoint],
         segments: &[crate::DefSegment],
@@ -564,82 +629,30 @@ impl DefIndex {
                 b.padded()
             })
             .collect();
-        // Face boxes cover boundary vertices only. The world index's
-        // `face_aabb` also covers each vertex's projection onto the fitted
-        // plane (the exact hit region), but projection along the normal does
-        // NOT commute with an affine pose — under non-uniform scale the
-        // world-plane projection of a transformed vertex is not the
-        // transform of the definition-plane projection. So the off-plane
-        // extent is carried as one scalar (`face_slack`) and re-applied in
-        // world space, where the bound is provable (see `face_map`).
-        let mut face_slack = 0.0_f64;
+        // Boundary vertices only; the off-plane extent is the member's
+        // `DefBounds::face_slack`, applied in world space.
         let face_boxes: Vec<Aabb> = faces
             .iter()
             .map(|f| {
                 let mut b = Aabb::EMPTY;
                 for &p in &f.boundary {
                     b.include(p);
-                    face_slack = face_slack.max(f.plane.signed_distance(p).abs());
                 }
                 b.padded()
             })
             .collect();
-        let fold = |boxes: &[Aabb]| {
-            boxes
-                .iter()
-                .fold(Aabb::EMPTY, |acc, &b| Aabb::union(acc, b))
-        };
         DefIndex {
-            point_box: fold(&point_boxes),
-            segment_box: fold(&segment_boxes),
-            face_box: fold(&face_boxes),
             points: Bvh::build(&point_boxes),
             segments: Bvh::build(&segment_boxes),
             faces: Bvh::build(&face_boxes),
-            face_slack,
         }
     }
 
-    /// The node-box map for point/segment walks under `pose`: definition
-    /// box → world box (see [`Aabb::transformed`]).
     fn map(pose: &Transform) -> impl Fn(Aabb) -> Aabb + '_ {
         move |aabb| aabb.transformed(pose)
     }
-
-    /// The node-box map for face walks under `pose`: transformed, then
-    /// inflated by the world-space off-plane bound.
-    ///
-    /// The exact face test intersects the ray with the *transformed fitted
-    /// plane* and containment-tests the transformed boundary's shadow on it,
-    /// so a hit point can sit off the transformed vertices by the boundary's
-    /// world off-plane distance. For a definition-space vertex `p` at
-    /// distance `d ≤ face_slack` from its plane, the world distance is at
-    /// most `‖L‖₂·d` (map the definition-space foot point, which lands ON
-    /// the world plane by `apply_plane`'s construction; the images differ by
-    /// `L·(p − foot)`). `‖L‖₂ ≤ ‖L‖_F` bounds that without an SVD, so
-    /// inflating by `‖L‖_F · face_slack` keeps every reachable hit point
-    /// inside the mapped node box.
-    fn face_map<'a>(&self, pose: &'a Transform) -> impl Fn(Aabb) -> Aabb + 'a {
-        let world_slack = linear_frobenius(pose) * self.face_slack;
-        move |aabb| aabb.transformed(pose).inflated(world_slack)
-    }
-
-    /// The placement-level world box for each class under `pose` (the
-    /// primitive boxes of the top-level placement BVHs). Empty classes stay
-    /// empty, so a placement never gets admitted for a class its member
-    /// doesn't have.
-    fn placement_boxes(&self, pose: &Transform) -> (Aabb, Aabb, Aabb) {
-        (
-            self.point_box.transformed(pose),
-            self.segment_box.transformed(pose),
-            self.face_map(pose)(self.face_box),
-        )
-    }
 }
 
-/// Frobenius norm of the linear part of `t` — a cheap upper bound on its
-/// spectral norm `‖L‖₂` (largest singular value), used to carry
-/// definition-space distance bounds into world space conservatively.
 fn linear_frobenius(t: &Transform) -> f64 {
     let m = t.to_affine();
     // Row-major 3×4: columns 0..3 of each row are the linear part; column 3
@@ -708,7 +721,7 @@ impl SceneIndex {
         let mut placement_face_boxes = Vec::with_capacity(placements.len());
         for pl in placements {
             let (p, s, f) = match members.get(&pl.member) {
-                Some(m) => m.index.placement_boxes(&pl.pose),
+                Some(m) => m.bounds.placement_boxes(&pl.pose),
                 None => (Aabb::EMPTY, Aabb::EMPTY, Aabb::EMPTY),
             };
             placement_point_boxes.push(p);
@@ -767,7 +780,7 @@ impl SceneIndex {
     pub(crate) fn placed_points_in_cone(
         &self,
         placements: &[Placement],
-        members: &BTreeMap<ObjectId, DefMember>,
+        members: &Members<'_>,
         origin: Point3,
         dir: Vec3,
         tol: PruneTolerance,
@@ -775,11 +788,11 @@ impl SceneIndex {
         let mut out = Vec::new();
         for pi in self.placement_points.cone_candidates(origin, dir, tol) {
             let pl = &placements[pi];
-            let Some(m) = members.get(&pl.member) else {
+            let Some(g) = (members.geometry)(pl.member) else {
                 continue;
             };
             for li in
-                m.index
+                g.index
                     .points
                     .cone_candidates_mapped(DefIndex::map(&pl.pose), origin, dir, tol)
             {
@@ -793,7 +806,7 @@ impl SceneIndex {
     pub(crate) fn placed_segments_in_cone(
         &self,
         placements: &[Placement],
-        members: &BTreeMap<ObjectId, DefMember>,
+        members: &Members<'_>,
         origin: Point3,
         dir: Vec3,
         tol: PruneTolerance,
@@ -801,11 +814,11 @@ impl SceneIndex {
         let mut out = Vec::new();
         for pi in self.placement_segments.cone_candidates(origin, dir, tol) {
             let pl = &placements[pi];
-            let Some(m) = members.get(&pl.member) else {
+            let Some(g) = (members.geometry)(pl.member) else {
                 continue;
             };
             for li in
-                m.index
+                g.index
                     .segments
                     .cone_candidates_mapped(DefIndex::map(&pl.pose), origin, dir, tol)
             {
@@ -821,20 +834,21 @@ impl SceneIndex {
     pub(crate) fn placed_faces_crossing_ray(
         &self,
         placements: &[Placement],
-        members: &BTreeMap<ObjectId, DefMember>,
+        members: &Members<'_>,
         origin: Point3,
         dir: Vec3,
     ) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         for pi in self.placement_faces.ray_candidates(origin, dir) {
             let pl = &placements[pi];
-            let Some(m) = members.get(&pl.member) else {
+            let (Some(m), Some(g)) = (members.map.get(&pl.member), (members.geometry)(pl.member))
+            else {
                 continue;
             };
-            for li in m
+            for li in g
                 .index
                 .faces
-                .ray_candidates_mapped(m.index.face_map(&pl.pose), origin, dir)
+                .ray_candidates_mapped(m.bounds.face_map(&pl.pose), origin, dir)
             {
                 out.push((pi, li));
             }
@@ -861,7 +875,7 @@ impl SceneIndex {
     pub(crate) fn any_placed_face_hit_before(
         &self,
         placements: &[Placement],
-        members: &BTreeMap<ObjectId, DefMember>,
+        members: &Members<'_>,
         origin: Point3,
         dir: Vec3,
         t_before: f64,
@@ -870,11 +884,13 @@ impl SceneIndex {
         self.placement_faces
             .any_hit_before(origin, dir, t_before, |pi| {
                 let pl = &placements[pi];
-                let Some(m) = members.get(&pl.member) else {
+                let (Some(m), Some(g)) =
+                    (members.map.get(&pl.member), (members.geometry)(pl.member))
+                else {
                     return false;
                 };
-                m.index.faces.any_hit_before_mapped(
-                    m.index.face_map(&pl.pose),
+                g.index.faces.any_hit_before_mapped(
+                    m.bounds.face_map(&pl.pose),
                     origin,
                     dir,
                     t_before,

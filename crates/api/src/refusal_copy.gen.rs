@@ -449,6 +449,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadCamera" => {
             "Hew's own request to the model kernel carried a malformed camera. If this keeps happening, use Report Bug."
         }
+        "BadPose" => {
+            "Hew's own request to the model kernel carried a malformed pose. If this keeps happening, use Report Bug."
+        }
         "BadViewStyle" => {
             "Hew's own request to the model kernel carried a malformed view style. If this keeps happening, use Report Bug."
         }

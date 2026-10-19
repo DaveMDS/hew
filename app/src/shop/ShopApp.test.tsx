@@ -21,6 +21,7 @@
  */
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { objectBoundsFromMesh } from '../test/meshBounds'
 
 /** Sets `window.innerWidth`/`innerHeight` (jsdom's own are read-only own
  *  properties, not plain assignable fields) — matches `orientation.test.ts`'s
@@ -117,6 +118,10 @@ const mockScene = {
     positions: () => fixture.objectMesh[String(id)] ?? new Float32Array([0, 0, 0, 1, 1, 1]),
     free: () => {},
   }),
+  object_bounds: objectBoundsFromMesh((id: bigint) => ({
+    positions: () => fixture.objectMesh[String(id)] ?? new Float32Array([0, 0, 0, 1, 1, 1]),
+    free: () => {},
+  })),
   instance_pose: () => undefined as Float64Array | undefined,
   instance_expanded_members: () => new BigUint64Array(),
   instance_expanded_local_poses: () => new Float64Array(),

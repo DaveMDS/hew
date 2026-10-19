@@ -8,6 +8,12 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [Unreleased]
+
+### Fixed
+
+- **Open:** A large SketchUp model takes far less memory to open, so models that ran Hew out of memory now open. A furnished house of 1.8 million faces (a 443 MB `.skp`) needed more than the 4 GB Hew can use; it now opens with room to spare. Four things cost that memory and no longer do: a model's loose geometry came in as thousands of pieces, each carrying the whole model's list of soft edges; the snapping index copied every component's geometry at open, where it now reads a component the first time a snap or pick reaches one of its copies; the kernel kept a second copy of every render mesh the view already held; and the document's element storage was sized by doubling. Every edit on such a model also serialized the whole document for a diagnostic digest, seconds of work and a second copy of the model each time; a document of more than 50,000 faces now skips the digest. The log line for an open records the kernel's memory.
+
 ## [1.2.2] (2026-10-18) - The "Big Files Too" Release
 
 A bug report about a SketchUp file that wouldn't open specifically because it

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { resolveInspect, isWholePartKind } from './inspect'
+import { objectBoundsFromMesh } from '../test/meshBounds'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Snap } from '../tools/types'
 import type { NodeRef } from '../panels/treeModel'
@@ -43,6 +44,11 @@ function makeScene(overrides: Partial<{
       if (positions === undefined) throw new Error('UnknownObject')
       return makeMesh(positions)
     },
+    object_bounds: objectBoundsFromMesh((id: bigint) => {
+      const positions = overrides.object_mesh?.[String(id)]
+      if (positions === undefined) throw new Error('UnknownObject')
+      return makeMesh(positions)
+    }),
     edge_endpoints: () => overrides.edge_endpoints,
     edge_endpoints_in_instance: () => overrides.edge_endpoints_in_instance,
     face_boundary: () => overrides.face_boundary ?? new Float32Array(),

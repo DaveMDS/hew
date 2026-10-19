@@ -89,8 +89,11 @@
 //! World-object candidates are baked into world space at registration and
 //! pruned through a lazily rebuilt AABB BVH (see `index`) before the exact
 //! per-candidate tests run. Component-instance candidates are stored **once
-//! per definition member**, in definition space ([`InferenceScene::set_def_member`]);
-//! each placement is a lightweight `(instance, member, pose)` record
+//! per definition member**, in definition space ([`InferenceScene::set_def_member`],
+//! or [`InferenceScene::set_def_member_deferred`], which takes the member's
+//! bounds and rims at registration and extracts its geometry the first time
+//! a query reaches one of its placements, through the query's
+//! [`MemberSource`]); each placement is a lightweight `(instance, member, pose)` record
 //! ([`InferenceScene::add_placement`]), resolved through a two-level walk —
 //! a top-level BVH over placement world boxes, descending into the member's
 //! persistent definition-space tree with pose-mapped node tests. Exact tests
@@ -105,7 +108,7 @@
 //! a guide line crosses a segment (sketch or object edge) or another guide
 //! line — the crossing is precisely why the guide was drawn.
 
-use std::cell::{Cell, Ref, RefCell};
+use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{
@@ -116,7 +119,7 @@ use kernel::{
 
 mod index;
 
-use index::{DefIndex, PruneTolerance, SceneIndex};
+use index::{DefBounds, DefIndex, Members, PruneTolerance, SceneIndex};
 
 /// A picking ray in world space (UI derives it from the camera + cursor).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1008,15 +1011,19 @@ pub(crate) struct DefFace {
     pub(crate) face: FaceId,
 }
 
-/// One definition member's shared snap geometry: definition-space
-/// candidates extracted once ([`InferenceScene::set_def_member`]) plus the
-/// persistent per-member spatial trees. Every placement of the member
-/// resolves against this one copy.
+/// One definition member's shared snap data. Its bounds and rims come
+/// from its object at registration ([`InferenceScene::set_def_member`],
+/// [`InferenceScene::set_def_member_deferred`]); its geometry
+/// ([`DefGeometry`]) either then or, deferred, the first time a query
+/// reaches one of its placements, through the query's [`MemberSource`].
+/// Every placement of the member resolves against this one copy. A
+/// document of thousands of placed components holds millions of member
+/// vertices, edges and faces: extracting them all at open costs a large
+/// part of the memory a browser allows, and a session touches few of them.
 #[derive(Debug, Clone)]
 pub(crate) struct DefMember {
-    pub(crate) points: Vec<DefPoint>,
-    pub(crate) segments: Vec<DefSegment>,
-    pub(crate) faces: Vec<DefFace>,
+    /// Class boxes: what every placement's world boxes derive from.
+    pub(crate) bounds: DefBounds,
     /// Definition-space analytic rims (coverage-bearing only), materialized
     /// per placement at query time (see [`DefMember::rims_at`]) — rims are
     /// few per scene and linear-walked, so placements pay no baking cost and
@@ -1025,50 +1032,26 @@ pub(crate) struct DefMember {
     /// Definition-space centers of polygons drawn on the member's faces
     /// ([`Object::edge_polygon_centers`]), offered like rim centers.
     pub(crate) polygon_centers: Vec<(Point3, kernel::FaceId)>,
+    /// The member's candidates and trees, once extracted.
+    geometry: OnceCell<DefGeometry>,
+}
+
+/// A definition member's definition-space candidates — the same element
+/// walk [`InferenceScene::register`] does for world objects, minus the
+/// world transform (applied per placement at query time instead) — and
+/// the persistent per-member spatial trees over them.
+#[derive(Debug, Clone)]
+pub(crate) struct DefGeometry {
+    pub(crate) points: Vec<DefPoint>,
+    pub(crate) segments: Vec<DefSegment>,
+    pub(crate) faces: Vec<DefFace>,
     pub(crate) index: DefIndex,
 }
 
 impl DefMember {
-    /// Extracts `object`'s vertices/edges/faces into definition-space
-    /// candidates — the same element walk [`InferenceScene::register`] does
-    /// for world objects, minus the world transform (applied per placement
-    /// at query time instead).
-    fn extract(object: &Object) -> DefMember {
-        let mut points = Vec::new();
-        let mut segments = Vec::new();
-        let mut faces = Vec::new();
-        for (vid, vertex) in object.vertices() {
-            points.push(DefPoint {
-                position: vertex.position,
-                vertex: vid,
-            });
-        }
-        for (eid, edge) in object.edges() {
-            let half_edges = object.half_edges();
-            let he = &half_edges[edge.half_edge];
-            let origin_vid = he.origin;
-            let dest_vid = half_edges[he.next].origin;
-            segments.push(DefSegment {
-                a: object.vertices()[origin_vid].position,
-                b: object.vertices()[dest_vid].position,
-                edge: eid,
-            });
-        }
-        for (fid, face) in object.faces() {
-            let boundary: Vec<Point3> = object.loop_positions(face.outer_loop).collect();
-            let holes: Vec<Vec<Point3>> = face
-                .inner_loops
-                .iter()
-                .map(|&lid| object.loop_positions(lid).collect())
-                .collect();
-            faces.push(DefFace {
-                plane: face.plane,
-                boundary,
-                holes,
-                face: fid,
-            });
-        }
-        let index = DefIndex::build(&points, &segments, &faces);
+    /// The member of `object`, its geometry extracted now or left for the
+    /// first query that needs it.
+    fn of(object: &Object, extract_now: bool) -> DefMember {
         // Analytic rims, gated on surviving coverage exactly like the world
         // path (`register`): a vacant rim offers no candidates at all.
         // Imprinted circle edges (a circle drawn on a member's face) join the
@@ -1080,42 +1063,15 @@ impl DefMember {
             .chain(drawn)
             .filter(AnalyticRim::has_coverage)
             .collect();
+        let geometry = OnceCell::new();
+        if extract_now {
+            let _ = geometry.set(DefGeometry::extract(object));
+        }
         DefMember {
-            points,
-            segments,
-            faces,
+            bounds: DefBounds::of(object),
             rims,
             polygon_centers: object.edge_polygon_centers(),
-            index,
-        }
-    }
-
-    /// Materializes one placed point into the world-space candidate the old
-    /// per-placement baking would have stored: the identical
-    /// `apply_point` on the identical inputs, so positions are bit-equal.
-    fn point_at(&self, li: usize, pl: &Placement) -> ScenePoint {
-        let p = &self.points[li];
-        ScenePoint {
-            position: pl.pose.apply_point(p.position),
-            source: SnapSource {
-                object: pl.member,
-                element: ElementRef::Vertex(p.vertex),
-                instance: Some(pl.instance),
-            },
-        }
-    }
-
-    /// Materializes one placed segment (see [`DefMember::point_at`]).
-    fn segment_at(&self, li: usize, pl: &Placement) -> SceneSegment {
-        let s = &self.segments[li];
-        SceneSegment {
-            a: pl.pose.apply_point(s.a),
-            b: pl.pose.apply_point(s.b),
-            source: SnapSource {
-                object: pl.member,
-                element: ElementRef::Edge(s.edge),
-                instance: Some(pl.instance),
-            },
+            geometry,
         }
     }
 
@@ -1183,8 +1139,84 @@ impl DefMember {
             }
         }
     }
+}
 
-    /// Materializes one placed face (see [`DefMember::point_at`]), or `None`
+impl DefGeometry {
+    /// Extracts `object`'s vertices/edges/faces into definition-space
+    /// candidates and builds the trees over them.
+    fn extract(object: &Object) -> DefGeometry {
+        let mut points = Vec::new();
+        let mut segments = Vec::new();
+        let mut faces = Vec::new();
+        for (vid, vertex) in object.vertices() {
+            points.push(DefPoint {
+                position: vertex.position,
+                vertex: vid,
+            });
+        }
+        for (eid, edge) in object.edges() {
+            let half_edges = object.half_edges();
+            let he = &half_edges[edge.half_edge];
+            let origin_vid = he.origin;
+            let dest_vid = half_edges[he.next].origin;
+            segments.push(DefSegment {
+                a: object.vertices()[origin_vid].position,
+                b: object.vertices()[dest_vid].position,
+                edge: eid,
+            });
+        }
+        for (fid, face) in object.faces() {
+            let boundary: Vec<Point3> = object.loop_positions(face.outer_loop).collect();
+            let holes: Vec<Vec<Point3>> = face
+                .inner_loops
+                .iter()
+                .map(|&lid| object.loop_positions(lid).collect())
+                .collect();
+            faces.push(DefFace {
+                plane: face.plane,
+                boundary,
+                holes,
+                face: fid,
+            });
+        }
+        let index = DefIndex::build(&points, &segments, &faces);
+        DefGeometry {
+            points,
+            segments,
+            faces,
+            index,
+        }
+    }
+
+    /// Materializes one placed point: the member's vertex under the
+    /// placement's pose, sourced to the instance.
+    fn point_at(&self, li: usize, pl: &Placement) -> ScenePoint {
+        let p = &self.points[li];
+        ScenePoint {
+            position: pl.pose.apply_point(p.position),
+            source: SnapSource {
+                object: pl.member,
+                element: ElementRef::Vertex(p.vertex),
+                instance: Some(pl.instance),
+            },
+        }
+    }
+
+    /// Materializes one placed segment (see [`DefGeometry::point_at`]).
+    fn segment_at(&self, li: usize, pl: &Placement) -> SceneSegment {
+        let s = &self.segments[li];
+        SceneSegment {
+            a: pl.pose.apply_point(s.a),
+            b: pl.pose.apply_point(s.b),
+            source: SnapSource {
+                object: pl.member,
+                element: ElementRef::Edge(s.edge),
+                instance: Some(pl.instance),
+            },
+        }
+    }
+
+    /// Materializes one placed face (see [`DefGeometry::point_at`]), or `None`
     /// for a singular pose — the same faces registration-time baking used to
     /// skip, so both storage schemes emit the same candidate set.
     fn face_at(&self, li: usize, pl: &Placement) -> Option<SceneFace> {
@@ -1206,6 +1238,12 @@ impl DefMember {
         })
     }
 }
+
+/// Where a query finds the object of a deferred definition member the
+/// first time it needs the member's geometry (see
+/// [`InferenceScene::set_def_member_deferred`]): `None` for a member it
+/// does not know, which then offers nothing.
+pub type MemberSource<'a> = &'a dyn Fn(ObjectId) -> Option<&'a Object>;
 
 /// One placement of a definition member: everything an instance contributes
 /// to the scene, now that the geometry itself is shared (see [`DefMember`]).
@@ -1424,7 +1462,7 @@ pub struct InferenceScene {
     placements: Vec<Placement>,
     /// Cumulative count of definition-member extraction passes (see
     /// [`InferenceScene::def_extractions`]).
-    def_extractions: u64,
+    def_extractions: Cell<u64>,
 }
 
 impl Default for InferenceScene {
@@ -1455,7 +1493,7 @@ impl Default for InferenceScene {
             removal_visits: 0,
             def_members: BTreeMap::new(),
             placements: Vec::new(),
-            def_extractions: 0,
+            def_extractions: Cell::new(0),
         }
     }
 }
@@ -1490,11 +1528,16 @@ impl InferenceScene {
     /// Candidate counts as (points, segments, faces) — cheap introspection
     /// for tests and debug overlays. Counts what queries can *see*: world
     /// candidates plus each placement's share of its member's candidates
-    /// (definition geometry with no live placement contributes nothing).
+    /// (definition geometry with no live placement contributes nothing, and
+    /// neither does a deferred member no query has extracted yet).
     pub fn candidate_counts(&self) -> (usize, usize, usize) {
         let (mut p, mut s, mut f) = (self.points.len(), self.segments.len(), self.faces.len());
         for pl in &self.placements {
-            if let Some(m) = self.def_members.get(&pl.member) {
+            if let Some(m) = self
+                .def_members
+                .get(&pl.member)
+                .and_then(|m| m.geometry.get())
+            {
                 p += m.points.len();
                 s += m.segments.len();
                 // Placed faces resolve through `apply_plane`, which refuses
@@ -1509,15 +1552,16 @@ impl InferenceScene {
         (p, s, f)
     }
 
-    /// Cumulative number of definition-member extraction passes performed by
-    /// [`InferenceScene::set_def_member`] across the scene's lifetime —
-    /// cheap introspection for tests and debug overlays, like
-    /// [`InferenceScene::occlusion_face_tests`]. Shared definition storage
-    /// exists to make this scale with *definitions*, not placements: the
-    /// registration perf-sanity spec asserts registering N instances of one
-    /// member costs exactly one extraction.
+    /// Cumulative number of definition-member extraction passes across the
+    /// scene's lifetime: one per [`InferenceScene::set_def_member`], and one
+    /// per deferred member ([`InferenceScene::set_def_member_deferred`]) the
+    /// first time a query reaches it — cheap introspection for tests and
+    /// debug overlays, like [`InferenceScene::occlusion_face_tests`]. Shared
+    /// definition storage exists to make this scale with *definitions*, not
+    /// placements: the registration perf-sanity spec asserts registering N
+    /// instances of one member costs exactly one extraction.
     pub fn def_extractions(&self) -> u64 {
-        self.def_extractions
+        self.def_extractions.get()
     }
 
     /// Cumulative number of exact ray-vs-face tests performed by occlusion
@@ -1596,11 +1640,39 @@ impl InferenceScene {
     /// [`InferenceScene::has_def_member`] to skip this when the geometry is
     /// already current.
     pub fn set_def_member(&mut self, member: ObjectId, object: &Object) {
-        self.def_members.insert(member, DefMember::extract(object));
-        self.def_extractions += 1;
+        self.def_members.insert(member, DefMember::of(object, true));
+        self.def_extractions.set(self.def_extractions.get() + 1);
         // Placement-level world boxes derive from the member's class boxes:
         // the top-level index is stale even though no placement changed.
         *self.spatial.get_mut() = None;
+    }
+
+    /// [`Self::set_def_member`] with the member's geometry left for the
+    /// first query that reaches one of its placements, which extracts it
+    /// through its [`MemberSource`] ([`Self::resolve_from`],
+    /// [`Self::pick_face_from`]); the member's bounds and rims are taken
+    /// now. A query given no source, or one that does not know the
+    /// member, offers nothing of it.
+    pub fn set_def_member_deferred(&mut self, member: ObjectId, object: &Object) {
+        self.def_members
+            .insert(member, DefMember::of(object, false));
+        *self.spatial.get_mut() = None;
+    }
+
+    /// The member's geometry, extracted through `source` the first time.
+    fn geometry<'s>(
+        &'s self,
+        member: ObjectId,
+        source: MemberSource<'_>,
+    ) -> Option<&'s DefGeometry> {
+        let m = self.def_members.get(&member)?;
+        if let Some(g) = m.geometry.get() {
+            return Some(g);
+        }
+        let object = source(member)?;
+        self.def_extractions.set(self.def_extractions.get() + 1);
+        let _ = m.geometry.set(DefGeometry::extract(object));
+        m.geometry.get()
     }
 
     /// Whether shared definition geometry is currently registered for
@@ -2074,8 +2146,15 @@ impl InferenceScene {
     /// prunes the point/segment/face candidates to a conservative superset
     /// before the exact tests run.
     pub fn resolve(&self, query: &SnapQuery) -> Option<Snap> {
+        self.resolve_from(query, &|_| None)
+    }
+
+    /// [`Self::resolve`] for a scene with deferred definition members:
+    /// `source` serves the object of a member the query first reaches
+    /// (see [`Self::set_def_member_deferred`]).
+    pub fn resolve_from(&self, query: &SnapQuery, source: MemberSource<'_>) -> Option<Snap> {
         let index = self.spatial_index();
-        self.resolve_impl(query, Some(&index))
+        self.resolve_impl(query, Some(&index), source)
     }
 
     /// Reference implementation of [`resolve`](Self::resolve) with the
@@ -2085,7 +2164,7 @@ impl InferenceScene {
     /// part of the supported API.
     #[doc(hidden)]
     pub fn resolve_linear(&self, query: &SnapQuery) -> Option<Snap> {
-        self.resolve_impl(query, None)
+        self.resolve_impl(query, None, &|_| None)
     }
 
     /// Shared body of `resolve`/`resolve_linear`: with `index == None` every
@@ -2093,7 +2172,12 @@ impl InferenceScene {
     /// superset is, in ascending-index (= linear emission) order, so the
     /// exact tests, ranking, tie-breaks, and occlusion behave identically on
     /// both paths.
-    fn resolve_impl(&self, query: &SnapQuery, index: Option<&SceneIndex>) -> Option<Snap> {
+    fn resolve_impl(
+        &self,
+        query: &SnapQuery,
+        index: Option<&SceneIndex>,
+        source: MemberSource<'_>,
+    ) -> Option<Snap> {
         // Normalize the ray direction; degenerate direction -> None.
         let dir = match query.ray.direction.normalized() {
             Ok(d) => d,
@@ -2200,42 +2284,41 @@ impl InferenceScene {
                 (0..self.faces.len()).collect::<Vec<_>>(),
             ),
         };
+        let geom = |member: ObjectId| self.geometry(member, source);
+        let members = Members {
+            map: &self.def_members,
+            geometry: &geom,
+        };
         let (placed_point_ids, placed_segment_ids, placed_face_ids) = match index {
             Some(ix) => (
-                ix.placed_points_in_cone(
-                    &self.placements,
-                    &self.def_members,
-                    origin,
-                    dir,
-                    prune_tolerance,
-                ),
+                ix.placed_points_in_cone(&self.placements, &members, origin, dir, prune_tolerance),
                 ix.placed_segments_in_cone(
                     &self.placements,
-                    &self.def_members,
+                    &members,
                     origin,
                     dir,
                     prune_tolerance,
                 ),
-                ix.placed_faces_crossing_ray(&self.placements, &self.def_members, origin, dir),
+                ix.placed_faces_crossing_ray(&self.placements, &members, origin, dir),
             ),
             None => (
-                self.all_placed(|m| m.points.len()),
-                self.all_placed(|m| m.segments.len()),
-                self.all_placed(|m| m.faces.len()),
+                self.all_placed(source, |g| g.points.len()),
+                self.all_placed(source, |g| g.segments.len()),
+                self.all_placed(source, |g| g.faces.len()),
             ),
         };
         let placed_points: Vec<ScenePoint> = placed_point_ids
             .iter()
-            .map(|&(pi, li)| {
+            .filter_map(|&(pi, li)| {
                 let pl = &self.placements[pi];
-                self.def_members[&pl.member].point_at(li, pl)
+                Some(geom(pl.member)?.point_at(li, pl))
             })
             .collect();
         let placed_segments: Vec<SceneSegment> = placed_segment_ids
             .iter()
-            .map(|&(pi, li)| {
+            .filter_map(|&(pi, li)| {
                 let pl = &self.placements[pi];
-                self.def_members[&pl.member].segment_at(li, pl)
+                Some(geom(pl.member)?.segment_at(li, pl))
             })
             .collect();
         // Singular poses drop out here (`face_at` is `None`), exactly as
@@ -2244,7 +2327,7 @@ impl InferenceScene {
             .iter()
             .filter_map(|&(pi, li)| {
                 let pl = &self.placements[pi];
-                self.def_members[&pl.member].face_at(li, pl)
+                geom(pl.member)?.face_at(li, pl)
             })
             .collect();
 
@@ -3172,7 +3255,7 @@ impl InferenceScene {
         //       since with the ray aimed exactly down the anchor's
         //       perpendicular the "side" is itself noise. ---
         let winner = candidates.iter().copied().find(|c| {
-            if self.is_occluded(origin, c.3, index) {
+            if self.is_occluded(origin, c.3, index, source) {
                 return false;
             }
             match lock_ctx {
@@ -3291,8 +3374,18 @@ impl InferenceScene {
     /// the raw world-ray otherwise "sees" solids the user cannot (a drag must
     /// never move an object off-screen).
     pub fn pick_face(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
+        self.pick_face_from(ray, &|_| None)
+    }
+
+    /// [`Self::pick_face`] for a scene with deferred definition members
+    /// (see [`Self::resolve_from`]).
+    pub fn pick_face_from(
+        &self,
+        ray: &PickRay,
+        source: MemberSource<'_>,
+    ) -> Option<(SnapSource, f64)> {
         let index = self.spatial_index();
-        self.pick_face_impl(ray, Some(&index))
+        self.pick_face_impl(ray, Some(&index), source)
     }
 
     /// Reference implementation of [`pick_face`](Self::pick_face) with the
@@ -3301,7 +3394,7 @@ impl InferenceScene {
     /// part of the supported API.
     #[doc(hidden)]
     pub fn pick_face_linear(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
-        self.pick_face_impl(ray, None)
+        self.pick_face_impl(ray, None, &|_| None)
     }
 
     /// Shared body of `pick_face`/`pick_face_linear`. The indexed superset
@@ -3312,6 +3405,7 @@ impl InferenceScene {
         &self,
         ray: &PickRay,
         index: Option<&SceneIndex>,
+        source: MemberSource<'_>,
     ) -> Option<(SnapSource, f64)> {
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
@@ -3319,17 +3413,20 @@ impl InferenceScene {
             Some(ix) => ix.faces_crossing_ray(origin, dir),
             None => (0..self.faces.len()).collect(),
         };
+        let geom = |member: ObjectId| self.geometry(member, source);
+        let members = Members {
+            map: &self.def_members,
+            geometry: &geom,
+        };
         let placed_face_ids: Vec<(usize, usize)> = match index {
-            Some(ix) => {
-                ix.placed_faces_crossing_ray(&self.placements, &self.def_members, origin, dir)
-            }
-            None => self.all_placed(|m| m.faces.len()),
+            Some(ix) => ix.placed_faces_crossing_ray(&self.placements, &members, origin, dir),
+            None => self.all_placed(source, |g| g.faces.len()),
         };
         let placed_faces: Vec<SceneFace> = placed_face_ids
             .iter()
             .filter_map(|&(pi, li)| {
                 let pl = &self.placements[pi];
-                self.def_members[&pl.member].face_at(li, pl)
+                geom(pl.member)?.face_at(li, pl)
             })
             .collect();
         let mut best: Option<(f64, SnapSource)> = None;
@@ -3351,11 +3448,15 @@ impl InferenceScene {
     /// enumeration order — the linear reference's counterpart to the
     /// two-level index walks. Placements of an unregistered member are
     /// skipped, matching the indexed paths (their world boxes are empty).
-    fn all_placed(&self, count: impl Fn(&DefMember) -> usize) -> Vec<(usize, usize)> {
+    fn all_placed(
+        &self,
+        source: MemberSource<'_>,
+        count: impl Fn(&DefGeometry) -> usize,
+    ) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
         for (pi, pl) in self.placements.iter().enumerate() {
-            if let Some(m) = self.def_members.get(&pl.member) {
-                out.extend((0..count(m)).map(|li| (pi, li)));
+            if let Some(g) = self.geometry(pl.member, source) {
+                out.extend((0..count(g)).map(|li| (pi, li)));
             }
         }
         out
@@ -3376,7 +3477,13 @@ impl InferenceScene {
     /// distance to `pos`, not nearer. A ray that passes through a face's *hole*
     /// is not occluded by that face (`face_cone_hit` already rejects holes), so
     /// snaps seen through an imprinted opening stay visible.
-    fn is_occluded(&self, origin: Point3, pos: Point3, index: Option<&SceneIndex>) -> bool {
+    fn is_occluded(
+        &self,
+        origin: Point3,
+        pos: Point3,
+        index: Option<&SceneIndex>,
+        source: MemberSource<'_>,
+    ) -> bool {
         let to_pos = pos - origin;
         let dist = to_pos.length();
         let dir = match to_pos.normalized() {
@@ -3397,11 +3504,16 @@ impl InferenceScene {
         };
         let occludes = |face: &SceneFace| face_occludes(&face.plane, &face.boundary, &face.holes);
         // A placed face materializes on demand and skips singular poses,
-        // exactly like the candidate paths (`DefMember::face_at`).
+        // exactly like the candidate paths (`DefGeometry::face_at`).
+        let geom = |member: ObjectId| self.geometry(member, source);
+        let members = Members {
+            map: &self.def_members,
+            geometry: &geom,
+        };
         let occludes_placed = |pi: usize, li: usize| {
             let pl = &self.placements[pi];
-            self.def_members[&pl.member]
-                .face_at(li, pl)
+            geom(pl.member)
+                .and_then(|g| g.face_at(li, pl))
                 .is_some_and(|face| face_occludes(&face.plane, &face.boundary, &face.holes))
         };
         // Sketch region faces occlude just like solid faces (a drawn region
@@ -3424,7 +3536,7 @@ impl InferenceScene {
                 ix.any_face_hit_before(origin, dir, near_threshold, |fi| occludes(&self.faces[fi]))
                     || ix.any_placed_face_hit_before(
                         &self.placements,
-                        &self.def_members,
+                        &members,
                         origin,
                         dir,
                         near_threshold,
@@ -3435,7 +3547,7 @@ impl InferenceScene {
             None => {
                 self.faces.iter().any(occludes)
                     || self
-                        .all_placed(|m| m.faces.len())
+                        .all_placed(source, |g| g.faces.len())
                         .into_iter()
                         .any(|(pi, li)| occludes_placed(pi, li))
                     || sketch_occludes()

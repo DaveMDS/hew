@@ -10,15 +10,6 @@ import { rotationZAffine } from '../tools/transformMath'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from './treeModel'
 
-/** A mesh stand-in shaped like the real `MeshJs` FFI surface (matching
- * `SceneRenderer.test.ts`'s `makeMesh`) — only `positions`/`free` matter here. */
-function makeMesh(positions: Float32Array) {
-  return {
-    positions: () => positions,
-    free: () => {},
-  }
-}
-
 /** Corners of an axis-aligned box centered at the origin with the given
  * half-extents, as a flat [x,y,z, ...] position buffer (not a real
  * triangulated mesh — meshWorldBounds only cares about the extremal
@@ -63,10 +54,11 @@ function makeScene(opts: {
   const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
     inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
   return {
-    object_mesh: (id: bigint) => {
+    object_bounds: (id: bigint, pose?: Float64Array) => {
       const positions = objectMeshes[id.toString()]
-      if (positions === undefined) throw new Error(`unexpected object_mesh(${id})`)
-      return makeMesh(positions)
+      if (positions === undefined) throw new Error(`unexpected object_bounds(${id})`)
+      const b = meshWorldBounds(positions, pose)
+      return b === null ? new Float64Array() : Float64Array.from([...b.min, ...b.max])
     },
     group_members: (id: bigint) => groups[id.toString()] ?? [],
     instance_pose: (id: bigint) => {
@@ -222,8 +214,8 @@ describe('worldBoundsForSelection', () => {
     expect(bounds).toBeNull()
   })
 
-  it('does not throw when object_mesh throws for a stale object id (returns null)', () => {
-    // `object_mesh` throws (UnknownObject) on a stale/deleted id — the mock
+  it('does not throw when object_bounds throws for a stale object id (returns null)', () => {
+    // `object_bounds` throws (UnknownObject) on a stale/deleted id — the mock
     // reproduces this by throwing for any id with no registered mesh. A
     // selection can name a just-removed object (undo bumps docRev without
     // pruning it), so the readout must degrade to null, not crash.
@@ -236,7 +228,7 @@ describe('worldBoundsForSelection', () => {
   })
 
   it('skips a throwing (stale) leaf and unions only the valid ones', () => {
-    // Object 1 has a live mesh; object 2 is stale (object_mesh throws). The
+    // Object 1 has a live mesh; object 2 is stale (object_bounds throws). The
     // union is just object 1's box — the stale leaf contributes nothing.
     const scene = makeScene({
       objectMeshes: {

@@ -2957,7 +2957,8 @@ export default function App() {
     const format = normalizeDocFormat(report.container)
     setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
     setImportReport(report)
-    LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
+    const kernelMemory = kernelMemoryBytes()
+    LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})${kernelMemory === null ? '' : `; kernel memory ${formatBytes(kernelMemory)}`}`)
     requestAnimationFrame(() => {
       viewportApi.current?.zoomExtents()
       // A document with Scenes opens on its first Scene — after the framing

@@ -8,6 +8,7 @@
  * with the right methods stands in as the Scene.
  */
 
+import { objectBoundsFromMesh } from '../test/meshBounds'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
@@ -79,7 +80,7 @@ import { BANNED_RE, readableText } from '../health/bannedWords'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeScene(overrides: Record<string, any> = {}): WasmScene {
-  return {
+  const scene = {
     object_ids: () => new BigUint64Array(),
     group_ids: () => new BigUint64Array(),
     instance_ids: () => new BigUint64Array(),
@@ -139,6 +140,12 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     component_member_objects: (_id: bigint) => new BigUint64Array(),
     explode_session_objects: () => undefined as BigUint64Array | undefined,
     ...overrides,
+  }
+  // The Bounding Box row reads `object_bounds`; a mock describes its parts
+  // by mesh corners, so derive the one from the other unless given.
+  return {
+    ...scene,
+    object_bounds: overrides.object_bounds ?? objectBoundsFromMesh(scene.object_mesh as (id: bigint) => { positions(): Float32Array; free(): void }),
   } as unknown as WasmScene
 }
 

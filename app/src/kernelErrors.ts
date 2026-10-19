@@ -395,6 +395,7 @@ const DESCRIPTIONS: Record<string, string> = {
   BadVector: `Hew's own request to the model kernel carried a malformed xyz value. ${internalRequest}`,
   BadProjection: `Hew's own request to the model kernel named a camera projection it doesn't recognize. ${internalRequest}`,
   BadCamera: `Hew's own request to the model kernel carried a malformed camera. ${internalRequest}`,
+  BadPose: `Hew's own request to the model kernel carried a malformed pose. ${internalRequest}`,
   BadViewStyle: `Hew's own request to the model kernel carried a malformed view style. ${internalRequest}`,
   BadDisplay: `Hew's own request to the model kernel carried malformed display settings. ${internalRequest}`,
   BadPlane: `Hew's own request to the model kernel carried a malformed plane. ${internalRequest}`,

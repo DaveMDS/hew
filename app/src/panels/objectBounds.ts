@@ -3,11 +3,12 @@
  * for the Object Info panel's Bounding Box readout ("does this part fit my
  * print bed?").
  *
- * Client-side, surface-free: reuses the exact accessors `SceneRenderer`
- * already calls to draw the scene (`object_mesh`, `instance_pose`,
+ * Client-side: the kernel's `object_bounds` (an Object's vertex bounds
+ * under a pose, no tessellation), the accessors `SceneRenderer` already
+ * calls to draw the scene (`instance_pose`,
  * `instance_expanded_members`/`instance_expanded_local_poses`), and
  * `treeModel.collectLeafIds` to walk a selection down to its leaf
- * Objects/Instances — no new wasm-api method.
+ * Objects/Instances.
  *
  * A Group has no geometry or pose of its own; moving one bakes the transform
  * into every leaf Object beneath it (ARCHITECTURE.md §2.7), so a leaf
@@ -96,10 +97,9 @@ export function boundsExtents(bounds: Bounds): Vec3 {
 }
 
 /**
- * World AABB of one Object's mesh — the (optionally posed) bounds of its
- * render mesh, or null if it contributes nothing.
+ * World bounds of one Object's vertices, or null if it contributes nothing.
  *
- * `object_mesh` is the ONE panel accessor that THROWS (a typed
+ * `object_bounds` is the ONE panel accessor that THROWS (a typed
  * `UnknownObject` JsError) on a stale/deleted object id, rather than
  * returning a quiet empty like `object_name`/`object_solid`/`node_tags`/
  * `instance_pose`/etc. all do. A selection can legitimately name a
@@ -109,30 +109,25 @@ export function boundsExtents(bounds: Bounds): Vec3 {
  * contribution" (return null), honoring the graceful-degradation contract
  * every other Object Info accessor already keeps.
  *
- * `.free()` discipline: the `MeshJs` is freed only on the success path,
- * where it was actually materialized — a throw leaves nothing to free.
- *
- * `pose`, if given, transforms the (definition-local) mesh into world space
- * before bounding — used for a Component instance's members; an Object's own
- * mesh is already baked world-space (module doc), so it's called without a
- * pose.
+ * `pose`, if given, transforms the (definition-local) vertices into world
+ * space before bounding — used for a Component instance's members; an
+ * Object's own vertices are already world-space (module doc), so it's
+ * called without a pose. The kernel bounds the vertices themselves, so a
+ * readout of a large selection never tessellates anything.
  */
 function objectMeshBounds(
   scene: WasmScene,
   objectId: bigint,
   pose?: ArrayLike<number>,
 ): Bounds | null {
-  let mesh
+  let b: Float64Array
   try {
-    mesh = scene.object_mesh(objectId)
+    b = scene.object_bounds(objectId, pose === undefined ? undefined : Float64Array.from(pose))
   } catch {
     return null
   }
-  try {
-    return meshWorldBounds(mesh.positions(), pose)
-  } finally {
-    mesh.free()
-  }
+  if (b.length < 6) return null
+  return { min: [b[0], b[1], b[2]], max: [b[3], b[4], b[5]] }
 }
 
 /**

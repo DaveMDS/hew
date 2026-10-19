@@ -2056,8 +2056,9 @@ export class SceneRenderer {
     // its outline while the app-level selection (Outliner) kept it.
     const wasSelected = this.selectedObjectIds.includes(objectId)
 
-    // Always remove the old group and rebuild — tessellation cache means this
-    // is cheap (docs/dev/DEVELOPMENT.md B4: cache invalidated on mutation).
+    // Always remove the old group and rebuild: the kernel tessellates the
+    // object afresh for this call (it keeps no render buffers of its own),
+    // which is what a changed object needs anyway.
     if (this.objectGroups.has(objectId)) {
       this._removeObjectGroup(objectId)
     }
@@ -5169,8 +5170,9 @@ export class SceneRenderer {
    * committed to the document until the gesture ends (Enter/click-away), so
    * this only ever touches renderer-local buffers.
    *
-   * `face_mesh_range` (a cheap lookup into the already-cached `RenderMesh`,
-   * not a re-tessellation) gives the `[base, count]` vertex range; the
+   * `face_mesh_range` (a lookup into the face ranges the kernel kept from
+   * the tessellation that drew the object, not a re-tessellation while
+   * those are warm) gives the `[base, count]` vertex range; the
    * source positions are read straight out of whatever is ALREADY uploaded
    * (the object's own geometry for a world object, or the member's shared
    * cache for a component member — the same shared `Float32Array` every

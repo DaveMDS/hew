@@ -210,6 +210,7 @@ impl ConvertJob {
             run_variants: BTreeMap::new(),
             def_frames: Vec::new(),
             provenance: Provenance::default(),
+            claims: None,
         };
 
         // ── The composed instance tree ─────────────────────────────────────────
@@ -637,6 +638,9 @@ struct Converter {
     /// inherited-material variant).
     run_variants: BTreeMap<usize, Vec<usize>>,
     provenance: Provenance,
+    /// The claims of the run last read, under its bake, for the pieces
+    /// still to come from it (see [`RunClaims`]).
+    claims: Option<RunClaims>,
     /// While a definition's children convert: the inverse of the
     /// definition placement's world pose, innermost last. A group's own
     /// geometry inside one bakes straight into the definition's frame.
@@ -1286,8 +1290,7 @@ impl Converter {
         key: Option<u64>,
         part: Option<LoosePart<'_>>,
     ) -> Vec<MeshRecipe> {
-        let mut extra = self.mesh_extra(run_idx, bake);
-        extra.key = key;
+        self.ensure_claims(run_idx, bake);
         let mesh = &self.model.geometry[run_idx].mesh;
 
         let positions: Vec<Point3> = mesh
@@ -1358,12 +1361,9 @@ impl Converter {
             return Vec::new();
         }
 
-        let tags = match part {
-            Some(p) => {
-                extra.hidden |= p.hidden;
-                p.tags
-            }
-            None => self.mesh_layer_tags(run_idx),
+        let (tags, hidden) = match part {
+            Some(p) => (p.tags, p.hidden),
+            None => (self.mesh_layer_tags(run_idx), false),
         };
         let base_material = if eff_slot != 0 {
             self.mats.dense(eff_slot)
@@ -1395,6 +1395,10 @@ impl Converter {
             // that closes does (the mesh it came from could not tell: the
             // closed-shell test needs it whole) — a cavity a closed piece
             // encloses keeping its inward faces.
+            let claims = self
+                .claims
+                .as_ref()
+                .expect("the run's claims are built above");
             return mesh_heal::split::orient_pieces_outward(pieces)
                 .into_iter()
                 .map(|piece| {
@@ -1406,7 +1410,9 @@ impl Converter {
                         &piece.faces,
                         &piece.face_materials,
                     );
-                    let mut extra = extra.clone();
+                    let mut extra = claims.narrow(&piece.positions);
+                    extra.key = key;
+                    extra.hidden = hidden;
                     extra.face_back_materials = paints.back;
                     recipe_from_arrays(
                         name.clone(),
@@ -1424,6 +1430,13 @@ impl Converter {
         }
 
         let paints = self.face_paints(run_idx, eff_slot, bake, &positions, &faces, &healed_labels);
+        let mut extra = self
+            .claims
+            .as_ref()
+            .expect("the run's claims are built above")
+            .narrow(&positions);
+        extra.key = key;
+        extra.hidden = hidden;
         extra.face_back_materials = paints.back;
         vec![recipe_from_arrays(
             name,
@@ -1990,19 +2003,27 @@ impl Converter {
         out
     }
 
-    /// What a run says about its mesh beyond faces, carried through `bake`:
-    /// soft and smooth edges, welded arcs, and (in a Hew-written file) the
-    /// cylinders its faces are facets of. A non-similarity `bake` drops the
-    /// circle claims, which only a similarity maps.
-    fn mesh_extra(&self, run_idx: usize, bake: &Transform) -> MeshExtra {
+    /// Build the claims of run `run_idx` under `bake` ([`RunClaims`]),
+    /// unless the run last read was this one under this bake: a loose run
+    /// is read piece by piece, each taking its own claims from the one
+    /// index.
+    fn ensure_claims(&mut self, run_idx: usize, bake: &Transform) {
+        if self
+            .claims
+            .as_ref()
+            .is_some_and(|c| c.run_idx == run_idx && c.bake == *bake)
+        {
+            return;
+        }
         let run = &self.model.geometry[run_idx];
         let mesh = &run.mesh;
-        let at = |i: u32| {
-            let v = mesh.vertices[i as usize];
-            bake.apply_point(Point3::new(v[0], v[1], v[2]))
-        };
+        let points: Vec<Point3> = mesh
+            .vertices
+            .iter()
+            .map(|v| bake.apply_point(Point3::new(v[0], v[1], v[2])))
+            .collect();
         let scale = uniform_scale(bake);
-        let mut extra = MeshExtra::default();
+        let mut claims: Vec<Claim> = Vec::new();
         let flat = flat_joins(mesh);
         for e in &mesh.edges {
             // A hidden edge between two faces of one plane draws nothing in
@@ -2010,15 +2031,16 @@ impl Converter {
             // shading there, the faces' normals being one.
             let hidden_flat = e.hidden && flat.contains(&(e.v0.min(e.v1), e.v0.max(e.v1)));
             if e.soft || e.smooth || hidden_flat {
-                extra.soft_edges.push([at(e.v0), at(e.v1)]);
+                claims.push(Claim::Soft(e.v0, e.v1));
             }
             if let (Some(c), Some(s)) = (e.curve, scale)
                 && let Some(a) = run.curves.get(c as usize).and_then(|c| c.arc.as_ref())
             {
                 let center =
                     bake.apply_point(Point3::new(a.center_m[0], a.center_m[1], a.center_m[2]));
-                extra.edge_curves.push((
-                    [at(e.v0), at(e.v1)],
+                claims.push(Claim::Curve(
+                    e.v0,
+                    e.v1,
                     CurveGeom {
                         center,
                         radius: a.radius_m * s,
@@ -2026,10 +2048,10 @@ impl Converter {
                 ));
             }
         }
+        let mut surfaces: Vec<SurfaceRef> = Vec::new();
         if self.hew.written_by_hew
             && let Some(s) = scale
         {
-            let mut seen: Vec<SurfaceRef> = Vec::new();
             for fi in 0..mesh.faces.len() {
                 let Some(SurfaceRef::Cylinder {
                     axis_point,
@@ -2050,13 +2072,12 @@ impl Converter {
                     axis,
                     radius: radius * s,
                 };
-                if !seen.contains(&surf) {
-                    seen.push(surf);
+                if !surfaces.contains(&surf) {
+                    surfaces.push(surf);
                 }
             }
-            extra.surfaces = seen;
         }
-        extra
+        self.claims = Some(RunClaims::new(run_idx, *bake, points, claims, surfaces));
     }
 
     /// Every dictionary of the file, other than Hew's own, as Hew
@@ -2542,6 +2563,127 @@ fn newell(ring: &[Point3]) -> Vec3 {
 
 /// Some of a loose run's faces, read as a mesh of their own: the face
 /// indices, the tags they take, and whether the mesh is hidden.
+/// What a run says about its edges beyond faces, under one bake: soft and
+/// smooth edges, welded arcs, and (in a Hew-written file) the cylinders its
+/// faces are facets of. Built once per run ([`Converter::ensure_claims`])
+/// and indexed by the run's vertices, so each mesh read from the run takes
+/// only the claims on its own edges ([`RunClaims::narrow`]): a run read as
+/// many pieces (its loose geometry by layer, a non-manifold run split
+/// apart) hands each piece its own, not the whole run's over again.
+struct RunClaims {
+    run_idx: usize,
+    bake: Transform,
+    /// The run's vertices, baked.
+    points: Vec<Point3>,
+    /// Vertices bucketed on a grid of the import tolerance, the one the
+    /// kernel matches a claim's endpoints with.
+    grid: BTreeMap<[i64; 3], Vec<u32>>,
+    claims: Vec<Claim>,
+    /// Each vertex's claims, as indexes into `claims`.
+    incident: Vec<Vec<u32>>,
+    surfaces: Vec<SurfaceRef>,
+}
+
+/// One edge claim, by the run's vertex indexes.
+enum Claim {
+    Soft(u32, u32),
+    Curve(u32, u32, CurveGeom),
+}
+
+impl Claim {
+    fn ends(&self) -> (u32, u32) {
+        match self {
+            Claim::Soft(a, b) | Claim::Curve(a, b, _) => (*a, *b),
+        }
+    }
+}
+
+impl RunClaims {
+    const TOL: f64 = kernel::tol::IMPORT_PLANE_DIST;
+
+    fn cell(p: Point3) -> [i64; 3] {
+        // Clamped so a neighboring cell of an absurd coordinate (a mutated
+        // file's) can still be named without overflowing.
+        [p.x, p.y, p.z].map(|c| (c / Self::TOL).floor().clamp(-1e15, 1e15) as i64)
+    }
+
+    fn new(
+        run_idx: usize,
+        bake: Transform,
+        points: Vec<Point3>,
+        claims: Vec<Claim>,
+        surfaces: Vec<SurfaceRef>,
+    ) -> RunClaims {
+        let mut grid: BTreeMap<[i64; 3], Vec<u32>> = BTreeMap::new();
+        for (i, &p) in points.iter().enumerate() {
+            grid.entry(Self::cell(p)).or_default().push(i as u32);
+        }
+        let mut incident: Vec<Vec<u32>> = vec![Vec::new(); points.len()];
+        for (ci, c) in claims.iter().enumerate() {
+            let (a, b) = c.ends();
+            for v in [a, b] {
+                if let Some(list) = incident.get_mut(v as usize) {
+                    list.push(ci as u32);
+                }
+            }
+        }
+        RunClaims {
+            run_idx,
+            bake,
+            points,
+            grid,
+            claims,
+            incident,
+            surfaces,
+        }
+    }
+
+    /// The claims on the edges among `positions` (a piece of the run after
+    /// its heal: endpoints within the import tolerance of the run's
+    /// vertices), in the run's order, as the kernel adopts them.
+    fn narrow(&self, positions: &[Point3]) -> MeshExtra {
+        let mut marked: BTreeSet<u32> = BTreeSet::new();
+        for &p in positions {
+            let c = Self::cell(p);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        for &v in self
+                            .grid
+                            .get(&[c[0] + dx, c[1] + dy, c[2] + dz])
+                            .into_iter()
+                            .flatten()
+                        {
+                            if (self.points[v as usize] - p).length() <= Self::TOL {
+                                marked.insert(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let mut keep: BTreeSet<u32> = BTreeSet::new();
+        for &v in &marked {
+            for &ci in &self.incident[v as usize] {
+                let (a, b) = self.claims[ci as usize].ends();
+                if marked.contains(&a) && marked.contains(&b) {
+                    keep.insert(ci);
+                }
+            }
+        }
+        let mut extra = MeshExtra::default();
+        for ci in keep {
+            let at = |v: u32| self.points[v as usize];
+            match &self.claims[ci as usize] {
+                Claim::Soft(a, b) => extra.soft_edges.push([at(*a), at(*b)]),
+                Claim::Curve(a, b, g) => extra.edge_curves.push(([at(*a), at(*b)], *g)),
+            }
+        }
+        extra.surfaces = self.surfaces.clone();
+        extra
+    }
+}
+
 struct LoosePart<'a> {
     faces: &'a BTreeSet<usize>,
     tags: Vec<Vec<String>>,
@@ -3045,6 +3187,89 @@ mod tests {
             "{:?}",
             report.sketches
         );
+    }
+
+    /// A loose run read as several pieces (here a visible box and a hidden
+    /// one) hands each piece the soft edges among its own vertices, not the
+    /// run's whole list over again: a furnished model's loose geometry is
+    /// thousands of pieces, and the whole list on each cost gigabytes.
+    #[test]
+    fn each_piece_of_a_loose_run_carries_only_its_own_soft_edges() {
+        let mut mesh = openskp::Mesh::default();
+        let add_box = |mesh: &mut openskp::Mesh, x0: f64, soft: usize, hidden: bool| {
+            let base = mesh.vertices.len() as u32;
+            let corners = [
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.0, 1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 1.0],
+                [1.0, 1.0, 1.0],
+                [0.0, 1.0, 1.0],
+            ];
+            for [x, y, z] in corners {
+                mesh.vertices.push([x0 + x, y, z]);
+            }
+            let quads: [[u32; 4]; 6] = [
+                [0, 3, 2, 1],
+                [4, 5, 6, 7],
+                [0, 1, 5, 4],
+                [1, 2, 6, 5],
+                [2, 3, 7, 6],
+                [3, 0, 4, 7],
+            ];
+            for (k, q) in quads.iter().enumerate() {
+                mesh.faces.push(openskp::MeshFace {
+                    pid: base + 100 + k as u32,
+                    outer: q.iter().map(|&i| base + i).collect(),
+                    hidden,
+                    ..Default::default()
+                });
+            }
+            let edges: [[u32; 2]; 12] = [
+                [0, 1],
+                [1, 2],
+                [2, 3],
+                [3, 0],
+                [4, 5],
+                [5, 6],
+                [6, 7],
+                [7, 4],
+                [0, 4],
+                [1, 5],
+                [2, 6],
+                [3, 7],
+            ];
+            for (k, e) in edges.iter().enumerate() {
+                mesh.edges.push(openskp::MeshEdge {
+                    pid: base + 200 + k as u32,
+                    v0: base + e[0],
+                    v1: base + e[1],
+                    soft: k < soft,
+                    ..Default::default()
+                });
+            }
+        };
+        add_box(&mut mesh, 0.0, 4, false);
+        add_box(&mut mesh, 5.0, 2, true);
+        let mut model = openskp::Model::default();
+        model.geometry.push(openskp::GeometryRun {
+            mesh,
+            ..Default::default()
+        });
+        let out = convert(Rc::new(model));
+        let mut soft: Vec<(bool, usize)> = out
+            .scene
+            .roots
+            .iter()
+            .filter_map(|n| match n {
+                ImportNode::Mesh(m) => Some((m.extra.hidden, m.extra.soft_edges.len())),
+                _ => None,
+            })
+            .collect();
+        soft.sort();
+        assert_eq!(soft, vec![(false, 4), (true, 2)], "{:?}", out.warnings);
     }
 
     /// A coordinate that is not a number comes from a run the reader

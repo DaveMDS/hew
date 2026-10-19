@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { buildPartsSheetSections, totalPartCount, visiblePartCount } from './partsSheetModel'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { objectBoundsFromMesh } from '../test/meshBounds'
 import { nodeKey } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
 
@@ -43,6 +44,11 @@ function makeScene(overrides: Partial<{
       if (positions === undefined) throw new Error('UnknownObject')
       return makeMesh(positions)
     },
+    object_bounds: objectBoundsFromMesh((id: bigint) => {
+      const positions = overrides.object_mesh?.[String(id)]
+      if (positions === undefined) throw new Error('UnknownObject')
+      return makeMesh(positions)
+    }),
     tag_meta_paths: () => overrides.tag_meta_paths ?? [],
   } as unknown as WasmScene
 }

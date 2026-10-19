@@ -20,7 +20,7 @@ merged, time-ordered stream:
 
 - **Kernel events** — one record per `tracing` event raised by the kernel and
   inference crates: the start of each document-mutating operation (name +
-  scalar parameters), the resulting canonical state digest after it commits,
+  scalar parameters), the resulting canonical state digest after it commits (on a document of more than 50,000 faces, its face count instead),
   and (at a finer level) inference/snap resolution during pointer movement.
 - **UI events** — the application's own info/warning/error log, bridged into
   the same stream.
@@ -78,7 +78,7 @@ no representation for them.
 | `target` | Level | When | Key `fields` |
 |---|---|---|---|
 | `kernel::op` | INFO | start of each document-mutating operation | `op` (name) + scalar parameters (`distance`, `boolean_op`, `node`, …) |
-| `kernel::cmd` | INFO | after each committed mutation | `state_hash` (canonical digest after the op), `objects` (count touched) |
+| `kernel::cmd` | INFO | after each committed mutation | `state_hash` (canonical digest after the op), `objects` (count touched); on a document of more than 50,000 faces, `state_hash_skipped_faces` (the face count) in place of the digest |
 | `inference::resolve` | TRACE | every snap query (per pointer move) | `candidates` (count), `winner` (snap kind, or `None`) |
 
 A single user gesture therefore brackets as one `kernel::op` record (the
@@ -91,7 +91,10 @@ Well-known `fields` keys:
 - `state_hash` — the document's canonical state digest after the operation.
   Two runs that are supposed to be identical (e.g. original vs. replay) can be
   compared op-by-op by walking matching `state_hash` values, which pinpoints
-  the exact operation at which they diverge.
+  the exact operation at which they diverge. The digest is a full
+  serialization of the document, so on one of more than 50,000 faces the
+  record carries `state_hash_skipped_faces` instead; the recording's
+  `golden_hash` at stop still checks the whole replay.
 - `message` — free-text, when present.
 - `winner`, `candidates` — inference/snapping diagnostics.
 
@@ -487,7 +490,10 @@ for a failed open gives the file's size and the kernel's memory
 (`kernelMemoryBytes()` in `wasm/kernelMemory.ts`): wasm memory only grows,
 so a figure near 4 GB marks an out-of-memory abort, and the line says
 `; out of memory` (or `; kernel trap`, or `; kernel panic` when the hook
-had already captured one) when a wasm trap ended the open.
+had already captured one) when a wasm trap ended the open. The log line
+for an open that worked (`Opened SKP: …`) ends with the kernel's memory
+too, so a report about a model that opened but left little room says how
+much it took.
 A sent report that had to leave the file out still carries `failedFile`
 without `bytes` — `{"name", "label", "size", "error", "omitted": "too large
 to send"}` — and a top-level `dropped` array naming every ticked row Send

@@ -297,9 +297,12 @@ it by matching them, not by inventing new ones per method.
 - **State lives inside the module.** The kernel's `Document` is the
   authoritative model. The WASM-side `Scene` is a thin shim over it, adding
   only what the kernel itself may not depend on — the inference engine and
-  per-Object render-mesh caches. Every mutation goes: call into `Document`,
-  then reconcile those caches from what changed. Geometry does not cross
-  the boundary on every frame, only on commit.
+  a per-Object record of where each face sits in its render mesh (the
+  render buffers themselves are the app's to keep: on a large model they
+  are hundreds of megabytes the kernel's memory cannot spare twice). Every
+  mutation goes: call into `Document`, then reconcile those caches from
+  what changed. Geometry does not cross the boundary on every frame, only
+  on commit.
 - **Handles are opaque `u64`s** (JS `BigInt`), reusing the kernel's
   generational slotmap keys. JavaScript stores and passes them back but
   never does arithmetic on them. A stale handle raises a typed error, never

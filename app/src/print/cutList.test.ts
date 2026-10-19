@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { cutListRows } from './cutList'
+import { objectBoundsFromMesh } from '../test/meshBounds'
 
 /** A mesh stand-in (objectBounds.test.ts's `makeMesh`). */
 function makeMesh(positions: Float32Array) {
@@ -45,6 +46,7 @@ function makeScene(o: {
     component_name: (id: bigint) => o.component_name?.[String(id)],
     node_tags: (_k: number, id: bigint) => o.node_tags?.[String(id)] ?? [],
     object_mesh: () => makeMesh(BOX),
+    object_bounds: objectBoundsFromMesh(() => makeMesh(BOX)),
     tag_meta_paths: () => o.tag_meta_paths ?? [],
   } as unknown as WasmScene
 }

@@ -4804,3 +4804,129 @@ fn a_guide_snaps_and_crosses_only_over_its_stretch() {
         "the ray does not run back behind its start"
     );
 }
+
+/// A definition member registered deferred
+/// ([`InferenceScene::set_def_member_deferred`]) is extracted by the first
+/// query that reaches one of its placements, once, through the query's
+/// source, and then snaps exactly as an eagerly registered member does. A
+/// query aimed elsewhere extracts nothing, and one given no source offers
+/// nothing of the member.
+#[test]
+fn a_deferred_member_is_extracted_by_the_first_query_that_reaches_it() {
+    let cube = unit_cube();
+    let mut eager = InferenceScene::new();
+    eager.set_def_member(ObjectId::default(), &cube);
+    eager.add_placement(
+        InstanceId::default(),
+        ObjectId::default(),
+        &Transform::IDENTITY,
+    );
+    let mut deferred = InferenceScene::new();
+    deferred.set_def_member_deferred(ObjectId::default(), &cube);
+    deferred.add_placement(
+        InstanceId::default(),
+        ObjectId::default(),
+        &Transform::IDENTITY,
+    );
+    assert_eq!(
+        deferred.def_extractions(),
+        0,
+        "registration extracts nothing"
+    );
+
+    let eye = Point3::new(3.0, 3.0, 3.0);
+    let at_corner = || query(ray_at(eye, Point3::new(0.98, 1.0, 1.01)), WIDE);
+    // Aimed along -x from the eye: never within the cube's placement box.
+    let away = || query(ray_at(eye, Point3::new(-40.0, 3.0, 3.0)), 0.05);
+    let source = |_: ObjectId| Some(&cube);
+
+    deferred.resolve_from(&away(), &source);
+    assert_eq!(
+        deferred.def_extractions(),
+        0,
+        "a query that reaches no placement of the member extracts nothing"
+    );
+    assert_eq!(
+        deferred.resolve(&at_corner()),
+        InferenceScene::new().resolve(&at_corner()),
+        "without a source the member offers nothing"
+    );
+    assert_eq!(deferred.def_extractions(), 0);
+
+    let snap = deferred.resolve_from(&at_corner(), &source);
+    assert_eq!(snap.as_ref().map(|s| s.kind), Some(SnapKind::Endpoint));
+    assert_eq!(
+        snap,
+        eager.resolve(&at_corner()),
+        "a deferred member snaps as an eager one"
+    );
+    assert_eq!(
+        deferred.def_extractions(),
+        1,
+        "extracted by the first query that reaches it"
+    );
+    deferred.resolve_from(&at_corner(), &source);
+    assert_eq!(deferred.def_extractions(), 1, "extracted once");
+    assert_eq!(deferred.candidate_counts(), eager.candidate_counts());
+
+    let face_ray = || ray_at(eye, Point3::new(0.5, 0.5, 1.0));
+    assert_eq!(
+        deferred.pick_face_from(&face_ray(), &source),
+        eager.pick_face(&face_ray())
+    );
+    assert_eq!(
+        deferred.resolve_from(&at_corner(), &source),
+        deferred.resolve_linear(&at_corner()),
+        "the linear reference agrees once the member is extracted"
+    );
+}
+
+/// A deferred member that only stands in the way is extracted too: the
+/// occlusion test reaches it through the same source, so a snap behind a
+/// deferred component resolves exactly as it does behind an eager one.
+#[test]
+fn a_deferred_member_in_the_way_is_extracted_for_occlusion() {
+    use slotmap::KeyData;
+    let cube = unit_cube();
+    let a = ObjectId::from(KeyData::from_ffi(1 << 32 | 1));
+    let b = ObjectId::from(KeyData::from_ffi(1 << 32 | 2));
+    let ia = InstanceId::from(KeyData::from_ffi(1 << 32 | 1));
+    let ib = InstanceId::from(KeyData::from_ffi(1 << 32 | 2));
+    // B sits between the eye and A's corner, its own corners off the
+    // narrow cone, so only its faces (the occlusion test) can reach it.
+    let in_the_way = Transform::translation(Vec3::new(1.6, 1.4, 1.5));
+    let eye = Point3::new(3.0, 3.0, 3.0);
+    let q = || query(ray_at(eye, Point3::new(1.0, 1.0, 1.0)), 0.01);
+
+    let mut alone = InferenceScene::new();
+    alone.set_def_member(a, &cube);
+    alone.add_placement(ia, a, &Transform::IDENTITY);
+    let mut eager = InferenceScene::new();
+    eager.set_def_member(a, &cube);
+    eager.add_placement(ia, a, &Transform::IDENTITY);
+    eager.set_def_member(b, &cube);
+    eager.add_placement(ib, b, &in_the_way);
+    let mut deferred = InferenceScene::new();
+    deferred.set_def_member_deferred(a, &cube);
+    deferred.add_placement(ia, a, &Transform::IDENTITY);
+    deferred.set_def_member_deferred(b, &cube);
+    deferred.add_placement(ib, b, &in_the_way);
+
+    assert_ne!(
+        eager.resolve(&q()),
+        alone.resolve(&q()),
+        "B changes the answer, so the spec exercises it"
+    );
+    let source = |_: ObjectId| Some(&cube);
+    assert_eq!(deferred.resolve_from(&q(), &source), eager.resolve(&q()));
+    assert_eq!(
+        deferred.def_extractions(),
+        2,
+        "A for its candidates and B for standing in the way"
+    );
+    assert_eq!(
+        deferred.resolve_from(&q(), &source),
+        deferred.resolve_linear(&q()),
+        "the linear reference agrees once both are extracted"
+    );
+}

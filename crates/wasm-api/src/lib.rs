@@ -10,7 +10,7 @@
 //!
 //! Surface design and decision record: `docs/dev/DEVELOPMENT.md` (rule 8 sign-off
 //! trail). Summary: the authoritative model is the kernel [`Document`]; [`Scene`]
-//! is its FFI shim, adding only the inference scene and render-mesh caches (the
+//! is its FFI shim, adding only the inference scene and face-range caches (the
 //! concerns the kernel may not depend on). The UI holds opaque `u64` handles
 //! (BigInt in JS), pulls copied buffers after mutations, and receives typed
 //! errors as thrown `"CODE: message"` strings.
@@ -283,6 +283,11 @@ fn records_itself(method: &str, frame: &str) -> bool {
         })
         .unwrap_or(false)
 }
+
+/// The most faces a document may hold for `reconcile` to stamp its
+/// canonical `state_hash` on the log after every committed op (see there).
+/// Below it the digest costs tens of milliseconds at most.
+const STATE_HASH_FACE_LIMIT: usize = 50_000;
 
 /// A `.skp` open under way (see [`Scene::open_skp_begin`]).
 struct PendingOpen {
@@ -2173,15 +2178,20 @@ impl SnapJs {
 /// (docs/dev/DEVELOPMENT.md B1). The model — Sketches, Objects, per-Object undo, and
 /// the document command log — lives in the kernel `Document`. `Scene` keeps only
 /// what the kernel may not depend on (DEVELOPMENT.md rule 1): the inference scene and
-/// per-Object render-mesh caches. Every mutation delegates to `doc`, then
+/// per-Object face-range caches. Every mutation delegates to `doc`, then
 /// `reconcile`s those derived caches from the returned [`DocChange`].
 #[wasm_bindgen]
 pub struct Scene {
     doc: Document,
     inference: InferenceScene,
-    /// Flat-shaded render buffers per Object, rebuilt lazily on demand and
-    /// invalidated by `reconcile` when the Object changes or is hidden.
-    mesh_cache: SecondaryMap<ObjectId, RenderMesh>,
+    /// Where each face's triangles sit in an Object's render buffers
+    /// ([`RenderMesh::face_ranges`]), kept from the tessellation
+    /// [`Scene::object_mesh`] hands the app so a face highlight finds its
+    /// range without tessellating again; invalidated by `reconcile` when
+    /// the Object changes or is hidden. The buffers themselves are not
+    /// kept: the app holds its own copy, and on a large model they are
+    /// hundreds of megabytes the kernel's memory cannot spare.
+    face_range_cache: SecondaryMap<ObjectId, Vec<(FaceId, u32, u32)>>,
     /// User-hidden world objects/instances (session-only, app-driven via
     /// [`Scene::set_hidden`]). Hidden geometry is dropped from the inference
     /// scene so `snap`/`pick_face` never report it — hiding makes a solid both
@@ -2293,10 +2303,10 @@ impl Scene {
         // Objects: drop the cached mesh, then (re)register *world* objects with
         // inference at identity, or drop hidden/gone ones. Definition members
         // are not world inference candidates — they reach inference only
-        // through their instances below — but their mesh cache is still dropped
+        // through their instances below — but their face ranges are still dropped
         // so a definition edit re-tessellates the shared geometry.
         for &id in &change.objects_touched {
-            self.mesh_cache.remove(id);
+            self.face_range_cache.remove(id);
             self.health_cache.remove(&id);
             // A user-hidden object stays out of inference even when a mutation
             // touches it, so snap/pick never resurrect hidden candidates.
@@ -2354,13 +2364,33 @@ impl Scene {
         // fires once per committed mutation (the universal post-mutation hook),
         // so the `kernel::op` event the kernel emitted at the start of the op and
         // this `kernel::cmd` event share a correlation id and bracket the command
-        // with its name+params and its resulting state digest (docs/dev/DEVELOPMENT.md).
-        // The single full serialization per gesture is negligible vs. per-frame work.
-        tracing::info!(
-            target: "kernel::cmd",
-            state_hash = self.doc.state_hash(),
-            objects = change.objects_touched.len(),
-        );
+        // with its name+params and its resulting state digest, or its size
+        // (docs/dev/DEVELOPMENT.md).
+        // The digest is a full serialization of the document, which copies
+        // every object: nothing on a document of a few thousand faces, but on
+        // a model of a million it is seconds and a second document's worth of
+        // memory per gesture, so past `STATE_HASH_FACE_LIMIT` the event carries
+        // the face count in its place (docs/dev/DIAGNOSTICS.md).
+        let faces: usize = self
+            .doc
+            .live_object_ids()
+            .iter()
+            .filter_map(|&id| self.doc.object(id))
+            .map(|o| o.faces().len())
+            .sum();
+        if faces <= STATE_HASH_FACE_LIMIT {
+            tracing::info!(
+                target: "kernel::cmd",
+                state_hash = self.doc.state_hash(),
+                objects = change.objects_touched.len(),
+            );
+        } else {
+            tracing::info!(
+                target: "kernel::cmd",
+                state_hash_skipped_faces = faces,
+                objects = change.objects_touched.len(),
+            );
+        }
 
         self.torture_self_check(change);
     }
@@ -2436,7 +2466,7 @@ impl Scene {
                 let Some(object) = self.doc.object(m) else {
                     continue;
                 };
-                self.inference.set_def_member(m, object);
+                self.inference.set_def_member_deferred(m, object);
             }
             self.inference.add_placement(iid, m, &local.then(&pose));
         }
@@ -2673,7 +2703,7 @@ impl Scene {
         Scene {
             doc: Document::new(),
             inference: InferenceScene::new(),
-            mesh_cache: SecondaryMap::new(),
+            face_range_cache: SecondaryMap::new(),
             hidden_objects: std::collections::HashSet::new(),
             hidden_instances: std::collections::HashSet::new(),
             active_inference_instance: None,
@@ -2745,7 +2775,7 @@ impl Scene {
     /// since there is no connection to reply through.
     ///
     /// A successful non-read-only dispatch reconciles the scene's derived
-    /// caches (inference, mesh cache) exactly as every other `Scene`
+    /// caches (inference, face ranges) exactly as every other `Scene`
     /// mutator does via [`Scene::reconcile`], so the change is visible in
     /// the live viewport immediately — docs/agents/HEW_API.md §12's "in front of
     /// the user's eyes" requirement for `--live`. `crates/api` hands back
@@ -2897,7 +2927,7 @@ impl Scene {
             .is_some_and(|c| c.mutates_document)
     }
 
-    /// Fully rebuilds `inference` and clears `mesh_cache` from the
+    /// Fully rebuilds `inference` and clears `face_range_cache` from the
     /// Document's current state — the live-API-dispatch analogue of
     /// [`Scene::reconcile`], used by [`Scene::api_dispatch`] after any
     /// successful non-read-only dispatch. Every visible world object is
@@ -2909,7 +2939,7 @@ impl Scene {
     /// session-only view state that `api_dispatch`'s in-place mutations
     /// do not).
     fn full_resync(&mut self) {
-        self.mesh_cache = SecondaryMap::new();
+        self.face_range_cache = SecondaryMap::new();
         self.health_cache.clear();
         self.inference = InferenceScene::new();
         self.inference.set_axes_frame(self.doc.axes());
@@ -5438,7 +5468,6 @@ impl Scene {
     /// undo entry labeled "Purge unused" (no entry, and a zeroed report, when
     /// there is nothing to purge).
     pub fn purge_unused(&mut self) -> Result<PurgeReportJs, ApiError> {
-        let before = self.doc.state_hash();
         let report = self.doc.purge_unused().map_err(doc_err)?;
         // purge_unused can touch an arbitrary set of objects/instances/
         // components across the whole document (every unused definition's
@@ -5446,8 +5475,10 @@ impl Scene {
         // hand-built DocChange would have to enumerate all of that, so a
         // full-scene resync is the simplest correct path here — mirrors how
         // `load`/`replay` resync after a wholesale document change. Skipped
-        // entirely when idle (no-op purge changes nothing to reconcile).
-        if self.doc.state_hash() != before {
+        // entirely when idle (no-op purge changes nothing to reconcile). The
+        // report says whether anything went; a state digest would serialize
+        // the whole document twice to learn the same.
+        if report.materials > 0 || report.definitions > 0 {
             self.full_resync();
             recording::record(recording::RecordedCall::PurgeUnused);
         }
@@ -6323,28 +6354,58 @@ impl Scene {
         Ok(())
     }
 
-    /// Render buffers for one Object (cached until its next mutation).
-    pub fn object_mesh(&mut self, object: u64) -> Result<MeshJs, ApiError> {
+    /// The axis-aligned bounds of one Object's vertices, `[min_x, min_y,
+    /// min_z, max_x, max_y, max_z]`, under `pose` (a row-major 3×4 affine,
+    /// as [`Scene::instance_expanded_local_poses`] hands them out) or as
+    /// the Object is. What a readout of an object's extent needs, without
+    /// the tessellation [`Scene::object_mesh`] costs: a selection of a
+    /// thousand placed components is bounded from their vertices alone.
+    ///
+    /// # Errors
+    /// An unknown object, or a pose that is not twelve numbers.
+    pub fn object_bounds(&self, object: u64, pose: Option<Vec<f64>>) -> Result<Vec<f64>, ApiError> {
         let id = object_id(object);
-        if !self.mesh_cache.contains_key(id) {
-            let palette = self.doc.materials();
-            let object = self
-                .doc
-                .object(id)
-                .ok_or_else(|| stale("UnknownObject", "object"))?;
-            let mesh = tessellate(object, palette).map_err(|e| api_err(&e, &e))?;
-            self.mesh_cache.insert(id, mesh);
-        }
-        let watertight = self
+        let object = self
             .doc
             .object(id)
-            .ok_or_else(|| stale("UnknownObject", "object"))?
-            .watertight()
-            == WatertightState::Watertight;
-        Ok(MeshJs {
-            mesh: self.mesh_cache[id].clone(),
-            watertight,
-        })
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let pose = match pose {
+            None => None,
+            Some(p) => Some(Transform::from_affine(
+                &<[f64; 12]>::try_from(p.as_slice())
+                    .map_err(|_| ApiError("BadPose: a pose is twelve numbers".to_string()))?,
+            )),
+        };
+        let mut min = [f64::INFINITY; 3];
+        let mut max = [f64::NEG_INFINITY; 3];
+        for (_, v) in object.vertices() {
+            let p = match &pose {
+                Some(t) => t.apply_point(v.position),
+                None => v.position,
+            };
+            for (k, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+                min[k] = min[k].min(c);
+                max[k] = max[k].max(c);
+            }
+        }
+        if min[0] > max[0] {
+            return Ok(Vec::new());
+        }
+        Ok(vec![min[0], min[1], min[2], max[0], max[1], max[2]])
+    }
+
+    /// Render buffers for one Object, tessellated afresh on each call (the
+    /// app keeps the copy it draws from; see `face_range_cache`).
+    pub fn object_mesh(&mut self, object: u64) -> Result<MeshJs, ApiError> {
+        let id = object_id(object);
+        let object = self
+            .doc
+            .object(id)
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let mesh = tessellate(object, self.doc.materials()).map_err(|e| api_err(&e, &e))?;
+        self.face_range_cache.insert(id, mesh.face_ranges.clone());
+        let watertight = object.watertight() == WatertightState::Watertight;
+        Ok(MeshJs { mesh, watertight })
     }
 
     /// Export tessellation of one Object as a flat triangle soup
@@ -6962,7 +7023,10 @@ impl Scene {
             soft_axis_aperture_scale,
             off_plane_points: off_plane_points.unwrap_or(false),
         };
-        Ok(self.inference.resolve(&query).map(|snap| SnapJs { snap }))
+        Ok(self
+            .inference
+            .resolve_from(&query, &|id| self.doc.object(id))
+            .map(|snap| SnapJs { snap }))
     }
 
     /// Picks the nearest Object face the ray passes through (for the push/pull
@@ -6982,7 +7046,9 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
-        let (source, depth) = self.inference.pick_face(&ray)?;
+        let (source, depth) = self
+            .inference
+            .pick_face_from(&ray, &|id| self.doc.object(id))?;
         match source.element {
             ElementRef::Face(f) => Some(FacePickJs {
                 object: source.object.data().as_ffi(),
@@ -7678,15 +7744,14 @@ impl Scene {
     /// object), so it costs nothing extra on the common path.
     pub fn face_mesh_range(&mut self, object: u64, face: u64) -> Option<Vec<u32>> {
         let id = object_id(object);
-        if !self.mesh_cache.contains_key(id) {
+        if !self.face_range_cache.contains_key(id) {
             let palette = self.doc.materials();
             let obj = self.doc.object(id)?;
             let mesh = tessellate(obj, palette).ok()?;
-            self.mesh_cache.insert(id, mesh);
+            self.face_range_cache.insert(id, mesh.face_ranges);
         }
         let fid = FaceId::from(KeyData::from_ffi(face));
-        let mesh = &self.mesh_cache[id];
-        mesh.face_ranges
+        self.face_range_cache[id]
             .iter()
             .find(|(f, _, _)| *f == fid)
             .map(|&(_, base, count)| vec![base, count])
@@ -10473,7 +10538,7 @@ impl Scene {
     /// `.hew` container produced by [`Scene::save`]).
     ///
     /// On success the derived caches are fully rebuilt:
-    /// - `mesh_cache` is cleared (every object will re-tessellate on demand).
+    /// - `face_range_cache` is cleared (every object will re-tessellate on demand).
     /// - `inference` is rebuilt from scratch: every visible world object is
     ///   added at identity, every visible instance is registered at its pose.
     ///
@@ -10514,7 +10579,7 @@ impl Scene {
         // whatever the new one put in those slots.
         self.last_import_objects.clear();
         self.health_cache.clear();
-        self.mesh_cache = SecondaryMap::new();
+        self.face_range_cache = SecondaryMap::new();
         self.inference = InferenceScene::new();
         // Hidden sets key by dense ids the new document reuses; drop them so a
         // stale id can't keep a fresh object out of inference.
@@ -11524,6 +11589,81 @@ mod tests {
         assert!(
             cmd["fields"]["state_hash"].as_u64().is_some(),
             "the cmd event carries a numeric post-op state_hash"
+        );
+    }
+
+    /// Past `STATE_HASH_FACE_LIMIT` faces the per-op `kernel::cmd` event
+    /// carries the document's face count in place of the digest: the
+    /// digest is a full serialization, and on a large model it would cost
+    /// seconds and a second copy of the model per gesture.
+    #[test]
+    fn a_large_document_logs_its_face_count_in_place_of_the_state_hash() {
+        use kernel::{ImportNode, ImportScene, ImportSceneExtra, MeshExtra, MeshRecipe};
+        use tracing::subscriber::with_default;
+
+        // A grid of quads, more faces than the limit.
+        let n = 1 + (STATE_HASH_FACE_LIMIT as f64).sqrt().ceil() as usize;
+        let positions: Vec<Point3> = (0..n + 1)
+            .flat_map(|j| (0..n + 1).map(move |i| Point3::new(i as f64, j as f64, 0.0)))
+            .collect();
+        let faces: Vec<Vec<usize>> = (0..n)
+            .flat_map(|j| {
+                (0..n).map(move |i| {
+                    let a = j * (n + 1) + i;
+                    vec![a, a + 1, a + n + 2, a + n + 1]
+                })
+            })
+            .collect();
+        assert!(faces.len() > STATE_HASH_FACE_LIMIT);
+        let count = faces.len();
+        let recipe = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: vec![ImportNode::Mesh(MeshRecipe {
+                name: "grid".to_string(),
+                positions,
+                face_materials: vec![0; count],
+                face_uv_frames: vec![None; count],
+                face_holes: vec![Vec::new(); count],
+                faces,
+                base_material: kernel::NO_MATERIAL,
+                tags: Vec::new(),
+                extra: MeshExtra::default(),
+            })],
+            guides: Vec::new(),
+            tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
+            view_style: None,
+            extra: ImportSceneExtra::default(),
+        };
+
+        log::reset();
+        with_default(log::DrainSubscriber, || {
+            let mut scene = Scene::new();
+            let (report, _) = scene
+                .doc
+                .ingest(recipe, Vec::new())
+                .expect("ingest the grid");
+            assert_eq!(report.objects_created, 1);
+            scene
+                .add_guide_point(1.0, 2.0, 3.0)
+                .expect("add guide point");
+        });
+        let cmd = log::drain_buffer()
+            .into_iter()
+            .map(|s| serde_json::from_str::<serde_json::Value>(&s).unwrap())
+            .find(|r| r["target"] == "kernel::cmd")
+            .expect("a committed Scene mutation emits a kernel::cmd event");
+        assert!(
+            cmd["fields"]["state_hash"].is_null(),
+            "no digest over the limit: {cmd}"
+        );
+        assert_eq!(
+            cmd["fields"]["state_hash_skipped_faces"].as_u64(),
+            Some(count as u64),
+            "the face count stands in for it: {cmd}"
         );
     }
 
