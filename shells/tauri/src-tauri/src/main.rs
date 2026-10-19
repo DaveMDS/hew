@@ -2254,6 +2254,22 @@ fn emit_to_active(app: &tauri::AppHandle, event: &str, payload: &str) {
 /// written pre-readiness, so it cannot go stale and leak into a later
 /// File ▸ New window.
 fn deliver_open(app: &tauri::AppHandle, path: &str) {
+    // Cold start: the macOS "open document" Apple event (or a racing
+    // second-instance open) can arrive BEFORE `setup` has managed the rest
+    // of the app state, so none of it can be consulted yet. Buffer the path
+    // — the buffer itself is managed on the builder — and let `setup`
+    // approve it; the first window's mount-time poll then opens it. The
+    // buffer lock is held across the check so it pairs with `setup`.
+    {
+        let pending_state = app.state::<Mutex<PendingOpen>>();
+        let Ok(mut pending) = pending_state.lock() else {
+            return;
+        };
+        if app.try_state::<Mutex<WindowMenuState>>().is_none() {
+            pending.0 = Some(path.to_string());
+            return;
+        }
+    }
     // Already open in some window (a second double-click on the same file
     // in Finder/Explorer, say)? Focus it — never a second copy.
     if let Some(label) = window_label_for_path(app, path) {
@@ -2771,6 +2787,10 @@ fn main() {
     };
 
     let builder = tauri::Builder::default()
+        // Managed here, not in `setup`: a macOS cold-start open event can
+        // fire before `setup` runs and needs somewhere to land (see
+        // `deliver_open`). `setup` seeds it from argv on Windows/Linux.
+        .manage(Mutex::new(PendingOpen(None)))
         // Single-instance guard, registered first (its docs require it): a
         // second launch — a Windows/Linux file-association double-click —
         // joins the running instance instead of spawning a second process
@@ -3897,10 +3917,6 @@ fn main() {
                     approve_file(handle, Path::new(path), true);
                 }
             }
-            if let Some(path) = &argv_path {
-                approve_file(handle, Path::new(path), true);
-            }
-
             // ----------------------------------------------------------------
             // Managed state: recents + submenu handle
             // ----------------------------------------------------------------
@@ -3908,11 +3924,6 @@ fn main() {
                 paths: recents,
                 submenu: open_recent_submenu,
             }));
-
-            // ----------------------------------------------------------------
-            // Managed state: pending-open (seeded from argv on Windows/Linux)
-            // ----------------------------------------------------------------
-            app.manage(Mutex::new(PendingOpen(argv_path)));
 
             // ----------------------------------------------------------------
             // Managed state: stateful menu handles, document-window counter,
@@ -3945,10 +3956,30 @@ fn main() {
             // `rebuild_window_menu_tail`) — built on every platform since
             // `window_menu` itself is (menu parity), even though only macOS
             // actually attaches and rebuilds it.
-            app.manage(Mutex::new(WindowMenuState {
-                submenu: window_menu,
-                dynamic_count: 0,
-            }));
+            // `WindowMenuState` is the LAST state `setup` manages, so its
+            // presence is `deliver_open`'s "setup is done" signal. The
+            // pending-open lock is held across seeding, approving, and
+            // managing it: a Windows/Linux second-instance open (another
+            // thread) either buffers first — and is approved here — or
+            // waits and then sees a fully set-up app.
+            {
+                let pending_state = app.state::<Mutex<PendingOpen>>();
+                let mut pending = pending_state.lock().unwrap_or_else(|e| e.into_inner());
+                // The argv path (Windows/Linux) seeds the buffer; a macOS
+                // cold-start open event may already be sitting in it. Either
+                // way the path came from the OS on the user's behalf, so
+                // approve it like any other file-association open.
+                if pending.0.is_none() {
+                    pending.0 = argv_path.clone();
+                }
+                if let Some(path) = &pending.0 {
+                    approve_file(handle, Path::new(path), true);
+                }
+                app.manage(Mutex::new(WindowMenuState {
+                    submenu: window_menu,
+                    dynamic_count: 0,
+                }));
+            }
             // Seed the Window-menu tail / broadcast with this launch's first
             // window before anything triggers the usual create/focus refresh.
             refresh_window_list(handle);
