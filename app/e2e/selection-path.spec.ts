@@ -290,8 +290,10 @@ test.describe('selection path', () => {
     expect(stripBox.y).toBeGreaterThanOrEqual(hudBox.y + hudBox.height)
   })
 
-  test('at 1440 px the five-crumb path fits the top-center band', async ({ page }) => {
-    await page.setViewportSize({ width: 1440, height: 900 })
+  test('at 1600 px the five-crumb path fits the top-center band', async ({ page }) => {
+    // The side panels leave the viewport ~500 px narrower than the window, so
+    // the band must have headroom for the wider fallback UI font on Linux.
+    await page.setViewportSize({ width: 1600, height: 900 })
     const { s } = await setupScene(page)
     await page.evaluate((id) => window.__hew_test!.selectNodes([{ kind: 'object', id }]), s.door)
     await expect(crumbs(page)).toHaveCount(5)
