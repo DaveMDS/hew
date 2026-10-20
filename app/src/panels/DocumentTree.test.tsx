@@ -13,6 +13,8 @@
 import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DocumentTree } from './DocumentTree'
+import { makeLabelFor, nodeKey, type NodeRef } from './treeModel'
+import { draftRef, outlinerDrawing, type OutlinerDrawing } from '../tools/planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -271,5 +273,64 @@ describe('DocumentTree — outliner placement by store', () => {
     // Lit as a selected (non-primary) row: the selection is the edge, not the shape.
     const row = screen.getByText('Rectangle').closest('div')
     expect(row).toHaveStyle({ background: 'var(--accent-tint-15)' })
+  })
+})
+
+describe('makeLabelFor — parity with the Outliner rows', () => {
+  const owned1: Store = { kind: 'owned', object: 1, sketch: 7 }
+
+  it('numbers a free sketch by its Outliner row, not by its sketch_ids() position', () => {
+    const scene = drawingScene({
+      drawn: {
+        1: [{ key: 30, stores: [{ kind: 'free', sketch: 5 }], kind: 'rect' }],
+        2: [{ key: 31, stores: [{ kind: 'free', sketch: 6 }], kind: 'rect' }],
+      },
+      sketches: { 5: 1, 6: 2 },
+      // sketch_ids() lists them in the opposite order to the Outliner's rows.
+      extra: { sketch_ids: () => [6n, 5n] },
+    })
+    const drawing = outlinerDrawing(scene as unknown as Parameters<typeof outlinerDrawing>[0], [1n])
+    expect(drawing.free).toHaveLength(2)
+    const labelFor = makeLabelFor(scene, new Map(), new Map(), () => drawing)
+    drawing.free.forEach((u, i) => {
+      const e = u.unit.edges[0].store
+      if (e.kind !== 'free') throw new Error('expected a free store')
+      expect(labelFor({ kind: 'sketch', id: e.sketch })).toBe(`Sketch ${i + 1}`)
+    })
+    // Without a drawing it falls back to the sketch_ids() position.
+    expect(makeLabelFor(scene, new Map())({ kind: 'sketch', id: 6n })).toBe('Sketch 1')
+  })
+
+  it('prints a drawn selection with the Outliner\'s numbered label, for the shape and its lines', () => {
+    const scene = drawingScene({
+      drawn: { [FACE_Z]: [{ key: 10, stores: [topo1], kind: 'circle' }, { key: 11, stores: [topo1], kind: 'circle', ox: 3 }] },
+      faces: { 10: FACE_Z },
+    })
+    const drawing: OutlinerDrawing = outlinerDrawing(scene as unknown as Parameters<typeof outlinerDrawing>[0], [1n])
+    const labelFor = makeLabelFor(scene, new Map(), new Map(), () => drawing)
+    const island2 = draftRef('draft-island', ctxAt(FACE_Z), hex(11))
+    expect(drawing.labels.get(nodeKey(island2))).toBe('Circle 2')
+    expect(labelFor(island2)).toBe('Circle 2')
+    // A line of that shape resolves to the shape's row label.
+    expect(labelFor(draftRef('draft-edge', ctxAt(FACE_Z), hex(11 * 100)))).toBe('Circle 2')
+    // No drawing to consult: the bare kind word.
+    expect(makeLabelFor(scene, new Map())(island2)).toBe('Shape')
+    void owned1
+  })
+})
+
+describe('DocumentTree — filter keeps positional labels', () => {
+  it('an unnamed child keeps its unfiltered "Group N" while siblings are filtered out', () => {
+    const g = (id: number): NodeRef => ({ kind: 'group', id: BigInt(id) })
+    const scene = makeScene({
+      top_level_nodes: () => [g(1)],
+      group_ids: () => [1n, 2n, 3n, 4n],
+      group_members: (id: bigint) => (id === 1n ? [g(2), g(3), g(4)] : []),
+      group_name: (id: bigint) => (id === 1n ? 'Top' : undefined),
+    })
+    render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
+    fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'Group 3' } })
+    expect(screen.getByText('Group 3')).toBeInTheDocument()
+    expect(screen.queryByText('Group 1')).not.toBeInTheDocument()
   })
 })

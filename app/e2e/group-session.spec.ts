@@ -5,6 +5,7 @@ import {
   type CameraParams,
   type Mat4,
 } from './helpers/projectWorldToScreen'
+import { outlinerEditingChips } from './helpers/outliner'
 
 /**
  * Group editing sessions — end to end with REAL pointer input
@@ -226,13 +227,13 @@ test('entry convergence: an Outliner double-click on a session MEMBER while its 
   // fool `enterNode`'s ancestor walk.
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(1)
+  await expect(outlinerEditingChips(page)).toHaveCount(1)
   expect(await page.evaluate((g) => window.__hew_test!.getGroupMembers(g), setup.group)).toEqual([])
 
   // Now double-click the member's OWN row in the Outliner — the session
   // header nests it as "Object 1" (its positional label as the group's
   // only, unnamed member).
-  const memberRow = page.getByText('Object 1').first()
+  const memberRow = page.getByLabel('Tray', { exact: true }).getByText('Object 1').first()
   await expect(memberRow).toBeVisible()
   await memberRow.dblclick()
   await page.waitForTimeout(200)
@@ -241,8 +242,8 @@ test('entry convergence: an Outliner double-click on a session MEMBER while its 
   // group frame) AND an object context pushed on top of it (a second chip
   // for the object) — the bug this fixes closed the session outright,
   // dropping back to zero chips and a bare top-level object context.
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(2)
-  await expect(page.getByRole('button', { name: 'Model', exact: true })).toBeVisible()
+  await expect(outlinerEditingChips(page)).toHaveCount(2)
+  await expect(page.getByLabel('Tray', { exact: true }).getByRole('button', { name: 'Model', exact: true })).toBeVisible()
   // The kernel agrees: the group session is still open (its member reads
   // as hidden/empty from the outside, the same assertion the sibling
   // convergence test above uses).
@@ -254,10 +255,10 @@ test('entry convergence: an Outliner double-click on a session MEMBER while its 
   // had nothing left to pop).
   await page.keyboard.press('Escape')
   await page.waitForTimeout(150)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(1)
+  await expect(outlinerEditingChips(page)).toHaveCount(1)
   await page.keyboard.press('Escape')
   await page.waitForTimeout(150)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(0)
+  await expect(outlinerEditingChips(page)).toHaveCount(0)
   expect(await page.evaluate((g) => window.__hew_test!.getGroupMembers(g), setup.group))
     .toEqual([{ kind: 'object', id: setup.box }])
 })
@@ -281,7 +282,7 @@ test('entry convergence: an Outliner double-click on an object nested inside a g
 
   // Positional label: the object is this group's only, unnamed member, so
   // it reads "Object 1" — same fallback `resolveLabel` uses everywhere else.
-  const objectRow = page.getByText('Object 1').first()
+  const objectRow = page.getByLabel('Tray', { exact: true }).getByText('Object 1').first()
   await expect(objectRow).toBeVisible()
   await objectRow.dblclick()
   await page.waitForTimeout(200)
@@ -293,10 +294,10 @@ test('entry convergence: an Outliner double-click on an object nested inside a g
   // "Model → Object 1" breadcrumb with no chip on the group at all).
   // Exact match: the chip text is exactly "editing"; a substring match
   // would also catch the viewport's "Editing <name>" status overlay.
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(2)
+  await expect(outlinerEditingChips(page)).toHaveCount(2)
   // The root "Model" crumb is still a clickable button — the combined path
   // is non-empty (Group → Object), not collapsed back to the top level.
-  await expect(page.getByRole('button', { name: 'Model', exact: true })).toBeVisible()
+  await expect(page.getByLabel('Tray', { exact: true }).getByRole('button', { name: 'Model', exact: true })).toBeVisible()
 
   // The kernel agrees: a group session is open on exactly this group (its
   // member is a genuinely top-level world object right now, the ungroup
@@ -311,10 +312,10 @@ test('entry convergence: an Outliner double-click on an object nested inside a g
   await page.keyboard.press('Escape')
   await page.waitForTimeout(150)
   // Exact match throughout — see above.
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(1) // only the group frame remains
+  await expect(outlinerEditingChips(page)).toHaveCount(1) // only the group frame remains
   await page.keyboard.press('Escape')
   await page.waitForTimeout(150)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(0)
+  await expect(outlinerEditingChips(page)).toHaveCount(0)
   expect(await page.evaluate((g) => window.__hew_test!.getGroupMembers(g), setup.group))
     .toEqual([{ kind: 'object', id: setup.box }])
 })
@@ -463,7 +464,7 @@ test('group session: measuring geometry OUTSIDE the open session declines the sc
   // ---- Open the group session.
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(1)
+  await expect(outlinerEditingChips(page)).toHaveCount(1)
 
   // ---- Tape Measure: two real clicks on the OUTSIDE box's own top-front
   // edge corners (a real 2 m distance) — snapping is unscoped, so this

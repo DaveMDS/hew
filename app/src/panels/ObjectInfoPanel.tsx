@@ -43,7 +43,8 @@
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import { pathAbove } from './selectionPath'
 import {
   runsOfCurve,
   draftKindLabel,
@@ -135,6 +136,14 @@ interface Props {
    * selected the panel shows a read-only entry for it.
    */
   selectedGuide?: bigint | null
+  /**
+   * The open session frames (outermost first, with the labels captured when
+   * they opened) and the innermost frame's live direct members. An open frame
+   * erases its members' parent links, so the "in A › B › C" line needs them to
+   * name the frames above a selection (docs/design/selection-path.md).
+   */
+  sessionStack?: readonly { node: NodeRef; label: string }[]
+  sessionMembers?: readonly NodeRef[] | null
 }
 
 /** The guide accessor the panel reads. */
@@ -225,7 +234,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -431,6 +440,38 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, docRev, selectedIds])
+
+  // --------------------------------------------------------------------------
+  // Selection path: where the selected object/group/instance sits, outermost
+  // first, for the faint "in A › B › C" line under Type. Same walk and labels
+  // as the viewport strip (selectionPath.ts, treeModel.makeLabelFor).
+  // --------------------------------------------------------------------------
+  const pathSegments = useMemo(() => {
+    const node = nodeInfo?.node
+    if (node === undefined || (node.kind !== 'object' && node.kind !== 'group' && node.kind !== 'instance')) {
+      return []
+    }
+    const frames = sessionStack ?? []
+    const treeIndex = buildTreeIndexMap(
+      scene.top_level_nodes().map(nodeRefFromJs),
+      (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+    )
+    const labelFor = makeLabelFor(scene, treeIndex, new Map(frames.map((f) => [nodeKey(f.node), f.label])))
+    const parentOf = (n: NodeRef): NodeRef | undefined => {
+      const kindNum = nodeKindToNumber(n.kind)
+      if (kindNum < 0) return undefined
+      const p = scene.node_parent(kindNum, n.id)
+      return p === undefined ? undefined : { kind: 'group', id: p }
+    }
+    const frameKeys = new Set(frames.map((f) => nodeKey(f.node)))
+    return pathAbove(node, { sessionStack: frames, parentOf, sessionMembers }).map((n) => ({
+      node: n,
+      label: labelFor(n),
+      // An open frame is where you are editing, not something to jump to.
+      selectable: !frameKeys.has(nodeKey(n)),
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene, docRev, nodeInfo?.node, sessionStack, sessionMembers])
 
   // --------------------------------------------------------------------------
   // World bounding-box (Bounding Box row). Computed for ANY selection — single
@@ -1023,6 +1064,38 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 {nodeInfo.instanceIds.length === 1 ? 'instance' : 'instances'})
               </button>
             </>
+          )}
+          {pathSegments.length > 0 && (
+            <div
+              data-testid="object-info-path"
+              style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)', marginTop: '1px' }}
+            >
+              in{' '}
+              {pathSegments.map((seg, i) => (
+                <span key={nodeKey(seg.node)}>
+                  {i > 0 && ' › '}
+                  {seg.selectable ? (
+                    <button
+                      type="button"
+                      onClick={() => onSelectMany([seg.node])}
+                      title={`Select ${seg.label}`}
+                      style={{
+                        background: 'none',
+                        border: 'none',
+                        padding: 0,
+                        font: 'inherit',
+                        color: 'var(--accent-base, #7aa7e0)',
+                        cursor: 'pointer',
+                      }}
+                    >
+                      {seg.label}
+                    </button>
+                  ) : (
+                    seg.label
+                  )}
+                </span>
+              ))}
+            </div>
           )}
         </div>
       </div>

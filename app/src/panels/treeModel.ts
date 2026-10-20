@@ -1,4 +1,4 @@
-import { draftRefAlive, type PlaneUnitsScene } from '../tools/planeUnits'
+import { draftKindLabel, draftRef, draftRefAlive, resolveDraft, type OutlinerDrawing, type PlaneUnitsScene } from '../tools/planeUnits'
 
 /**
  * Pure model helpers for the document tree + editing context ( navigation).
@@ -290,6 +290,83 @@ export function resolveLabel(
     return strippedDef
   }
   return entityLabel(kind, index)
+}
+
+/** The slice of the wasm `Scene` the shared label resolver reads. */
+export interface LabelScene {
+  group_name(id: bigint): string | undefined
+  object_name(id: bigint): string | undefined
+  instance_name(id: bigint): string | undefined
+  instance_def(id: bigint): bigint | undefined
+  component_name(def: bigint): string | undefined
+  sketch_ids?(): ArrayLike<bigint>
+}
+
+/**
+ * The one label resolver every surface prints: Outliner rows and breadcrumb,
+ * the Selection path strip, the hover tip line, and Object Info
+ * (docs/design/selection-path.md "Shared code"). `treeIndex` is the
+ * positional-fallback map from `buildTreeIndexMap`; `frameLabelByKey` carries
+ * the labels captured for open session frames, whose nodes the kernel hides
+ * for the session's duration so a scene query answers nothing for them.
+ */
+export function makeLabelFor(
+  scene: LabelScene,
+  treeIndex: ReadonlyMap<string, number>,
+  frameLabelByKey: ReadonlyMap<string, string> = new Map(),
+  drawing?: () => OutlinerDrawing,
+): (node: NodeRef) => string {
+  // The Outliner numbers free sketch rows by their position among
+  // `drawing.free`, and numbers drawn units per owning object
+  // (`drawing.labels`). Both come from one lazily read OutlinerDrawing so a
+  // model without drawn selections never pays for the kernel read.
+  let sketchRowOf: Map<bigint, number> | undefined
+  const sketchRows = (): Map<bigint, number> => {
+    if (sketchRowOf !== undefined) return sketchRowOf
+    const m = new Map<bigint, number>()
+    drawing?.().free.forEach((u, i) => {
+      for (const e of u.unit.edges) {
+        if (e.store.kind === 'free' && !m.has(e.store.sketch)) m.set(e.store.sketch, i)
+      }
+    })
+    return (sketchRowOf = m)
+  }
+  return (node) => {
+    const frameLabel = frameLabelByKey.get(nodeKey(node))
+    if (frameLabel !== undefined) return frameLabel
+    if (isDraftKind(node.kind)) {
+      const d = drawing?.()
+      if (d !== undefined) {
+        const own = d.labels.get(nodeKey(node))
+        if (own !== undefined) return own
+        if (node.kind !== 'draft-island' && node.ctx !== undefined) {
+          const unit = resolveDraft(scene as unknown as PlaneUnitsScene, node)?.unit
+          if (unit !== null && unit !== undefined) {
+            const viaUnit = d.labels.get(nodeKey(draftRef('draft-island', node.ctx, unit.key)))
+            if (viaUnit !== undefined) return viaUnit
+          }
+        }
+      }
+      return draftKindLabel(node.kind)
+    }
+    if (node.kind === 'sketch') {
+      let at = sketchRows().get(node.id)
+      if (at === undefined) {
+        const ids = scene.sketch_ids !== undefined ? Array.from(scene.sketch_ids()) : []
+        at = ids.findIndex((id) => id === node.id)
+      }
+      return entityLabel('sketch', at >= 0 ? at : 0)
+    }
+    const idx = treeIndex.get(nodeKey(node)) ?? 0
+    if (node.kind === 'group') {
+      return resolveLabel(scene.group_name(node.id), undefined, 'group', idx)
+    } else if (node.kind === 'instance') {
+      const def = scene.instance_def(node.id)
+      const defName = def !== undefined ? scene.component_name(def) : undefined
+      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx)
+    }
+    return resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
+  }
 }
 
 /**

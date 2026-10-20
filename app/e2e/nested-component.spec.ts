@@ -5,6 +5,7 @@ import {
   type CameraParams,
   type Mat4,
 } from './helpers/projectWorldToScreen'
+import { outlinerEditingChips } from './helpers/outliner'
 
 /**
  * Nested components — end to end with REAL pointer input (feat(kernel):
@@ -135,11 +136,16 @@ async function dblClickWorld(page: Page, ctx: Ctx, x: number, y: number, z: numb
 
 /** The Outliner's "editing" chip count — one per node on the combined
  *  session-stack path (DocumentTree.tsx's `NodeRow`/`Row`), so it doubles
- *  as the session stack depth. Exact match: a substring match would also
- *  catch the viewport's "Editing <name>" status overlay (see
+ *  as the session stack depth. Exact match, and outside the viewport's
+ *  selection-path strip, which repeats each frame's chip (see
  *  group-session.spec.ts's own identical comment). */
 async function editingChipCount(page: Page): Promise<number> {
-  return page.getByText('editing', { exact: true }).count()
+  return outlinerEditingChips(page).count()
+}
+
+/** The strip's open-frame crumb for `label` (the `editing` chip rides on it). */
+function editingFrameCrumb(page: Page, label: string) {
+  return page.locator('[data-testid="selection-path-crumb"][data-editing="true"]', { hasText: label })
 }
 
 // A 3/4 view wide enough to cover the part's standalone placement
@@ -467,7 +473,7 @@ test('renaming the definition mid-session updates the "Editing" breadcrumb', asy
   // Enter the session with a real double-click on the instance's top face.
   await dblClickWorld(page, ctx, 0.5, 0.5, 1)
   await expect.poll(() => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(instance)
-  await expect(page.getByText('Editing Component 1')).toBeVisible()
+  await expect(editingFrameCrumb(page, 'Component 1')).toBeVisible()
 
   // Rename the definition in the Components panel. Nothing drawn changes
   // (no re-tessellation), but the breadcrumb names the definition live.
@@ -475,5 +481,5 @@ test('renaming the definition mid-session updates the "Editing" breadcrumb', asy
   const input = page.getByRole('textbox', { name: /rename component/i })
   await input.fill('Cabinet')
   await input.press('Enter')
-  await expect(page.getByText('Editing Cabinet')).toBeVisible()
+  await expect(editingFrameCrumb(page, 'Cabinet')).toBeVisible()
 })

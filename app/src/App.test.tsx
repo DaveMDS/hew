@@ -2678,12 +2678,23 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
       onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 1' }])
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    // Two `Model` buttons now: the Outliner's breadcrumb and the viewport
+    // selection-path strip's root crumb. Both reach `handleExitToModel`.
+    const [outlinerModel, stripModel] = ['not-strip', 'strip'].map((which) =>
+      screen.getAllByRole('button', { name: 'Model' }).find(
+        (b) => (b.dataset.testid === 'selection-path-crumb') === (which === 'strip'),
+      ) as HTMLElement,
+    )
+
+    fireEvent.click(outlinerModel)
+    fireEvent.click(stripModel)
     expect(runCloseInnermostSession).not.toHaveBeenCalled()
 
     armed = false
-    fireEvent.click(screen.getByRole('button', { name: 'Model' }))
+    fireEvent.click(outlinerModel)
     expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    fireEvent.click(stripModel)
+    expect(runCloseInnermostSession).toHaveBeenCalledTimes(2)
   })
 })
 

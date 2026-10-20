@@ -35,6 +35,7 @@ const chipStyle: React.CSSProperties = {
 export function ViewportHUD({ onSelectView, onOrbit }: ViewportHUDProps) {
   return (
     <div
+      data-testid="viewport-hud"
       style={{
         position: 'absolute',
         top: '16px',

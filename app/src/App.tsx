@@ -58,7 +58,9 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { SelectionPathStrip } from './panels/SelectionPathStrip'
+import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
@@ -66,7 +68,7 @@ import { installTestHarness, type PrintRecorder } from './test/harness'
 import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { setKernelHidden } from './tools/planeUnits'
+import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
 import { makeFileHost, isTauri, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   SAVE_PANEL_FORMATS,
@@ -545,6 +547,14 @@ export default function App() {
    *  viewport, which owns the renderer and needs no cross-render state to
    *  apply them. */
   const [sessionStack, setSessionStack] = useState<{ node: NodeRef; label: string }[]>([])
+  /** The leaf a viewport click hit, paired with the node that click selected
+   *  (docs/design/selection-path.md "The strip"): the strip's crumbs below
+   *  the selection exist only for such a selection. Any other route to the
+   *  selection clears it (the effect below). */
+  const [pathHit, setPathHit] = useState<{ leaf: HitLeaf; sel: NodeRef } | null>(null)
+  /** The select snap of the click in flight — the viewport fires it just
+   *  before `onSelect` (see `handleSelect` in Viewport.tsx). */
+  const selectSnapLeafRef = useRef<HitLeaf | null>(null)
   /** The innermost open session frame's NodeRef, or `null`. */
   const innermostSessionNode: NodeRef | null =
     sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null
@@ -1293,10 +1303,28 @@ export default function App() {
   }, [])
 
   const handleSelect = useCallback((node: NodeRef | null, mode: SelectMode) => {
+    // Every route to a selection starts without a hit leaf; the viewport
+    // click and the crumb click set it again right after this returns.
+    setPathHit(null)
     // Node, guide, and annotation selection are mutually exclusive.
     setSelectedGuide(null)
     setSelectedAnnotation(null)
     setSelectedIds((cur) => nextSelection(cur, node, mode))
+  }, [])
+
+  /** The viewport's own Select click: the plain selection change, plus the
+   *  hit leaf the click's snap named so the strip can show what is below the
+   *  selected container. Only a replace-mode click on a node qualifies. */
+  const handleViewportSelect = useCallback((node: NodeRef | null, mode: SelectMode) => {
+    const leaf = selectSnapLeafRef.current
+    selectSnapLeafRef.current = null
+    handleSelect(node, mode)
+    setPathHit(node !== null && mode === 'replace' && leaf !== null ? { leaf, sel: node } : null)
+  }, [handleSelect])
+
+  const handleSelectSnap = useCallback((snap: { object?: bigint; instance?: bigint } | null) => {
+    selectSnapLeafRef.current =
+      snap !== null && snap.object !== undefined ? { object: snap.object, instance: snap.instance } : null
   }, [])
 
   /** Lift a multi-node selection (marquee, Select All, Invert Selection)
@@ -2159,6 +2187,120 @@ export default function App() {
     [docRev, sessionStack],
   )
 
+  // The hit leaf outlives only the selection it produced: any other route to
+  // a different selection (Outliner, Object Info, palette, marquee, script)
+  // drops it so the strip never shows crumbs from a stale click.
+  useEffect(() => {
+    if (pathHit === null) return
+    if (selectedIds.length === 1 && nodeEq(selectedIds[0], pathHit.sel)) return
+    setPathHit(null)
+  }, [selectedIds, pathHit])
+
+  // The Outliner's positional-label index (per parent container), built once
+  // per document revision and shared by the palette entries and the path.
+  const sharedTreeIndex = useMemo(() => {
+    const scene = state?.scene
+    if (scene == null) return null
+    return buildTreeIndexMap(
+      scene.top_level_nodes().map(nodeRefFromJs),
+      (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
+    )
+    // docRev: membership changes on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.scene, docRev])
+
+  // Selection path (docs/design/selection-path.md): one label resolver shared
+  // with the Outliner, Object Info, and the hover tip line. The positional
+  // fallback index is the Outliner's (per parent container), recomputed per
+  // document revision.
+  const pathLabels = useMemo(() => {
+    const scene = state?.scene
+    if (scene == null || sharedTreeIndex === null) return null
+    const frameLabels = new Map(sessionStack.map((f) => [nodeKey(f.node), f.label]))
+    // The Outliner's drawn-unit numbering, read once and only if a drawn or
+    // free-sketch label is asked for.
+    let drawing: OutlinerDrawing | undefined
+    const drawingOnce = () =>
+      (drawing ??= outlinerDrawing(scene as unknown as Parameters<typeof outlinerDrawing>[0], Array.from(scene.object_ids())))
+    const labelFor = makeLabelFor(scene, sharedTreeIndex, frameLabels, drawingOnce)
+    const parentOf = (n: NodeRef): NodeRef | undefined => {
+      const kindNum = nodeKindToNumber(n.kind)
+      if (kindNum < 0) return undefined
+      const p = scene.node_parent(kindNum, n.id)
+      return p === undefined ? undefined : { kind: 'group' as const, id: p }
+    }
+    const memberName = (objectId: bigint): string | undefined => {
+      const name = scene.object_name(objectId)
+      const stripped = name === undefined ? '' : stripTagSuffix(name)
+      return stripped === '' ? undefined : stripped
+    }
+    return { scene, labelFor, parentOf, memberName }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state?.scene, sharedTreeIndex, sessionStack])
+
+  const pathCrumbs = useMemo(() => {
+    if (pathLabels === null) return []
+    const { scene, labelFor, parentOf, memberName } = pathLabels
+    // The object or free sketch a drawn selection lives on.
+    const draftOwner = (ref: NodeRef): NodeRef | null => {
+      const r = resolveDraft(scene as unknown as PlaneUnitsScene, ref)
+      if (r === null) return null
+      let sketch: bigint | null = null
+      for (const e of r.edges) {
+        if (e.store.kind === 'free') sketch = sketch ?? e.store.sketch
+        else return { kind: 'object', id: e.store.object }
+      }
+      return sketch !== null ? { kind: 'sketch', id: sketch } : null
+    }
+    return buildSelectionPath({
+      sessionStack,
+      activeContext,
+      selected: selectedIds,
+      hitLeaf: pathHit !== null && selectedIds.length === 1 && nodeEq(selectedIds[0], pathHit.sel) ? pathHit.leaf : null,
+      parentOf,
+      sessionMembers,
+      labelFor,
+      memberName,
+      draftOwner,
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathLabels, sessionStack, activeContext, selectedIds, pathHit, sessionMembers])
+
+  /** The hover tip's second line for the object under the cursor (Select tool
+   *  only — the viewport forwards `object` solely then). */
+  const hoverDetail = useMemo(() => {
+    if (pathLabels === null || inferenceInfo === null || inferenceInfo.object === undefined) return null
+    // An open session frame erases its direct members' parent links, so a
+    // member under the cursor names the innermost frame as its parent.
+    const frame = sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null
+    const parentOf = (n: NodeRef): NodeRef | undefined =>
+      pathLabels.parentOf(n) ??
+      (frame !== null && sessionMembers?.some((m) => nodeEq(m, n)) === true ? frame : undefined)
+    // An instance that is an open frame (or in the object context) shows its
+    // parts as ordinary objects, not as closed-definition members.
+    const isOpenInstance = (id: bigint): boolean =>
+      sessionStack.some((f) => f.node.kind === 'instance' && f.node.id === id) ||
+      activeContext.some((n) => n.kind === 'instance' && n.id === id)
+    return hoverLine(
+      { object: inferenceInfo.object, instance: inferenceInfo.instance },
+      parentOf, pathLabels.labelFor, pathLabels.memberName, isOpenInstance,
+    )
+  }, [pathLabels, inferenceInfo?.object, inferenceInfo?.instance, sessionStack, activeContext, sessionMembers])
+
+  /** A strip crumb click: the selection becomes that node, nothing else
+   *  changes. The hit leaf stays paired with it so the crumbs below survive. */
+  const handlePathSelect = useCallback((node: NodeRef) => {
+    const h = pathHit
+    handleSelect(node, 'replace')
+    setPathHit(h === null ? null : { leaf: h.leaf, sel: node })
+  }, [handleSelect, pathHit])
+
+  /** `Model` crumb: with anything open, exit everything; otherwise clear. */
+  const handlePathModel = useCallback(() => {
+    if (sessionStack.length > 0 || activeContext.length > 0) handleExitToModel()
+    else handleSelectNone()
+  }, [sessionStack, activeContext, handleExitToModel, handleSelectNone])
+
   // Compute the lit set for isolation.
   // When the context is non-empty, compute the leaf objects of the deepest context node.
   // When entering an object (deepest is an object), lit = {that object}.
@@ -2307,16 +2449,13 @@ export default function App() {
   // Outliner exactly (same resolveLabel fallbacks).
   const paletteModelEntries = useMemo((): PaletteEntry[] => {
     const scene = state?.scene
-    if (scene == null) return []
+    if (scene == null || sharedTreeIndex === null) return []
     const entries: PaletteEntry[] = []
 
     // Positional fallback indices ("Object N") must be the Outliner's — the
     // tree numbers nodes within their parent container, not within the flat
     // per-kind id lists these loops iterate.
-    const treeIndex = buildTreeIndexMap(
-      scene.top_level_nodes().map(nodeRefFromJs),
-      (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
-    )
+    const treeIndex = sharedTreeIndex
     const indexOf = (kind: NodeRef['kind'], id: bigint) =>
       treeIndex.get(nodeKey({ kind, id })) ?? 0
 
@@ -2367,7 +2506,7 @@ export default function App() {
     return entries
     // docRev: names/tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, docRev])
+  }, [state, sharedTreeIndex])
 
   // Model Health's cheap whole-document summary, once per document change —
   // the status badge and the Outliner icons read it (component-definition
@@ -4097,11 +4236,7 @@ export default function App() {
     (node: NodeRef): string => {
       const scene = state?.scene
       if (scene == null) return 'Item'
-      const treeIndex = buildTreeIndexMap(
-        scene.top_level_nodes().map(nodeRefFromJs),
-        (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
-      )
-      const index = treeIndex.get(nodeKey(node)) ?? 0
+      const index = sharedTreeIndex?.get(nodeKey(node)) ?? 0
       if (node.kind === 'object') return resolveLabel(scene.object_name(node.id), undefined, 'object', index)
       if (node.kind === 'group') return resolveLabel(scene.group_name(node.id), undefined, 'group', index)
       if (node.kind === 'instance') {
@@ -4111,7 +4246,7 @@ export default function App() {
       }
       return 'Item'
     },
-    [state],
+    [state, sharedTreeIndex],
   )
 
   /** Fire-and-forget thumbnail render + write, resolving `toastId` from a
@@ -6832,7 +6967,8 @@ export default function App() {
             activeContext={activeContext}
             selectedIds={selectedIds}
             activeLitSet={activeLitSet}
-            onSelect={handleSelect}
+            onSelect={handleViewportSelect}
+            onSelectSnap={handleSelectSnap}
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
             selectedGuide={selectedGuide}
@@ -6865,7 +7001,7 @@ export default function App() {
               — all net-new DOM overlays; Viewport.tsx rendered none of this
               before this milestone. */}
           <SnapDot info={inferenceInfo} />
-          <InferenceTooltip info={inferenceInfo} />
+          <InferenceTooltip info={inferenceInfo} detail={hoverDetail} />
           {/* The in-viewport annotation text editor (docs/design/
               dimensions-text.md): double-click-to-edit an existing dimension/
               leader, or the Text tool's second click wording a new leader. */}
@@ -6899,36 +7035,23 @@ export default function App() {
             />
           </div>
 
-          {/* Session status: the only other place the app names the current
-              edit target is the Outliner's breadcrumb/"editing" row chips
-              (DocumentTree.tsx), which lives in a collapsible panel — this
-              top-of-viewport text stays visible regardless. Names the
-              INNERMOST open frame (group or component alike). */}
-          {sessionStack.length > 0 && (
-            <div
-              style={{
-                position: 'absolute',
-                top: '16px',
-                left: '50%',
-                transform: 'translateX(-50%)',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '5px 12px',
-                background: 'var(--surface-overlay)',
-                border: '1px solid var(--border-hairline)',
-                borderRadius: '7px',
-                fontFamily: 'var(--font-family-ui)',
-                fontSize: '11.5px',
-                color: 'var(--text-secondary)',
-                whiteSpace: 'nowrap',
-                zIndex: 20,
-                pointerEvents: 'none',
+          {/* Selection path (docs/design/selection-path.md): where you are
+              editing and what is selected, in one strip. It replaces the old
+              "Editing X" pill — open frames read as crumbs carrying the
+              Outliner's `editing` chip. */}
+          <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
+            <SelectionPathStrip
+              crumbs={pathCrumbs}
+              onSelect={handlePathSelect}
+              onModel={handlePathModel}
+              onFrame={(depth) => {
+                // The innermost open frame has nothing to close.
+                if (frameClickAction(depth, sessionStack.length, activeContext.length) === 'noop') return
+                handleSetPathDepth(depth + 1)
               }}
-            >
-              Editing {sessionStack[sessionStack.length - 1].label}
-            </div>
-          )}
+              onEnter={enterNode}
+            />
+          </div>
 
           {/* Make Solid wizard: over the viewport's right side, non-modal. */}
           {makeSolid !== null && state !== null && (
@@ -6997,14 +7120,14 @@ export default function App() {
               viewport-level tool, not a rail selection, so the status bar's
               usual "active tool" chrome doesn't name it (see App.tsx's
               LibraryPlaceTool status-hint note). Cleared by the arm
-              callback on both cancel and commit. Offset below the session
-              pill when both are showing (editing inside an open group/
+              callback on both cancel and commit. Offset below the selection-path
+              strip when it is showing (editing inside an open group/
               component while placing a library item) rather than overlap it. */}
           {insertingItem !== null && (
             <div
               style={{
                 position: 'absolute',
-                top: sessionStack.length > 0 ? '54px' : '14px',
+                top: pathCrumbs.length > 0 ? '54px' : '14px',
                 left: '50%',
                 transform: 'translateX(-50%)',
                 display: 'flex',
@@ -7237,6 +7360,8 @@ export default function App() {
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
               onSelectMany={handleReplaceSelection}
+              sessionStack={sessionStack}
+              sessionMembers={sessionMembers}
               onShowHealth={handleShowObjectHealth}
               onToast={handleToast}
             />

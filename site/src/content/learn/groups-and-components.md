@@ -84,6 +84,18 @@ Groups appear as folders you can expand; component instances get their own hexag
 
 Hover a group row for its second eye button — a stacked-eye glyph — to hide or show every one of its members at once, nested groups included; the root Model row above the tree has the same button for the whole document. Typing into the filter field above the tree narrows the list to matching rows and the groups standing between them and the top.
 
+## What did I just click?
+
+A click in the viewport selects the outermost group a thing belongs to, so a click on a cabinet door inside a kitchen group selects the kitchen. The selection path, the strip at the top of the viewport, tells you what was under that click: Model › Kitchen › Base Cabinets › Cabinet 2 › Door. The selected level is highlighted; the levels after it run down to the thing you hit.
+
+![The selection path reads Model › Kitchen › Base Cabinets › Cabinet 2 › Door with Kitchen highlighted, after one click on the door](/docs/selection-path.webp)
+
+Click any crumb to select that level instead: Cabinet 2 to move the one cabinet, Door to rename it. Nothing opens and nothing fades. The Outliner expands to the row, and Object Info names it with an "in Kitchen › Base Cabinets › Cabinet 2" line under its type; the group names there are clickable too, except one you are editing, which stays plain text. Double-click a crumb to open that group for editing, the same as double-clicking its Outliner row. While you are editing, the strip marks each open level "editing", and clicking Model closes them all.
+
+With the Select tool, rest the cursor on anything for a moment and the inference tip names it under the snap: On Face, then Door · in Cabinet 2. A part of a component you haven't opened appears at the end of the path in italics; double-click the component's crumb to open it.
+
+The strip shows only when there is a path to show. One object with no group around it shows nothing, and so does a selection of several things.
+
 ## Nesting
 
 A component definition can contain other components (and groups) as members, the same way it contains objects — place a wheel component inside a car component, and the car definition holds four wheel instances alongside its own geometry. Make Component builds this from a selection that includes instances: a selected group stays whole rather than being flattened, and a selected instance becomes a nested member instead of being refused.

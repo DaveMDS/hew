@@ -553,6 +553,16 @@ below.
   `hew.group.reparent`); refused typed for a group-into-itself-or-descendant
   cycle or
   while a group/component session is open
+- Selection path: a strip at the top of the viewport reads the containment
+  chain of the selection from Model down to the thing clicked (`Model ›
+  Kitchen › Base Cabinets › Cabinet 2 › Door`), replacing the "Editing X"
+  pill; open session frames appear in the same strip with an `editing`
+  chip. A crumb click re-targets the selection to that level without
+  opening a session; a double-click opens it (the Outliner row's
+  double-click path). A member of an unopened component instance ends the
+  path as a non-selectable crumb. The Select tool's inference tip names
+  the hovered thing and its parent after a 400 ms dwell, and Object Info
+  shows the same containment line under Type (docs/design/selection-path.md)
 - Tags for organizing and toggling visibility of groups of objects,
   deletable without touching the geometry that carries them; clicking a
   tag selects everything it carries, and a tag is renamed in place

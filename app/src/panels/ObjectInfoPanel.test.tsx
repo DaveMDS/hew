@@ -428,3 +428,60 @@ describe('ObjectInfoPanel — guide selection', () => {
     expect(screen.queryByLabelText('Add tag')).toBeNull()
   })
 })
+
+describe('ObjectInfoPanel — selection path line', () => {
+  // Kitchen(g1) > Base(g2) > Door(o10); Floor(o12) is top level.
+  const parents = new Map<string, bigint>([['1:2', 1n], ['0:10', 2n]])
+  const names: Record<string, string> = { '1': 'Kitchen', '2': 'Base Cabinets' }
+  function pathScene() {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'group', id: 1n }, { kind: 'object', id: 12n }],
+      group_members: (id: bigint) =>
+        id === 1n ? [{ kind: 'group', id: 2n }] : id === 2n ? [{ kind: 'object', id: 10n }] : [],
+      node_parent: (kind: number, id: bigint) => parents.get(`${kind}:${id}`),
+      group_name: (id: bigint) => names[String(id)],
+      node_tags: () => [],
+      object_solid: () => true,
+      object_name: (id: bigint) => (id === 10n ? 'Door' : id === 12n ? 'Floor' : undefined),
+    })
+  }
+
+  it('shows "in A › B" under Type for a nested object, each segment selecting that node', () => {
+    const onSelectMany = vi.fn()
+    render(
+      <ObjectInfoPanel {...baseProps} onSelectMany={onSelectMany} scene={pathScene()} selectedIds={[{ kind: 'object', id: 10n }]} />,
+    )
+    const line = screen.getByTestId('object-info-path')
+    expect(line.textContent).toBe('in Kitchen › Base Cabinets')
+    fireEvent.click(screen.getByRole('button', { name: 'Kitchen' }))
+    expect(onSelectMany).toHaveBeenCalledWith([{ kind: 'group', id: 1n }])
+    fireEvent.click(screen.getByRole('button', { name: 'Base Cabinets' }))
+    expect(onSelectMany).toHaveBeenLastCalledWith([{ kind: 'group', id: 2n }])
+  })
+
+  it('shows the line for a nested group too', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={pathScene()} selectedIds={[{ kind: 'group', id: 2n }]} />)
+    expect(screen.getByTestId('object-info-path').textContent).toBe('in Kitchen')
+  })
+
+  it('shows no line for a top-level object', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={pathScene()} selectedIds={[{ kind: 'object', id: 12n }]} />)
+    expect(screen.queryByTestId('object-info-path')).toBeNull()
+  })
+
+  it('names the open frames above a selection whose parent links the session erased, without making them buttons', () => {
+    const erased = pathScene()
+    ;(erased as unknown as { node_parent: () => undefined }).node_parent = () => undefined
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={erased}
+        selectedIds={[{ kind: 'object', id: 10n }]}
+        sessionStack={[{ node: { kind: 'group', id: 1n }, label: 'Kitchen' }]}
+        sessionMembers={[{ kind: 'object', id: 10n }]}
+      />,
+    )
+    expect(screen.getByTestId('object-info-path').textContent).toBe('in Kitchen')
+    expect(screen.queryByRole('button', { name: 'Kitchen' })).toBeNull()
+  })
+})

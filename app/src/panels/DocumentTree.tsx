@@ -20,6 +20,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import {
   entityLabel,
   resolveLabel,
+  makeLabelFor,
   breadcrumb,
   buildTreeIndexMap,
   isTreeRowDimmed,
@@ -421,20 +422,7 @@ export function DocumentTree({
 
   // Label resolver for breadcrumbs AND the filter below (same text, so a
   // filter match is exactly what the row itself displays).
-  const labelFor = (node: NodeRef): string => {
-    const frameLabel = frameLabelByKey.get(nodeKey(node))
-    if (frameLabel !== undefined) return frameLabel
-    const idx = treeIndex.get(nodeKey(node)) ?? 0
-    if (node.kind === 'group') {
-      return resolveLabel(scene.group_name(node.id), undefined, 'group', idx)
-    } else if (node.kind === 'instance') {
-      const def = scene.instance_def(node.id)
-      const defName = def !== undefined ? scene.component_name(def) : undefined
-      return resolveLabel(scene.instance_name(node.id), defName, 'instance', idx)
-    } else {
-      return resolveLabel(scene.object_name(node.id), undefined, 'object', idx)
-    }
-  }
+  const labelFor = makeLabelFor(scene, treeIndex, frameLabelByKey, () => drawing)
 
   // ---------------------------------------------------------------------
   // Filter (MaterialPalette's filter pattern): case-insensitive substring
@@ -1268,12 +1256,16 @@ const NodeRow = memo(function NodeRowInner({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [members, hiddenKeys],
   )
-  const visibleMembers = members.filter(
-    (child) =>
-      filterResult === null ||
-      filterResult.matches.has(nodeKey(child)) ||
-      filterResult.ancestors.has(nodeKey(child)),
-  )
+  // Each child keeps its position among ALL members: an unnamed child's
+  // "Group N" must not shift when a filter hides its siblings.
+  const visibleMembers = members
+    .map((child, position) => ({ child, position }))
+    .filter(
+      ({ child }) =>
+        filterResult === null ||
+        filterResult.matches.has(nodeKey(child)) ||
+        filterResult.ancestors.has(nodeKey(child)),
+    )
 
   return (
     <>
@@ -1303,12 +1295,12 @@ const NodeRow = memo(function NodeRowInner({
         isDropTarget={dropHighlightKey === key}
         onRowPointerDown={(e) => onStartDrag(node, e)}
       />
-      {expanded && visibleMembers.map((child, childIdx) => (
+      {expanded && visibleMembers.map(({ child, position }) => (
         <NodeRow
               drawing={drawing}
           key={`${child.kind}:${child.id}`}
           node={child}
-          index={childIdx}
+          index={position}
           depth={depth + 1}
           scene={scene}
           docRev={docRev}

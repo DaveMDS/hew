@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { outlinerEditingChips } from './helpers/outliner'
 
 /**
  * Lane C — dirty-state E2E (docs/design/v1.1-cycle.md): the derived
@@ -103,7 +104,7 @@ test('entering and leaving a group edit session never dirties the title or the C
   await expect(groupRow).toBeVisible()
   await groupRow.dblclick()
   await page.waitForTimeout(200)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(1)
+  await expect(outlinerEditingChips(page)).toHaveCount(1)
 
   // Undoable bookkeeping, but not a change: no dirty dot, no reported changes.
   await expect(page).toHaveTitle(/^Untitled — Hew$/)
@@ -122,7 +123,7 @@ test('entering and leaving a group edit session never dirties the title or the C
   // Exiting the session (Escape) is itself more bookkeeping — still clean.
   await page.keyboard.press('Escape')
   await page.waitForTimeout(200)
-  await expect(page.getByText('editing', { exact: true })).toHaveCount(0)
+  await expect(outlinerEditingChips(page)).toHaveCount(0)
   await expect(page).toHaveTitle(/^Untitled — Hew$/)
   await expect(page.getByText('No changes since last save.')).toBeVisible()
 })

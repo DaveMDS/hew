@@ -177,6 +177,7 @@ export function MeasurementBox({
 
   return (
     <div
+      data-testid="measurement-box"
       style={{
         position: 'absolute',
         top: '16px',

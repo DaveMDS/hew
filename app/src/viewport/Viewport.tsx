@@ -280,6 +280,12 @@ export interface InferenceInfo {
    *  projected it onto its drawing plane (see `Tool.snapProjected`). The chip
    *  qualifies the label so it stops claiming a snap that was not honoured. */
   projected?: boolean
+  /** The hit leaf under the cursor and, for instanced geometry, the instance
+   *  carrying it. Forwarded only while the Select tool is idle (no gesture
+   *  armed, not read-only) so the app can name what the cursor is over in the
+   *  tip's second line (docs/design/selection-path.md "The hover line"). */
+  object?: bigint
+  instance?: bigint
 }
 
 interface Props {
@@ -8651,6 +8657,14 @@ export default function Viewport({
     }
 
     // ------------------------------------------------------------------ pointer move (snap + cue)
+    /** True once the inference tip was hidden for a held button; the next
+     *  publishSnapCues re-arms it. Keeps the hide to one publish per press. */
+    let tipHiddenForButton = false
+    function hideTipForButton(): void {
+      if (tipHiddenForButton) return
+      tipHiddenForButton = true
+      onInferenceChangeRef.current?.(null)
+    }
     function onPointerMove(ev: PointerEvent): void {
       // Capture every raw move first (before any early-return) so low-level
       // replay reproduces the whole stack, camera-nav moves included.
@@ -8685,7 +8699,10 @@ export default function Viewport({
       updateSketchHover(ray, ev)
 
       // In camera-nav mode, OrbitControls owns left-drag — skip geometry routing.
-      if (cameraModeRef.current) return
+      if (cameraModeRef.current) {
+        if (ev.buttons !== 0) hideTipForButton()
+        return
+      }
 
       // Armed deferred-tap (Shop Mode's readOnly stand-in for the marquee,
       // above): only tracks whether the press has moved past the drag
@@ -8708,7 +8725,10 @@ export default function Viewport({
           ) {
             deferredTapDrag.active = true
           }
-          if (deferredTapDrag.active) return
+          if (deferredTapDrag.active) {
+            hideTipForButton()
+            return
+          }
         }
       }
 
@@ -8727,6 +8747,7 @@ export default function Viewport({
             marqueeDrag.active = true
           }
           if (marqueeDrag.active) {
+            hideTipForButton()
             updateMarqueeOverlay(px, py)
             return
           }
@@ -8749,7 +8770,12 @@ export default function Viewport({
           }
         }
       }
-      if (ev.buttons !== 0 && ev.button !== -1 && dragMove?.active !== true) return
+      if (ev.buttons !== 0 && ev.button !== -1 && dragMove?.active !== true) {
+        // Orbit, pan, or a press-and-drag in flight: the tip describes a
+        // hover that is no longer true, so hide it (once) until the next hover.
+        hideTipForButton()
+        return
+      }
 
       // Armed annotation offset/leader drag: past the threshold, live-preview
       // the new placement and own the pointer entirely (no tool routing) —
@@ -8824,7 +8850,7 @@ export default function Viewport({
       drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
       scheduleRender()
 
-      publishSnapCues(cueSnap, activeTool)
+      publishSnapCues(cueSnap, activeTool, ev.buttons)
 
       // Tape loupe (round-3 playtest finding 4): keep the latest probe live
       // for whichever commit outcome eventually applies (armTapeLoupe's own
@@ -8887,7 +8913,8 @@ export default function Viewport({
      * and reports a snap that is no longer the winner. `snap` is expected to
      * already be the tool-preferred one (`toolSnapForCues`, applied by the
      * caller so it can share the same value with `cueLayer.update`). */
-    function publishSnapCues(snap: Snap | null, activeTool: Tool): void {
+    function publishSnapCues(snap: Snap | null, activeTool: Tool, buttons = 0): void {
+      tipHiddenForButton = false
       onStatusChangeRef.current?.(toolController.activeToolName, snap !== null ? snap.kind : null)
 
       // Inference tooltip chip + snap dot (Refinement B) —
@@ -8909,6 +8936,12 @@ export default function Viewport({
           direction: snap.direction,
           frame: getDrawingAxes(wasmScene),
           projected: activeTool.snapProjected?.() ?? false,
+          // Hover identification is a Select-only, idle-only second line.
+          ...(toolController.activeToolName === 'Select' && !readOnlyRef.current &&
+              !toolHasArmedGesture(activeTool) && snap.object !== undefined &&
+              buttons === 0 && dragMove === null && marqueeDrag === null && deferredTapDrag === null
+            ? { object: snap.object, instance: snap.instance }
+            : {}),
         })
       }
     }
@@ -9124,6 +9157,9 @@ export default function Viewport({
       selectIslandOnPick = toolController.activeToolName === 'Select' && clickCount >= 3
 
       if (toolController.activeToolName === 'Select') {
+        // A Select press (the start of a click, a drag-move, or a marquee)
+        // ends the hover the tip described.
+        if (!readOnlyRef.current) hideTipForButton()
         const [px, py] = canvasPoint(ev)
         const topLevel = activeContextRef.current.length === 0
 
