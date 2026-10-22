@@ -154,6 +154,8 @@ import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
+import { getMeasurementsPosition, subscribeMeasurementsPosition } from './settings/view'
+import { useViewSetting } from './settings/useViewSetting'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { useScenesController } from './scenes/useScenesController'
 import { parseCameraJson, parseSectionJson, parseViewStyleJson, type ViewStyleJson } from './scenes/scenesModel'
@@ -1068,6 +1070,7 @@ export default function App() {
   // the View menu at a fixed 600ms instead, same posture as `showDebugMode`
   // above). `useScenesController` reads the singleton directly for the tween
   // duration; this is only the menu/palette checkmark's own render cache.
+  const measurementsPosition = useViewSetting(getMeasurementsPosition, subscribeMeasurementsPosition)
   const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
   useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
 
@@ -7239,9 +7242,9 @@ export default function App() {
                 measurement (a Line's length mid-gesture) always wins, since
                 that is the number the gesture is about. */}
             {measurement === '' && fly.mode !== 'off' ? (
-              <MeasurementBox toolName={toolName} value={fly.speedText} label={t`Fly speed`} frozen />
+              <MeasurementBox toolName={toolName} value={fly.speedText} label={t`Fly speed`} frozen position={measurementsPosition} />
             ) : (
-              <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
+              <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} position={measurementsPosition} />
             )}
             <ViewportHUD
               onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}

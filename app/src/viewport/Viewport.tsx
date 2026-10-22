@@ -162,7 +162,25 @@ import {
 } from '../tools/planeUnits'
 import { runDraft } from '../tools/draftCommit'
 import { dedupeRefs, invertWithin, objectDrawingIslands } from './drawnSelection'
-import { cursorFor } from '../tools/toolIcons'
+import { cursorFor as toolIconCursor } from '../tools/toolIcons'
+import {
+  getShowToolPointer,
+  subscribeShowToolPointer,
+  getSmoothCamera,
+  subscribeSmoothCamera,
+  getZoomWheelSpeed,
+  subscribeZoomWheelStop,
+  shouldAnimateCamera,
+  inertiaEnabled,
+  resolveToolCursor,
+  mayReapplyToolCursor,
+} from '../settings/view'
+
+/** The canvas cursor for a tool — the tool-shaped icon, or the plain arrow
+ *  when Settings ▸ View ▸ Show tool pointer is off. */
+export function cursorFor(...args: Parameters<typeof toolIconCursor>): string {
+  return resolveToolCursor(getShowToolPointer(), () => toolIconCursor(...args))
+}
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
@@ -5962,7 +5980,7 @@ export default function Viewport({
       onDone?: (completed: boolean) => void,
     ): void {
       cancelCameraTween()
-      if (durationMs <= 0 || prefersReducedMotion()) {
+      if (!shouldAnimateCamera(durationMs, prefersReducedMotion(), getSmoothCamera())) {
         applyCameraState(state)
         noteCameraMoved()
         onDone?.(true)
@@ -7240,6 +7258,9 @@ export default function Viewport({
     let flyLatched = false
 
     // Switch tool by name
+    // The tool whose cursor the canvas currently shows — re-applied when the
+    // Show tool pointer setting flips (Settings ▸ View).
+    let lastToolCursorName = 'Select'
     switchToolRef.current = (toolName: string) => {
       // Shop Mode's read-only contract (shop-mode adversarial review,
       // CRITICAL finding 1): this is the ONE choke point every tool switch
@@ -7526,6 +7547,7 @@ export default function Viewport({
       // pointer. The canvas owns its cursor — the only writers besides this
       // switch are the shift-pan swap and MoveTool's copy-toggle badge
       // (makeMoveTool), both routed through the same cursorFor pipeline.
+      lastToolCursorName = toolName
       renderer.domElement.style.cursor = cursorFor(toolName)
       // The outgoing tool's drawing-plane cue (if any) no longer applies —
       // don't wait for the next pointer move to hide it (design §6 bullet 1).
@@ -7575,7 +7597,8 @@ export default function Viewport({
         RIGHT: null,
       }
       c.zoomToCursor = true
-      c.enableDamping = !preciseOrbitHeld
+      c.enableDamping = inertiaEnabled(preciseOrbitHeld, getSmoothCamera())
+      c.zoomSpeed = getZoomWheelSpeed()
       c.dampingFactor = 0.08
       c.screenSpacePanning = true
       // From the world-length state, never re-hardcoded: a controls rebuild
@@ -7617,6 +7640,23 @@ export default function Viewport({
     // zoom, zoomToCursor works for both — docs/design/camera.md §1).
     let controls = new OrbitControls(camera, renderer.domElement)
     configureControls(controls)
+    // Settings ▸ View, applied live: wheel speed, orbit inertia, and the
+    // tool pointer follow the setting without a reload.
+    const unsubscribeZoomWheelSpeed = subscribeZoomWheelStop(() => { controls.zoomSpeed = getZoomWheelSpeed() })
+    const unsubscribeSmoothCamera = subscribeSmoothCamera(() => {
+      controls.enableDamping = inertiaEnabled(preciseOrbitHeld, getSmoothCamera())
+    })
+    const unsubscribeToolPointer = subscribeShowToolPointer(() => {
+      // A live Shift-pan / Shift-fov / fov drag / eyedropper cursor wins; its
+      // own restore reads the setting when the gesture ends.
+      if (!mayReapplyToolCursor({
+        shiftPan: shiftPanActive,
+        shiftFov: shiftFovCursorActive,
+        fovDrag: fovDragState !== null,
+        eyedropper: paintEyedropperActive,
+      })) return
+      renderer.domElement.style.cursor = cursorFor(lastToolCursorName)
+    })
 
     // Camera-drag notifications: tell the parent while a pointer-drag
     // navigation is in flight so it can fade the contextual dock out of the
@@ -8027,6 +8067,7 @@ export default function Viewport({
       if (ev.ctrlKey || ev.metaKey) return // the other one is still held
       preciseOrbitHeld = false
       setPreciseOrbit(controls, false)
+      controls.enableDamping = inertiaEnabled(false, getSmoothCamera())
     }
     // A blur swallows the keyup (Cmd-Tab is the canonical case: the ⌘ that
     // switched apps is still down when focus leaves) — same posture as
@@ -8035,6 +8076,7 @@ export default function Viewport({
       if (!preciseOrbitHeld) return
       preciseOrbitHeld = false
       setPreciseOrbit(controls, false)
+      controls.enableDamping = inertiaEnabled(false, getSmoothCamera())
     }
     window.addEventListener('keydown', onPreciseModifierKeyDown)
     window.addEventListener('keyup', onPreciseModifierKeyUp)
@@ -10739,6 +10781,9 @@ export default function Viewport({
       window.removeEventListener('blur', onFovDragWindowBlur)
       resizeObserver.disconnect()
       unsubscribeTheme()
+      unsubscribeZoomWheelSpeed()
+      unsubscribeSmoothCamera()
+      unsubscribeToolPointer()
       unsubscribeLengthUnit()
       disposeOriginAxes(originAxes)
       infiniteGrid.dispose()

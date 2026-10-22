@@ -14,6 +14,8 @@ import { useLingui } from '@lingui/react/macro'
 import { useEffect, useState } from 'react'
 import { inferenceAxisName, inferenceCssColor } from './inferenceColor'
 import type { InferenceInfo } from './Viewport'
+import { getShowToolHints, subscribeShowToolHints } from '../settings/view'
+import { useViewSetting } from '../settings/useViewSetting'
 
 const KIND_LABEL: Record<string, MessageDescriptor> = {
   endpoint: msg`Endpoint`,
@@ -64,6 +66,7 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
   const subject = info !== null && info.object !== undefined ? `${info.object}/${info.instance ?? ''}` : null
   const { t } = useLingui()
   const [settled, setSettled] = useState<string | null>(null)
+  const showHints = useViewSetting(getShowToolHints, subscribeShowToolHints)
   useEffect(() => {
     setSettled(null)
     if (subject === null) return
@@ -71,7 +74,7 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
     return () => clearTimeout(timer)
   }, [subject])
 
-  if (info === null) return null
+  if (info === null || !showHints) return null
 
   const label = inferenceKindLabel(info.kind)
   const axisName = inferenceAxisName(info)

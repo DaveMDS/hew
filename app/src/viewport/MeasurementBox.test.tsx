@@ -119,4 +119,16 @@ describe('MeasurementBox', () => {
       expect(container.querySelector('.hew-vcb-caret')).toBeNull()
     })
   })
+
+  it('docks top-right by default and bottom-right when asked', () => {
+    const { rerender } = render(<MeasurementBox toolName="Move" value="1m" />)
+    const top = screen.getByTestId('measurement-box')
+    expect(top.style.top).toBe('16px')
+    expect(top.style.bottom).toBe('')
+    rerender(<MeasurementBox toolName="Move" value="1m" position="bottom-right" />)
+    const bottom = screen.getByTestId('measurement-box')
+    expect(bottom.style.bottom).toBe('16px')
+    expect(bottom.style.top).toBe('')
+    expect(bottom.style.right).toBe('16px')
+  })
 })

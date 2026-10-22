@@ -17,7 +17,9 @@ import {
   applyEditContext,
   isToolSwitchAllowedUnderReadOnly,
   mapUndoRedoError,
+  cursorFor,
 } from './Viewport'
+import { setShowToolPointer } from '../settings/view'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import type { EditContext, Tool } from '../tools/types'
@@ -297,5 +299,16 @@ describe('mapUndoRedoError', () => {
 
   it('returns null for a non-Error throw with no CODE: prefix', () => {
     expect(mapUndoRedoError('boom')).toBeNull()
+  })
+})
+describe('cursorFor honors Settings ▸ View ▸ Show tool pointer', () => {
+  it('gives the tool-shaped cursor by default and the plain arrow when off', () => {
+    expect(cursorFor('Move')).toContain('data:image/svg+xml')
+    setShowToolPointer(false)
+    try {
+      expect(cursorFor('Move')).toBe('default')
+    } finally {
+      setShowToolPointer(true)
+    }
   })
 })

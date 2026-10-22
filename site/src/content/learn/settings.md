@@ -1,6 +1,6 @@
 ---
 title: "Settings and diagnostics"
-description: "Units and theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
+description: "Units, how the viewport feels, theme, the server Open on Phone uses, plus Debug Mode and a bug reporter that bundles everything a developer needs into one file."
 order: 22
 ---
 
@@ -16,6 +16,15 @@ Choose a **System** (Metric or Imperial) and a **Format**:
 - Imperial: **Architectural** (`5' 3-1/8"`), **Fractional inches** (`60-1/8"`), or **Decimal inches** (`60.125"`)
 
 This controls how every length is displayed and how bare typed numbers are interpreted. Geometry itself is always stored in meters, so switching formats never changes your model, and you can always type any unit explicitly regardless of the display setting ([full input reference](/learn/measurement-and-guides/)). The welcome screen offers the same choice as a single flat dropdown; both set the same persisted default.
+
+## View
+
+The View pane is about how the viewport feels. Everything in it starts out the way Hew has always behaved, so nothing changes until you pick.
+
+- **Zoom wheel speed** is a five-stop slider from Slow to Fast. It scales how far one turn of the mouse wheel moves the camera; the middle stop is the usual speed.
+- **Smooth camera moves** is on by default. Views, scenes, and other camera moves glide into place, and orbiting coasts to a stop after you let go. Turn it off and the camera jumps straight to where it is going and stops the moment you release. It wins over **View ▸ Scenes ▸ Scene Transitions**: with smooth moves off, scenes always snap.
+- **At the cursor** has two switches. **Show tool hints** controls the small labels that follow the pointer, like Endpoint or On Edge. **Show tool pointer** controls the cursor that is shaped like your current tool; turn it off and you get the plain arrow. The hint line in the status bar stays either way.
+- **Measurements box** puts the box that shows the number you are typing in the **Top right** (the default) or **Bottom right** of the viewport. The fly speed readout moves with it.
 
 ## Theme
 

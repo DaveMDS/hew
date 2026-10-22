@@ -19,6 +19,7 @@ import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { useLingui } from '@lingui/react/macro'
 import { UnitsPane } from './UnitsPane'
+import { ViewPane } from './ViewPane'
 import { ThemePane } from './ThemePane'
 import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
@@ -26,7 +27,7 @@ import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
-type Category = 'units' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
+type Category = 'units' | 'view' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -46,6 +47,16 @@ function UnitsIcon() {
     <svg {...iconProps}>
       <rect x="2.5" y="8.5" width="19" height="7" rx="1.5" />
       <path d="M6.3 8.5v3.2M10.1 8.5v4.6M13.9 8.5v3.2M17.7 8.5v4.6" />
+    </svg>
+  )
+}
+
+/** Eye — View. */
+function ViewIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
+      <circle cx="12" cy="12" r="3" />
     </svg>
   )
 }
@@ -104,6 +115,7 @@ function AdvancedIcon() {
 
 const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
   { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
+  { id: 'view', label: msg`View`, icon: <ViewIcon /> },
   { id: 'theme', label: msg`Theme`, icon: <ThemeIcon /> },
   { id: 'language', label: msg`Language`, icon: <LanguageIcon /> },
   { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
@@ -200,6 +212,7 @@ export function SettingsWindow() {
         style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '20px 24px 22px' }}
       >
         {active === 'units' && <UnitsPane />}
+        {active === 'view' && <ViewPane />}
         {active === 'theme' && <ThemePane />}
         {active === 'language' && <LanguagePane />}
         {active === 'folders' && <FoldersPane />}

@@ -1,6 +1,19 @@
 import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 import { HOVER_DETAIL_DWELL_MS, InferenceTooltip } from './InferenceTooltip'
+import { setShowToolHints } from '../settings/view'
+
+describe('InferenceTooltip hints setting', () => {
+  afterEach(() => setShowToolHints(true))
+
+  it('draws nothing when Show tool hints is off, and comes back when on', () => {
+    setShowToolHints(false)
+    const { container } = render(<InferenceTooltip info={{ kind: 'endpoint', screenX: 10, screenY: 20 }} />)
+    expect(container.firstChild).toBeNull()
+    act(() => setShowToolHints(true))
+    expect(screen.getByText('Endpoint')).toBeInTheDocument()
+  })
+})
 
 describe('InferenceTooltip', () => {
   it('renders nothing when info is null', () => {

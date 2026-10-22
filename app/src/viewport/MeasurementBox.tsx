@@ -37,6 +37,14 @@ const VCB_LABEL: Record<string, MessageDescriptor> = {
 }
 
 export interface MeasurementBoxProps {
+  /**
+   * Editor variant only: which right-hand corner the box docks to
+   * (Settings ▸ View ▸ Measurements box). Defaults to `'top-right'`, the
+   * long-standing spot. `'bottom-right'` lifts it clear of the status bar's
+   * edge and the Viewport HUD. Ignored by the `'shop'` variant, which has
+   * its own placement.
+   */
+  position?: 'top-right' | 'bottom-right'
   toolName: string
   value: string
   /** Overrides the tool-derived label — Fly's speed readout
@@ -116,6 +124,7 @@ export function MeasurementBox({
   variant = 'editor',
   bottomOffsetPx = 0,
   orientation = 'portrait',
+  position = 'top-right',
 }: MeasurementBoxProps) {
   if (value === '') return null
   const toolLabel = VCB_LABEL[toolName]
@@ -184,7 +193,7 @@ export function MeasurementBox({
       data-testid="measurement-box"
       style={{
         position: 'absolute',
-        top: '16px',
+        ...(position === 'bottom-right' ? { bottom: '16px' } : { top: '16px' }),
         right: '16px',
         display: 'flex',
         alignItems: 'center',
