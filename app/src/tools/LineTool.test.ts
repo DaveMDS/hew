@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { LineTool } from './LineTool'
 import type { Snap } from './types'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
@@ -609,6 +609,9 @@ describe('LineTool — retype the segment just placed', () => {
 
 
 describe('LineTool — a clicked length is exactly the displayed length', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const segs = (scene: WasmScene) =>
     (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => [c[1], c[2], c[3], c[4], c[5], c[6]] as number[])
   const prev = getLengthUnit()
@@ -617,25 +620,25 @@ describe('LineTool — a clicked length is exactly the displayed length', () => 
   it('free click commits the same segment as typing the shown length', () => {
     setLengthUnit('mm')
     try {
-      const ex = 0.0079, ey = 0.0071 // length 10.6226... mm
+      const ex = 0.0079, ey = 0.0071 // length 10.6217 mm, shows "10.622 mm"
       const a = makeTool(makeWasmScene())
       a.tool.onPointerDown(at(0, 0), rayThrough(0, 0))
       a.tool.onPointerMove(at(ex, ey), rayThrough(ex, ey))
       a.tool.onPointerDown(at(ex, ey), rayThrough(ex, ey))
-      expect(a.onMeasurement).toHaveBeenCalledWith('10.6 mm')
+      expect(a.onMeasurement).toHaveBeenCalledWith('10.622 mm')
       const clicked = segs((a.tool as unknown as { wasmScene: WasmScene }).wasmScene)
 
       const b = makeTool(makeWasmScene())
       b.tool.onPointerDown(at(0, 0), rayThrough(0, 0))
       b.tool.onPointerMove(at(ex, ey), rayThrough(ex, ey))
-      for (const ch of '10.6') b.tool.onKey({ key: ch } as KeyboardEvent)
+      for (const ch of '10.622') b.tool.onKey({ key: ch } as KeyboardEvent)
       b.tool.onKey({ key: 'Enter' } as KeyboardEvent)
       const typed = segs((b.tool as unknown as { wasmScene: WasmScene }).wasmScene)
 
       expect(clicked.length).toBe(1)
       expect(clicked).toEqual(typed)
       const [, , , x1, y1] = clicked[0]
-      expect(Math.hypot(x1, y1)).toBeCloseTo(10.6 * 0.001, 15)
+      expect(Math.hypot(x1, y1)).toBeCloseTo(10.622 * 0.001, 15)
     } finally {
       setLengthUnit(prev)
     }

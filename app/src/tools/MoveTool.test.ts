@@ -16,9 +16,9 @@
  * unaffected by that reset.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as THREE from 'three'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import { MoveTool } from './MoveTool'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import { DragCommitGate } from '../viewport/dragCommit'
@@ -1271,8 +1271,11 @@ describe('MoveTool — a typed distance after an array re-spaces the array', () 
 
 
 describe('MoveTool — a clicked distance is exactly the displayed distance', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
-  const target: [number, number] = [0.0093987, 0.0037873] // |.| = 10.134 mm, shows "10.1 mm"
+  const target: [number, number] = [0.0093987, 0.0037873] // |.| = 10.133 mm, shows "10.133 mm"
 
   function drag(kind: string, typed: string | null, locked = false) {
     const { tool, scene, onMeasurement } = makeTool()
@@ -1293,9 +1296,9 @@ describe('MoveTool — a clicked distance is exactly the displayed distance', ()
     setLengthUnit('mm')
     try {
       const clicked = drag('ground', null)
-      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.1 mm')
-      expect(clicked.t).toEqual(drag('ground', '10.1').t)
-      expect(Math.hypot(...clicked.t)).toBeCloseTo(10.1 * 0.001, 15)
+      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.133 mm')
+      expect(clicked.t).toEqual(drag('ground', '10.133').t)
+      expect(Math.hypot(...clicked.t)).toBeCloseTo(10.133 * 0.001, 15)
     } finally {
       setLengthUnit(prev)
     }
@@ -1305,8 +1308,8 @@ describe('MoveTool — a clicked distance is exactly the displayed distance', ()
     setLengthUnit('mm')
     try {
       const clicked = drag('on-axis', null, true)
-      expect(clicked.t).toEqual(drag('on-axis', '9.4', true).t)
-      expect(clicked.t[0]).toBe(9.4 * 0.001)
+      expect(clicked.t).toEqual(drag('on-axis', '9.399', true).t)
+      expect(clicked.t[0]).toBe(9.399 * 0.001)
     } finally {
       setLengthUnit(prev)
     }

@@ -876,10 +876,10 @@ describe('ShopApp — Parts sheet header (design_handoff_shop_mode §1)', () => 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: /units/i })).not.toBeInTheDocument())
     expect(screen.getByRole('button', { name: /^units: decimal inches$/i })).toHaveTextContent('in.d')
     expect(screen.queryByText('1.5 m')).not.toBeInTheDocument()
-    // 1.5m == 59.055...in, rounded to 3 decimals and trimmed by formatLengthIn
+    // 1.5m == 59.055...in, shown at the default decimal-inch rounding (3 places, ~-marked) by formatLengthIn
     // — an imperial format switches the row to the STACKED layout (design
     // §2), a single line with all three dims, not three separate columns.
-    expect(screen.getByText((_, el) => el?.textContent === 'L 59.055" · W 59.055" · H 59.055"')).toBeInTheDocument()
+    expect(screen.getByText((_, el) => el?.textContent === 'L ~59.055" · W ~59.055" · H ~59.055"')).toBeInTheDocument()
   })
 
   it('a tag section renders a "Hide all"/"Show all" master toggle that hides every row under it', async () => {

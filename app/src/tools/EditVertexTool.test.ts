@@ -1,8 +1,8 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as THREE from 'three'
 import { EditVertexTool } from './EditVertexTool'
 import type { Snap } from './types'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { ctxOfPlane } from './planeUnits'
@@ -253,8 +253,11 @@ describe('EditVertexTool — cancel', () => {
 
 
 describe('EditVertexTool — a clicked drag distance is exactly the displayed distance', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
-  const dest = { x: 1 + 0.0093987, y: 1 + 0.0037873 } // dragged 10.134 mm, shows "10.1 mm"
+  const dest = { x: 1 + 0.0093987, y: 1 + 0.0037873 } // dragged 10.133 mm, shows "10.133 mm"
 
   function drag(kind: string) {
     const scene = makeWasmScene({ pick: makePick(7n, 9n, [1, 1, 0]) })
@@ -270,8 +273,8 @@ describe('EditVertexTool — a clicked drag distance is exactly the displayed di
     setLengthUnit('mm')
     try {
       const r = drag('ground')
-      expect(r.onMeasurement).toHaveBeenCalledWith('10.1 mm')
-      expect(Math.hypot(r.args[4] - 1, r.args[5] - 1)).toBeCloseTo(10.1 * 0.001, 14)
+      expect(r.onMeasurement).toHaveBeenCalledWith('10.133 mm')
+      expect(Math.hypot(r.args[4] - 1, r.args[5] - 1)).toBeCloseTo(10.133 * 0.001, 14)
     } finally {
       setLengthUnit(prev)
     }

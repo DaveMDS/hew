@@ -125,6 +125,7 @@ if (!('fonts' in document)) {
 // vi.mock() above is hoisted before imports, so this must appear after it.
 import { TextDialog } from './TextDialog'
 import { validateGlyphOutlines } from '../text/outlineValidation'
+import { setLengthUnit, setPrecision } from '../settings/units'
 
 function makeFontFile(name: string): File {
   return new File(['fake-font-bytes'], name, { type: 'font/ttf' })
@@ -333,5 +334,31 @@ describe('TextDialog font picker', () => {
       expect(screen.queryByText('Permission was denied.')).not.toBeInTheDocument()
       expect(screen.queryByText(/Couldn't list system fonts/)).not.toBeInTheDocument()
     })
+  })
+})
+
+describe('TextDialog size boxes at a coarse Precision', () => {
+  beforeEach(() => {
+    state.bundled = [entry('bundled-a', 'Alpha', 'Regular', 'bundled')]
+    state.systemKind = null
+    state.systemEntries = []
+    state.systemListImpl = null
+    state.userEntries = []
+    state.lastSelected = null
+    vi.mocked(validateGlyphOutlines).mockReturnValue([])
+  })
+
+  it('seeds Height and Depth at Exact so OK stays enabled at "Whole units" in meters', async () => {
+    setLengthUnit('m')
+    setPrecision(0, 'm')
+    try {
+      render(<TextDialog onPlace={vi.fn()} onCancel={vi.fn()} />)
+      await waitForPickerReady()
+      expect((screen.getByLabelText(/height/i) as HTMLInputElement).value).not.toContain('~')
+      expect((screen.getByLabelText(/depth/i) as HTMLInputElement).value).not.toContain('~')
+      await waitFor(() => expect(screen.getByRole('button', { name: 'OK' })).toBeEnabled())
+    } finally {
+      setPrecision(3, 'm')
+    }
   })
 })

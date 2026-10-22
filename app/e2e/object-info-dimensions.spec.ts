@@ -39,9 +39,10 @@ function dimensionsValue(page: import('@playwright/test').Page): Locator {
     .locator('xpath=following-sibling::div[1]')
 }
 
-/** Parse "X 220 mm × Y 150 mm × Z 100 mm" into per-axis millimetre numbers. */
+/** Parse "X 220 mm × Y 150 mm × Z 100 mm" into per-axis millimeter numbers.
+ *  A "~" before a value (the display precision hid digits) is accepted. */
 function parseMm(text: string): { x: number; y: number; z: number } {
-  const m = /X\s+([\d.]+)\s*mm.*Y\s+([\d.]+)\s*mm.*Z\s+([\d.]+)\s*mm/.exec(text)
+  const m = /X\s+~?([\d.]+)\s*mm.*Y\s+~?([\d.]+)\s*mm.*Z\s+~?([\d.]+)\s*mm/.exec(text)
   if (m === null) throw new Error(`Bounding Box text did not parse: ${JSON.stringify(text)}`)
   return { x: Number(m[1]), y: Number(m[2]), z: Number(m[3]) }
 }

@@ -7,7 +7,8 @@
  * chain's "projected" verdict does not outlive the chain, and Shift held
  * through the end of a chain never pins a plane by autorepeat.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
+import { setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import * as THREE from 'three'
 import { LineTool } from './LineTool'
 import type { Snap } from './types'
@@ -342,16 +343,19 @@ describe('LineTool — review fixes on the face-chain round', () => {
 })
 
 describe('LineTool — face chain points are the displayed length', () => {
+  // This pins the Exact digits (0.500432 m); the default m rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.m, 'm'))
   it('a free on-face click is quantized to the shown length; a hard click keeps its exact point', () => {
     const scene = makeScene()
     const { tool } = makeTool(scene)
     tool.onPointerDown(onEdge(0, 0.5), rayThrough(0, 0.5))
-    tool.onPointerDown(onFace(0.50043, 0.5), rayThrough(0.50043, 0.5)) // shows 0.5 m
-    tool.onPointerDown(hardOnFace(0.50043, 0.80077), rayThrough(0.50043, 0.80077))
+    tool.onPointerDown(onFace(0.5004321, 0.5), rayThrough(0.5004321, 0.5)) // shows 0.500432 m
+    tool.onPointerDown(hardOnFace(0.5004321, 0.80077), rayThrough(0.5004321, 0.80077))
     tool.onKey({ key: 'Escape' } as KeyboardEvent)
     const path = pathOf(scene)
-    expect(path.slice(0, 6)).toEqual([0, 0.5, 1, 0.5, 0.5, 1])
-    expect(path.slice(6)).toEqual([0.50043, 0.80077, 1])
+    expect(path.slice(0, 6)).toEqual([0, 0.5, 1, 0.500432, 0.5, 1])
+    expect(path.slice(6)).toEqual([0.5004321, 0.80077, 1])
   })
 })
 

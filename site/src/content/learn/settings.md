@@ -17,6 +17,17 @@ Choose a **System** (Metric or Imperial) and a **Format**:
 
 This controls how every length is displayed and how bare typed numbers are interpreted. Geometry itself is always stored in meters, so switching formats never changes your model, and you can always type any unit explicitly regardless of the display setting ([full input reference](/learn/measurement-and-guides/)). The welcome screen offers the same choice as a single flat dropdown; both set the same persisted default.
 
+### Precision
+
+**Precision** sets how far a length is rounded. Each format remembers its own choice, and the list changes when you change the Format. The defaults are the rounding Hew has always used: Meters 3 decimals, Centimeters 2, Millimeters 1, Decimal inches 3, and the nearest 1/16" for Architectural and Fractional inches.
+
+- **Exact** shows the digits the value needs and no more: `0.5 m`, `5' 3-1/8"`, `9.399 mm`. A length that never ends stops at a sensible limit, so a third of a meter reads `0.333333 m`. In imperial, Exact uses the smallest fraction down to 1/64" that is exactly right, and switches to decimal inches (`1' 2.3333"`) when no fraction is.
+- Meters, Centimeters, Millimeters, and Decimal inches round to a number of decimals, from **Whole** (0) up to 6 decimals.
+- Architectural and Fractional inches round to the nearest 1', 1", 1/2", 1/4", 1/8", 1/16", 1/32", or 1/64". The 1' choice rounds to the nearest 12".
+- When rounding changed the value, the readout starts with `~` (`~0.33 m`, `~3/16"`, `~1' 2-1/8"`). A value that already sits on the grid shows no `~`.
+
+Precision applies to every length Hew shows, including the measurement box, the Tape Measure, Object Info, and dimension text (a dimension whose text you typed over keeps your text). You can type a value with or without the leading `~`. When Hew saves a SketchUp file, it leaves the `~` out.
+
 ## View
 
 The View pane is about how the viewport feels. Everything in it starts out the way Hew has always behaved, so nothing changes until you pick.

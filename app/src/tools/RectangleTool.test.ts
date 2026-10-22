@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { RectangleTool } from './RectangleTool'
 import type { Snap } from './types'
 import { draftMock } from './draftMock'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
@@ -787,6 +787,9 @@ describe('RectangleTool — typed size before any cursor movement grows right an
 
 
 describe('RectangleTool — a clicked value is exactly the displayed value', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const calls = (scene: WasmScene) => (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls
   const corners = (scene: WasmScene) => calls(scene).slice(-4).map((c) => [c[1] as number, c[2] as number, c[3] as number])
   const prev = getLengthUnit()
@@ -799,27 +802,27 @@ describe('RectangleTool — a clicked value is exactly the displayed value', () 
     }
   }
 
-  it('free ground click at an off-grid cursor commits the same corners as typing "9.4,3.8"', () => {
+  it('free ground click at an off-grid cursor commits the same corners as typing "9.399,3.787"', () => {
     withMm(() => {
       const clicked = makeWasmScene()
       const a = makeTool(clicked)
       a.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
       a.tool.onPointerMove(makeSnap({ x: 1.00939876, y: 1.00378732, z: 0 }), rayThrough(1.00939876, 1.00378732))
       a.tool.onPointerDown(makeSnap({ x: 1.00939876, y: 1.00378732, z: 0 }), rayThrough(1.00939876, 1.00378732))
-      expect(a.onMeasurement).toHaveBeenCalledWith('9.4 mm × 3.8 mm')
+      expect(a.onMeasurement).toHaveBeenCalledWith('9.399 mm × 3.787 mm')
 
       const typed = makeWasmScene()
       const b = makeTool(typed)
       b.tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 0 }), rayThrough(1, 1))
       b.tool.onPointerMove(makeSnap({ x: 1.00939876, y: 1.00378732, z: 0 }), rayThrough(1.00939876, 1.00378732))
-      for (const ch of '9.4,3.8') b.tool.onKey({ key: ch } as KeyboardEvent)
+      for (const ch of '9.399,3.787') b.tool.onKey({ key: ch } as KeyboardEvent)
       b.tool.onKey({ key: 'Enter' } as KeyboardEvent)
 
       expect(calls(clicked).length).toBe(4)
       expect(corners(clicked)).toEqual(corners(typed))
-      // Bit-for-bit: far corner offset equals the typed 9.4 mm / 3.8 mm.
+      // Bit-for-bit: far corner offset equals the typed 9.399 mm / 3.787 mm.
       const xs = corners(clicked).map((c) => c[0])
-      expect(Math.max(...xs)).toBe(1 + 9.4 * 0.001)
+      expect(Math.max(...xs)).toBe(1 + 9.399 * 0.001)
     })
   })
 
@@ -846,8 +849,8 @@ describe('RectangleTool — a clicked value is exactly the displayed value', () 
       const loop = draftLoop(scene)
       const xs = [0, 3, 6, 9].map((i) => loop[i])
       const ys = [1, 4, 7, 10].map((i) => loop[i])
-      expect(Math.max(...xs)).toBe(9.4 * 0.001)
-      expect(Math.max(...ys)).toBe(3.8 * 0.001)
+      expect(Math.max(...xs)).toBe(9.399 * 0.001)
+      expect(Math.max(...ys)).toBe(3.787 * 0.001)
 
       const scene2 = makeWasmScene({ pick: () => makePick(7n, 3n) })
       const t2 = makeTool(scene2).tool

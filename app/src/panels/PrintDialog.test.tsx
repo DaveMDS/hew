@@ -35,7 +35,7 @@ import { paperSize, MARGIN_MM, defaultPaperForRegion } from '../print/paper'
 import { fitRatioFor, DEFAULT_TITLE_BLOCK_MM } from '../print/layout'
 import { fitScale, sameScale, scalePresetsFor } from '../print/scale'
 import { buildPrintPdf } from '../print/pdf'
-import { setLengthUnit } from '../settings/units'
+import { setLengthUnit, setPrecision } from '../settings/units'
 import type { AnnotationDrawing } from '../viewport/SceneRenderer'
 
 vi.mock('../print/pdf', () => ({
@@ -432,6 +432,33 @@ describe('PrintDialog', () => {
       expect(scaleSelect.value).not.toBe('custom')
     } finally {
       setLengthUnit('m')
+    }
+  })
+
+  it('custom paper boxes are seeded at Exact and a blur without an edit leaves the paper size alone', () => {
+    setLengthUnit('m')
+    setPrecision(0, 'm')
+    try {
+      renderDialog()
+      const paperSelect = screen.getByLabelText('Paper') as HTMLSelectElement
+      fireEvent.change(paperSelect, { target: { value: 'letter' } })
+      fireEvent.change(paperSelect, { target: { value: 'custom' } })
+      const w = screen.getByLabelText('Paper width') as HTMLInputElement
+      const h = screen.getByLabelText('Paper height') as HTMLInputElement
+      expect(w.value).toBe('215.9 mm')
+      expect(h.value).toBe('279.4 mm')
+      fireEvent.focus(w)
+      fireEvent.blur(w)
+      fireEvent.blur(h)
+      const paper = getPrintPrefs().paper as { w_mm: number; h_mm: number }
+      expect(paper.w_mm).toBeCloseTo(215.9, 9)
+      expect(paper.h_mm).toBeCloseTo(279.4, 9)
+      // An actual edit still commits.
+      fireEvent.change(w, { target: { value: '200 mm' } })
+      fireEvent.blur(w)
+      expect((getPrintPrefs().paper as { w_mm: number }).w_mm).toBeCloseTo(200, 9)
+    } finally {
+      setPrecision(3, 'm')
     }
   })
 

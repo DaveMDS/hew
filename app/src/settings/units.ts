@@ -26,6 +26,13 @@
  *     global event ('settings-changed') on every change, and every window
  *     subscribes to both channels on load.
  *
+ * Precision (`Precision`, below) is a second display-only preference: how many
+ * digits a readout shows. One value per display FORMAT (m, cm, mm and dec_in
+ * count decimals; frac_in and arch pick a fraction of an inch, or a whole
+ * inch or foot), defaulting to the rounding the readouts always had. A
+ * choice that rounds a value prefixes `~`; Exact never rounds. Persisted
+ * under `hew.settings.precision` and synced across windows like the format.
+ *
  * Back-compat: old persisted values were `'m'|'cm'|'mm'|'ft'|'in'`. On load
  * we migrate m→m, cm→cm, mm→mm, in→dec_in, ft→arch, then persist forward in
  * the new vocabulary.
@@ -127,9 +134,6 @@ const METERS_PER_INCH = 0.0254
 const METERS_PER_FOOT = 0.3048
 const INCHES_PER_FOOT = 12
 
-/** Default display/rounding denominator for imperial fractions (nearest 1/16"). */
-const DEFAULT_FRACTION_DENOMINATOR = 16
-
 const UNIT_SUFFIX: Record<LengthFormat, string> = {
   m: 'm',
   cm: 'cm',
@@ -225,13 +229,149 @@ export function setLengthUnit(format: LengthFormat): void {
     /* ignore quota / privacy-mode errors */
   }
   notify()
-  broadcastTauri(format)
+  broadcastTauri({ lengthUnit: format })
 }
 
 /** Subscribe to format changes (local + cross-window). Returns an unsubscribe fn. */
 export function subscribe(cb: (format: LengthFormat) => void): () => void {
   subscribers.add(cb)
   return () => subscribers.delete(cb)
+}
+
+// ---------------------------------------------------------------------------
+// Precision (display-only; per format)
+// ---------------------------------------------------------------------------
+
+/** What a readout rounds to.
+ *   - `'exact'`: the digits the value needs (with a ceiling), never rounded.
+ *   - `'foot'`: the nearest 12" (`frac_in` / `arch` only).
+ *   - a number, by format: decimals of the display unit for `m`, `cm`, `mm`
+ *     and `dec_in` (0 to 6); the fraction denominator for `frac_in` and
+ *     `arch` (1 = whole inches, 2 = halves, ... 64). */
+export type Precision = 'exact' | 'foot' | number
+
+const DECIMAL_PRECISIONS: Precision[] = ['exact', 0, 1, 2, 3, 4, 5, 6]
+const FRACTION_PRECISIONS: Precision[] = ['exact', 'foot', 1, 2, 4, 8, 16, 32, 64]
+
+/** Precision choices per format, in display order; the first is Exact. */
+export const PRECISION_OPTIONS: Record<LengthFormat, Precision[]> = {
+  m: DECIMAL_PRECISIONS,
+  cm: DECIMAL_PRECISIONS,
+  mm: DECIMAL_PRECISIONS,
+  dec_in: DECIMAL_PRECISIONS,
+  frac_in: FRACTION_PRECISIONS,
+  arch: FRACTION_PRECISIONS,
+}
+
+/** The rounding each format always had before Precision existed. */
+export const DEFAULT_PRECISION: Record<LengthFormat, Precision> = {
+  m: 3,
+  cm: 2,
+  mm: 1,
+  dec_in: 3,
+  frac_in: 16,
+  arch: 16,
+}
+
+const PRECISION_STORAGE_KEY = 'hew.settings.precision'
+
+/** Micrometer: the tolerance for "the value is unchanged" in both Exact
+ * round-tripping and the `~` decision. */
+const ROUND_TRIP_METERS = 1e-6
+/** Exact ceilings: decimals of the display unit (metric) and decimal inches
+ * for the imperial fallback. */
+const EXACT_METRIC_MAX_DECIMALS = 6
+const EXACT_INCH_MAX_DECIMALS = 5
+/** Finest fraction Exact will use for imperial. */
+const EXACT_MAX_DENOMINATOR = 64
+const EXACT_FRACTION_TOLERANCE_IN = 1e-6
+
+function isValidPrecision(format: LengthFormat, v: unknown): v is Precision {
+  return (PRECISION_OPTIONS[format] as unknown[]).includes(v)
+}
+
+type PrecisionMap = Record<LengthFormat, Precision>
+
+const ALL_FORMATS: LengthFormat[] = ['m', 'cm', 'mm', 'arch', 'frac_in', 'dec_in']
+
+function defaultPrecisionMap(): PrecisionMap {
+  return { ...DEFAULT_PRECISION }
+}
+
+/** Turn a stored or received value into a complete map. Understands the
+ * per-format shape and the older `{ metric, imperial }` one (a metric number
+ * applies to m/cm/mm, an imperial denominator to frac_in/arch, `'exact'` to
+ * every format the old value covered; dec_in keeps its default). Anything
+ * invalid falls back to that format's default. */
+function sanitizePrecisionMap(raw: unknown): PrecisionMap {
+  const out = defaultPrecisionMap()
+  if (typeof raw !== 'object' || raw === null) return out
+  const r = raw as Record<string, unknown>
+  const legacy = 'metric' in r || 'imperial' in r
+  if (legacy) {
+    const metric = r.metric
+    if (metric === 'exact' || (typeof metric === 'number' && DECIMAL_PRECISIONS.includes(metric))) {
+      out.m = out.cm = out.mm = metric
+    }
+    const imperial = r.imperial
+    if (imperial === 'exact' || (typeof imperial === 'number' && FRACTION_PRECISIONS.includes(imperial))) {
+      out.frac_in = out.arch = imperial
+    }
+    return out
+  }
+  for (const f of ALL_FORMATS) {
+    if (isValidPrecision(f, r[f])) out[f] = r[f] as Precision
+  }
+  return out
+}
+
+function loadPrecision(): PrecisionMap {
+  try {
+    const raw = localStorage.getItem(PRECISION_STORAGE_KEY)
+    if (raw !== null) return sanitizePrecisionMap(JSON.parse(raw))
+  } catch {
+    /* ignore — privacy mode / unavailable storage / bad JSON */
+  }
+  return defaultPrecisionMap()
+}
+
+let currentPrecision: PrecisionMap = loadPrecision()
+
+/** The precision for `format` (default: the current format). */
+export function getPrecision(format: LengthFormat = getLengthUnit()): Precision {
+  return currentPrecision[format]
+}
+
+/** Set the precision for `format` (default: the current format). Persists,
+ * notifies subscribers, and broadcasts to other windows. Ignores a value
+ * that is not offered for that format. */
+export function setPrecision(precision: Precision, format: LengthFormat = getLengthUnit()): void {
+  if (!isValidPrecision(format, precision)) return
+  currentPrecision = { ...currentPrecision, [format]: precision }
+  try {
+    localStorage.setItem(PRECISION_STORAGE_KEY, JSON.stringify(currentPrecision))
+  } catch {
+    /* ignore quota / privacy-mode errors */
+  }
+  notify()
+  broadcastTauri({ precision: currentPrecision })
+}
+
+const WHOLE_UNIT_LABEL: Partial<Record<LengthFormat, string>> = {
+  m: 'Whole meters',
+  cm: 'Whole centimeters',
+  mm: 'Whole millimeters',
+  dec_in: 'Whole inches',
+}
+
+/** Label for a precision choice in the Units pane. */
+export function precisionLabel(format: LengthFormat, p: Precision): string {
+  if (p === 'exact') return 'Exact'
+  if (p === 'foot') return 'Nearest 1\''
+  if (LENGTH_SYSTEM_OF[format] === 'metric' || format === 'dec_in') {
+    return p === 0 ? (WHOLE_UNIT_LABEL[format] ?? 'Whole units') : `${p} decimal${p === 1 ? '' : 's'}`
+  }
+  return p === 1 ? 'Nearest 1"' : `Nearest 1/${p}"`
 }
 
 /**
@@ -261,23 +401,6 @@ export function homeFramingScale(format: LengthFormat = getLengthUnit()): number
 // Fraction helpers (imperial display)
 // ---------------------------------------------------------------------------
 
-/** Round `value` to the nearest 1/`denominator`, returning [whole, numerator,
- * denominator] with the fraction already reduced (numerator may be 0). */
-function roundToFraction(
-  value: number,
-  denominator: number = DEFAULT_FRACTION_DENOMINATOR,
-): { whole: number; num: number; den: number } {
-  const totalSixteenths = Math.round(value * denominator)
-  let whole = Math.floor(totalSixteenths / denominator)
-  let num = totalSixteenths - whole * denominator
-  if (num === 0) return { whole, num: 0, den: denominator }
-  // Reduce the fraction.
-  const g = gcd(num, denominator)
-  const rDen = denominator / g
-  num = num / g
-  return { whole, num, den: rDen }
-}
-
 function gcd(a: number, b: number): number {
   let x = Math.abs(a)
   let y = Math.abs(b)
@@ -287,66 +410,142 @@ function gcd(a: number, b: number): number {
   return x === 0 ? 1 : x
 }
 
-/** Format a non-negative inch value as `frac_in` digits without the sign or
- * trailing `"` — e.g. 60.125 -> "60-1/8", 0.5 -> "1/2", 60 -> "60". */
-function formatFractionalInches(absInches: number): string {
-  const { whole, num, den } = roundToFraction(absInches)
-  if (num === 0) return `${whole}`
-  if (whole === 0) return `${num}/${den}`
-  return `${whole}-${num}/${den}`
-}
-
 // ---------------------------------------------------------------------------
 // Display
 // ---------------------------------------------------------------------------
 
-/** Pure formatting helper — convert meters to `format` and render as text. */
-export function formatLengthIn(meters: number, format: LengthFormat): string {
-  if (format === 'm' || format === 'cm' || format === 'mm') {
-    const converted = meters / METERS_PER_UNIT[format]
-    const decimals = format === 'm' ? 3 : format === 'cm' ? 2 : 1
-    // Grouping off: a length reads "1234.5 m", never "1,234.5 m".
-    const trimmed = formatNumber(converted, { maxFractionDigits: decimals, grouping: false })
-    return `${trimmed} ${UNIT_SUFFIX[format]}`
+/** Shortest count of decimals (0..maxDecimals) at which `value` (in display
+ * units, `metersPerUnit` meters each) is within a micrometer of itself. */
+function shortestDecimals(value: number, metersPerUnit: number, maxDecimals: number): number {
+  for (let d = 0; d < maxDecimals; d++) {
+    const r = Math.round(value * 10 ** d) / 10 ** d
+    if (Math.abs(r - value) * metersPerUnit <= ROUND_TRIP_METERS) return d
+  }
+  return maxDecimals
+}
+
+/** `ticks / 10^decimals` as trimmed decimal text, sign-free (ticks >= 0). */
+function ticksToDecimalText(ticks: number, decimals: number): string {
+  // Grouping off: a length reads "1234.5 m", never "1,234.5 m".
+  return formatNumber(ticks / 10 ** decimals, { maxFractionDigits: decimals, grouping: false })
+}
+
+/** The inch grid a value is rounded to: `perInch` ticks per inch, and
+ * `decimals` when the ticks are shown as a decimal (null = as a fraction). */
+interface InchGrid {
+  perInch: number
+  decimals: number | null
+}
+
+/** Smallest power-of-two denominator up to 1/64 that holds `inches` exactly
+ * (within 1e-6 in), or null. */
+function exactDenominator(inches: number): number | null {
+  for (let den = 1; den <= EXACT_MAX_DENOMINATOR; den *= 2) {
+    if (Math.abs(inches * den - Math.round(inches * den)) / den <= EXACT_FRACTION_TOLERANCE_IN) return den
+  }
+  return null
+}
+
+/**
+ * Pure formatting helper — convert meters to `format` and render as text.
+ *
+ * `precision` defaults to the saved choice for the format. Exact
+ * shows the digits the value needs (metric: shortest decimal within 1 µm,
+ * at most 6 decimals; imperial: the smallest power-of-two fraction up to
+ * 1/64 that is exact, else decimal inches, at most 5 decimals) and never
+ * carries `~`. A coarser precision rounds to its grid and prefixes `~` when
+ * the rounding moved the value by more than 1 µm. The prefix leads the whole
+ * text, ahead of any minus sign.
+ */
+export function formatLengthIn(
+  meters: number,
+  format: LengthFormat,
+  precision?: Precision,
+): string {
+  const system = LENGTH_SYSTEM_OF[format]
+  const p = precision !== undefined && isValidPrecision(format, precision) ? precision : getPrecision(format)
+
+  if (system === 'metric') {
+    const unit = METERS_PER_UNIT[format as 'm' | 'cm' | 'mm']
+    const converted = meters / unit
+    const decimals = p === 'exact' ? shortestDecimals(converted, unit, EXACT_METRIC_MAX_DECIMALS) : (p as number)
+    const ticks = Math.round(Math.abs(converted) * 10 ** decimals)
+    const rounded = ticks / 10 ** decimals
+    const changed = p !== 'exact' && Math.abs(rounded * unit - Math.abs(meters)) > ROUND_TRIP_METERS
+    const sign = meters < 0 && ticks !== 0 ? '-' : ''
+    return `${changed ? '~' : ''}${sign}${ticksToDecimalText(ticks, decimals)} ${UNIT_SUFFIX[format]}`
   }
 
-  const sign = meters < 0 ? '-' : ''
-  const totalInches = Math.abs(meters) / METERS_PER_INCH
-
-  if (format === 'dec_in') {
-    const trimmed = formatNumber(totalInches, { maxFractionDigits: 3, grouping: false })
-    return `${sign}${trimmed}"`
+  const absInches = Math.abs(meters) / METERS_PER_INCH
+  let grid: InchGrid
+  if (p === 'exact') {
+    const den = format === 'dec_in' ? null : exactDenominator(absInches)
+    if (den !== null) {
+      grid = { perInch: EXACT_MAX_DENOMINATOR, decimals: null }
+    } else {
+      const decimals = shortestDecimals(absInches, METERS_PER_INCH, EXACT_INCH_MAX_DECIMALS)
+      grid = { perInch: 10 ** decimals, decimals }
+    }
+  } else {
+    // dec_in counts decimals; the fractional formats pick a denominator
+    // (1 = whole inches, 'foot' = whole inches in steps of 12).
+    grid =
+      format === 'dec_in'
+        ? { perInch: 10 ** (p as number), decimals: p as number }
+        : { perInch: p === 'foot' ? 1 : (p as number), decimals: null }
   }
 
-  if (format === 'frac_in') {
-    return `${sign}${formatFractionalInches(totalInches)}"`
+  // Round to the grid ONCE; every digit (including the foot/inch carry) is
+  // derived from the same integer tick count.
+  const { perInch } = grid
+  const ticks = p === 'foot' ? Math.round(absInches / INCHES_PER_FOOT) * INCHES_PER_FOOT : Math.round(absInches * perInch)
+  const changed = p !== 'exact' && Math.abs(ticks / perInch - absInches) * METERS_PER_INCH > ROUND_TRIP_METERS
+  const sign = meters < 0 && ticks !== 0 ? '-' : ''
+  const tilde = changed ? '~' : ''
+
+  const wholeInches = Math.floor(ticks / perInch)
+  const rem = ticks - wholeInches * perInch // ticks past the whole inch
+
+  // Part after the whole inch, '' when zero: reduced fraction or decimal digits.
+  const isDec = grid.decimals !== null
+  let fracText = ''
+  if (rem !== 0) {
+    if (grid.decimals === null) {
+      const g = gcd(rem, perInch)
+      fracText = `${rem / g}/${perInch / g}`
+    } else {
+      const digits = Math.round((rem * 10 ** grid.decimals) / perInch)
+      fracText = String(digits).padStart(grid.decimals, '0').replace(/0+$/, '')
+    }
   }
 
-  // arch: feet + inches + fraction. Round to the nearest 1/16" first so the
-  // foot/inch carry (e.g. 11.97" -> 1') is computed from the SAME rounded
-  // value the inches text displays, rather than rounding twice.
-  const { whole: roundedWholeInches, num, den } = roundToFraction(totalInches)
-  const feet = Math.floor(roundedWholeInches / INCHES_PER_FOOT)
-  const inches = roundedWholeInches - feet * INCHES_PER_FOOT
+  if (format === 'dec_in' || format === 'frac_in') {
+    let body: string
+    if (isDec) body = formatNumber(ticks / perInch, { maxFractionDigits: grid.decimals as number, grouping: false })
+    else if (fracText === '') body = `${wholeInches}`
+    else body = wholeInches === 0 ? fracText : `${wholeInches}-${fracText}`
+    return `${tilde}${sign}${body}"`
+  }
 
-  const inchFraction = num === 0 ? '' : `-${num}/${den}`
+  // arch: feet + inches (+ fraction). Feet and inches come from the rounded
+  // tick count, so 11.97" carries to 1' rather than rounding twice.
+  const feet = Math.floor(wholeInches / INCHES_PER_FOOT)
+  const inches = wholeInches - feet * INCHES_PER_FOOT
   const feetPart = feet > 0 ? `${feet}'` : ''
-
-  if (feet > 0 && inches === 0 && num === 0) {
-    return `${sign}${feetPart}`
+  if (feet > 0 && inches === 0 && rem === 0) return `${tilde}${sign}${feetPart}`
+  let inchesPart: string
+  if (isDec) {
+    inchesPart = `${formatNumber(inches + rem / perInch, { maxFractionDigits: grid.decimals as number, grouping: false })}"`
+  } else if (rem === 0) {
+    inchesPart = `${inches}"`
+  } else if (feet === 0 && inches === 0) {
+    // Standalone sub-inch value reads `3/4"`, not `0-3/4"`. Inside a
+    // composite (`1' 0-3/4"`) the zero is the whole-inch count and stays.
+    inchesPart = `${fracText}"`
+  } else {
+    inchesPart = `${inches}-${fracText}"`
   }
-  // Standalone sub-inch value (no feet AND no whole inches — just a
-  // fraction): drop the leading "0-" so it reads "3/4"" not "0-3/4"" —
-  // matching frac_in's own formatFractionalInches, which already omits it
-  // (its own `whole === 0` branch above). Only the standalone case drops
-  // it: inside a composite WITH feet ("1' 0-3/4""), the "0-3/4" inch part
-  // is left exactly as-is — the zero there is load-bearing (it's the whole
-  // inches count, not a dropped leading digit).
-  const inchesPart = feet === 0 && inches === 0 && num !== 0 ? `${num}/${den}"` : `${inches}${inchFraction}"`
-  if (feet === 0) {
-    return `${sign}${inchesPart}`
-  }
-  return `${sign}${feetPart} ${inchesPart}`
+  return feet === 0 ? `${tilde}${sign}${inchesPart}` : `${tilde}${sign}${feetPart} ${inchesPart}`
 }
 
 /** Format meters using the CURRENT singleton format. */
@@ -499,6 +698,13 @@ function parseFeetInchesToMeters(input: string): number | null {
   return sign * totalInches * METERS_PER_INCH
 }
 
+/** Trim `input` and drop one leading `~` (the "rounded readout" mark), so a
+ * value copied from a readout can be typed back in. */
+function stripApproxPrefix(input: string): string {
+  const t = input.trim()
+  return t.startsWith('~') ? t.slice(1).trimStart() : t
+}
+
 /**
  * Parse a typed length string to meters.
  *
@@ -525,7 +731,7 @@ export function parseLengthToMeters(
   input: string,
   format: LengthFormat = getLengthUnit(),
 ): number | null {
-  const trimmed = input.trim()
+  const trimmed = stripApproxPrefix(input)
   if (trimmed === '') return null
 
   // Explicit unit suffix — honored in any mode.
@@ -582,7 +788,7 @@ export function parseDimensionsToMeters(
   input: string,
   format: LengthFormat = getLengthUnit(),
 ): [number, number] | null {
-  const trimmed = input.trim()
+  const trimmed = stripApproxPrefix(input)
   if (trimmed === '') return null
 
   const componentPair = (a: string, b: string): [number, number] | null => {
@@ -621,15 +827,15 @@ export function parseDimensionsToMeters(
 
 let tauriEmit: ((event: string, payload?: unknown) => Promise<void>) | null = null
 
-function broadcastTauri(format: LengthFormat): void {
+function broadcastTauri(payload: { lengthUnit?: LengthFormat; precision?: PrecisionMap }): void {
   if (!isTauri) return
   if (tauriEmit !== null) {
-    tauriEmit('settings-changed', { lengthUnit: format }).catch(() => { /* ignore */ })
+    tauriEmit('settings-changed', payload).catch(() => { /* ignore */ })
     return
   }
   import('@tauri-apps/api/event').then(({ emit }) => {
     tauriEmit = emit
-    return emit('settings-changed', { lengthUnit: format })
+    return emit('settings-changed', payload)
   }).catch(() => { /* ignore */ })
 }
 
@@ -639,12 +845,28 @@ function applyExternalFormat(next: unknown): void {
   notify()
 }
 
+function applyExternalPrecision(next: unknown): void {
+  if (typeof next !== 'object' || next === null) return
+  const clean = sanitizePrecisionMap(next)
+  if (ALL_FORMATS.every((f) => clean[f] === currentPrecision[f])) return
+  currentPrecision = clean
+  notify()
+}
+
 // Refresh the singleton + notify subscribers when the OTHER window changes
 // the format. Two channels:
 //   - Tauri global event 'settings-changed' (separate webview windows).
 //   - Browser 'storage' event (same-origin web tabs).
 if (typeof window !== 'undefined') {
   window.addEventListener('storage', (ev) => {
+    if (ev.key === PRECISION_STORAGE_KEY) {
+      try {
+        applyExternalPrecision(ev.newValue === null ? null : JSON.parse(ev.newValue))
+      } catch {
+        /* ignore bad JSON */
+      }
+      return
+    }
     if (ev.key !== STORAGE_KEY) return
     if (isLengthFormat(ev.newValue)) {
       applyExternalFormat(ev.newValue)
@@ -655,8 +877,9 @@ if (typeof window !== 'undefined') {
 
   if (isTauri) {
     import('@tauri-apps/api/event').then(({ listen }) => {
-      return listen<{ lengthUnit?: unknown }>('settings-changed', (event) => {
+      return listen<{ lengthUnit?: unknown; precision?: unknown }>('settings-changed', (event) => {
         applyExternalFormat(event.payload?.lengthUnit)
+        applyExternalPrecision(event.payload?.precision)
       })
     }).catch(() => { /* ignore */ })
   }

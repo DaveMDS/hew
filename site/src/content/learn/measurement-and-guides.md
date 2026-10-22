@@ -14,14 +14,14 @@ Model geometry is always stored in meters internally. **Settings ▸ Units** con
 
 | System | Format | Example |
 |---|---|---|
-| Metric | Meters | `1.238 m` |
+| Metric | Meters | `1.2375 m` |
 | Metric | Centimeters | `123.75 cm` |
 | Metric | Millimeters | `1237.5 mm` |
 | Imperial | Architectural | `5' 3-1/8"` |
 | Imperial | Fractional inches | `63-1/8"` |
 | Imperial | Decimal inches | `63.125"` |
 
-Imperial fractions round to the nearest 1/16". Every readout — tool previews, the Tape Measure, the typed-input echo — follows this setting.
+**Precision** (also in Settings ▸ Units) sets how far a readout is rounded, separately for each format, and marks a rounded value with `~`; choose Exact to see every digit a length needs (see [Settings](/learn/settings/#precision)). The examples above are values that need no rounding. Every readout — tool previews, the Tape Measure, the typed-input echo — follows this setting.
 
 ## Typed input, in full
 
@@ -33,7 +33,7 @@ While a tool is mid-gesture, type a value and press `Enter`. The rules:
 - **Rectangle** takes two comma- or `x`-separated dimensions, width across the surface then height up it, mixable: `1cm,100mm`, `2' x 18"`; one value makes a square.
 - **Rotate and Protractor** take plain degrees; **Scale** takes a plain positive factor as-typed (not a length in the display unit) — or an explicit length (`50mm`, `8"`) as a target dimension for the axis being dragged.
 
-**Clicking is the same as typing.** A value you click is exactly the value the measurement box shows, as if you had typed it: if the box reads `9.4 mm × 3.8 mm` when you click the second corner, the rectangle is exactly that size, not a few extra digits' worth off. This holds for every tool with a readout, on the ground and on a face. The exception is a click that snaps onto existing geometry (an endpoint, midpoint, intersection, point on an edge, guide point, center, or quadrant): that keeps the exact point you snapped to, because rounding it would land a hair off the geometry you aimed at. Only free picks, on a face, on a plane, or along an axis lock, are rounded to the displayed value.
+**Clicking is the same as typing.** A value you click is exactly the value the measurement box shows, as if you had typed it: if the box reads `9.399 mm × 3.787 mm` when you click the second corner, the rectangle is exactly that size, not a few extra digits' worth off. This holds for every tool with a readout, on the ground and on a face. The exception is a click that snaps onto existing geometry (an endpoint, midpoint, intersection, point on an edge, guide point, center, or quadrant): that keeps the exact point you snapped to, because rounding it would land a hair off the geometry you aimed at. Only free picks, on a face, on a plane, or along an axis lock, are rounded to the displayed value.
 
 ## Tape Measure (`T`)
 

@@ -1626,8 +1626,7 @@ impl Converter {
                         b: free(b),
                         offset: off * d.offset_m,
                         plane: Plane::from_point_normal(a, n).ok()?,
-                        text_override: (!d.text_override.is_empty())
-                            .then(|| d.text_override.clone()),
+                        text_override: dimension_override(&d.text_override),
                     },
                     tags_through(d.layer, chain),
                 ))
@@ -1714,7 +1713,7 @@ impl Converter {
                     } else {
                         radial * -1.0
                     },
-                    text_override: (!r.text_override.is_empty()).then(|| r.text_override.clone()),
+                    text_override: dimension_override(&r.text_override),
                 };
                 Some((a, tags_through(r.layer, chain)))
             })();
@@ -3088,8 +3087,26 @@ fn section_planes_world(
     out
 }
 
+/// A dimension record's text as a Hew override: none when empty, and a
+/// leading `~` (Hew's mark for a rounded readout) dropped, so a file that
+/// carries one never shows it as text the person typed.
+fn dimension_override(text: &str) -> Option<String> {
+    let t = text.strip_prefix('~').map_or(text, str::trim_start);
+    (!t.is_empty()).then(|| t.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dimension_override_drops_a_leading_tilde() {
+        assert_eq!(dimension_override(""), None);
+        assert_eq!(dimension_override("~"), None);
+        assert_eq!(dimension_override("1' 2\""), Some("1' 2\"".to_string()));
+        assert_eq!(dimension_override("~3/16\""), Some("3/16\"".to_string()));
+        assert_eq!(dimension_override("~ 0.33 m"), Some("0.33 m".to_string()));
+        assert_eq!(dimension_override("about ~3"), Some("about ~3".to_string()));
+    }
+
     use super::*;
 
     fn parallel(eye: [f64; 3], height: f64) -> openskp::Camera {

@@ -38,7 +38,7 @@ import {
   type FontProviderSet,
 } from '../text/fontSources'
 import { validateGlyphOutlines } from '../text/outlineValidation'
-import { formatLength, getLengthUnit, getLengthUnitSuffix, parseLengthToMeters } from '../settings/units'
+import { formatLengthIn, getLengthUnit, getLengthUnitSuffix, parseLengthToMeters } from '../settings/units'
 import { isComposingKey } from '../input/keyboard'
 
 export interface TextDialogResult {
@@ -309,8 +309,8 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
   const { t } = useLingui()
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- sample text placed into the model (the product name), not interface copy
   const [text, setText] = useState('Hew')
-  const [heightText, setHeightText] = useState(() => formatLength(DEFAULT_HEIGHT_M))
-  const [depthText, setDepthText] = useState(() => formatLength(DEFAULT_DEPTH_M))
+  const [heightText, setHeightText] = useState(() => formatLengthIn(DEFAULT_HEIGHT_M, getLengthUnit(), 'exact'))
+  const [depthText, setDepthText] = useState(() => formatLengthIn(DEFAULT_DEPTH_M, getLengthUnit(), 'exact'))
   const [error, setError] = useState<string | null>(null)
   const [placing, setPlacing] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)

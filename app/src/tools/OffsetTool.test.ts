@@ -6,11 +6,11 @@
  * VCB entry, retype, and Esc. Mirrors the fake-WasmScene pattern used by
  * PushPullTool.test.ts.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as THREE from 'three'
 import { OffsetTool } from './OffsetTool'
 import type { Snap } from './types'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { ctxOfPlane, keyToId } from './planeUnits'
@@ -842,6 +842,9 @@ describe('OffsetTool — retype the distance after the commit', () => {
 
 
 describe('OffsetTool — a clicked distance is exactly the displayed distance', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
   function drag(snap: Snap | null, y: number) {
     const scene = makeWasmScene({ regionPick: makeRegionPick(9n, 7n) })
@@ -855,12 +858,12 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     }
   }
 
-  it('a free click outside the boundary commits the shown +12.3 mm', () => {
+  it('a free click outside the boundary commits the shown +12.346 mm', () => {
     setLengthUnit('mm')
     try {
       const r = drag(null, -0.0123456)
-      expect(r.onMeasurement).toHaveBeenCalledWith('12.3 mm')
-      expect(r.d).toBe(12.3 * 0.001)
+      expect(r.onMeasurement).toHaveBeenCalledWith('12.346 mm')
+      expect(r.d).toBe(12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }
@@ -869,7 +872,7 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
   it('a free click inside commits the shown negative distance', () => {
     setLengthUnit('mm')
     try {
-      expect(drag(makeSnap({ kind: 'on-face', x: 1, y: 0.0123456 }), 0.0123456).d).toBe(-12.3 * 0.001)
+      expect(drag(makeSnap({ kind: 'on-face', x: 1, y: 0.0123456 }), 0.0123456).d).toBe(-12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }
@@ -880,7 +883,7 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     try {
       const r = drag(makeSnap({ kind: 'endpoint', x: 1, y: -0.0123456, z: 0 }), -0.0123456)
       expect(r.d).toBeCloseTo(0.0123456, 15)
-      expect(r.d).not.toBe(12.3 * 0.001)
+      expect(r.d).not.toBe(12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }

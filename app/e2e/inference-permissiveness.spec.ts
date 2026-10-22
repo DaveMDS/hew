@@ -89,7 +89,7 @@ test('Push/Pull: pulling a face up past its own edges never drops the depth to 0
   for (let dy = 6; dy <= 150; dy += 6) {
     await page.mouse.move(start.x, start.y - dy)
     await page.waitForTimeout(40)
-    const depth = parseFloat(await vcb(page, 'Push depth'))
+    const depth = parseFloat((await vcb(page, 'Push depth')).replace('~', ''))
     expect(depth, `at ${dy}px up the readout must keep growing (chip: ${await chip(page)})`).toBeGreaterThan(last - 1e-6)
     expect(depth).toBeGreaterThan(0)
     last = depth
@@ -159,7 +159,7 @@ test('Line: bottom-southwest corner to top-southeast corner splits the face, nev
   await click(page, ctx, [0, 0, 0])
   await hover(page, ctx, [1, 0, 1])
   expect(await chip(page)).toBe('Endpoint')
-  expect(await vcb(page, 'Value')).toBe('1.414 m')
+  expect(await vcb(page, 'Value')).toBe('~1.414 m')
   await click(page, ctx, [1, 0, 1])
   await page.keyboard.press('Escape')
   expect((await sketchPlanes(page)).length).toBe(before)

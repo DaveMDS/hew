@@ -4,7 +4,7 @@
  * committed sketch edge) enters parallel-guide mode and commits
  * `add_guide_line`; anything else falls to measure mode.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as THREE from 'three'
 import { TapeMeasureTool } from './TapeMeasureTool'
 import type { Snap } from './types'
@@ -14,7 +14,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { GUIDE_COLOR } from '../viewport/guideColors'
 import { AXIS_ALONG_EDGE_COS } from './tapeOffset'
-import { formatLength, setLengthUnit, getLengthUnit } from '../settings/units'
+import { formatLength, setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -1699,8 +1699,11 @@ describe('TapeMeasureTool — Shop Mode (measure-only) parts flow', () => {
 
 
 describe('TapeMeasureTool — a clicked distance is exactly the displayed distance', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
-  const P = { x: 0.0093987, y: 0.0037873 } // |P| = 10.134 mm, shows "10.1 mm"
+  const P = { x: 0.0093987, y: 0.0037873 } // |P| = 10.133 mm, shows "10.133 mm"
 
   function measure(kind: string, typed: string | null) {
     const { scene, guidePoints } = makeWasmScene()
@@ -1717,9 +1720,9 @@ describe('TapeMeasureTool — a clicked distance is exactly the displayed distan
     setLengthUnit('mm')
     try {
       const clicked = measure('ground', null)
-      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.1 mm', expect.anything())
-      expect(clicked.guidePoints).toEqual(measure('ground', '10.1').guidePoints)
-      expect(Math.hypot(clicked.guidePoints[0][0], clicked.guidePoints[0][1])).toBeCloseTo(10.1 * 0.001, 15)
+      expect(clicked.onMeasurement).toHaveBeenCalledWith('10.133 mm', expect.anything())
+      expect(clicked.guidePoints).toEqual(measure('ground', '10.133').guidePoints)
+      expect(Math.hypot(clicked.guidePoints[0][0], clicked.guidePoints[0][1])).toBeCloseTo(10.133 * 0.001, 15)
     } finally {
       setLengthUnit(prev)
     }
@@ -1755,8 +1758,8 @@ describe('TapeMeasureTool — a clicked distance is exactly the displayed distan
         return guideLines[0]
       }
       const clicked = run('ground', null)
-      expect(clicked).toEqual(run('ground', '12.3'))
-      expect(clicked[1]).toBeCloseTo(12.3 * 0.001, 15)
+      expect(clicked).toEqual(run('ground', '12.346'))
+      expect(clicked[1]).toBeCloseTo(12.346 * 0.001, 15)
       expect(run('endpoint', null)[1]).toBeCloseTo(0.0123456, 15)
     } finally {
       setLengthUnit(prev)

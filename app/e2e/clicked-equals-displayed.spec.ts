@@ -74,7 +74,7 @@ async function vcb(page: Page, label: string): Promise<string> {
 
 /** "412.3 mm" -> metres, the way typing it would parse. */
 function mm(text: string): number {
-  const m = /^(-?\d+(?:\.\d+)?)\s*mm$/.exec(text.trim())
+  const m = /^~?(-?\d+(?:\.\d+)?)\s*mm$/.exec(text.trim())
   if (m === null) throw new Error(`not a millimetre reading: "${text}"`)
   return parseFloat(m[1]) * 0.001
 }

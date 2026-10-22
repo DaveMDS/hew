@@ -60,13 +60,12 @@ import { i18n } from '@lingui/core'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   formatLengthIn,
-  getLengthUnit,
-  subscribe as subscribeLengthUnit,
   LENGTH_FORMAT_SHORT_LABEL,
   LENGTH_FORMAT_NAME,
   LENGTH_SYSTEM_OF,
   type LengthFormat,
 } from '../settings/units'
+import { useLengthDisplay } from '../settings/useLengthDisplay'
 import { nodeKey, type NodeRef } from '../panels/treeModel'
 import { buildPartsSheetSections, totalPartCount, visiblePartCount, type PartsSheetRow, type PartsSheetSection } from './partsSheetModel'
 import { clampDragHeightPx, detentHeightPx, nearestDetent, type SheetDetent } from './sheetDetents'
@@ -156,8 +155,7 @@ export function PartsSheet({
   // row's dims must re-render on — ANY change: this sheet's own chip, the
   // Settings picker, or another window under Tauri, `settings/units.ts`'s
   // module doc on cross-window sync).
-  const [unit, setUnit] = useState<LengthFormat>(getLengthUnit)
-  useEffect(() => subscribeLengthUnit(setUnit), [])
+  const { format: unit } = useLengthDisplay()
   const metric = LENGTH_SYSTEM_OF[unit] === 'metric'
 
   // ---------------------------------------------------------------- container height tracking

@@ -13,6 +13,7 @@ import {
   setLengthUnit,
   getLengthUnit,
   type LengthFormat,
+  setPrecision,
 } from '../settings/units'
 
 const snap = (kind: string, extra: Partial<Snap> = {}): Snap => ({ x: 0, y: 0, z: 0, kind, ...extra })
@@ -75,23 +76,55 @@ describe('displayedLength', () => {
     }
   })
 
-  it('reads 9.39876 mm as exactly 9.4 mm', () => {
+  it('at Exact, reads 9.39876 mm as exactly 9.399 mm', () => {
     setLengthUnit('mm')
+    setPrecision('exact')
+    try {
+      expect(displayedLength(0.00939876)).toBe(9.399 * 0.001)
+      expect(displayedLength(0.00378732)).toBe(3.787 * 0.001)
+      expect(displayedLength(0.0106123)).toBe(10.612 * 0.001)
+    } finally {
+      setPrecision(1)
+    }
+  })
+
+  it('at the default mm precision (1 decimal), reads 9.39876 mm as exactly the rounded, ~-marked value', () => {
+    setLengthUnit('mm')
+    expect(formatLength(0.00939876)).toBe('~9.4 mm')
     expect(displayedLength(0.00939876)).toBe(9.4 * 0.001)
     expect(displayedLength(0.00378732)).toBe(3.8 * 0.001)
     expect(displayedLength(0.0106123)).toBe(10.6 * 0.001)
   })
 
-  it('metric formats round to their shown decimals', () => {
+  it('metric formats show the digits the value needs at Exact, and round at a coarser precision', () => {
     setLengthUnit('m')
-    expect(displayedLength(1.23456)).toBe(1.235)
+    setPrecision('exact')
     setLengthUnit('cm')
-    expect(displayedLength(0.123456)).toBe(12.35 * 0.01)
+    setPrecision('exact')
+    try {
+      setLengthUnit('m')
+      expect(displayedLength(1.23456)).toBe(1.23456)
+      setLengthUnit('cm')
+      expect(displayedLength(0.123456)).toBe(12.3456 * 0.01)
+      setLengthUnit('m')
+      setPrecision(3)
+      expect(displayedLength(1.23456)).toBe(1.235)
+    } finally {
+      setLengthUnit('m')
+      setPrecision(3)
+      setLengthUnit('cm')
+      setPrecision(2)
+    }
   })
 
-  it('imperial formats round to their shown precision', () => {
+  it('imperial formats show the digits the value needs at Exact', () => {
     setLengthUnit('dec_in')
-    expect(displayedLength(0.0254 * 3.14159)).toBe(3.142 * 0.0254)
+    setPrecision('exact')
+    try {
+      expect(displayedLength(0.0254 * 3.14159)).toBe(3.1416 * 0.0254)
+    } finally {
+      setPrecision(3)
+    }
     setLengthUnit('arch')
     // 1' 3-1/4" shown for 15.26 in -> nearest 1/16 in
     expect(displayedLength(0.0254 * 15.26)).toBe(parseLengthToMeters(formatLength(0.0254 * 15.26))!)
@@ -99,7 +132,12 @@ describe('displayedLength', () => {
 
   it('keeps the sign and never returns -0', () => {
     setLengthUnit('mm')
-    expect(displayedLength(-0.00939876)).toBe(-9.4 * 0.001)
+    setPrecision('exact')
+    try {
+      expect(displayedLength(-0.00939876)).toBe(-9.399 * 0.001)
+    } finally {
+      setPrecision(1)
+    }
     expect(Object.is(displayedLength(-0.0000001), 0)).toBe(true)
     expect(Object.is(displayedLength(-0), 0)).toBe(true)
     expect(Object.is(displayedLength(0), 0)).toBe(true)

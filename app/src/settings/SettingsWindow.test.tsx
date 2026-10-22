@@ -16,7 +16,7 @@ import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { SettingsWindow } from './SettingsWindow'
 import { UnitsPane } from './UnitsPane'
 import { DebugPane } from './DebugPane'
-import { setLengthUnit, getLengthUnit } from './units'
+import { setLengthUnit, getLengthUnit, getPrecision, setPrecision } from './units'
 import { setDebugMode, getDebugMode } from './debugMode'
 
 // DebugPane conditionally renders a "Download diagnostic log" button (web path)
@@ -97,13 +97,57 @@ describe('UnitsPane', () => {
     setLengthUnit('m')
   })
 
-  it('renders the System and Format selectors with associated labels', () => {
+  it('renders the System, Format and Precision selectors with associated labels', () => {
     render(<UnitsPane />)
     // The form-grid labels are real <label htmlFor> now (SettingsForm.tsx), so
     // the selects are queryable by their accessible names.
     expect(screen.getByLabelText('System')).toBeInTheDocument()
     expect(screen.getByLabelText('Format')).toBeInTheDocument()
-    expect(screen.getAllByRole('combobox')).toHaveLength(2)
+    expect(screen.getByLabelText('Precision')).toBeInTheDocument()
+    expect(screen.getAllByRole('combobox')).toHaveLength(3)
+  })
+
+  it('Precision lists Exact first, with choices that follow the format', () => {
+    setLengthUnit('m')
+    const { unmount } = render(<UnitsPane />)
+    const metric = screen.getByLabelText('Precision') as HTMLSelectElement
+    expect(Array.from(metric.options).map((o) => o.value)).toEqual(['exact', '0', '1', '2', '3', '4', '5', '6'])
+    expect(metric.options[0].textContent).toBe('Exact')
+    expect(metric.value).toBe('3')
+    unmount()
+
+    setLengthUnit('arch')
+    render(<UnitsPane />)
+    const imperial = screen.getByLabelText('Precision') as HTMLSelectElement
+    expect(Array.from(imperial.options).map((o) => o.value)).toEqual([
+      'exact', 'foot', '1', '2', '4', '8', '16', '32', '64',
+    ])
+    expect((imperial.options[1] as HTMLOptionElement).textContent).toBe("Nearest 1'")
+    expect(imperial.value).toBe('16')
+  })
+
+  it('choosing a Precision sets it for the current format only, and switching back restores it', () => {
+    setLengthUnit('arch')
+    try {
+      render(<UnitsPane />)
+      fireEvent.change(screen.getByLabelText('Precision'), { target: { value: '32' } })
+      expect(getPrecision('arch')).toBe(32)
+      expect(getPrecision('frac_in')).toBe(16)
+      expect(getPrecision('m')).toBe(3)
+      expect((screen.getByLabelText('Precision') as HTMLSelectElement).value).toBe('32')
+      fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'frac_in' } })
+      expect((screen.getByLabelText('Precision') as HTMLSelectElement).value).toBe('16')
+      fireEvent.change(screen.getByLabelText('Precision'), { target: { value: 'foot' } })
+      expect(getPrecision('frac_in')).toBe('foot')
+      fireEvent.change(screen.getByLabelText('System'), { target: { value: 'metric' } })
+      expect((screen.getByLabelText('Precision') as HTMLSelectElement).value).toBe('3')
+      fireEvent.change(screen.getByLabelText('System'), { target: { value: 'imperial' } })
+      // Switching system lands on Architectural again, which kept its own value.
+      expect((screen.getByLabelText('Precision') as HTMLSelectElement).value).toBe('32')
+    } finally {
+      setPrecision(16, 'arch')
+      setPrecision(16, 'frac_in')
+    }
   })
 
   it('defaults to Metric system when the unit is meters', () => {

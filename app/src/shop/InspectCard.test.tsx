@@ -10,7 +10,7 @@
 import { act, render, screen } from '@testing-library/react'
 import { describe, expect, it, beforeEach } from 'vitest'
 import { InspectCard } from './InspectCard'
-import { setLengthUnit } from '../settings/units'
+import { setLengthUnit, setPrecision } from '../settings/units'
 import type { InspectResult } from './inspect'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -55,6 +55,18 @@ describe('InspectCard — PART shape', () => {
     // own element.
     const dimsLine = screen.getByText('L').parentElement as HTMLElement
     expect(dimsLine.textContent).toBe('L 0.6 m W 0.4 m H 0.02 m')
+  })
+
+  it('re-renders its dims when only the Precision changes (e.g. from the Settings window)', () => {
+    renderCard({ ...PART_RESULT, extentsM: [1 / 3, 0.4, 0.02] })
+    const dimsLine = screen.getByText('L').parentElement as HTMLElement
+    expect(dimsLine.textContent).toBe('L ~0.333 m W 0.4 m H 0.02 m')
+    try {
+      act(() => setPrecision(2, 'm'))
+      expect(dimsLine.textContent).toBe('L ~0.33 m W 0.4 m H 0.02 m')
+    } finally {
+      act(() => setPrecision(3, 'm'))
+    }
   })
 
   it('gives the L/W/H letters distinct axis colors (design: "colored letters")', () => {

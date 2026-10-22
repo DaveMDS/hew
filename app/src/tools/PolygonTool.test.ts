@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { PolygonTool, DEFAULT_POLYGON_SIDES, MIN_POLYGON_SIDES, MAX_POLYGON_SIDES } from './PolygonTool'
 import { draftMock } from './draftMock'
 import { toolHasArmedGesture, type Snap, type Tool } from './types'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
@@ -796,8 +796,11 @@ describe('PolygonTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
 
 
 describe('PolygonTool — a clicked radius is exactly the displayed radius', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
-  const rim = 0.0123456 // shows "R 12.3 mm"
+  const rim = 0.0123456 // shows "R 12.346 mm" at Exact
   const run = (kind: string, typed: string | null) => {
     const scene = makeWasmScene()
     const t = makeTool(scene)
@@ -816,11 +819,11 @@ describe('PolygonTool — a clicked radius is exactly the displayed radius', () 
     setLengthUnit('mm')
     try {
       const clicked = run('ground', null)
-      const typed = run('ground', '12.3')
-      expect(clicked.measure).toHaveBeenCalledWith('R 12.3 mm')
+      const typed = run('ground', '12.346')
+      expect(clicked.measure).toHaveBeenCalledWith('R 12.346 mm')
       expect(clicked.calls.length).toBeGreaterThan(0)
       expect(clicked.calls).toEqual(typed.calls)
-      expect(clicked.calls[0][1]).toBe(12.3 * 0.001)
+      expect(clicked.calls[0][1]).toBe(12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }

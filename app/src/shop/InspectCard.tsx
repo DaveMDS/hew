@@ -25,9 +25,9 @@
  *     (flagged as a follow-on spec item — see the caption constant below)
  *     with a generic usage hint; only the generic half ships here.
  */
-import { useEffect, useState } from 'react'
 import { useLingui } from '@lingui/react/macro'
-import { formatLengthIn, getLengthUnit, subscribe as subscribeLengthUnit, type LengthFormat } from '../settings/units'
+import { formatLengthIn } from '../settings/units'
+import { useLengthDisplay } from '../settings/useLengthDisplay'
 import { colorForTagPath, hexToRgba } from './tagPalette'
 import type { InspectResult } from './inspect'
 
@@ -71,8 +71,7 @@ export function InspectCard({ result, screenX, screenY, containerWidth, containe
   const { t } = useLingui()
   const EDGE_CAPTION = t`double-tap zooms to part`
   const PART_CAPTION = t`tap away to dismiss · hold part to isolate`
-  const [unit, setUnit] = useState<LengthFormat>(getLengthUnit)
-  useEffect(() => subscribeLengthUnit(setUnit), [])
+  const { format: unit } = useLengthDisplay()
 
   const cardHeightEstimate = CARD_HEIGHT_ESTIMATE_PX[result.kind]
 

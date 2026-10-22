@@ -235,15 +235,22 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
   const paperFmt: LengthFormat = LENGTH_SYSTEM_OF[format] === 'metric' ? 'mm' : 'dec_in'
   const [paperWText, setPaperWText] = useState('')
   const [paperHText, setPaperHText] = useState('')
+  // Edited since the last seed/commit: blur or Enter without an edit must not
+  // write the displayed paper size back.
+  const [paperDirty, setPaperDirty] = useState(false)
   const [paperErr, setPaperErr] = useState<string | null>(null)
   useEffect(() => {
     if (paperIsCustom) {
       const p = opts.paper as { w_mm: number; h_mm: number }
-      setPaperWText(formatLengthIn(p.w_mm / 1000, paperFmt))
-      setPaperHText(formatLengthIn(p.h_mm / 1000, paperFmt))
+      // Editable fields are seeded at Exact so a coarse Precision never
+      // puts a rounded, "~"-prefixed size into the box.
+      setPaperWText(formatLengthIn(p.w_mm / 1000, paperFmt, 'exact'))
+      setPaperHText(formatLengthIn(p.h_mm / 1000, paperFmt, 'exact'))
+      setPaperDirty(false)
     } else {
       setPaperWText('')
       setPaperHText('')
+      setPaperDirty(false)
       setPaperErr(null)
     }
     // Only re-seed on the custom/named transition, not every keystroke.
@@ -259,9 +266,12 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
     }
   }
   const commitCustomPaper = (): void => {
+    if (!paperDirty) return
     const wM = parseLengthToMeters(paperWText, paperFmt)
     const hM = parseLengthToMeters(paperHText, paperFmt)
-    setPaperErr(c.applyCustomPaper(wM === null ? NaN : wM * 1000, hM === null ? NaN : hM * 1000))
+    const err = c.applyCustomPaper(wM === null ? NaN : wM * 1000, hM === null ? NaN : hM * 1000)
+    setPaperErr(err)
+    if (err === null) setPaperDirty(false)
   }
 
   // ---- custom scale
@@ -639,9 +649,9 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
               {paperIsCustom && (
                 <Solo>
                   <div className="hwprint__inline">
-                    <input aria-label={t`Paper width`} className="hwprint__input" value={paperWText} onChange={(e) => setPaperWText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
+                    <input aria-label={t`Paper width`} className="hwprint__input" value={paperWText} onChange={(e) => { setPaperWText(e.target.value); setPaperDirty(true) }} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
                     <span className="hwprint__inline-text">×</span>
-                    <input aria-label={t`Paper height`} className="hwprint__input" value={paperHText} onChange={(e) => setPaperHText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
+                    <input aria-label={t`Paper height`} className="hwprint__input" value={paperHText} onChange={(e) => { setPaperHText(e.target.value); setPaperDirty(true) }} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
                   </div>
                 </Solo>
               )}

@@ -646,7 +646,7 @@ test('switching units via the header chip\'s picker changes a row\'s rendered di
   await expect(sheet.getByText('1 m')).not.toBeVisible()
   // All 3 fixture objects are identical 1×1×1 boxes — `.first()` avoids a
   // strict-mode violation over the 3 identical matches.
-  await expect(sheet.getByText(/^L 39\.37" · W 39\.37" · H 39\.37"$/).first()).toBeVisible()
+  await expect(sheet.getByText(/^L ~39\.37" · W ~39\.37" · H ~39\.37"$/).first()).toBeVisible()
 })
 
 // ---------------------------------------------------------------------------

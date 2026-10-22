@@ -20,6 +20,10 @@ import { Trans, useLingui } from '@lingui/react/macro'
 import {
   getLengthUnit,
   setLengthUnit,
+  getPrecision,
+  setPrecision,
+  precisionLabel,
+  PRECISION_OPTIONS,
   subscribe,
   LENGTH_FORMAT_OPTIONS,
   LENGTH_FORMATS_BY_SYSTEM,
@@ -27,6 +31,7 @@ import {
   DEFAULT_FORMAT_FOR_SYSTEM,
   type LengthFormat,
   type LengthSystem,
+  type Precision,
 } from './units'
 import {
   SettingsForm,
@@ -48,7 +53,15 @@ export function UnitsPane() {
 
   // Keep in sync with external changes (the other window, or another
   // subscriber in this same window).
-  useEffect(() => subscribe(setFormat), [])
+  const [, setTick] = useState(0)
+  useEffect(
+    () =>
+      subscribe((next) => {
+        setFormat(next)
+        setTick((t) => t + 1) // precision changes notify with the same format
+      }),
+    [],
+  )
 
   const system = LENGTH_SYSTEM_OF[format]
   const formatOptions = LENGTH_FORMATS_BY_SYSTEM[system]
@@ -93,12 +106,33 @@ export function UnitsPane() {
         </select>
       </SettingsRow>
 
+      <SettingsRow label="Precision" htmlFor="settings-units-precision">
+        <select
+          id="settings-units-precision"
+          value={String(getPrecision(format))}
+          onChange={(e) => {
+            const v = e.target.value
+            setPrecision(v === 'exact' || v === 'foot' ? v : Number(v))
+          }}
+          style={settingsSelectStyle}
+        >
+          {PRECISION_OPTIONS[format].map((p: Precision) => (
+            <option key={String(p)} value={String(p)} style={settingsOptionStyle}>
+              {precisionLabel(format, p)}
+            </option>
+          ))}
+        </select>
+      </SettingsRow>
+
       <SettingsSeparator />
 
       <SettingsNote>
         <Trans>
           Controls how lengths are displayed (e.g. the Move tool's live measurement).
-          Model geometry is always stored in meters internally.
+          Precision sets how far readouts are rounded: a number of decimals, or
+          a fraction of an inch. A rounded readout is marked with ~, and Exact
+          shows every digit a length needs. Each format remembers its own
+          choice. Model geometry is always stored in meters internally.
         </Trans>
       </SettingsNote>
     </SettingsForm>

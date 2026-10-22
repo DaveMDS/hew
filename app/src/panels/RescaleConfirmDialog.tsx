@@ -31,6 +31,7 @@ import { useLingui } from '@lingui/react/macro'
 import { formatNumber } from '../i18n/format'
 import { formatLength } from '../settings/units'
 import { isComposingKey } from '../input/keyboard'
+import { useLengthDisplay } from '../settings/useLengthDisplay'
 
 interface RescaleConfirmDialogProps {
   /** The real, currently-measured distance between the two picked points. */
@@ -134,6 +135,7 @@ export function RescaleConfirmDialog({
   onConfirm,
   onCancel,
 }: RescaleConfirmDialogProps) {
+  useLengthDisplay()
   const { t } = useLingui()
   const scopeLabel = scope?.label ?? ''
   const heading = scope === null ? t`Resize the model?` : t`Resize ${scopeLabel}?`

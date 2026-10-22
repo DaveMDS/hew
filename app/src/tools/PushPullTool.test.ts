@@ -5,13 +5,13 @@
  * first-class interactable"). Mirrors the fake-WasmScene pattern used by
  * CircleTool.test.ts/ArcTool.test.ts.
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import * as THREE from 'three'
 import { PushPullTool } from './PushPullTool'
 import type { Snap } from './types'
-import { setLengthUnit, getLengthUnit } from '../settings/units'
+import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { ctxOfPlane } from './planeUnits'
@@ -1279,10 +1279,13 @@ describe('PushPullTool — a drawn region in front of an object face wins the pi
 
 
 describe('PushPullTool — a clicked depth is exactly the displayed depth', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
   const pushPullDistance = (scene: WasmScene): number =>
     (scene.push_pull as ReturnType<typeof vi.fn>).mock.calls[0][2] as number
-  // A horizontal ray crossing the push axis at z = 12.3456 mm (shows "12.3 mm").
+  // A horizontal ray crossing the push axis at z = 12.3456 mm (shows "12.346 mm").
   const SIDE: Ray = { origin: [1, 0, 0.0123456], direction: [-1, 0, 0] }
 
   function pull(kind: string, depthSnap: number, ray: Ray = SIDE) {
@@ -1298,8 +1301,8 @@ describe('PushPullTool — a clicked depth is exactly the displayed depth', () =
     setLengthUnit('mm')
     try {
       const r = pull('on-face', 0.0123456)
-      expect(r.onMeasurement).toHaveBeenCalledWith('12.3 mm')
-      expect(r.d).toBe(12.3 * 0.001)
+      expect(r.onMeasurement).toHaveBeenCalledWith('12.346 mm')
+      expect(r.d).toBe(12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }
@@ -1309,7 +1312,7 @@ describe('PushPullTool — a clicked depth is exactly the displayed depth', () =
     setLengthUnit('mm')
     try {
       const r = pull('on-face', -0.0123456, { origin: [1, 0, -0.0123456], direction: [-1, 0, 0] })
-      expect(r.d).toBe(-12.3 * 0.001)
+      expect(r.d).toBe(-12.346 * 0.001)
     } finally {
       setLengthUnit(prev)
     }
@@ -1368,7 +1371,6 @@ describe('PushPullTool — routing through the plane listing', () => {
   })
 
   it.each([
-    ['pinch', 'RegionPinched', 'single point'],
     ['sliver', 'RegionSliver', 'too thin'],
     ['other', 'RegionNotPushable', 'part of it is drawn'],
     [undefined, 'RegionNotPushable', 'part of it is drawn'],

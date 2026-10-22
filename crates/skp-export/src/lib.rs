@@ -1628,7 +1628,7 @@ impl<'d> Author<'d> {
                     let pid = self.pid();
                     self.model.dimensions.push(openskp::Dimension {
                         pid,
-                        text_override: text_override.unwrap_or_default(),
+                        text_override: dimension_text(text_override.as_deref()),
                         start: free(a.point),
                         end: free(b.point),
                         normal: m(Point3::ORIGIN + n),
@@ -1738,7 +1738,7 @@ impl<'d> Author<'d> {
                         edge: Some(edge),
                         diameter: kind == kernel::RadialKind::Diameter,
                         leader: [angle, off],
-                        text_override: text_override.unwrap_or_default(),
+                        text_override: dimension_text(text_override.as_deref()),
                         layer,
                         ..Default::default()
                     });
@@ -2366,8 +2366,28 @@ pub(crate) fn same_guide_line(
     end(mapped.from, span.from) && end(mapped.to, span.to)
 }
 
+/// The text a dimension record carries in a `.skp`: Hew's override as typed,
+/// minus a leading `~` (Hew's mark for a rounded readout, which SketchUp
+/// has no use for). No override is the empty string, which SketchUp reads as
+/// "show the measured length".
+fn dimension_text(text: Option<&str>) -> String {
+    let t = text.unwrap_or_default();
+    t.strip_prefix('~').map_or(t, str::trim_start).to_string()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dimension_text_drops_a_leading_tilde() {
+        assert_eq!(dimension_text(None), "");
+        assert_eq!(dimension_text(Some("1' 2\"")), "1' 2\"");
+        assert_eq!(dimension_text(Some("~3/16\"")), "3/16\"");
+        assert_eq!(dimension_text(Some("~ 0.33 m")), "0.33 m");
+        assert_eq!(dimension_text(Some("~")), "");
+        // Only a leading mark goes.
+        assert_eq!(dimension_text(Some("about ~3")), "about ~3");
+    }
+
     use super::*;
 
     #[test]

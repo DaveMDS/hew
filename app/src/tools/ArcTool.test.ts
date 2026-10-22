@@ -3,13 +3,13 @@
  * pattern: drive the 3-click gesture (A, B, bulge) and assert the exact
  * kernel calls the tool commits (one draft per commit, unified drafting).
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
 import { draftMock } from './draftMock'
 import { arcFromChord, arcSegmentCount } from './arcMath'
 import type { Snap } from './types'
-import { setLengthUnit, getLengthUnit, parseLengthToMeters } from '../settings/units'
+import { setLengthUnit, getLengthUnit, parseLengthToMeters, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import { sagittaForDisplayedRadius } from './displayedValue'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { setPickRenderMode } from './pickPolicy'
@@ -1021,9 +1021,12 @@ describe('ArcTool — Shift-pinned drawing plane (GitHub issue 14)', () => {
 
 
 describe('ArcTool — clicked chord and radius are exactly the displayed values', () => {
+  // These pin the Exact digits (9.399 mm); the default mm rounding is coarser.
+  beforeAll(() => setPrecision('exact', 'mm'))
+  afterAll(() => setPrecision(DEFAULT_PRECISION.mm, 'mm'))
   const prev = getLengthUnit()
   const at = (x: number, y: number, kind = 'ground') => makeSnap({ x, y, z: 0, kind })
-  // Chord shows "20 mm" exactly when B is at 0.0200041 (off-grid); bulge cursor off-grid.
+  // Chord shows "20.004 mm" exactly when B is at 0.0200041 (off-grid); bulge cursor off-grid.
   const B = 0.0200041
   const CUR = { x: 0.0100021, y: 0.0043217 }
 
@@ -1045,13 +1048,13 @@ describe('ArcTool — clicked chord and radius are exactly the displayed values'
       tool.onPointerDown(at(CUR.x, CUR.y), RAY)
 
       // Reference: the typed path with the converted values.
-      const c = 20 * 0.001
+      const c = 20.004 * 0.001
       const sd = sagittaForDisplayedRadius(c, CUR.y, CUR.y > c / 2)!
       const { scene: ref, segments: refSegments } = makeWasmScene()
       const r = makeTool(ref)
       r.tool.onPointerDown(at(0, 0), RAY)
       r.tool.onPointerMove(at(B, 0), RAY)
-      typeDigits(r.tool, '20')
+      typeDigits(r.tool, '20.004')
       r.tool.onKey(makeKeyEvent('Enter'))
       r.tool.onPointerMove(at(CUR.x, CUR.y), RAY)
       typeDigits(r.tool, String(sd / 0.001))
