@@ -26,6 +26,13 @@ import { displayedLength } from './displayedValue'
 import { readHealthReport } from '../health/healthReport'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { buildSweptPrismPreview, clearPreview } from './transformPreview'
+import {
+  readPreviewTint,
+  PREVIEW_EXTRUDE_NEW_FALLBACK,
+  PREVIEW_EXTRUDE_NEW_TOKEN,
+  PREVIEW_PUSHPULL_FALLBACK,
+  PREVIEW_PUSHPULL_TOKEN,
+} from './previewTint'
 import { defaultFaceEligible, ineligibleFaceHint, worldFaceNormal, FacePickCache, type FaceEligible, type RawFacePick } from './faceDraw'
 import { ctxOfFace, type PlaneUnitsScene } from './planeUnits'
 import { regionUnderRay } from './regionPick'
@@ -1173,7 +1180,18 @@ export class PushPullTool implements Tool {
         // mid-drag) degrades to the arrow rather than drawing a misplaced
         // ghost — `worldBoundary` is null exactly then.
         if (worldBoundary !== null) {
-          const prism = buildSweptPrismPreview(worldBoundary, normal, distance)
+          // Extrude-as-new mode tints the ghost blue (both signs); plain
+          // push/pull keeps its orange add / red cut look.
+          const prism = buildSweptPrismPreview(
+            worldBoundary,
+            normal,
+            distance,
+            this.extrudeAsNewMode
+              ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
+              : distance > 0
+                ? readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
+                : undefined,
+          )
           if (prism !== null) {
             this.preview.add(prism)
             return
@@ -1234,8 +1252,11 @@ export class PushPullTool implements Tool {
     const pts = new Float32Array([ax, ay, az, ...tip])
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(pts, 3))
+    const arrowColor = this.extrudeAsNewMode
+      ? readPreviewTint(PREVIEW_EXTRUDE_NEW_TOKEN, PREVIEW_EXTRUDE_NEW_FALLBACK)
+      : readPreviewTint(PREVIEW_PUSHPULL_TOKEN, PREVIEW_PUSHPULL_FALLBACK)
     const mat = new THREE.LineBasicMaterial({
-      color: 0xee8800,
+      color: arrowColor,
       depthTest: false,
     })
     const line = new THREE.LineSegments(geo, mat)
@@ -1250,7 +1271,7 @@ export class PushPullTool implements Tool {
     ])
     const crossGeo = new THREE.BufferGeometry()
     crossGeo.setAttribute('position', new THREE.BufferAttribute(crossPts, 3))
-    const crossMat = new THREE.LineBasicMaterial({ color: 0xee8800, depthTest: false })
+    const crossMat = new THREE.LineBasicMaterial({ color: arrowColor, depthTest: false })
     const cross = new THREE.LineSegments(crossGeo, crossMat)
     cross.renderOrder = 996
     this.preview.add(cross)

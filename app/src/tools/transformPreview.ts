@@ -333,6 +333,8 @@ export function buildSweptPrismPreview(
   boundary: Float32Array | number[],
   normal: [number, number, number],
   distance: number,
+  /** Overrides the add/cut tint (extrude-as-new mode tints both signs alike). */
+  tint?: number,
 ): THREE.Object3D | null {
   if (Math.abs(distance) < 1e-6) return null
 
@@ -376,7 +378,7 @@ export function buildSweptPrismPreview(
   geo.computeVertexNormals()
 
   const mat = new THREE.MeshBasicMaterial({
-    color: distance > 0 ? SWEPT_PRISM_ADD_COLOR : SWEPT_PRISM_CUT_COLOR,
+    color: tint ?? (distance > 0 ? SWEPT_PRISM_ADD_COLOR : SWEPT_PRISM_CUT_COLOR),
     transparent: true,
     opacity: 0.45,
     depthWrite: false,

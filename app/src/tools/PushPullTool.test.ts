@@ -6,6 +6,8 @@
  * CircleTool.test.ts/ArcTool.test.ts.
  */
 import { describe, it, expect, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import * as THREE from 'three'
 import { PushPullTool } from './PushPullTool'
 import type { Snap } from './types'
@@ -1524,5 +1526,73 @@ describe('PushPullTool — a flat surface is pulled into a solid (Model Health, 
     drag(tool)
     expect(onCommit).not.toHaveBeenCalled()
     expect(onToast).toHaveBeenCalledWith(expect.stringMatching(/too small/), 'ThicknessTooSmall')
+  })
+})
+
+describe('PushPullTool — preview tint per mode (#41)', () => {
+  const SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+
+  function ghostColor(extrudeAsNew: boolean, z = 1): number {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockReturnValue(SQUARE)
+    const { tool, preview } = makeTool(scene)
+    if (extrudeAsNew) tool.toggleExtrudeAsNew()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z, kind: 'endpoint' }), RAY)
+    const mesh = preview.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    return (mesh.material as THREE.MeshBasicMaterial).color.getHex()
+  }
+
+  it('toggling extrude-as-new changes the ghost color the renderer receives', () => {
+    const plain = ghostColor(false)
+    const asNew = ghostColor(true)
+    expect(asNew).not.toBe(plain)
+    expect(ghostColor(true, -1)).toBe(asNew) // pulling the other way is still "new"
+  })
+
+  it('the arrow/cross fallback (no swept prism) follows the mode too', () => {
+    const arrowColors = (extrudeAsNew: boolean): number[] => {
+      const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+      // A stale handle mid-drag: no ghost prism, so the bare arrow is drawn.
+      ;(scene.face_boundary as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        throw new Error('stale handle')
+      })
+      const { tool, preview } = makeTool(scene)
+      if (extrudeAsNew) tool.toggleExtrudeAsNew()
+      tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint' }), RAY)
+      tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 1, kind: 'endpoint' }), RAY)
+      const lines = preview.children.filter((c) => (c as THREE.LineSegments).isLineSegments === true) as THREE.LineSegments[]
+      expect(preview.children.some((c) => (c as THREE.Mesh).isMesh === true)).toBe(false)
+      return lines.map((l) => (l.material as THREE.LineBasicMaterial).color.getHex())
+    }
+    const plain = arrowColors(false)
+    const asNew = arrowColors(true)
+    expect(plain).toHaveLength(2) // shaft + tip cross
+    expect(asNew).toHaveLength(2)
+    expect(asNew[0]).not.toBe(plain[0])
+    expect(asNew[1]).toBe(asNew[0])
+    expect(plain[1]).toBe(plain[0])
+  })
+
+  it('reads the tints from the theme tokens', () => {
+    const tokens: Record<string, string> = { '--preview-extrude-new': '#123456', '--preview-pushpull': '#654321' }
+    vi.stubGlobal('document', { documentElement: {} })
+    vi.stubGlobal('window', { getComputedStyle: () => ({ getPropertyValue: (n: string) => tokens[n] ?? '' }) })
+    try {
+      expect(ghostColor(true)).toBe(0x123456)
+      expect(ghostColor(false)).toBe(0x654321)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('defines both tokens in the dark and the light theme blocks', () => {
+    const css = readFileSync(resolve(__dirname, '../theme/tokens.css'), 'utf8')
+    const light = css.slice(css.indexOf("[data-theme='light']"))
+    const dark = css.slice(css.indexOf("[data-theme='dark']"), css.indexOf("[data-theme='light']"))
+    for (const block of [dark, light]) {
+      expect(block).toMatch(/--preview-pushpull:\s*#[0-9a-f]{6}/i)
+      expect(block).toMatch(/--preview-extrude-new:\s*#[0-9a-f]{6}/i)
+    }
   })
 })
