@@ -115,6 +115,14 @@ export interface SnapConstraint {
   lockAxis?: 0 | 1 | 2
   constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }
   offPlanePoints?: boolean
+  /**
+   * The tool drops an off-plane snap onto `constraintPlane` and discloses it
+   * through `snapProjected` (the draw tools' `cursorOnFrozenPlane`), so in
+   * X-ray and Wireframe hidden points and edges behind the face it is held
+   * to may be offered. A tool that commits the snapped point as-is must
+   * leave this unset: it then gets the plain plane filter in every mode.
+   */
+  seeThroughPoints?: boolean
   facesOnly?: boolean
 }
 

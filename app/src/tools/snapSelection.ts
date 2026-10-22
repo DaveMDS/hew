@@ -160,6 +160,10 @@ export interface ResolveDeps {
    *  object of an object context (its own face click deselects; its
    *  imprints still select). Same predicate the draw tools use. */
   imprintEligible?: (objectId: bigint, instanceId: bigint | undefined) => boolean
+  /** Whether faces hide what is behind them — false in X-ray and Wireframe,
+   *  where nothing occludes (the render mode's face policy). Omitted means
+   *  they do (Shaded). */
+  facesOcclude?: boolean
 }
 
 /** Screen distance (pixels) within which a click counts as ON a drawn line —
@@ -293,11 +297,14 @@ function withinFarPlane(depth: number, ray: Ray, deps: ResolveDeps): boolean {
 }
 
 /** A scoped sketch is selectable only where it is actually rendered: before
- * the far plane and not behind the nearest solid face. The relative depth skin
+ * the far plane and, when faces occlude (Shaded), not behind the nearest
+ * solid face. The relative depth skin
  * mirrors the inference layer's occlusion rule, keeping coplanar linework
  * selectable at every model scale without exposing sketches behind thin walls. */
 function scopedSketchVisible(depth: number, ray: Ray, deps: ResolveDeps): boolean {
   if (!withinFarPlane(depth, ray, deps)) return false
+  // X-ray and Wireframe: nothing occludes, so no face can hide the sketch.
+  if (deps.facesOcclude === false) return true
   const face = deps.scene.pick_face(
     ray.origin[0], ray.origin[1], ray.origin[2],
     ray.direction[0], ray.direction[1], ray.direction[2],

@@ -491,6 +491,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadFormat" => {
             "Hew's own request to the model kernel named an image format it doesn't recognize. If this keeps happening, use Report Bug."
         }
+        "BadRenderMode" => {
+            "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
+        }
         "REPLAY" => {
             "This recorded session couldn't be replayed. If this keeps happening, use Report Bug."
         }

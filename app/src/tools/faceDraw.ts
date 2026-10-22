@@ -41,8 +41,9 @@ import type { Ray } from '../viewport/math'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { applyAffine3x4, transformNormalThroughPose } from '../viewport/geoHelpers'
+import { applyAffine3x4, rayPlaneIntersect, transformNormalThroughPose } from '../viewport/geoHelpers'
 import { parseKernelErrorCode } from '../kernelErrors'
+import { pickPolicyGeneration, pickRenderMode } from './pickPolicy'
 
 /** May the face on `object` (hit through `instance`, when the ray struck
  *  instanced geometry) be drawn on directly? */
@@ -176,6 +177,59 @@ export function snapOnObjectBoundary(
   )
 }
 
+/**
+ * Where a cursor lands on a draw tool's frozen plane (a face, or a
+ * non-ground sketch plane) that must stay planar: the snapped point when it
+ * lies on the plane, else — a snap OFF the plane, which a non-occluding
+ * render mode (X-ray, Wireframe) offers through the face the tool is held
+ * to — that point dropped straight onto the plane, with `projected` set so
+ * the cue says so (`Tool.snapProjected`), exactly as the ground plane drops
+ * a snap's height. With no snap, the ray's hit on the plane (`null` when the
+ * ray runs parallel to it).
+ */
+export function cursorOnFrozenPlane(
+  snap: Snap | null,
+  ray: Ray,
+  planePoint: V3,
+  normal: V3,
+): { point: V3; projected: boolean } | null {
+  if (snap !== null) {
+    const p: V3 = [snap.x, snap.y, snap.z]
+    const off = distanceOffPlane(p, planePoint, normal)
+    if (Math.abs(off) <= FACE_PLANE_EPS_M) return { point: p, projected: false }
+    const n2 = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]
+    if (n2 > 0) {
+      const k = off / n2
+      return { point: [p[0] - normal[0] * k, p[1] - normal[1] * k, p[2] - normal[2] * k], projected: true }
+    }
+  }
+  const hit = rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+  return hit === null ? null : { point: hit, projected: false }
+}
+
+/**
+ * The first point of a gesture started on `face` (the hovered or adopted
+ * face) from `snap`: the snap itself when it lies on the face's plane — any
+ * visible snap, and a hidden edge or corner whose face `faceThrough`
+ * adopted in X-ray — else, for a hidden point that is no part of the face
+ * (an edge crossing, a drawn center), that point dropped onto the face's
+ * plane and marked `projected`, exactly as the gesture's later clicks are
+ * (`cursorOnFrozenPlane`). Without it such a point anchored a plane
+ * parallel to the face but off it by the point's depth.
+ */
+export function firstPointOnFace(
+  wasmScene: WasmScene,
+  face: { object: bigint; face: bigint; normal: V3 },
+  activeInstance: bigint | null,
+  snap: Snap,
+  ray: Ray,
+): { point: V3; projected: boolean } {
+  const raw: V3 = [snap.x, snap.y, snap.z]
+  const plane = worldFacePlane(wasmScene, face.object, face.face, activeInstance)
+  if (plane === null) return { point: raw, projected: false }
+  return cursorOnFrozenPlane(snap, ray, plane.point, face.normal) ?? { point: raw, projected: false }
+}
+
 /** Signed distance of `p` off the plane through `point` with unit `normal`. */
 export function distanceOffPlane(p: V3, point: V3, normal: V3): number {
   return normal[0] * (p[0] - point[0]) + normal[1] * (p[1] - point[1]) + normal[2] * (p[2] - point[2])
@@ -305,15 +359,15 @@ export interface FaceThroughPick extends EligibleFacePick {
  * eligibility predicate rejected it.
  */
 export class FacePickCache {
-  private cache: { ray: Ray; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
-  private throughCache: { ray: Ray; key: string; pick: FaceThroughPick | null } | null = null
+  private cache: { ray: Ray; gen: number; raw: RawFacePick | null; eligible: EligibleFacePick | null } | null = null
+  private throughCache: { ray: Ray; gen: number; key: string; pick: FaceThroughPick | null } | null = null
 
   pickFor(
     wasmScene: WasmScene,
     ray: Ray,
     isEligible: FaceEligible,
   ): EligibleFacePick | null {
-    if (this.cache !== null && this.cache.ray === ray) {
+    if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
       return this.cache.eligible
     }
     const raw = rawPick(wasmScene, ray.origin, ray.direction)
@@ -321,7 +375,7 @@ export class FacePickCache {
     if (raw !== null && isEligible(raw.object, raw.instance)) {
       eligible = { object: raw.object, face: raw.face }
     }
-    this.cache = { ray, raw, eligible }
+    this.cache = { ray, gen: pickPolicyGeneration(), raw, eligible }
     return eligible
   }
 
@@ -359,7 +413,7 @@ export class FacePickCache {
     ineligible = false,
   ): FaceThroughPick | null {
     const key = through.map((p) => p.join(',')).join(';') + `|${activeInstance ?? ''}|${ineligible ? 'x' : ''}`
-    if (this.throughCache !== null && this.throughCache.ray === ray && this.throughCache.key === key) {
+    if (this.throughCache !== null && this.throughCache.ray === ray && this.throughCache.gen === pickPolicyGeneration() && this.throughCache.key === key) {
       return this.throughCache.pick
     }
     const seen = new Set<string>()
@@ -383,7 +437,7 @@ export class FacePickCache {
     }
     // The plain ray first (reusing `pickFor`'s memo when it already ran for
     // this ray), then the ring.
-    if (this.cache !== null && this.cache.ray === ray) {
+    if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
       consider(this.cache.raw)
     } else {
       consider(rawPick(wasmScene, ray.origin, ray.direction))
@@ -391,11 +445,30 @@ export class FacePickCache {
     for (const d of ringDirections(ray.direction)) {
       consider(rawPick(wasmScene, ray.origin, d))
     }
+    // Nothing found, though the point is on an Object's edge or corner: in
+    // X-ray it is hidden behind nearer faces, which nothing occludes there.
+    // Ask where the geometry is instead — the same probes, started just
+    // short of the point so the faces in front are skipped, against the
+    // policy-blind pick — so a draw tool started on that point lands on the
+    // face it lies on rather than falling through to the ground. Never in
+    // Wireframe: faces do not exist for input there, so a gesture started
+    // on a point keeps the ground or a locked plane.
+    if (candidates.length === 0 && through.length > 0 && pickRenderMode() === 'xray') {
+      const p = through[0]
+      const dist = Math.hypot(p[0] - ray.origin[0], p[1] - ray.origin[1], p[2] - ray.origin[2])
+      const start = dist * (1 - THROUGH_RESTART_FRACTION)
+      for (const d of [ray.direction, ...ringDirections(ray.direction)]) {
+        const len = Math.hypot(d[0], d[1], d[2])
+        if (len < 1e-12) continue
+        const origin: V3 = [ray.origin[0] + (d[0] / len) * start, ray.origin[1] + (d[1] / len) * start, ray.origin[2] + (d[2] / len) * start]
+        consider(rawGeometryPick(wasmScene, origin, d))
+      }
+    }
     // Most camera-facing first; a tie keeps probe order (plain ray, then
     // the ring from screen-right counter-clockwise), which is deterministic.
     candidates.sort((a, b) => b.facing - a.facing)
     const pick = candidates.length > 0 ? candidates[0].pick : null
-    this.throughCache = { ray, key, pick }
+    this.throughCache = { ray, gen: pickPolicyGeneration(), key, pick }
     return pick
   }
 
@@ -416,7 +489,7 @@ export class FacePickCache {
    * `snapConstraint` / `onPointerDown`, which must agree on this.
    */
   rawPickFor(ray: Ray): RawFacePick | null {
-    if (this.cache !== null && this.cache.ray === ray) {
+    if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
       return this.cache.raw
     }
     return null
@@ -425,6 +498,27 @@ export class FacePickCache {
   clear(): void {
     this.cache = null
     this.throughCache = null
+  }
+}
+
+/** How far short of a hidden boundary point (as a fraction of its distance
+ *  from the eye) `FacePickCache.faceThrough`'s fallback probes start: past
+ *  the faces in front of it, near enough that the probes' ring still lands
+ *  on the faces meeting at it. */
+const THROUGH_RESTART_FRACTION = 0.02
+
+/** One `pick_face_geometry` raycast (blind to the render mode's face
+ *  policy), with the wasm handle freed; `null` for a miss or a scene double
+ *  without it. */
+function rawGeometryPick(wasmScene: WasmScene, origin: V3, direction: V3): RawFacePick | null {
+  const geometry = (wasmScene as Partial<WasmScene>).pick_face_geometry
+  if (geometry === undefined) return null
+  const pick = geometry.call(wasmScene, origin[0], origin[1], origin[2], direction[0], direction[1], direction[2])
+  if (pick === undefined) return null
+  try {
+    return { object: pick.object(), instance: pick.instance(), face: pick.face(), depth: pick.depth() }
+  } finally {
+    pick.free()
   }
 }
 

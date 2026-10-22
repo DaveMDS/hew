@@ -3525,6 +3525,17 @@ fn main() {
                 None,
                 None,
             )?;
+            // Whole-model render modes: independent checkable toggles, no
+            // accelerators (SketchUp binds none), per window, never saved.
+            let view_xray = check_item(handle, &mut checks, "view-xray", "X-ray", None, None)?;
+            let view_wireframe = check_item(
+                handle,
+                &mut checks,
+                "view-wireframe",
+                "Wireframe",
+                None,
+                None,
+            )?;
             // Command palette — `Cmd/Ctrl+/` on every platform, matching the
             // JS keydown handler's binding in App.tsx so one shortcut is true
             // in both shells and the web build. `/` rather than `K` because
@@ -3702,6 +3713,8 @@ fn main() {
                 .item(&view_grid)
                 .item(&view_guides)
                 .item(&view_section_plane)
+                .item(&view_xray)
+                .item(&view_wireframe)
                 .item(&PredefinedMenuItem::separator(handle)?)
                 .item(&view_compact_rail)
                 .item(&view_tray)
@@ -4559,6 +4572,8 @@ fn main() {
                 "view-grid" => "toggle-grid",
                 "view-guides" => "toggle-guides",
                 "view-section-plane" => "toggle-section-active",
+                "view-xray" => "toggle-xray",
+                "view-wireframe" => "toggle-wireframe",
                 "scenes-add" => "scenes-add",
                 "scenes-update" => "scenes-update",
                 "scenes-next" => "scenes-next",

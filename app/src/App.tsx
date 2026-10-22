@@ -13,6 +13,7 @@ import Viewport, {
   type RescaleConfirmInfo,
   type FlyState,
 } from './viewport/Viewport'
+import { toggledRenderMode, type RenderMode } from './viewport/SceneRenderer'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
@@ -684,6 +685,14 @@ export default function App() {
   /** View ▸ Axes / Grid / Guides visibility. Default all shown. */
   const [showAxes, setShowAxes] = useState(true)
   const [showGrid, setShowGrid] = useState(true)
+  // Whole-model render mode (View ▸ X-ray / Wireframe): one value, so the
+  // two are mutually exclusive. Per window, not saved in the file, not
+  // persisted, so a new document starts Shaded.
+  const [renderMode, setRenderMode] = useState<RenderMode>('shaded')
+  const xrayOn = renderMode === 'xray'
+  const wireframeOn = renderMode === 'wireframe'
+  const toggleXray = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'xray')), [])
+  const toggleWireframe = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'wireframe')), [])
   const [showGuides, setShowGuides] = useState(true)
   /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1)
    * — a RENDER CACHE of the rig's own truth, mirroring showAxes/showGrid's
@@ -2598,6 +2607,9 @@ export default function App() {
     skpNoticeShownRef.current = false
     setSkpNotice(null)
     setDocGeneration((g) => g + 1)
+    // A new document starts in normal rendering. Revert keeps the window as
+    // it is, so it keeps the person's render mode too.
+    if (opts?.keepCamera !== true) setRenderMode('shaded')
     setWelcomeOpen(false)
     setSelectedIds([])
     setActiveContext([])
@@ -5458,6 +5470,8 @@ export default function App() {
       case 'toggle-axes':         setShowAxes((v) => !v); break
       case 'reset-axes':         viewportApi.current?.resetAxes(); break
       case 'toggle-grid':         setShowGrid((v) => !v); break
+      case 'toggle-xray':         toggleXray(); break
+      case 'toggle-wireframe':    toggleWireframe(); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
       case 'toggle-section-active': viewportApi.current?.toggleSectionActive(); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
@@ -6240,6 +6254,7 @@ export default function App() {
     sceneRef.current?.set_view_style_axes(showAxes)
   }, [showAxes])
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
+  useEffect(() => { viewportApi.current?.setRenderMode(renderMode) }, [renderMode])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
 
   // Undo/redo availability (queried from scene each render for menu state)
@@ -6277,6 +6292,8 @@ export default function App() {
     const checked: Record<string, boolean> = {
       'view-axes': showAxes,
       'view-grid': showGrid,
+      'view-xray': xrayOn,
+      'view-wireframe': wireframeOn,
       'view-guides': showGuides,
       'view-section-plane': sectionPlaneMenuState.checked,
       // Sections read "on screen", as in the web MenuBar (see its props).
@@ -6344,6 +6361,8 @@ export default function App() {
     activeTool,
     showAxes,
     showGrid,
+    xrayOn,
+    wireframeOn,
     showGuides,
     sectionPlaneMenuState,
     showModelInfo,
@@ -7038,6 +7057,10 @@ export default function App() {
         onToggleAxes={() => setShowAxes((v) => !v)}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
+        xray={xrayOn}
+        wireframe={wireframeOn}
+        onToggleXray={toggleXray}
+        onToggleWireframe={toggleWireframe}
         onToggleGuides={() => setShowGuides((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}

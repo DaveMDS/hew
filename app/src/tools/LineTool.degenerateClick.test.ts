@@ -62,6 +62,8 @@ function makeFaceWasmScene() {
     pick_sketch: vi.fn(() => undefined),
     node_parent: vi.fn(() => undefined), // top-level, not grouped
     face_normal: vi.fn(() => new Float64Array([0, 0, 1])),
+    // The face's plane (z = 1): the first click is checked against it.
+    face_plane: vi.fn(() => new Float64Array([0, 0, 1, 0, 0, 1])),
     ...dm.members,
     clear_transient_segments: vi.fn(),
     add_transient_segment: vi.fn(),

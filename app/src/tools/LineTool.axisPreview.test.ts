@@ -174,6 +174,10 @@ describe('LineTool — soft/hard axis preview colour and weight (design §2c)', 
     ;(scene as unknown as { face_normal: ReturnType<typeof vi.fn> }).face_normal = vi.fn(
       () => new Float64Array([0, 0, 1]),
     )
+    // The face's plane (z = 1): the first click is checked against it.
+    ;(scene as unknown as { face_plane: ReturnType<typeof vi.fn> }).face_plane = vi.fn(
+      () => new Float64Array([0, 0, 1, 0, 0, 1]),
+    )
     ;(scene as unknown as { node_parent: ReturnType<typeof vi.fn> }).node_parent = vi.fn(() => undefined)
     const { tool, preview } = makeTool(scene)
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'face' }), RAY) // face-mode anchor

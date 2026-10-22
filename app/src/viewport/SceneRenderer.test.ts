@@ -28,8 +28,9 @@
 
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import * as THREE from 'three'
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { SceneRenderer, type SectionWidgetCoverage } from './SceneRenderer'
+import { EDGE_COLOR_SEE_THROUGH_DARK, EDGE_COLOR_SELECTED, SceneRenderer, edgeColorFor, toggledRenderMode, type SectionWidgetCoverage } from './SceneRenderer'
 import { facePlaneBasis } from './geoHelpers'
 import { buildInstancePreviewClone } from '../tools/transformPreview'
 import { buildSelectionPreview } from '../tools/transformSelection'
@@ -1430,6 +1431,18 @@ describe('SceneRenderer — hidden/selected/isolation interactions (RR17)', () =
     expect(batchMaterial(batch).opacity).toBe(1)
     expect((batchEdges.material as THREE.LineBasicMaterial).opacity).toBe(1)
   })
+
+  it('instanced batches follow the mode too', () => {
+    const { scene } = threePlacementsMutable()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const batch = instancedBatches(renderer.instancesGroup)[0]
+    renderer.setRenderMode('xray')
+    expect(batchMaterial(batch).opacity).toBeCloseTo(0.4)
+    expect(batchMaterial(batch).depthWrite).toBe(false)
+    renderer.setRenderMode('wireframe')
+    expect(batchMaterial(batch).colorWrite).toBe(false)
+  })
 })
 
 describe('SceneRenderer — definition-owned sketch rendering (component-edit-parity.md Finding 1)', () => {
@@ -2665,5 +2678,257 @@ describe('SceneRenderer — guide spans (segments and rays)', () => {
     expect(pos[0]).toBeGreaterThanOrEqual(0)
     expect(pos[3]).toBeGreaterThanOrEqual(0)
     expect(pos[0]).toBe(pos[3]) // window misses the ray: nothing visible
+  })
+})
+
+describe('SceneRenderer — whole-model render mode (X-ray / Wireframe)', () => {
+  const edgeOf = (root: THREE.Object3D, name: string): THREE.LineSegments =>
+    (root.getObjectByName(name) as THREE.Group).children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+
+  it('starts Shaded: opaque, depth-writing, color-writing faces', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect([m.opacity, m.transparent, m.depthWrite, m.colorWrite]).toEqual([1, false, true, true])
+    expect(renderer.getRenderMode()).toBe('shaded')
+  })
+
+  it('X-ray: faces at 0.4 opacity, transparent, no depth write; edges untouched', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setRenderMode('xray')
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(m.opacity).toBeCloseTo(0.4)
+    expect(m.transparent).toBe(true)
+    expect(m.depthWrite).toBe(false)
+    expect(m.colorWrite).toBe(true)
+    const e = edgeOf(renderer.objectsGroup, 'Object_1').material as THREE.LineBasicMaterial
+    expect(e.opacity).toBe(1)
+    renderer.setRenderMode('shaded')
+    expect([m.opacity, m.transparent, m.depthWrite]).toEqual([1, false, true])
+  })
+
+  it('flipping transparency asks three to recompile the material (OPAQUE variant forces alpha 1)', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    const version = m.version
+    renderer.setRenderMode('xray')
+    expect(m.version).toBeGreaterThan(version)
+    const v2 = m.version
+    renderer.setRenderMode('xray')
+    expect(m.version).toBe(v2)
+  })
+
+  it('X-ray multiplies in the per-material opacity and the isolation dim', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    m.userData.baseOpacity = 0.5
+    renderer.setRenderMode('xray')
+    expect(m.opacity).toBeCloseTo(0.2)
+    renderer.setActiveContext(new Set([99n]), null)
+    expect(m.opacity).toBeCloseTo(0.4 * 0.5 * 0.55)
+    renderer.setActiveContext(null, null)
+    expect(m.opacity).toBeCloseTo(0.2)
+  })
+
+  it('Wireframe: faces write neither color nor depth, and edges still draw', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setRenderMode('wireframe')
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(m.colorWrite).toBe(false)
+    expect(m.depthWrite).toBe(false)
+    // The face mesh stays in the scene graph (picking is kernel-side).
+    expect((renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group).children.some((c) => c instanceof THREE.Mesh && c.visible)).toBe(true)
+    expect(edgeOf(renderer.objectsGroup, 'Object_1').visible).toBe(true)
+  })
+
+  it('X-ray straight to Wireframe: the faces stop drawing (no "both on" look)', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setRenderMode('xray')
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(m.colorWrite).toBe(true)
+    renderer.setRenderMode('wireframe')
+    expect(m.colorWrite).toBe(false)
+    expect(m.depthWrite).toBe(false)
+    expect(m.opacity).toBe(1)
+  })
+
+  it('X-ray and Wireframe draw light edges on the dark theme; selection orange stays', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true, '2': true } }))
+    renderer.refresh()
+    renderer.setEdgeTheme('dark')
+    renderer.setSelected([2n])
+    const plain = edgeOf(renderer.objectsGroup, 'Object_1').material as THREE.LineBasicMaterial
+    const picked = edgeOf(renderer.objectsGroup, 'Object_2').material as THREE.LineBasicMaterial
+    expect(plain.color.getHex()).toBe(edgeColorFor('shaded', 'dark'))
+    for (const mode of ['wireframe', 'xray'] as const) {
+      renderer.setRenderMode(mode)
+      expect(plain.color.getHex()).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+      expect(picked.color.getHex()).toBe(EDGE_COLOR_SELECTED)
+    }
+    // The light theme keeps the dark edges in every mode.
+    renderer.setEdgeTheme('light')
+    expect(plain.color.getHex()).toBe(edgeColorFor('xray', 'light'))
+    expect(plain.color.getHex()).not.toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    renderer.setEdgeTheme('dark')
+    renderer.setRenderMode('shaded')
+    expect(plain.color.getHex()).toBe(edgeColorFor('shaded', 'dark'))
+    // Deselecting in Wireframe on dark restores the light edge, not the dark one.
+    renderer.setRenderMode('wireframe')
+    renderer.setSelected([])
+    expect(picked.color.getHex()).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    // Rebuilt edges are born in the mode's color.
+    renderer.refresh()
+    expect((edgeOf(renderer.objectsGroup, 'Object_1').material as THREE.LineBasicMaterial).color.getHex()).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+  })
+
+  it('instanced batch edges recolor on the dark theme in X-ray and Wireframe, and new batches are born in the mode\'s color', () => {
+    const scene = makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+        '11': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setEdgeTheme('dark')
+    const edgeHex = () => (instancedEdges(renderer.instancesGroup)[0].material as THREE.LineBasicMaterial).color.getHex()
+    expect(edgeHex()).toBe(edgeColorFor('shaded', 'dark'))
+    for (const mode of ['xray', 'wireframe'] as const) {
+      renderer.setRenderMode(mode)
+      expect(edgeHex(), mode).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    }
+    // A rebuilt batch starts in Wireframe's color.
+    renderer.refresh()
+    expect(edgeHex()).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    renderer.setRenderMode('shaded')
+    expect(edgeHex()).toBe(edgeColorFor('shaded', 'dark'))
+  })
+
+  it('instance member highlights keep orange while the other members recolor on the dark theme', () => {
+    const scene = makeScene({
+      instances: {
+        '10': {
+          def: 100n,
+          pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0],
+          memberIds: [1n, 2n],
+          memberWatertight: { '1': true, '2': true },
+        },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setEdgeTheme('dark')
+    renderer.setRenderMode('wireframe')
+    renderer.setSelectedInstanceMembers(10n, [2n])
+    const group = renderer.instancesGroup.getObjectByName('Instance_10') as THREE.Group
+    const hex = (name: string) => ((group.getObjectByName(name) as THREE.LineSegments).material as THREE.LineBasicMaterial).color.getHex()
+    // Materialized in Wireframe: born light, the picked member orange.
+    expect(hex('InstanceEdge_10_1_0')).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    expect(hex('InstanceEdge_10_2_1')).toBe(EDGE_COLOR_SELECTED)
+    renderer.setRenderMode('shaded')
+    expect(hex('InstanceEdge_10_1_0')).toBe(edgeColorFor('shaded', 'dark'))
+    expect(hex('InstanceEdge_10_2_1')).toBe(EDGE_COLOR_SELECTED)
+    renderer.setRenderMode('xray')
+    expect(hex('InstanceEdge_10_1_0')).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+    renderer.setSelectedInstanceMembers(10n, [])
+    expect(hex('InstanceEdge_10_2_1')).toBe(EDGE_COLOR_SEE_THROUGH_DARK)
+  })
+
+  it('toggledRenderMode: choosing a mode turns the other off; choosing it again returns to Shaded', () => {
+    expect(toggledRenderMode('shaded', 'xray')).toBe('xray')
+    expect(toggledRenderMode('wireframe', 'xray')).toBe('xray')
+    expect(toggledRenderMode('xray', 'xray')).toBe('shaded')
+    expect(toggledRenderMode('xray', 'wireframe')).toBe('wireframe')
+    expect(toggledRenderMode('wireframe', 'wireframe')).toBe('shaded')
+  })
+
+  describe('films over faces (sketch-region fills and imprint overlays)', () => {
+    const square: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0]]
+    const edge = (i: number) => ({
+      key: `e${i}`,
+      a: square[i],
+      b: square[(i + 1) % 4],
+      store: { kind: 'topology', object: 1 },
+      curve: null,
+    })
+    const unitsJson = JSON.stringify({
+      units: [{ key: 'u', edges: [0, 1, 2, 3].map(edge), curves: [] }],
+      regions: [{ key: 'r', outer: square, holes: [], over: { object: 1, face: 0 }, extrude: null }],
+    })
+    function makeFilmScene(): WasmScene {
+      const scene = makeScene({ objects: { '1': true } }) as unknown as Record<string, unknown>
+      scene.sketch_ids = () => BigUint64Array.from([500n])
+      scene.sketch_lines = () => new Float32Array()
+      scene.sketch_regions = () => BigUint64Array.from([1n])
+      scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+      scene.object_drawing_planes = () => new Float32Array([0, 0, 0, 0, 0, 1])
+      scene.plane_units_json = () => unitsJson
+      return scene as unknown as WasmScene
+    }
+    const films = (renderer: SceneRenderer): THREE.Material[] => {
+      const out: THREE.Material[] = []
+      for (const c of renderer.sketchGroup.children) if (c instanceof THREE.Mesh) out.push(c.material as THREE.Material)
+      const imprints = renderer.objectsGroup.getObjectByName('Imprints_1')
+      for (const c of imprints?.children ?? []) {
+        if (c instanceof THREE.Mesh && !(c instanceof LineSegments2)) out.push(c.material as THREE.Material)
+      }
+      return out
+    }
+
+    it('Wireframe stops drawing them; X-ray and Shaded keep them; rebuilds honor the mode', () => {
+      const renderer = new SceneRenderer(new THREE.Scene(), makeFilmScene())
+      renderer.refresh()
+      renderer.refreshAllSketches()
+      // One sketch-region fill plus one imprint fill.
+      expect(films(renderer)).toHaveLength(2)
+      expect(films(renderer).map((m) => m.colorWrite)).toEqual([true, true])
+      renderer.setRenderMode('wireframe')
+      expect(films(renderer).map((m) => m.colorWrite)).toEqual([false, false])
+      renderer.setRenderMode('xray')
+      expect(films(renderer).map((m) => m.colorWrite)).toEqual([true, true])
+      renderer.setRenderMode('wireframe')
+      // A rebuild in Wireframe starts with the films off too.
+      renderer.refreshAllSketches()
+      renderer.refresh()
+      expect(films(renderer).map((m) => m.colorWrite)).toEqual([false, false])
+      // The imprint's ink lines are never hidden.
+      const ink = renderer.objectsGroup.getObjectByName('Imprints_1')?.children.find((c) => c instanceof LineSegments2) as LineSegments2
+      expect((ink.material as THREE.Material).colorWrite).toBe(true)
+      renderer.setRenderMode('shaded')
+      expect(films(renderer).map((m) => m.colorWrite)).toEqual([true, true])
+    })
+  })
+
+  it('a Line art print pass honors the mode on its white face materials and restores afterwards', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const mesh = (renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group).children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh
+    const orig = mesh.material
+    renderer.setRenderMode('xray')
+    renderer.beginPrintPass({ style: 'lineart', restrictTo: null, includeGuides: false })
+    const printed = mesh.material as THREE.MeshBasicMaterial
+    expect(printed).not.toBe(orig)
+    expect(printed.opacity).toBeCloseTo(0.4)
+    expect(printed.depthWrite).toBe(false)
+    renderer.endPrintPass()
+    expect(mesh.material).toBe(orig)
+    renderer.setRenderMode('wireframe')
+    renderer.beginPrintPass({ style: 'lineart', restrictTo: null, includeGuides: false })
+    expect((mesh.material as THREE.MeshBasicMaterial).colorWrite).toBe(false)
+    renderer.endPrintPass()
+  })
+
+  it('materials built after the mode is set pick it up (refresh)', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    renderer.setRenderMode('xray')
+    renderer.refresh()
+    const m = facesMaterial(renderer.objectsGroup, 'Object_1')
+    expect(m.opacity).toBeCloseTo(0.4)
+    expect(m.depthWrite).toBe(false)
   })
 })

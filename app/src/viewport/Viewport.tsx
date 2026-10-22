@@ -44,7 +44,7 @@ import { CueLayer } from './CueLayer'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
-import { SceneRenderer, type AnnotationDrawing, type RefreshTouched } from './SceneRenderer'
+import { SceneRenderer, type AnnotationDrawing, type RefreshTouched, type RenderMode } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
 import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
@@ -184,6 +184,8 @@ export function cursorFor(...args: Parameters<typeof toolIconCursor>): string {
 import { getResolvedTheme, subscribe as subscribeTheme, type ResolvedTheme } from '../settings/theme'
 import { buildShopGradientTextureFromToken } from './shopGradientBackground'
 import { readAppliedTheme } from '../theme/applyTheme'
+import { setPickRenderMode } from '../tools/pickPolicy'
+import { leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer } from './heldPointerReplay'
 import { getLengthSystem, getLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit } from '../settings/units'
 import { InfiniteGrid } from './InfiniteGrid'
 
@@ -1140,6 +1142,10 @@ export interface ViewportApi {
    * own theme-driven look.
    */
   setViewStyle: (style: ViewStyleColors | null) => void
+  /** Whole-model Shaded / X-ray / Wireframe (View menu): drawing and
+   * picking both follow it. Per window, never saved. */
+  setRenderMode: (mode: RenderMode) => void
+  getRenderMode: () => RenderMode
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible: (visible: boolean) => void
   /** Delete every construction guide (Edit ▸ Delete Guide Lines). */
@@ -2850,6 +2856,7 @@ export default function Viewport({
         cameraFar: camera.far,
         worldPerPixelAt: (p) =>
           rig.worldPerPixel(camera.position.distanceTo(new THREE.Vector3(p[0], p[1], p[2])), el.clientHeight),
+        facesOcclude: sceneRenderer.getRenderMode() === 'shaded',
       }
     }
 
@@ -3263,7 +3270,7 @@ export default function Viewport({
         : null
       const { snap, fromKernel } = snapService.resolve(
         ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints,
-        undefined, constraint?.facesOnly,
+        undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints,
       )
       loupePressSnap = snap
       loupePressRay = ray
@@ -6263,6 +6270,31 @@ export default function Viewport({
       scheduleRender()
     }
 
+    function setRenderMode(mode: RenderMode): void {
+      sceneRenderer.setRenderMode(mode)
+      // Picking follows the mode (SketchUp's rule): X-ray sees through faces
+      // but still lands on them, Wireframe has no faces to land on. One
+      // kernel switch covers every snap and face pick; a snap held from the
+      // old mode (a face Wireframe no longer has) is let go.
+      wasmScene.set_render_mode(mode)
+      setPickRenderMode(mode)
+      snapService.clearHold()
+      // A pick a tool memoized for the held pointer's ray was made under the
+      // old mode: re-resolve on a fresh Ray object so no per-event cache
+      // keyed by it (Push/Pull's region pick, Tape Measure's face pick) can
+      // answer, then refresh the cue at that pointer.
+      const held = lastRayRef.current
+      if (held !== null) {
+        lastRayRef.current = {
+          ...held,
+          ray: { origin: [...held.ray.origin], direction: [...held.ray.direction] },
+        }
+      }
+      reResolveAtHeldPointer()
+      reevaluateHoverNow()
+      scheduleRender()
+    }
+
     function setGuidesVisible(visible: boolean): void {
       sceneRenderer.setGuidesVisible(visible)
       // Hidden guides must not snap or flash a cue — gate inference too.
@@ -6541,7 +6573,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
@@ -7612,6 +7644,17 @@ export default function Viewport({
     // The last pointer position seen over the canvas, in client pixels —
     // the origin a mid-drag switch re-seeds its gesture at.
     const lastPointerClient = { x: 0, y: 0 }
+    // Whether the pointer is within the canvas's bounds: set by its moves and
+    // enter, cleared when it leaves them (an overlay coming up over a resting
+    // pointer also fires a leave, at the same point, and does not clear it).
+    // `lastPointerClient` and the held ray outlive the pointer's leaving, so
+    // the held-pointer replay asks this.
+    let pointerInsideCanvas = false
+    // Where the pointer last rested for that replay: its last move over the
+    // canvas, or the point it left the canvas at (a dock or panel inside the
+    // canvas's bounds then shows there instead of the canvas). Kept apart
+    // from `lastPointerClient`, the mid-drag switch's origin.
+    const pointerRestClient = { x: 0, y: 0 }
     function configureControls(c: OrbitControls): void {
       // RIGHT is null, not PAN: the right button is Fly's (docs/design/
       // fly-navigation.md §3.1, §5 — "configureControls sets RIGHT: null so
@@ -7782,14 +7825,18 @@ export default function Viewport({
 
     /**
      * The depth along `ray` of what the cursor is over — a solid face
-     * first (`pick_face`, BVH-backed and cheap), else a sketch region, else
+     * first, else a sketch region (`pick_face_geometry` /
+     * `pick_sketch_region_geometry`, both blind to the render mode), else
      * the ground plane when its hit is not absurdly far compared to the
      * current target distance (`groundHitIsUsable`). `null` means "leave
      * the pivot where it is": a grazing ray meeting z = 0 hundreds of
      * metres away is exactly the off-screen pole the fix removes.
      */
     function pickDepthAlongRay(ray: Ray): number | null {
-      const face = wasmScene.pick_face(
+      // Geometry, not input: the pivot is a camera question, so it lands on
+      // the model in Wireframe too, where faces are no editing targets
+      // (`pick_face_geometry` ignores the render mode's face policy).
+      const face = wasmScene.pick_face_geometry(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],
       )
@@ -7800,7 +7847,7 @@ export default function Viewport({
           face.free()
         }
       }
-      const region = wasmScene.pick_sketch_region(
+      const region = wasmScene.pick_sketch_region_geometry(
         ray.origin[0], ray.origin[1], ray.origin[2],
         ray.direction[0], ray.direction[1], ray.direction[2],
       )
@@ -8378,14 +8425,37 @@ export default function Viewport({
     function applyPrecision(on: boolean): void {
       if (!snapService.setPrecision(on)) return
       onPrecisionChangeRef.current?.(on)
+      reResolveAtHeldPointer()
+    }
+    /** Re-run the snap at the pointer's last ray without a pointer event —
+     *  after something that changes what the snap would be (precision held
+     *  or released, a render-mode switch) — so the tool's preview and the
+     *  cue follow at once rather than on the next move. */
+    function reResolveAtHeldPointer(): void {
       const cached = lastRayRef.current
-      const snapPathLive = !cameraModeRef.current && marqueeDrag === null && deferredTapDrag === null && dragMove === null
-      if (cached !== null && snapPathLive) {
+      // Replay only with the pointer still over the canvas (it may have left
+      // for the menu bar or a panel, leaving the held ray behind) and nothing
+      // come up over the point it rests on (the palette, a dialog) — asked
+      // of the layout at the stored client position, since `:hover` is only
+      // refreshed by the next pointer event (`shouldReplayHeldPointer`).
+      const replay = shouldReplayHeldPointer({
+        hasHeldRay: cached !== null,
+        snapPathLive: !cameraModeRef.current && marqueeDrag === null && deferredTapDrag === null && dragMove === null,
+        pointerInside: pointerInsideCanvas,
+        elementAtPoint: pointerInsideCanvas ? document.elementFromPoint(pointerRestClient.x, pointerRestClient.y) : null,
+        container: renderer.domElement,
+      })
+      if (cached !== null && replay) {
         const activeTool = toolController.activeTool
-        const constraint = 'snapConstraint' in activeTool
+        // A screen-space drag tool (Look Around/Walk) resolves no snap, as
+        // on the pointer-move path.
+        const isRawDragTool = replaysWithoutSnap(activeTool)
+        const constraint = !isRawDragTool && 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
           : null
-        const { snap: rawSnap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+        const { snap: rawSnap } = isRawDragTool
+          ? { snap: null }
+          : snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
         // Same Select-only axis exclusion as the pointer-move path — see
         // `excludeAxisSnapForSelect`'s doc.
         const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
@@ -8511,7 +8581,11 @@ export default function Viewport({
         // resolution cache below (updateFatLineResolutions's doc comment)).
         // `readAppliedTheme()` is just a DOM attribute read, so it pays
         // neither cost.
-        sceneRenderer.updateAnnotationBillboards(camera, el.clientWidth, el.clientHeight, readAppliedTheme())
+        const appliedTheme = readAppliedTheme()
+        sceneRenderer.updateAnnotationBillboards(camera, el.clientWidth, el.clientHeight, appliedTheme)
+        // X-ray and Wireframe edges follow the same applied theme (light
+        // edges on the dark canvas); a no-op unless the theme changed.
+        sceneRenderer.setEdgeTheme(appliedTheme)
         // Rotate/Protractor/Slice/SectionPlane's single-position preview
         // disks are virtual constructs too — keep them screen-constant the
         // same way (see RotateTool/ProtractorTool/SliceTool/
@@ -8788,6 +8862,9 @@ export default function Viewport({
       recordPointerInput('pointermove', ev)
       lastPointerClient.x = ev.clientX
       lastPointerClient.y = ev.clientY
+      pointerInsideCanvas = true
+      pointerRestClient.x = ev.clientX
+      pointerRestClient.y = ev.clientY
 
       // Shift-fov drag owns the pointer for its whole gesture — armed at
       // pointerdown by onFovDragPointerDownCapture (camera-playtest2.md §3).
@@ -8935,7 +9012,7 @@ export default function Viewport({
         : null
       const resolved = isRawDragTool
         ? { snap: null, fromKernel: false }
-        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+        : snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       const rawSnap = resolved.snap
       // Select-only axis-kind exclusion under `readOnly` (shop-mode round-3
       // playtest finding 2) — see `excludeAxisSnapForSelect`'s doc. A no-op
@@ -9444,7 +9521,7 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+      const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       activeTool.onPointerDown(snap, ray)
       // Shop-mode playtest finding 3: touch has no hover, so `onPointerMove`
       // (the only other `publishSnapCues` caller) never runs before a plain
@@ -9550,7 +9627,7 @@ export default function Viewport({
         const constraint = 'snapConstraint' in activeTool
           ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
           : null
-        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+        const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
         const handled = (activeTool as { onDoubleClick(snap: Snap | null, ray: Ray): boolean }).onDoubleClick(snap, ray)
         if (handled) {
           scheduleRender()
@@ -9767,7 +9844,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in activeTool
               ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(cached.ray)
               : null
-            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+            const { snap } = snapService.resolve(cached.ray, cached.viewportH, cached.basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
             activeTool.onPointerMove(snap, cached.ray)
             // Only Tape Measure's VCB reaches this under `readOnly` (Select
             // has none) — `suppressAxisLine` keeps its on-axis snap fully
@@ -9952,7 +10029,7 @@ export default function Viewport({
           const constraint = 'snapConstraint' in activeTool
             ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
             : null
-          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
@@ -9997,7 +10074,7 @@ export default function Viewport({
             const constraint = 'snapConstraint' in tool
               ? (tool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
               : null
-            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly)
+            const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, undefined, constraint?.seeThroughPoints)
             tool.onPointerDown(snap, ray)
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
@@ -10099,6 +10176,19 @@ export default function Viewport({
     const onDoubleClickTracked = (ev: MouseEvent) => { onDoubleClick(ev); reportToolHint() }
     const onKeyDownTracked = (ev: KeyboardEvent) => { onKeyDown(ev); reportToolHint() }
     renderer.domElement.addEventListener('pointermove', onPointerMoveTracked)
+    // Pointer presence for the held-pointer replay (`pointerInsideCanvas`).
+    const onCanvasPointerEnter = (ev: PointerEvent) => {
+      pointerInsideCanvas = true
+      pointerRestClient.x = ev.clientX
+      pointerRestClient.y = ev.clientY
+    }
+    const onCanvasPointerLeave = (ev: PointerEvent) => {
+      pointerRestClient.x = ev.clientX
+      pointerRestClient.y = ev.clientY
+      if (leftCanvasBounds(ev.clientX, ev.clientY, renderer.domElement.getBoundingClientRect())) pointerInsideCanvas = false
+    }
+    renderer.domElement.addEventListener('pointerenter', onCanvasPointerEnter)
+    renderer.domElement.addEventListener('pointerleave', onCanvasPointerLeave)
     renderer.domElement.addEventListener('pointerdown', onPointerDownTracked)
     renderer.domElement.addEventListener('pointerup', onPointerUpTracked)
     renderer.domElement.addEventListener('pointercancel', onPointerCancel)
@@ -10281,7 +10371,7 @@ export default function Viewport({
       const constraint = 'snapConstraint' in activeTool
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
-      const { snap: rawSnap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select')
+      const { snap: rawSnap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
       const snap = toolController.activeToolName === 'Select' ? excludeAxisSnapForSelect(rawSnap) : rawSnap
       activeTool.onPointerMove(snap, ray)
       const cueSnap = toolSnapForCues(snap, activeTool)
@@ -10795,6 +10885,8 @@ export default function Viewport({
       softwareNotice?.remove()
       renderer.domElement.removeEventListener('contextmenu', onContextMenu)
       renderer.domElement.removeEventListener('pointermove', onPointerMoveTracked)
+      renderer.domElement.removeEventListener('pointerenter', onCanvasPointerEnter)
+      renderer.domElement.removeEventListener('pointerleave', onCanvasPointerLeave)
       renderer.domElement.removeEventListener('pointerdown', onPointerDownTracked)
       renderer.domElement.removeEventListener('pointerup', onPointerUpTracked)
       renderer.domElement.removeEventListener('pointercancel', onPointerCancel)

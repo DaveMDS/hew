@@ -18,6 +18,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import type { DrawingAxes } from './drawingAxes'
 import { getDrawingAxes, isWorldIdentity, WORLD_DRAWING_AXES } from './drawingAxes'
 import { nextIdlePlaneLock } from './moveInput'
+import { pickPolicyGeneration } from './pickPolicy'
 import type { SketchTarget } from './sketchGesture'
 import type { EditContext, Snap } from './types'
 
@@ -291,12 +292,12 @@ export function drawPlaneCue(params: {
  * profile).
  */
 export class SketchPickCache {
-  private cache: { ray: Ray; handle: bigint | null } | null = null
-  private targetCache: { ray: Ray; key: string; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
+  private cache: { ray: Ray; gen: number; handle: bigint | null } | null = null
+  private targetCache: { ray: Ray; gen: number; key: string; resolved: { plane: DrawPlane; target: SketchTarget } } | null =
     null
 
   pickFor(wasmScene: WasmScene, ray: Ray): bigint | null {
-    if (this.cache !== null && this.cache.ray === ray) {
+    if (this.cache !== null && this.cache.ray === ray && this.cache.gen === pickPolicyGeneration()) {
       return this.cache.handle
     }
     const pick = wasmScene.pick_sketch(
@@ -304,7 +305,7 @@ export class SketchPickCache {
       ray.direction[0], ray.direction[1], ray.direction[2],
     )
     const handle = pick === undefined ? null : pick
-    this.cache = { ray, handle }
+    this.cache = { ray, gen: pickPolicyGeneration(), handle }
     return handle
   }
 
@@ -316,11 +317,11 @@ export class SketchPickCache {
     compute: () => { plane: DrawPlane; target: SketchTarget },
     key = '',
   ): { plane: DrawPlane; target: SketchTarget } {
-    if (this.targetCache !== null && this.targetCache.ray === ray && this.targetCache.key === key) {
+    if (this.targetCache !== null && this.targetCache.ray === ray && this.targetCache.gen === pickPolicyGeneration() && this.targetCache.key === key) {
       return this.targetCache.resolved
     }
     const resolved = compute()
-    this.targetCache = { ray, key, resolved }
+    this.targetCache = { ray, gen: pickPolicyGeneration(), key, resolved }
     return resolved
   }
 

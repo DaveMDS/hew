@@ -187,6 +187,16 @@ describe.each(DRIVERS)('$name — idle plane lock', ({ make, commit }) => {
     expect(tool.statusHint()).not.toContain('Locked')
   })
 
+  it('a held arrow (keydown autorepeat) keeps the lock instead of toggling it off', () => {
+    const { scene } = makeWasmScene()
+    const tool = make(scene)
+
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onKey({ key: 'ArrowUp', repeat: true, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent)
+    tool.onKey({ key: 'ArrowUp', repeat: true, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent)
+    expect(tool.statusHint()).toContain('Locked to the blue plane')
+  })
+
   it('a different arrow switches the lock axis (not toggle-off)', () => {
     const { scene } = makeWasmScene()
     const tool = make(scene)

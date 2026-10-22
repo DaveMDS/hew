@@ -87,7 +87,7 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { circlePolygonGround, circlePolygonFace, facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { circlePolygonGround, circlePolygonFace, facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { displayedLength, isFreePick } from './displayedValue'
@@ -97,9 +97,10 @@ import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retyp
 import { segmentLength } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
-import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
+import { pickRenderMode } from './pickPolicy'
 import { PlanePin } from './planePin'
 
 /** SketchUp parity default (design §1). */
@@ -147,20 +148,23 @@ type PlaneStage =
       target: SketchTarget
       center: V3
       natural: { plane: DrawPlane; target: SketchTarget }
+      /** Set when an arrow lock moved a FACE-anchored gesture onto this
+       *  plane (GitHub #51): releasing the lock goes back to that face
+       *  instead of to `natural`. */
+      fromFace?: AnchoredFaceStage
     }
 
 /** Face stage: idle, or anchored on a specific face plane */
-type FaceStage =
-  | { kind: 'idle' }
-  | {
-      kind: 'anchored'
-      object: bigint
-      face: bigint
-      normal: V3
-      /** A world-space point that lies on the face plane (the first click position) */
-      planePoint: V3
-      center: V3
-    }
+type AnchoredFaceStage = {
+  kind: 'anchored'
+  object: bigint
+  face: bigint
+  normal: V3
+  /** A world-space point that lies on the face plane (the first click position) */
+  planePoint: V3
+  center: V3
+}
+type FaceStage = { kind: 'idle' } | AnchoredFaceStage
 
 /**
  * The just-committed polygon, kept in a `RetypeWindow` (retypeWindow.ts) so
@@ -399,18 +403,30 @@ export class PolygonTool implements Tool {
       this._snapProjected = snap.z !== 0
       return [snap.x, snap.y, 0]
     }
-    this._snapProjected = false
-    if (snap !== null) return [snap.x, snap.y, snap.z]
-    return pointOnPlane(ray, plane)
+    // A non-ground plane is frozen like a face: an off-plane snap (X-ray)
+    // drops onto it, disclosed (`cursorOnFrozenPlane`).
+    const at = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)
+    this._snapProjected = at?.projected ?? false
+    return at?.point ?? null
   }
 
-  /** See `Tool.snapProjected`. Set by `_planeCursor`, which is where the
-   *  drawing plane's z actually replaces the snap's. */
+  /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
+   *  where the drawing plane replaces an off-plane snap (the ground drops its
+   *  height; a face or sketch plane drops it straight onto itself). */
   snapProjected(): boolean {
-    return this._snapProjected
+    // Only a gesture under way projects anything: once the stage is back to
+    // idle (a commit, Esc, a context change) the last verdict must not ride
+    // along on ordinary hover cues.
+    // An idle hover reports what its click would do (`_idleProjected`).
+    const active = this.faceStage.kind !== 'idle' || this.planeStage.kind !== 'idle'
+    return active ? this._snapProjected : this._idleProjected
   }
 
-  /** Whether the last `_planeCursor` discarded a non-zero snap z. */
+  /** Whether the idle hover's first click would drop its snap onto the
+   *  hovered face (`firstPointOnFace`); set by `_trackIdleHover`. */
+  private _idleProjected = false
+
+  /** Whether the last `_planeCursor` / `_faceCursor` moved the snap onto its plane. */
   private _snapProjected = false
 
   /**
@@ -449,7 +465,7 @@ export class PolygonTool implements Tool {
    *   that, a top-level hover over a non-ground sketch returns ITS plane.
    * - Otherwise (ground mode): return null (unconstrained).
    */
-  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
+  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }; seeThroughPoints?: boolean } | null {
     if (this.faceStage.kind === 'anchored') {
       // Already anchored: lock to the established face plane
       return {
@@ -457,6 +473,9 @@ export class PolygonTool implements Tool {
           point: this.faceStage.planePoint,
           normal: this.faceStage.normal,
         },
+        // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
+        // X-ray and Wireframe may offer hidden points through it.
+        seeThroughPoints: true,
       }
     }
 
@@ -467,6 +486,9 @@ export class PolygonTool implements Tool {
           point: this.planeStage.plane.origin,
           normal: this.planeStage.plane.normal,
         },
+        // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
+        // X-ray and Wireframe may offer hidden points through it.
+        seeThroughPoints: true,
       }
     }
 
@@ -484,7 +506,10 @@ export class PolygonTool implements Tool {
 
     const plane = this._idleHoverPlane(ray)
     if (!plane.ground) {
-      return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+      // Hidden points through the hovered face only in X-ray, where the
+      // first click can adopt or be dropped onto that face; Wireframe has no
+      // faces to adopt.
+      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray' }
     }
     return null
   }
@@ -596,7 +621,13 @@ export class PolygonTool implements Tool {
    *  and Shift pin previews both draw through it) and, for the pin, the
    *  plane the next click would land on (`_idleHoverPlane`). */
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
+    this._snapProjected = false
+    this._idleProjected = false
     if (snap === null) return
+    if (this._currentMode(ray, snap) === 'face') {
+      const face = this._facePickAt(snap, ray)
+      if (face !== null) this._idleProjected = firstPointOnFace(this.wasmScene, face, this._activeInstance, snap, ray).projected
+    }
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
@@ -753,6 +784,9 @@ export class PolygonTool implements Tool {
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        // Keydown autorepeat would flip the lock on every repeat (a held
+        // arrow alternating plane and face); only the first press counts.
+        if (ev.repeat) return
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
@@ -764,24 +798,50 @@ export class PolygonTool implements Tool {
     // Mid-gesture plane re-lock (design §2a): once the center is placed, an
     // arrow key still re-locks the plane — through that ALREADY-PLACED
     // anchor, not the cursor — since nothing has reached the kernel yet (the
-    // polygon commits only on the second click). Scoped to plane mode: a
-    // face-anchored gesture is locked to a REAL face's plane, which an
-    // arbitrary axis lock cannot honestly override without leaving that face
-    // (out of scope here — see the module's face-mode doc).
-    if (
-      this.planeStage.kind === 'anchored' &&
-      (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown')
-    ) {
-      const { center, natural } = this.planeStage
-      const next = nextGestureLockPlane(
-        this.idlePlaneLock, ev.key, center, natural, getDrawingAxes(this.wasmScene), this._editContext,
-      )
-      this.idlePlaneLock = next.lock
-      this.planeStage = { kind: 'anchored', plane: next.plane, target: next.target, center, natural }
-      this._lastPlaneCursor = null
-      this._clearPreview()
-      this.onMeasurementCb('')
-      return
+    // polygon commits only on the second click).
+    //
+    // A FACE-anchored center takes the lock too (GitHub #51 — see
+    // RectangleTool's identical block): the gesture leaves the face for the
+    // locked plane through the center, and releasing the lock puts it back
+    // on that face. Inside an entered object the face holds.
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      // Keydown autorepeat would flip the lock on every repeat (a held
+      // arrow alternating plane and face); only the first press counts.
+      if (ev.repeat) return
+      if (this.faceStage.kind === 'anchored') {
+        if (this._activeContext !== null) return
+        const fromFace = this.faceStage
+        const { center } = fromFace
+        const natural = groundNaturalTarget(this._editContext, center)
+        const next = nextGestureLockPlane(null, ev.key, center, natural, getDrawingAxes(this.wasmScene), this._editContext)
+        if (next.lock === null) return // Down with no lock: nothing to release
+        this.idlePlaneLock = next.lock
+        this.faceStage = { kind: 'idle' }
+        this.planeStage = { kind: 'anchored', plane: next.plane, target: next.target, center, natural, fromFace }
+        this._lastFaceCursor = null
+        this._lastPlaneCursor = null
+        this._clearPreview()
+        this.onMeasurementCb('')
+        return
+      }
+      if (this.planeStage.kind === 'anchored') {
+        const { center, natural, fromFace } = this.planeStage
+        const next = nextGestureLockPlane(
+          this.idlePlaneLock, ev.key, center, natural, getDrawingAxes(this.wasmScene), this._editContext,
+        )
+        this.idlePlaneLock = next.lock
+        if (next.lock === null && fromFace !== undefined) {
+          this.planeStage = { kind: 'idle' }
+          this.faceStage = fromFace
+        } else {
+          this.planeStage = { kind: 'anchored', plane: next.plane, target: next.target, center, natural, fromFace }
+        }
+        this._lastPlaneCursor = null
+        this._lastFaceCursor = null
+        this._clearPreview()
+        this.onMeasurementCb('')
+        return
+      }
     }
 
     if (ev.key === 'Enter') {
@@ -1132,7 +1192,11 @@ export class PolygonTool implements Tool {
       if (eligible === null) return
 
       const { normal } = eligible
-      const center: V3 = [snap.x, snap.y, snap.z]
+      // On the face's plane: a hidden point that is no part of the face
+      // (X-ray) drops onto it, disclosed, like the later clicks.
+      const first = firstPointOnFace(this.wasmScene, eligible, this._activeInstance, snap, ray)
+      const center: V3 = first.point
+      this._snapProjected = first.projected
 
       this.faceStage = {
         kind: 'anchored',
@@ -1195,11 +1259,9 @@ export class PolygonTool implements Tool {
   private _faceCursor(snap: Snap | null, ray: Ray): V3 | null {
     if (this.faceStage.kind !== 'anchored') return null
     const { planePoint, normal } = this.faceStage
-    if (snap !== null) {
-      const p: V3 = [snap.x, snap.y, snap.z]
-      if (Math.abs(distanceOffPlane(p, planePoint, normal)) <= FACE_PLANE_EPS_M) return p
-    }
-    return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+    const at = cursorOnFrozenPlane(snap, ray, planePoint, normal)
+    this._snapProjected = at?.projected ?? false
+    return at?.point ?? null
   }
 
   /** Split the given face with an N-gon loop defined by center/rim/normal. */

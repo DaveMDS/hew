@@ -83,6 +83,11 @@ import { shownAnnotationIds } from './shownAnnotations'
 const FACE_COLOR_DEFAULT = 0xcccccc
 /** Edge color — dark for readability. */
 const EDGE_COLOR = 0x1a1a1a
+/** Edge color in X-ray and Wireframe on the dark theme. With no opaque face
+ *  behind them most edges sit on the dark canvas itself, where `EDGE_COLOR`
+ *  all but vanishes; a light gray a step below the annotation ink
+ *  (`ANNOTATION_COLOR.dark`) reads there and keeps dimensions distinct. */
+export const EDGE_COLOR_SEE_THROUGH_DARK = 0xc4c9d0
 /** Orange highlight for selected object edges (kept for selection; face fill
  *  uses material color). Exported so other tools that want the SAME
  *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
@@ -128,6 +133,26 @@ export interface SectionWidgetCoverage {
  * `SectionPlaneTool`'s placement-preview color (kept as a literal in both
  * places rather than a cross-module import between viewport/ and tools/). */
 const SECTION_WIDGET_COLOR = 0x00bcd4
+/** Face opacity in X-ray mode (multiplies the material's own opacity). */
+export const XRAY_FACE_OPACITY = 0.4
+
+/** Whole-model render mode (View ▸ X-ray / Wireframe). One value, so the
+ *  two see-through modes are mutually exclusive. */
+export type RenderMode = 'shaded' | 'xray' | 'wireframe'
+
+/** The mode after choosing `chosen` from the View menu or palette while in
+ *  `current`: the chosen mode, or Shaded when it was already on. */
+export function toggledRenderMode(current: RenderMode, chosen: Exclude<RenderMode, 'shaded'>): RenderMode {
+  return current === chosen ? 'shaded' : chosen
+}
+
+/** The plain (unselected) edge color for a render mode and theme: light on
+ *  the dark theme whenever faces no longer hide the canvas behind the edges
+ *  (X-ray and Wireframe), the usual dark gray otherwise. */
+export function edgeColorFor(mode: RenderMode, theme: 'light' | 'dark'): number {
+  return mode !== 'shaded' && theme === 'dark' ? EDGE_COLOR_SEE_THROUGH_DARK : EDGE_COLOR
+}
+
 /** Fill opacity while the section is active (clipping) vs inactive (widget
  * shown, no clip — DESIGN §1/§4's active=solid vs inactive=dashed/dimmed).
  * Edges-first (D2, section-plane-polish): the fill is barely-there tinting,
@@ -1576,7 +1601,7 @@ export class SceneRenderer {
    * from colliding with the stock line program in the shader cache.
    */
   private _makeInstancedEdgeMaterial(): THREE.LineBasicMaterial {
-    const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
+    const mat = new THREE.LineBasicMaterial({ color: this._edgeColor() })
     mat.onBeforeCompile = (shader) => {
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -1788,7 +1813,7 @@ export class SceneRenderer {
 
       const edgeGeo = new THREE.BufferGeometry()
       edgeGeo.setAttribute('position', new THREE.BufferAttribute(cached.edgePositions, 3))
-      const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
+      const edgeMat = new THREE.LineBasicMaterial({ color: this._edgeColor() })
       const edgesLines = new THREE.LineSegments(edgeGeo, edgeMat)
       edgesLines.name = `InstanceEdge_${instanceId}_${memberId}_${pi}`
       edgesLines.matrixAutoUpdate = false
@@ -2037,6 +2062,7 @@ export class SceneRenderer {
           polygonOffsetUnits: DEPTH_BIAS.FACE,
         })
         m.userData.baseOpacity = baseOpacity
+        this._applyFaceMat(m, 1)
         // Which palette entry this material renders — the hook that lets
         // `syncPaletteOpacity` re-read live palette state (alpha) in place
         // instead of re-tessellating anything.
@@ -2147,7 +2173,7 @@ export class SceneRenderer {
       // Edge lines
       const edgeGeo = new THREE.BufferGeometry()
       edgeGeo.setAttribute('position', new THREE.BufferAttribute(edgePositions, 3))
-      const edgeMat = new THREE.LineBasicMaterial({ color: EDGE_COLOR })
+      const edgeMat = new THREE.LineBasicMaterial({ color: this._edgeColor() })
       const edgesLines = new THREE.LineSegments(edgeGeo, edgeMat)
 
       const group = new THREE.Group()
@@ -2315,6 +2341,7 @@ export class SceneRenderer {
       polygonOffset: true,
       polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
+      colorWrite: this._filmsDrawn(),
     })
     return new THREE.Mesh(geo, mat)
   }
@@ -2687,6 +2714,7 @@ export class SceneRenderer {
       polygonOffset: true,
       polygonOffsetFactor: DEPTH_BIAS.REGION_FILL,
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
+      colorWrite: this._filmsDrawn(),
     })
     return new THREE.Mesh(geo, mat)
   }
@@ -4000,6 +4028,9 @@ export class SceneRenderer {
             polygonOffsetUnits: DEPTH_BIAS.FACE,
             clippingPlanes: clip !== null && clip.length > 0 ? clip : null,
           })
+          // Honor the live render mode on paper (what you see is what prints).
+          m.userData.baseOpacity = 1
+          this._applyFaceMat(m, 1)
           cache.set(key, m)
         }
         return m
@@ -5088,13 +5119,107 @@ export class SceneRenderer {
     }
   }
 
-  private _setBatchOpacity(batch: MemberBatch, opacity: number): void {
-    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
-      m.opacity = eff
-      m.transparent = eff < 1
-      m.depthWrite = eff >= 1
+  /**
+   * Whole-model render mode (View > X-ray / Wireframe), per window and never
+   * saved. Read by `_applyFaceMat`, the one place a solid face material's
+   * opacity / transparent / depthWrite / colorWrite are decided, so isolation
+   * dimming, shop-mode fades and per-material alpha all compose with it.
+   */
+  private renderMode: RenderMode = 'shaded'
+  /** The theme the plain edge color was last chosen for (`setEdgeTheme`). */
+  private edgeTheme: 'light' | 'dark' = getResolvedTheme()
+
+  getRenderMode(): RenderMode {
+    return this.renderMode
+  }
+
+  /** Switch the whole-model render mode. Re-applies every face material in
+   *  place (no geometry rebuild) and recolors plain edges for the mode. */
+  setRenderMode(mode: RenderMode): void {
+    if (mode === this.renderMode) return
+    const before = this._edgeColor()
+    this.renderMode = mode
+    this._applyIsolation()
+    this._applyFilmMode()
+    if (this._edgeColor() !== before) this._recolorPlainEdges()
+  }
+
+  /** Follow the applied theme for the plain edge color (see `edgeColorFor`).
+   *  Cheap when nothing changed, so the viewport calls it every frame with
+   *  the theme it applies to annotations. */
+  setEdgeTheme(theme: 'light' | 'dark'): void {
+    if (theme === this.edgeTheme) return
+    const before = this._edgeColor()
+    this.edgeTheme = theme
+    if (this._edgeColor() !== before) this._recolorPlainEdges()
+  }
+
+  /** The plain (unselected) edge color right now. */
+  private _edgeColor(): number {
+    return edgeColorFor(this.renderMode, this.edgeTheme)
+  }
+
+  /** Re-apply edge colors everywhere after the plain color changed;
+   *  selection orange stays where it is. */
+  private _recolorPlainEdges(): void {
+    const plain = this._edgeColor()
+    for (const batch of this.batches.values()) {
+      ;(batch.edges.material as THREE.LineBasicMaterial).color.setHex(plain)
     }
+    const selectedObjects = new Set(this.selectedObjectIds)
+    for (const id of this.objectGroups.keys()) this._applyObjectColors(id, selectedObjects.has(id))
+    for (const id of this.instanceGroups.keys()) {
+      if (id === this.selectedMemberInstance) this._applyInstanceMemberColors(id)
+      else this._applyInstanceColors(id, this.selectedInstanceIds.includes(id))
+    }
+  }
+
+  /** Sketch-region fills and imprint overlays are translucent films over
+   *  their host faces. Wireframe removes the faces, so the films go too
+   *  (they would float with nothing under them); X-ray keeps the faces, so it
+   *  keeps the films. */
+  private _filmsDrawn(): boolean {
+    return this.renderMode !== 'wireframe'
+  }
+
+  private _applyFilmMode(): void {
+    const on = this._filmsDrawn()
+    const set = (mesh: THREE.Mesh): void => {
+      ;(mesh.material as THREE.Material).colorWrite = on
+    }
+    for (const mesh of this.sketchRegionMeshes.values()) set(mesh)
+    for (const g of this.defSketchGroups.values()) for (const mesh of g.regionMeshes.values()) set(mesh)
+    for (const g of this.objectGroups.values()) {
+      if (g.imprints === null) continue
+      // LineSegments2 is a Mesh too: the imprint's ink lines stay drawn.
+      for (const child of g.imprints.children) if (child instanceof THREE.Mesh && !(child instanceof LineSegments2)) set(child)
+    }
+  }
+
+  /**
+   * Apply opacity for one solid face material. `factor` is the dim / fade
+   * multiplier from isolation or shop mode. X-ray multiplies `XRAY_FACE_OPACITY`
+   * in and turns depth write off (so edges and hidden geometry read through);
+   * wireframe writes neither color nor depth, so faces vanish and do not hide
+   * edges. Picking follows the mode in the kernel (`Scene.set_render_mode`).
+   */
+  private _applyFaceMat(m: THREE.Material, factor: number): void {
+    const base = (m.userData.baseOpacity as number | undefined) ?? 1
+    const eff = factor * base * (this.renderMode === 'xray' ? XRAY_FACE_OPACITY : 1)
+    m.opacity = eff
+    // three compiles an OPAQUE variant (alpha forced to 1) of a material
+    // that is not `transparent`, so flipping the flag needs a recompile.
+    const transparent = eff < 1
+    if (m.transparent !== transparent) {
+      m.transparent = transparent
+      m.needsUpdate = true
+    }
+    m.depthWrite = eff >= 1 && this.renderMode === 'shaded'
+    m.colorWrite = this.renderMode !== 'wireframe'
+  }
+
+  private _setBatchOpacity(batch: MemberBatch, opacity: number): void {
+    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => this._applyFaceMat(m, opacity)
     const mat = batch.mesh.material
     if (Array.isArray(mat)) {
       for (const m of mat) {
@@ -5113,12 +5238,7 @@ export class SceneRenderer {
       // Isolation fades the members that are only context.
       const factor = this._isolationMemberFactor(g.instanceId, g.memberIds[i])
       const op = opacity * factor
-      const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-        const eff = op * ((m.userData.baseOpacity as number | undefined) ?? 1)
-        m.opacity = eff
-        m.transparent = eff < 1
-        m.depthWrite = eff >= 1
-      }
+      const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => this._applyFaceMat(m, op)
       const mat = mesh.material
       if (Array.isArray(mat)) {
         for (const m of mat) {
@@ -5136,12 +5256,7 @@ export class SceneRenderer {
   private _setObjectOpacity(g: ObjectMeshGroup, baseOpacity: number): void {
     const opacity = baseOpacity * (this.isolationFade?.objects.has(g.objectId) ? ISOLATION_FADE_OPACITY : 1)
     const mat = g.facesMesh.material
-    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => {
-      const eff = opacity * ((m.userData.baseOpacity as number | undefined) ?? 1)
-      m.opacity = eff
-      m.transparent = eff < 1
-      m.depthWrite = eff >= 1
-    }
+    const setFaceMatOpacity = (m: THREE.MeshPhongMaterial) => this._applyFaceMat(m, opacity)
     if (Array.isArray(mat)) {
       for (const m of mat) {
         setFaceMatOpacity(m as THREE.MeshPhongMaterial)
@@ -5195,7 +5310,7 @@ export class SceneRenderer {
     if (g === undefined) return
 
     // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : EDGE_COLOR
+    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.color.setHex(edgeColor)
   }
@@ -5204,7 +5319,7 @@ export class SceneRenderer {
     const g = this.instanceGroups.get(instanceId)
     if (g === undefined) return
     // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : EDGE_COLOR
+    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
     }
@@ -5220,7 +5335,7 @@ export class SceneRenderer {
     for (let i = 0; i < g.edgesLines.length; i++) {
       const highlighted = wholeInstanceSelected || selected.has(g.memberIds[i])
       ;(g.edgesLines[i].material as THREE.LineBasicMaterial).color.setHex(
-        highlighted ? EDGE_COLOR_SELECTED : EDGE_COLOR,
+        highlighted ? EDGE_COLOR_SELECTED : this._edgeColor(),
       )
     }
   }

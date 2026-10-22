@@ -13,6 +13,10 @@
  *      - On a world axis or an existing guide line ('on-axis'/'on-guide'
  *        snaps, which carry the analytic line's direction) → the same
  *        PARALLEL-GUIDE mode, sourced from the infinite analytic line.
+ *      - On an edge crossing ('intersection' snap — the point where two
+ *        edges pass through each other) → MEASURE mode from the crossing,
+ *        though the snap carries the first edge's provenance: the crossing
+ *        is a point, and which edge it would offset is a coin toss.
  *      - Anywhere else → MEASURE mode. Remembers the picked point as P0.
  *   2. Pointer move previews:
  *      - Parallel mode, no resolved offset plane (`_resolveOffsetPlane`
@@ -253,9 +257,16 @@ type GeometryAttribution =
  *  sketch; an object snap that also carries an `instance` (geometry reached
  *  through a placed component) attributes to that PLACEMENT, since that is
  *  what a session's `instanceIds` scope tracks — the defining object lives
- *  in the instance's definition, not the world. */
+ *  in the instance's definition, not the world.
+ *
+ *  An edge crossing (`isCrossingSnap`) is unattributable: the snap carries
+ *  only the FIRST crossed edge's provenance (the second edge's never crosses
+ *  the wasm boundary), while the point also lies on the other edge, which
+ *  may be outside an open session. So a crossing never anchors a scoped
+ *  rescale, at either end; with no session open, null still passes. */
 function attributionOf(snap: Snap): GeometryAttribution {
   if (!snapOnGeometry(snap)) return null
+  if (isCrossingSnap(snap)) return null
   if (snap.sketch !== undefined) return { kind: 'sketch', sketch: snap.sketch }
   if (snap.instance !== undefined) return { kind: 'instance', instance: snap.instance }
   if (snap.object !== undefined) return { kind: 'object', object: snap.object }
@@ -328,6 +339,16 @@ function sessionScopeRescaleDeclineMessage(): string {
  *  is still on the edge, so the distance has no direction. */
 function noOffsetSideMessage(): string {
   return t`Move the cursor to the side the guide should go, then type the distance.`
+}
+
+/** Idle hint while the cursor is on an edge crossing (`isCrossingSnap`). */
+const crossingHint = (): string => t`Click to measure from the crossing.`
+
+/** Whether `snap` is an edge-crossing snap (`SnapKind::Intersection` —
+ *  "intersection" across the wasm boundary): a first click there measures
+ *  from the point rather than starting a parallel guide (module doc). */
+function isCrossingSnap(snap: Snap | null): boolean {
+  return snap !== null && snap.kind === 'intersection'
 }
 
 /** Half-length of the previewed parallel-guide line (meters). */
@@ -617,9 +638,14 @@ export class TapeMeasureTool implements Tool {
         if (this._recall !== null) {
           return t`Type a distance and press Enter to resize the model to it — or click a point to measure from.`
         }
+        if (this._hoverCrossing) return crossingHint()
         return t`Click a point to measure from — or click an edge to drop a parallel guide.`
     }
   }
+
+  /** Whether the last idle hover sat on an edge crossing (`isCrossingSnap`),
+   *  for the idle hint. Set by every `onPointerMove`; false mid-gesture. */
+  private _hoverCrossing = false
 
   private stage: Stage = { kind: 'idle' }
   private preview: THREE.Group
@@ -1062,6 +1088,7 @@ export class TapeMeasureTool implements Tool {
   private _parallelCursorFree = false
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this._hoverCrossing = this.stage.kind === 'idle' && isCrossingSnap(snap)
     if (snap === null) return
 
     if (this.stage.kind === 'parallel') {
@@ -1107,8 +1134,11 @@ export class TapeMeasureTool implements Tool {
       // offset drag instead of a measurement — is pure confusion in a
       // read-only inspector. Force straight point-to-point measure there: an
       // edge/axis/guide tap measures FROM the picked point like any other.
-      // The editor (`_measureOnly` false) keeps SketchUp's full parallel mode.
-      const edge = this._measureOnly ? null : this._tryResolveEdge(snap)
+      // The editor (`_measureOnly` false) keeps SketchUp's full parallel mode,
+      // except at an edge crossing: that snap names a POINT (it carries the
+      // first edge's provenance only incidentally), so it measures from the
+      // crossing instead of offsetting whichever edge ranked first.
+      const edge = this._measureOnly || isCrossingSnap(snap) ? null : this._tryResolveEdge(snap)
       if (edge !== null) {
         const { edgePoint, edgeDir } = edge
         // WP-4: a frozen `_gesturePlane` that disagrees with the picked edge

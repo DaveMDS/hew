@@ -27,7 +27,7 @@
  */
 import * as THREE from 'three'
 import type { CameraRig } from './cameraRig'
-import type { SceneRenderer } from './SceneRenderer'
+import type { RenderMode, SceneRenderer } from './SceneRenderer'
 import { getFatLineResolution, makeFatSegments, disposeFatSegments, setFatLineWidthScale, updateFatLineResolutions } from './fatLine'
 import { GUIDE_COLOR } from './guideColors'
 
@@ -698,7 +698,7 @@ async function renderPrintPagesNow(
   undo.push(() => {
     if (rt !== null) rt.dispose()
   })
-  const silhouettes = opts.style === 'lineart' ? new SilhouetteCompositor() : null
+  const silhouettes = wantsSilhouettePass(opts.style, sceneRenderer.getRenderMode()) ? new SilhouetteCompositor() : null
   undo.push(() => silhouettes?.dispose())
 
   const restore = (): void => {
@@ -755,4 +755,11 @@ async function renderPrintPagesNow(
     sceneRenderer.updateAnnotationBillboards(h.rig.active, css.width, css.height, h.liveTheme())
   }
   return blobs
+}
+
+/** Whether a print wants the curved-wall silhouette pass. Line art only, and
+ *  not in Wireframe, which draws no faces and so has no wall to outline.
+ *  X-ray still draws its faces, so the ink stays. */
+export function wantsSilhouettePass(style: 'shaded' | 'lineart', mode: RenderMode): boolean {
+  return style === 'lineart' && mode !== 'wireframe'
 }

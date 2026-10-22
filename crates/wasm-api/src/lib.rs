@@ -30,8 +30,8 @@ mod scenes_api;
 
 use dae_import::ImageMap;
 use inference::{
-    ApertureMode, Axis, ElementRef, InferenceScene, PickRay, SketchRegionFace, SnapKind, SnapLock,
-    SnapQuery, SnapWeights,
+    ApertureMode, Axis, ElementRef, FacePolicy, InferenceScene, PickRay, SketchRegionFace,
+    SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
 use kernel::{
@@ -2948,6 +2948,20 @@ impl Scene {
             .is_some_and(|c| c.mutates_document)
     }
 
+    /// An empty [`InferenceScene`] that keeps the current one's per-window
+    /// view switches — guide and axis snapping (View ▸ Guides / Axes) and
+    /// the render mode's face policy ([`Scene::set_render_mode`]). Those
+    /// belong to the window, not the document, so rebuilding the candidates
+    /// (a load, a live-API resync) must not quietly turn hidden guides or
+    /// axes snappable again, or drop X-ray or Wireframe picking.
+    fn fresh_inference(&self) -> InferenceScene {
+        let mut fresh = InferenceScene::new();
+        fresh.set_guides_enabled(self.inference.guides_enabled());
+        fresh.set_axes_enabled(self.inference.axes_enabled());
+        fresh.set_face_policy(self.inference.face_policy());
+        fresh
+    }
+
     /// Fully rebuilds `inference` and clears `face_range_cache` from the
     /// Document's current state — the live-API-dispatch analogue of
     /// [`Scene::reconcile`], used by [`Scene::api_dispatch`] after any
@@ -2962,7 +2976,7 @@ impl Scene {
     fn full_resync(&mut self) {
         self.face_range_cache = SecondaryMap::new();
         self.health_cache.clear();
-        self.inference = InferenceScene::new();
+        self.inference = self.fresh_inference();
         self.inference.set_axes_frame(self.doc.axes());
         for id in self.doc.visible_object_ids() {
             if self.hidden_objects.contains(&id) {
@@ -6956,6 +6970,12 @@ impl Scene {
     /// [`SnapWeights::for_picking`]). The Select tool passes it, so a click
     /// in the middle of a small face selects the face, not an edge whose
     /// midpoint happens to be within point reach. Omitted/`None` is `false`.
+    ///
+    /// `see_through_points`, when `true`, lets precise points and edges lying
+    /// off `constraint_plane` through while the render mode hides nothing
+    /// (X-ray, Wireframe — see [`SnapQuery::see_through_points`]). Only a
+    /// tool that drops such a snap onto its plane and discloses it passes it;
+    /// omitted/`None` is `false`, the plain plane filter in every mode.
     // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -6975,6 +6995,7 @@ impl Scene {
         soft_axis_aperture_scale: Option<f64>,
         off_plane_points: Option<bool>,
         pick: Option<bool>,
+        see_through_points: Option<bool>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -7044,6 +7065,7 @@ impl Scene {
             },
             soft_axis_aperture_scale,
             off_plane_points: off_plane_points.unwrap_or(false),
+            see_through_points: see_through_points.unwrap_or(false),
         };
         Ok(self
             .inference
@@ -7054,7 +7076,8 @@ impl Scene {
     /// Picks the nearest Object face the ray passes through (for the push/pull
     /// tool). Unlike `snap`, this ignores the drawing snap-priority model, so
     /// it reliably returns the surface under the cursor rather than a nearby
-    /// vertex or edge. `undefined` when the ray hits no face.
+    /// vertex or edge. `undefined` when the ray hits no face, and always
+    /// `undefined` in Wireframe ([`Scene::set_render_mode`]).
     pub fn pick_face(
         &self,
         ox: f64,
@@ -7141,12 +7164,81 @@ impl Scene {
     /// participates and every one is extrudable (interpenetration is allowed
     /// everywhere in Hew). Hidden sketches never match (and an extruded
     /// region cannot: its scaffolding was deleted with it); `undefined` when
-    /// nothing is hit.
+    /// nothing is hit, and always `undefined` in Wireframe
+    /// ([`Scene::set_render_mode`]: a fill is a face).
     ///
     /// The "any sketch" targeting primitive: push/pull region targeting,
     /// select-by-interior, and dock hover all resolve through this, replacing
     /// the app's old single-active-sketch bookkeeping.
     pub fn pick_sketch_region(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchRegionPickJs> {
+        // Wireframe: a region fill is a face, and faces are not targets.
+        if !self.inference.face_policy().faces_are_targets() {
+            return None;
+        }
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+    }
+
+    /// [`Scene::pick_sketch_region`] ignoring the render mode's face policy
+    /// ([`Scene::set_render_mode`]): the sketch region under the ray even in
+    /// Wireframe, where a fill is no input target. For camera questions (the
+    /// orbit pivot over a drawn, not yet extruded shape).
+    pub fn pick_sketch_region_geometry(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<SketchRegionPickJs> {
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+    }
+
+    /// [`Scene::pick_face`] ignoring the render mode's face policy
+    /// ([`Scene::set_render_mode`]): the nearest face the ray passes through,
+    /// even in Wireframe. For questions about where the geometry IS rather
+    /// than what is an input target — the orbit pivot, and which face a
+    /// snapped edge or corner lies on when a draw tool starts there.
+    pub fn pick_face_geometry(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> Option<FacePickJs> {
+        let ray = PickRay {
+            origin: Point3::new(ox, oy, oz),
+            direction: kernel::Vec3::new(dx, dy, dz),
+        };
+        let (source, depth) = self
+            .inference
+            .pick_face_geometry_from(&ray, &|id| self.doc.object(id))?;
+        match source.element {
+            ElementRef::Face(f) => Some(FacePickJs {
+                object: source.object.data().as_ffi(),
+                face: f.data().as_ffi(),
+                instance: source.instance.map(|i| i.data().as_ffi()),
+                depth,
+            }),
+            _ => None,
+        }
+    }
+}
+
+impl Scene {
+    /// The body of [`Scene::pick_sketch_region`], without the face-policy
+    /// gate.
+    fn sketch_region_under_ray(
         &self,
         ox: f64,
         oy: f64,
@@ -7193,7 +7285,10 @@ impl Scene {
             depth,
         })
     }
+}
 
+#[wasm_bindgen]
+impl Scene {
     /// [`Scene::pick_sketch_region`], scoped to ONE component INSTANCE's own
     /// definition-owned sketches (component-edit-parity.md phase A2).
     /// `pick_sketch_region` walks only `Document::sketch_ids()`, which
@@ -7218,6 +7313,10 @@ impl Scene {
         dy: f64,
         dz: f64,
     ) -> Option<SketchRegionPickJs> {
+        // Wireframe: a region fill is a face, and faces are not targets.
+        if !self.inference.face_policy().faces_are_targets() {
+            return None;
+        }
         let iid = instance_id(instance);
         let pose = self.doc.instance_pose(iid)?;
         let component = self.doc.instance_def(iid)?;
@@ -7864,6 +7963,30 @@ impl Scene {
     /// guides, hidden axes must not snap or cue.
     pub fn set_axes_snappable(&mut self, enabled: bool) {
         self.inference.set_axes_enabled(enabled);
+    }
+
+    /// Sets the whole-model render mode's picking rule (View ▸ X-ray /
+    /// Wireframe), per window and never saved: `"shaded"` (faces occlude and
+    /// are targets), `"xray"` (nothing occludes; faces stay targets, the
+    /// nearest along the ray winning) or `"wireframe"` (nothing occludes and
+    /// faces are not targets). It governs `snap`, `pick_face`,
+    /// `pick_sketch_region` and `pick_sketch_region_in_instance`, so every
+    /// tool follows the mode without a per-call flag. Survives a document
+    /// load, like the other view switches. Any other string is refused with
+    /// `BadRenderMode` and changes nothing.
+    pub fn set_render_mode(&mut self, mode: &str) -> Result<(), ApiError> {
+        let policy = match mode {
+            "shaded" => FacePolicy::Opaque,
+            "xray" => FacePolicy::SeeThrough,
+            "wireframe" => FacePolicy::Absent,
+            other => {
+                return Err(ApiError(format!(
+                    "BadRenderMode: expected \"shaded\", \"xray\" or \"wireframe\", got {other:?}"
+                )));
+            }
+        };
+        self.inference.set_face_policy(policy);
+        Ok(())
     }
 
     /// Handles of every construction guide to draw: live, and not hidden
@@ -10602,7 +10725,7 @@ impl Scene {
         self.last_import_objects.clear();
         self.health_cache.clear();
         self.face_range_cache = SecondaryMap::new();
-        self.inference = InferenceScene::new();
+        self.inference = self.fresh_inference();
         // Hidden sets key by dense ids the new document reuses; drop them so a
         // stale id can't keep a fresh object out of inference.
         self.hidden_objects.clear();
@@ -10738,6 +10861,7 @@ mod tests {
         let snap = loaded
             .snap(
                 vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
+                None,
             )
             .unwrap()
             .expect("loaded sketch vertex snaps");
@@ -10746,7 +10870,7 @@ mod tests {
         let snap = loaded
             .snap(
                 1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("loaded circle center snaps");
@@ -10860,6 +10984,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap()
             .expect("something snaps at the copy center");
@@ -10870,6 +10995,7 @@ mod tests {
         let snap0 = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
+                None,
             )
             .unwrap()
             .expect("original center snaps");
@@ -10924,6 +11050,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
+                None,
             )
             .unwrap()
             .expect("center snaps");
@@ -10944,7 +11071,7 @@ mod tests {
             let snap = scene
                 .snap(
                     wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None, None, None,
-                    None,
+                    None, None,
                 )
                 .unwrap()
                 .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
@@ -11033,6 +11160,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
+                None,
             )
             .unwrap()
             .expect("polygon center snaps");
@@ -11206,6 +11334,7 @@ mod tests {
         let default_snap = scene
             .snap(
                 ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
+                None,
             )
             .unwrap()
             .expect("something snaps");
@@ -11228,6 +11357,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,
@@ -11256,6 +11386,7 @@ mod tests {
                 None,
                 None,
                 Some(false),
+                None,
                 None,
                 None,
                 None,
@@ -11297,6 +11428,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the fill");
         assert_eq!(
@@ -11312,9 +11444,12 @@ mod tests {
             snap.position.y
         );
 
-        // From the original zoom (eye at y=0.30) the side midpoints sit
-        // inside the drawing tools' point reach, but a selection pick gives
-        // points none, so the click still lands on the face.
+        // From the original zoom (eye at y=0.30) the named points around the
+        // fill sit inside the drawing tools' point reach — the side
+        // midpoints, and a crossing beside them, which outranks them and
+        // reaches as far (`SnapKind::Intersection`) — but a
+        // selection pick gives points none, so the click still lands on the
+        // face.
         let far = SnapQuery {
             ray: PickRay {
                 origin: Point3::new(0.11, 0.30, 0.015),
@@ -11324,7 +11459,7 @@ mod tests {
         };
         assert_eq!(
             scene.inference.resolve(&far).map(|s| s.kind),
-            Some(SnapKind::Midpoint)
+            Some(SnapKind::Intersection)
         );
         let pick = SnapQuery {
             weights: SnapWeights::default().for_picking(),
@@ -11402,6 +11537,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let snap = scene
             .inference
@@ -11470,6 +11606,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap over the region");
         assert_eq!(snap.kind, SnapKind::OnFace);
@@ -11516,6 +11653,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let snap = scene.inference.resolve(&q).expect("a snap at the origin");
         assert_eq!(snap.kind, SnapKind::Endpoint, "the origin wins on kind");
@@ -14052,6 +14190,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("snap call succeeds")
             .expect("axis lock with an anchor always resolves");
@@ -14157,6 +14296,109 @@ mod tests {
         scene.delete_sketch(sketch).unwrap();
         assert!(scene.sketch_plane(sketch).is_none());
         assert!(scene.sketch_plane(u64::MAX).is_none());
+    }
+
+    /// The render mode's picking rule reaches every face pick through one
+    /// switch: shaded hides the box's back-bottom midpoint behind its front
+    /// face, X-ray reaches it and still picks the near face, wireframe
+    /// reaches it and picks no face and no sketch region at all. The mode
+    /// belongs to the window, so a document load keeps it, along with the
+    /// guide and axis snapping switches.
+    #[test]
+    fn set_render_mode_sets_the_picking_rule_for_snaps_and_face_picks() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        let s2 = scene.begin_ground_sketch();
+        draw_rect(&mut scene, s2, 3.0, 0.0, 4.0, 1.0);
+
+        // Eye in front of and above the box, aimed at the back-bottom edge's
+        // midpoint (0.5, 1, 0) through the front face.
+        let hidden_mid = |scene: &Scene| {
+            let (ex, ey, ez) = (0.5, -3.0, 3.0);
+            scene
+                .snap(
+                    ex, ey, ez, 0.0, 4.0, -3.0, 0.01, None, None, None, None, None, None, None,
+                    None, None,
+                )
+                .unwrap()
+                .map(|snap| snap.kind())
+        };
+        let top_face = |scene: &Scene| {
+            scene
+                .pick_face(0.4, 0.6, 5.0, 0.0, 0.0, -1.0)
+                .map(|pick| pick.depth)
+        };
+        let region = |scene: &Scene| {
+            scene
+                .pick_sketch_region(3.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_some()
+        };
+
+        assert_eq!(
+            hidden_mid(&scene).as_deref(),
+            Some("on-face"),
+            "shaded hides it"
+        );
+        assert_eq!(top_face(&scene), Some(4.0));
+        assert!(region(&scene));
+
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(
+            hidden_mid(&scene).as_deref(),
+            Some("midpoint"),
+            "x-ray sees through"
+        );
+        assert_eq!(top_face(&scene), Some(4.0), "x-ray picks the near face");
+        assert!(region(&scene));
+
+        scene.set_render_mode("wireframe").unwrap();
+        assert_eq!(
+            hidden_mid(&scene).as_deref(),
+            Some("midpoint"),
+            "wireframe sees through"
+        );
+        assert_eq!(top_face(&scene), None, "wireframe has no face targets");
+        assert!(!region(&scene), "nor sketch-region targets");
+        assert!(
+            scene
+                .pick_sketch_region_geometry(3.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_some(),
+            "the camera still finds the fill (the orbit pivot)"
+        );
+        // Where the geometry is, policy or not (the orbit pivot, a draw
+        // tool starting on an edge).
+        let geometry = scene
+            .pick_face_geometry(0.4, 0.6, 5.0, 0.0, 0.0, -1.0)
+            .expect("the top face is still there");
+        assert_eq!(geometry.depth, 4.0);
+        assert!(
+            scene
+                .pick_face_geometry(10.0, 10.0, 5.0, 0.0, 0.0, -1.0)
+                .is_none()
+        );
+
+        // An unknown mode is refused and changes nothing.
+        assert!(scene.set_render_mode("hidden-line").is_err());
+        assert_eq!(top_face(&scene), None);
+
+        // A load keeps the window's switches.
+        scene.set_guides_snappable(false);
+        scene.set_axes_snappable(false);
+        let bytes = scene.save();
+        scene.load_core(&bytes).unwrap();
+        assert_eq!(top_face(&scene), None, "the load keeps wireframe");
+        assert!(
+            !scene.inference.guides_enabled(),
+            "the load keeps guides unsnappable"
+        );
+        assert!(
+            !scene.inference.axes_enabled(),
+            "the load keeps axes unsnappable"
+        );
+        scene.set_render_mode("shaded").unwrap();
+        assert_eq!(top_face(&scene), Some(4.0));
+        assert_eq!(hidden_mid(&scene).as_deref(), Some("on-face"));
     }
 
     #[test]
@@ -15318,7 +15560,8 @@ mod tests {
 
         let posed = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap()
             .expect("posed definition endpoint must snap");
@@ -15328,7 +15571,8 @@ mod tests {
         scene.set_hidden(&[], &[inst]);
         let hidden = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15339,7 +15583,8 @@ mod tests {
         scene.set_hidden(&[], &[]);
         let shown = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap()
             .expect("showing the active instance restores its posed sketch inference");
@@ -15348,7 +15593,8 @@ mod tests {
         scene.set_active_inference_instance(None);
         let after_exit = scene
             .snap(
-                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15358,7 +15604,8 @@ mod tests {
         );
         let local = scene
             .snap(
-                2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15394,7 +15641,8 @@ mod tests {
 
         let mirrored = scene
             .snap(
-                3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None, None,
+                3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap()
             .expect("mirrored definition endpoint must snap");
@@ -16788,6 +17036,63 @@ mod tests {
         );
     }
 
+    /// The Wireframe gate covers the in-instance region pick too: a fill is
+    /// a face, and faces are no input targets there. X-ray keeps it.
+    #[test]
+    fn pick_sketch_region_in_instance_follows_the_render_mode() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let def_sketch = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        for (ax, ay, bx, by) in [
+            (0.2, 0.2, 0.8, 0.2),
+            (0.8, 0.2, 0.8, 0.8),
+            (0.8, 0.8, 0.2, 0.8),
+            (0.2, 0.8, 0.2, 0.2),
+        ] {
+            scene
+                .sketch_add_segment(def_sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        let pick = |scene: &Scene| {
+            scene
+                .pick_sketch_region_in_instance(inst, 0.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+                .is_some()
+        };
+        assert!(pick(&scene), "shaded");
+        scene.set_render_mode("xray").unwrap();
+        assert!(pick(&scene), "x-ray keeps the fill as a target");
+        scene.set_render_mode("wireframe").unwrap();
+        assert!(!pick(&scene), "wireframe: no face targets");
+        scene.set_render_mode("shaded").unwrap();
+        assert!(pick(&scene));
+    }
+
+    /// The live-API resync rebuilds inference from the document; the
+    /// window's switches — face policy, guide and axis snapping — survive
+    /// it, like a load.
+    #[test]
+    fn a_full_resync_keeps_the_face_policy_and_the_view_switches() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        scene.extrude_region(s, r, 1.0).unwrap();
+        scene.set_render_mode("wireframe").unwrap();
+        scene.set_guides_snappable(false);
+        scene.set_axes_snappable(false);
+        scene.full_resync();
+        assert_eq!(scene.inference.face_policy(), FacePolicy::Absent);
+        assert!(scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_none());
+        assert!(!scene.inference.guides_enabled());
+        assert!(!scene.inference.axes_enabled());
+        scene.set_render_mode("xray").unwrap();
+        scene.full_resync();
+        assert_eq!(scene.inference.face_policy(), FacePolicy::SeeThrough);
+        assert!(scene.pick_face(0.5, 0.5, 5.0, 0.0, 0.0, -1.0).is_some());
+    }
+
     /// Same pick, through a MIRRORED pose (negative determinant) — closes
     /// the coverage gap this finding traced: every prior `_in_instance` ray/
     /// point test used only translation/identity poses, the same class of
@@ -16856,7 +17161,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None, None, None, None, None, None,
+                0.05, None, None, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -16872,7 +17177,8 @@ mod tests {
 
         let snap = scene
             .snap(
-                5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None, None,
+                5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap();
         assert!(
@@ -16894,7 +17200,7 @@ mod tests {
             scene
                 .snap(
                     ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None, None,
-                    None, None, None,
+                    None, None, None, None,
                 )
                 .unwrap()
         };
@@ -16927,7 +17233,8 @@ mod tests {
 
         let snap = scene
             .snap(
-                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None, None,
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap()
             .expect("ray points straight at the guide point");
@@ -16949,7 +17256,8 @@ mod tests {
 
         let cone_miss = scene
             .snap(
-                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None, None,
+                2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                None, None,
             )
             .unwrap();
         assert!(
@@ -16971,6 +17279,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,

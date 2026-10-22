@@ -112,6 +112,19 @@ Inference snapping itself is not scoped this way: the cursor can snap to
 anything visible in the whole scene (another Object's edge, a guide, an
 axis), because snapping is a read-only query, not a mutation. Only the
 merging of geometry into a single mesh is confined to the active Object.
+What counts as visible follows the window's render mode, set once on the
+inference scene as a face policy (`inference::FacePolicy`, pushed through
+`Scene::set_render_mode`) rather than passed by each tool: in Shaded faces
+hide what is behind them; in X-ray nothing is hidden but faces are still
+snap and pick targets; in Wireframe nothing is hidden and faces are not
+targets at all (no on-face snap, no face or sketch-region pick). In both
+see-through modes a query that opts in (`SnapQuery::see_through_points`,
+set only by the draw tools that drop an off-plane snap onto their plane
+and say "projected") is not limited by its constraint plane (the face the
+tool is held to) for named points and edges, so drawing reaches hidden
+geometry through the face; every other query keeps the plain plane
+filter. Camera questions (the orbit pivot) ask `Scene::pick_face_geometry`
+and `Scene::pick_sketch_region_geometry`, which ignore the policy.
 
 A shape drawn on a face and not yet pushed or pulled is **drawing**, and
 drawing on a face goes through the same engine as drawing on the ground

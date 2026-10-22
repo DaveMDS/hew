@@ -34,8 +34,8 @@
 //! scale, directly comparable across kinds, and `w = 1` ranks exactly as
 //! unweighted (admission still honors the base reach below).
 //!
-//! Separately from weights, named points — endpoints, midpoints, centers,
-//! quadrants — are always admitted out to [`POINT_SNAP_REACH`] apertures,
+//! Separately from weights, named points — endpoints, crossings, midpoints,
+//! centers, quadrants — are always admitted out to [`POINT_SNAP_REACH`] apertures,
 //! since a point is a far smaller target than a line ([`SnapWeights::reach`]
 //! is the larger of the two). That base reach changes admission only, never
 //! the ranking distance.
@@ -76,6 +76,23 @@
 //! matching SketchUp. A tool-supplied `constraint_plane` is a separate, additive
 //! filter (it restricts candidates to the active drawing plane).
 //!
+//! That is the default [`FacePolicy::Opaque`]. A whole-model view mode that
+//! draws faces see-through or not at all changes what "visible" means, so the
+//! scene carries a [`FacePolicy`] set once when the mode changes
+//! ([`InferenceScene::set_face_policy`]), not a flag on every query:
+//!
+//! | policy | faces occlude | `OnFace` snaps, `pick_face` |
+//! |---|---|---|
+//! | [`FacePolicy::Opaque`] (shaded) | yes | yes |
+//! | [`FacePolicy::SeeThrough`] (X-ray) | no | yes, nearest face along the ray |
+//! | [`FacePolicy::Absent`] (wireframe) | no | none |
+//!
+//! Under `SeeThrough` every edge and named point in the model is reachable,
+//! hidden or not, and a face is still the target wherever nothing stronger
+//! is under the cursor: face candidates all sit at angular distance zero, so
+//! the nearest-depth tie-break picks the front one. Under `Absent` faces do
+//! not exist for input at all, sketch-region fills included.
+//!
 //! # Locking
 //!
 //! A [`SnapLock`] (shift-lock or arrow keys in SketchUp terms) constrains the
@@ -106,7 +123,11 @@
 //! hides the storage so the index strategy can change without touching
 //! callers. Intersection snaps (`SnapKind::Intersection`) are emitted where
 //! a guide line crosses a segment (sketch or object edge) or another guide
-//! line — the crossing is precisely why the guide was drawn.
+//! line — the crossing is precisely why the guide was drawn — where an axis
+//! line crosses an edge, and where edges of two different owners (Objects,
+//! placements, sketches) truly cross in 3D: separate Objects never merge, so
+//! nothing else puts a point there. That last test pairs only the edges
+//! through the pick cone, and at most [`CROSSING_PAIR_CAP`] pairs a query.
 
 use std::cell::{Cell, OnceCell, Ref, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
@@ -158,10 +179,20 @@ pub enum SnapKind {
     /// weight, with a center at the same spot still winning on declared
     /// order.
     Quadrant,
+    /// On a crossing: a guide line or an axis line through an edge, two
+    /// guide lines, or two edges of different owners that truly cross in
+    /// 3D (both edges in the snap's provenance, see [`Snap::crossed_edge`]).
+    /// Screen-space "apparent" crossings of edges that only overlap on
+    /// screen are not offered.
+    ///
+    /// Outranks [`SnapKind::Midpoint`]: every edge has a midpoint, crossings
+    /// are rare, so a cursor near both means the crossing (a midpoint a
+    /// tenth of a millimeter away no longer steals it). Still below the
+    /// exact named points (endpoint, center, quadrant), which are geometry
+    /// rather than a construction from two lines.
+    Intersection,
     /// On the midpoint of an edge.
     Midpoint,
-    /// On the apparent intersection of two edges.
-    Intersection,
     /// On the point of a drawn circle or arc's rim where the segment from
     /// the tool's anchor is tangent to the exact analytic circle. Needs an
     /// anchor ([`SnapQuery::anchor`]); offered only over the covered
@@ -180,7 +211,7 @@ pub enum SnapKind {
     /// order forces it), a guide now also outranks plain
     /// [`SnapKind::OnEdge`]/[`SnapKind::OnFace`], which `OnAxis` already
     /// outranked. Still loses to every exact point kind above it
-    /// (Endpoint/Center/Quadrant/Midpoint/Intersection/Tangent) and to an
+    /// (Endpoint/Center/Quadrant/Intersection/Midpoint/Tangent) and to an
     /// EXPLICIT axis/direction hold (`query.lock`, which bypasses this
     /// ranking entirely and always wins regardless of `SnapKind`).
     OnGuide,
@@ -214,8 +245,8 @@ impl SnapKind {
         SnapKind::Endpoint,
         SnapKind::Center,
         SnapKind::Quadrant,
-        SnapKind::Midpoint,
         SnapKind::Intersection,
+        SnapKind::Midpoint,
         SnapKind::Tangent,
         SnapKind::OnGuide,
         SnapKind::OnAxis,
@@ -235,8 +266,8 @@ impl SnapKind {
             SnapKind::Endpoint => 0,
             SnapKind::Center => 1,
             SnapKind::Quadrant => 2,
-            SnapKind::Midpoint => 3,
-            SnapKind::Intersection => 4,
+            SnapKind::Intersection => 3,
+            SnapKind::Midpoint => 4,
             SnapKind::Tangent => 5,
             SnapKind::OnGuide => 6,
             SnapKind::OnAxis => 7,
@@ -258,8 +289,8 @@ impl SnapKind {
     /// ([`SnapKind::Quadrant`]). Those three are peers — which one the user
     /// meant is a question of how close they aimed, weighted by how much each
     /// is worth — whereas everything below is derived geometry whose ordering
-    /// is a fixed editorial decision (a midpoint beats an edge beats a face,
-    /// always).
+    /// is a fixed editorial decision (a crossing beats a midpoint beats an
+    /// edge beats a face, always).
     ///
     /// Within a group, equal normalized distance still breaks toward the
     /// stronger `SnapKind`, so a real vertex at the same spot as a center
@@ -281,8 +312,8 @@ impl SnapKind {
         match self {
             // The exact-named-point band.
             SnapKind::Endpoint | SnapKind::Center | SnapKind::Quadrant => 0,
-            SnapKind::Midpoint => 1,
-            SnapKind::Intersection => 2,
+            SnapKind::Intersection => 1,
+            SnapKind::Midpoint => 2,
             SnapKind::Tangent => 3,
             SnapKind::OnGuide => 4,
             SnapKind::OnAxis => 5,
@@ -297,9 +328,11 @@ impl SnapKind {
     /// before any gravity weight applies — see [`POINT_SNAP_REACH`].
     pub const fn point_reach(self) -> f64 {
         match self {
-            SnapKind::Endpoint | SnapKind::Center | SnapKind::Quadrant | SnapKind::Midpoint => {
-                POINT_SNAP_REACH
-            }
+            SnapKind::Endpoint
+            | SnapKind::Center
+            | SnapKind::Quadrant
+            | SnapKind::Intersection
+            | SnapKind::Midpoint => POINT_SNAP_REACH,
             _ => GRAVITY_NEUTRAL,
         }
     }
@@ -323,7 +356,7 @@ pub const GRAVITY_NEUTRAL: f64 = 1.0;
 pub const GRAVITY_ANALYTIC_POINT: f64 = 2.5;
 
 /// How much further than the query `aperture` a named point — an endpoint,
-/// a midpoint, a drawn curve's center or quadrant — is admitted.
+/// a crossing, a midpoint, a drawn curve's center or quadrant — is admitted.
 ///
 /// The app derives `aperture` from one pixel radius shared by every kind,
 /// but points and lines are not equally easy to hit: a line or axis is a
@@ -691,6 +724,59 @@ pub struct Snap {
     /// the lock. `None` for every unprojected snap and for the bare lock
     /// fallback.
     pub projected_from: Option<Point3>,
+    /// The SECOND edge of an edge × edge crossing ([`SnapKind::Intersection`]
+    /// where edges of two different owners pass through each other): the
+    /// first edge is in [`source`](Snap::source) or
+    /// [`sketch_source`](Snap::sketch_source) as usual, this is the other
+    /// one. `None` for every other snap, including the guide and axis
+    /// crossings (those cross a line, not a second edge).
+    pub crossed_edge: Option<CrossedEdge>,
+}
+
+/// One edge of an edge × edge crossing: an Object edge or a committed
+/// sketch edge (see [`Snap::crossed_edge`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrossedEdge {
+    /// An Object's edge (world or placed).
+    Object(SnapSource),
+    /// A committed sketch's edge.
+    Sketch(SketchId, SketchEdgeId),
+}
+
+/// The most edge pairs one query tests for edge × edge crossings.
+///
+/// The pair test runs over the edges that pass through the pick cone. That
+/// is a handful on open geometry, but a vertex where many Objects meet (a
+/// framed wall's corner) or a dense import seen from afar puts hundreds of
+/// edges in the cone, and pairs grow with the square. A query therefore
+/// takes at most this many steps of its pair walk, nearest edges first (by
+/// angular distance from the ray), so the crossing under the cursor is
+/// still found. Each step tests one cross-owner pair or steps over a run
+/// of one owner's own edges, so a capped query tests at most this many
+/// pairs (exactly this many when no such run lies in its way); the pairs
+/// it leaves untested are counted in [`InferenceScene::crossing_stats`]
+/// and traced at debug level, never silent. Edges of one owner never pair,
+/// so a cone full of one Object's edges costs no steps at all. 2,000 pairs
+/// is every pair of about 63 edges.
+pub const CROSSING_PAIR_CAP: usize = 2000;
+
+/// Cumulative edge × edge crossing counters for one scene (see
+/// [`InferenceScene::crossing_stats`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CrossingStats {
+    /// Cross-owner edge pairs tested for a crossing.
+    pub pairs_tested: u64,
+    /// Steps the pair walk took: every pair tested, plus every step over a
+    /// run of one owner's own edges (which pair with nothing). Each query
+    /// takes at most [`CROSSING_PAIR_CAP`].
+    pub pair_steps: u64,
+    /// Queries the cap stopped with cross-owner pairs still untested: each
+    /// tested as many pairs as its [`CROSSING_PAIR_CAP`] steps reached
+    /// (exactly the cap when the pool holds no same-owner run to step
+    /// over) and counted the rest in `pairs_skipped`.
+    pub queries_capped: u64,
+    /// Cross-owner edge pairs those capped queries left untested.
+    pub pairs_skipped: u64,
 }
 
 /// Internal candidate provenance: an Object element, a committed sketch edge,
@@ -703,27 +789,36 @@ enum Provenance {
     SketchEdge(SketchId, SketchEdgeId),
     SketchRegion(SketchId, SketchRegionId),
     SketchCurve(SketchId, SketchCurveId),
+    /// An edge × edge crossing: the first edge, then the second.
+    Crossing(CrossedEdge, CrossedEdge),
 }
 
-/// The four mutually-exclusive [`Snap`] provenance fields.
+/// The four mutually-exclusive [`Snap`] provenance fields, plus the
+/// crossing's second edge ([`Snap::crossed_edge`]).
 type SplitProvenance = (
     Option<SnapSource>,
     Option<(SketchId, SketchEdgeId)>,
     Option<(SketchId, SketchRegionId)>,
     Option<(SketchId, SketchCurveId)>,
+    Option<CrossedEdge>,
 );
 
 impl Provenance {
     /// Split into the public [`Snap`] provenance fields (object, sketch edge,
     /// sketch region, sketch curve) — exactly one is `Some` for a real
-    /// candidate.
+    /// candidate — and the crossed edge, `Some` only for an edge × edge
+    /// crossing (whose first edge fills the object or sketch-edge field).
     fn split(this: Option<Provenance>) -> SplitProvenance {
         match this {
-            Some(Provenance::Object(s)) => (Some(s), None, None, None),
-            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None),
-            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None),
-            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid))),
-            None => (None, None, None, None),
+            Some(Provenance::Object(s)) => (Some(s), None, None, None, None),
+            Some(Provenance::SketchEdge(sid, eid)) => (None, Some((sid, eid)), None, None, None),
+            Some(Provenance::SketchRegion(sid, rid)) => (None, None, Some((sid, rid)), None, None),
+            Some(Provenance::SketchCurve(sid, cid)) => (None, None, None, Some((sid, cid)), None),
+            Some(Provenance::Crossing(first, second)) => match first {
+                CrossedEdge::Object(s) => (Some(s), None, None, None, Some(second)),
+                CrossedEdge::Sketch(sid, eid) => (None, Some((sid, eid)), None, None, Some(second)),
+            },
+            None => (None, None, None, None, None),
         }
     }
 }
@@ -876,6 +971,15 @@ pub struct SnapQuery {
     /// discrete targets a re-home can pin down, and off-plane they mostly
     /// reintroduce the see-through noise the filter exists to remove.
     pub off_plane_points: bool,
+    /// Under a non-occluding [`FacePolicy`] (X-ray, Wireframe), keep precise
+    /// POINT candidates AND `OnEdge` that lie off the `constraint_plane`:
+    /// there is no see-through to protect against, and hidden geometry
+    /// behind the constraining face is what those modes are for. Opt-in, for
+    /// the tools that honor such a snap by dropping it onto their plane and
+    /// saying so (the draw tools' "projected" cue); a tool that commits the
+    /// snapped point as-is leaves this `false` and gets exactly the plain
+    /// plane filter in every mode. No effect under [`FacePolicy::Opaque`].
+    pub see_through_points: bool,
 }
 
 /// A snappable point with provenance.
@@ -1294,6 +1398,38 @@ enum SceneGuideGeom {
     Point { position: Point3 },
 }
 
+/// Whether faces hide what is behind them, and whether they are input
+/// targets at all — the picking rule of a whole-model view mode (crate docs,
+/// *Occlusion*). Set on the scene with [`InferenceScene::set_face_policy`];
+/// [`FacePolicy::Opaque`] is the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FacePolicy {
+    /// Faces occlude: only visible geometry snaps, and faces are snap
+    /// ([`SnapKind::OnFace`]) and [`InferenceScene::pick_face`] targets.
+    #[default]
+    Opaque,
+    /// Nothing occludes: every edge and point snaps, hidden or not. Faces
+    /// stay targets, and the nearest one along the ray wins.
+    SeeThrough,
+    /// Nothing occludes and faces are not targets: no `OnFace` candidate
+    /// (sketch-region fills included) and no [`InferenceScene::pick_face`]
+    /// hit. Edges and points still snap, so an Object is reached through
+    /// its edges.
+    Absent,
+}
+
+impl FacePolicy {
+    /// Whether faces hide geometry behind them from snapping.
+    pub const fn occludes(self) -> bool {
+        matches!(self, FacePolicy::Opaque)
+    }
+
+    /// Whether faces are snap and pick targets.
+    pub const fn faces_are_targets(self) -> bool {
+        !matches!(self, FacePolicy::Absent)
+    }
+}
+
 /// Kinds of sketch candidate a registered sketch can have, as bits of
 /// `InferenceScene::sketch_kinds`.
 const SKETCH_SEGMENTS: u8 = 1;
@@ -1405,6 +1541,10 @@ pub struct InferenceScene {
     /// axis" means for inference exactly as it does for drawing. Defaults
     /// to [`AxesFrame::IDENTITY`] (world).
     axes_frame: AxesFrame,
+    /// Whether faces occlude and are targets (the view mode's picking rule,
+    /// pushed by [`InferenceScene::set_face_policy`]). Defaults to
+    /// [`FacePolicy::Opaque`].
+    face_policy: FacePolicy,
     /// Lazily rebuilt spatial index over `points`/`segments`/`faces`; `None`
     /// means dirty (a mutator ran since the last build). Interior mutability
     /// because the hot pointer-move queries (`resolve`, `pick_face`) take
@@ -1463,6 +1603,10 @@ pub struct InferenceScene {
     /// Cumulative count of definition-member extraction passes (see
     /// [`InferenceScene::def_extractions`]).
     def_extractions: Cell<u64>,
+    /// Cumulative edge × edge crossing counters (see
+    /// [`InferenceScene::crossing_stats`]); `Cell` for the same reason as
+    /// `occlusion_tests`.
+    crossing_stats: Cell<CrossingStats>,
 }
 
 impl Default for InferenceScene {
@@ -1485,6 +1629,7 @@ impl Default for InferenceScene {
             guides_enabled: true,
             axes_enabled: true,
             axes_frame: AxesFrame::IDENTITY,
+            face_policy: FacePolicy::Opaque,
             spatial: RefCell::new(None),
             occlusion_tests: Cell::new(0),
             world_owners: BTreeSet::new(),
@@ -1494,6 +1639,7 @@ impl Default for InferenceScene {
             def_members: BTreeMap::new(),
             placements: Vec::new(),
             def_extractions: Cell::new(0),
+            crossing_stats: Cell::new(CrossingStats::default()),
         }
     }
 }
@@ -1514,6 +1660,30 @@ impl InferenceScene {
     /// Enable/disable world-origin/axis snapping (View ▸ Axes).
     pub fn set_axes_enabled(&mut self, enabled: bool) {
         self.axes_enabled = enabled;
+    }
+
+    /// Whether guide snapping is enabled ([`Self::set_guides_enabled`]).
+    pub fn guides_enabled(&self) -> bool {
+        self.guides_enabled
+    }
+
+    /// Whether world-origin/axis snapping is enabled
+    /// ([`Self::set_axes_enabled`]).
+    pub fn axes_enabled(&self) -> bool {
+        self.axes_enabled
+    }
+
+    /// Sets whether faces occlude and whether they are snap/pick targets —
+    /// the picking rule of the view mode (crate docs, *Occlusion*). Applies
+    /// to every later [`Self::resolve`] and [`Self::pick_face`]; the
+    /// registered geometry is untouched, so switching is instant.
+    pub fn set_face_policy(&mut self, policy: FacePolicy) {
+        self.face_policy = policy;
+    }
+
+    /// The current [`FacePolicy`].
+    pub fn face_policy(&self) -> FacePolicy {
+        self.face_policy
     }
 
     /// Sets the movable drawing axes frame (tool-parity design §4) that
@@ -1571,6 +1741,14 @@ impl InferenceScene {
     /// face count; the perf-sanity spec asserts exactly that.
     pub fn occlusion_face_tests(&self) -> u64 {
         self.occlusion_tests.get()
+    }
+
+    /// Cumulative edge × edge crossing counters across all queries so far:
+    /// pairs tested, and the queries (and their pairs) skipped for passing
+    /// [`CROSSING_PAIR_CAP`] — cheap introspection for tests and debug
+    /// overlays, like [`InferenceScene::occlusion_face_tests`].
+    pub fn crossing_stats(&self) -> CrossingStats {
+        self.crossing_stats.get()
     }
 
     /// Cumulative number of candidates walked by the retain passes of
@@ -2314,13 +2492,16 @@ impl InferenceScene {
                 Some(geom(pl.member)?.point_at(li, pl))
             })
             .collect();
-        let placed_segments: Vec<SceneSegment> = placed_segment_ids
-            .iter()
-            .filter_map(|&(pi, li)| {
-                let pl = &self.placements[pi];
-                Some(geom(pl.member)?.segment_at(li, pl))
-            })
-            .collect();
+        // Each placed segment's placement index rides alongside it: it is
+        // the segment's owner for the edge × edge crossing test below.
+        let (placed_segments, placed_segment_placements): (Vec<SceneSegment>, Vec<usize>) =
+            placed_segment_ids
+                .iter()
+                .filter_map(|&(pi, li)| {
+                    let pl = &self.placements[pi];
+                    Some((geom(pl.member)?.segment_at(li, pl), pi))
+                })
+                .unzip();
         // Singular poses drop out here (`face_at` is `None`), exactly as
         // registration-time baking skipped them.
         let placed_faces: Vec<SceneFace> = placed_face_ids
@@ -2505,9 +2686,21 @@ impl InferenceScene {
             }
         }
 
+        // The edges that pass through the pick cone at `Intersection`'s
+        // reach, with their owners: the pool the edge × edge crossing test
+        // below pairs up. A crossing inside the cone lies on both of its
+        // edges, so each of them passes at least that close to the ray —
+        // nothing outside this pool can contribute an admissible crossing.
+        // When the reach equals `OnEdge`'s (always, unless a caller weights
+        // the two differently) the OnEdge test's own answer decides it.
+        let crossing_reach_shared = weights.reach(SnapKind::Intersection, widening)
+            == weights.reach(SnapKind::OnEdge, widening);
+        let mut crossing_pool: Vec<CrossingEdge> = Vec::new();
+
         // --- Segment candidates: Midpoint and OnEdge (world, then placed) ---
         let world_segments = || segment_ids.iter().map(|&si| &self.segments[si]);
-        for seg in world_segments().chain(placed_segments.iter()) {
+        let world_segment_count = segment_ids.len();
+        for (k, seg) in world_segments().chain(placed_segments.iter()).enumerate() {
             let mid = midpoint(seg.a, seg.b);
 
             // Midpoint candidate: emitted when the midpoint itself is in the cone.
@@ -2525,7 +2718,26 @@ impl InferenceScene {
             // OnEdge candidate: the closest point on the segment to the ray,
             // if it lies within the cone. Emit even when the midpoint is also
             // in the cone — priority ranking handles "Midpoint beats OnEdge".
-            if let Some((pos, ang, depth)) = wsegment(seg.a, seg.b, SnapKind::OnEdge) {
+            let on_edge = wsegment(seg.a, seg.b, SnapKind::OnEdge);
+            let near = if crossing_reach_shared {
+                on_edge
+            } else {
+                wsegment(seg.a, seg.b, SnapKind::Intersection)
+            };
+            if let Some((_, ang, _)) = near {
+                let owner = match k.checked_sub(world_segment_count) {
+                    None => EdgeOwner::World(seg.source.object),
+                    Some(placed) => EdgeOwner::Placement(placed_segment_placements[placed]),
+                };
+                crossing_pool.push(CrossingEdge {
+                    a: seg.a,
+                    b: seg.b,
+                    ang,
+                    owner,
+                    edge: CrossedEdge::Object(seg.source),
+                });
+            }
+            if let Some((pos, ang, depth)) = on_edge {
                 // Skip if this is the same point as the midpoint (it would be
                 // a duplicate; the Midpoint candidate already covers it with
                 // the stronger kind).
@@ -2580,11 +2792,93 @@ impl InferenceScene {
                 candidates.push((SnapKind::Midpoint, ang, depth, mid, edge_prov, None));
             }
 
-            if let Some((pos, ang, depth)) = wsegment(seg.a, seg.b, SnapKind::OnEdge)
+            let on_edge = wsegment(seg.a, seg.b, SnapKind::OnEdge);
+            // Committed sketch edges join the crossing pool, owned by their
+            // sketch; a transient (in-progress) segment has no owner yet and
+            // stays out.
+            if let Some(Provenance::SketchEdge(sid, eid)) = edge_prov {
+                let near = if crossing_reach_shared {
+                    on_edge
+                } else {
+                    wsegment(seg.a, seg.b, SnapKind::Intersection)
+                };
+                if let Some((_, ang, _)) = near {
+                    crossing_pool.push(CrossingEdge {
+                        a: seg.a,
+                        b: seg.b,
+                        ang,
+                        owner: EdgeOwner::Sketch(sid),
+                        edge: CrossedEdge::Sketch(sid, eid),
+                    });
+                }
+            }
+            if let Some((pos, ang, depth)) = on_edge
                 && !pos.approx_eq(mid, tol::POINT_MERGE)
             {
                 candidates.push((SnapKind::OnEdge, ang, depth, pos, edge_prov, None));
             }
+        }
+
+        // --- Edge × edge crossings between different owners (#51b) ---
+        // Separate Objects never merge, so where an edge of one passes
+        // through an edge of another there is no vertex — yet the crossing
+        // is exactly what a user drawing between them aims at. Every pair of
+        // pooled edges (above: the ones through the pick cone) from
+        // DIFFERENT owners — two Objects, two placements, an Object and a
+        // sketch, two sketches — is tested for a true 3D crossing
+        // (`segment_crossing`: closest points within `tol::POINT_MERGE`,
+        // strictly inside both edges, since an endpoint has its own
+        // Endpoint snap). Edges of one owner never pair: the kernel splits
+        // edges within an Object or a sketch, so a crossing there is
+        // already a vertex. Snapped as `Intersection`, the same tier as the
+        // guide and axis crossings, with both edges as provenance.
+        //
+        // At most `CROSSING_PAIR_CAP` steps are taken, nearest edges first:
+        // the pool is ordered by each edge's angular distance from the ray
+        // (stable, so ties keep emission order and the result is
+        // deterministic), and every pair among the first `j` edges is
+        // tested before any pair involving edge `j + 1`. Only cross-owner
+        // pairs are visited (`walk_cross_owner_pairs`), so a dense spot of
+        // one Object costs nothing here. A crossing in the cone lies on two
+        // edges near the ray, so in a dense spot the crossing under the
+        // cursor is still found; what the cap leaves untested is counted
+        // and traced, never dropped silently.
+        let two_owners = crossing_pool
+            .first()
+            .is_some_and(|first| crossing_pool.iter().any(|e| e.owner != first.owner));
+        if two_owners {
+            crossing_pool.sort_by(|x, y| x.ang.total_cmp(&y.ang));
+        }
+        let walk = walk_cross_owner_pairs(&crossing_pool, CROSSING_PAIR_CAP, |e, f| {
+            if let Some(p) = segment_crossing(e.a, e.b, f.a, f.b)
+                && let Some((ang, depth)) = wcone(p, SnapKind::Intersection)
+            {
+                candidates.push((
+                    SnapKind::Intersection,
+                    ang,
+                    depth,
+                    p,
+                    Some(Provenance::Crossing(e.edge, f.edge)),
+                    None,
+                ));
+            }
+        });
+        if walk.steps > 0 {
+            let mut stats = self.crossing_stats.get();
+            stats.pairs_tested += walk.tested as u64;
+            stats.pair_steps += walk.steps as u64;
+            if walk.skipped > 0 {
+                stats.queries_capped += 1;
+                stats.pairs_skipped += walk.skipped as u64;
+                tracing::debug!(
+                    target: "inference::crossings",
+                    edges = crossing_pool.len(),
+                    skipped = walk.skipped,
+                    cap = CROSSING_PAIR_CAP,
+                    "edge crossing pairs past the cap left untested",
+                );
+            }
+            self.crossing_stats.set(stats);
         }
 
         // --- Face candidates: OnFace (world, then placed) ---
@@ -2594,8 +2888,13 @@ impl InferenceScene {
         // never reads, and dividing a zero, would both be no-ops. An `OnFace`
         // weight is therefore inert by construction — the same reason
         // `SnapWeights::max_indexed` leaves OnFace out.
+        // Under `FacePolicy::Absent` faces are not targets at all.
+        let faces_are_targets = self.face_policy.faces_are_targets();
         let world_faces = face_ids.iter().map(|&fi| &self.faces[fi]);
-        for face in world_faces.chain(placed_faces.iter()) {
+        for face in world_faces
+            .chain(placed_faces.iter())
+            .filter(|_| faces_are_targets)
+        {
             if let Some((pos, ang, depth)) = face_cone_hit(
                 origin,
                 dir,
@@ -2624,7 +2923,7 @@ impl InferenceScene {
         // the fill can resolve to this exact region — letting the Select
         // tool's click match this occlusion-aware hover (interior fill → the
         // region; a nearer region beats a solid behind it).
-        for (sid, face) in &self.sketch_faces {
+        for (sid, face) in self.sketch_faces.iter().filter(|_| faces_are_targets) {
             if let Some((pos, ang, depth)) = face_cone_hit(
                 origin,
                 dir,
@@ -2792,8 +3091,8 @@ impl InferenceScene {
         // tool "visibly following the red axis" with "no snapping to the
         // edge whatsoever" — the only way onto it was a hard lock plus a
         // projected midpoint). Snapped as `Intersection`, the same tier a
-        // guide × edge crossing gets (between Midpoint and OnEdge: a real
-        // vertex at the crossing still wins), carrying the EDGE's
+        // guide × edge crossing gets (above Midpoint, below the exact named
+        // points: a real vertex at the crossing still wins), carrying the EDGE's
         // provenance (a tool may adopt the face that edge belongs to — the
         // crossing is a point ON that edge) and the axis DIRECTION (the cue
         // draws the axis-coloured line and names the axis, exactly like a
@@ -2881,8 +3180,8 @@ impl InferenceScene {
         // --- Guide-intersection candidates ---
         // The point where a guide line crosses a sketch segment, an object
         // edge, or another guide line is precisely why the guide was drawn —
-        // snap it as SnapKind::Intersection (between Midpoint and OnEdge in
-        // strength, so a real vertex at the crossing still wins). Like plain
+        // snap it as SnapKind::Intersection (above Midpoint, below the exact
+        // named points, so a real vertex at the crossing still wins). Like plain
         // guide snaps: no provenance, suppressed when guides are hidden.
         if self.guides_enabled {
             let guide_lines: Vec<(Point3, Vec3, kernel::GuideSpan)> = self
@@ -2954,18 +3253,29 @@ impl InferenceScene {
         // origin vertex, which lives on an EARLIER sketch's plane. Occlusion
         // culling below still rejects hidden ones, so the see-through
         // protection this filter was introduced for is preserved.
+        //
+        // Under a non-occluding face policy (X-ray, Wireframe) there is no
+        // see-through to protect against: hidden geometry is meant to be
+        // reached, through the face the tool is constrained to (SketchUp's
+        // Line tool snapping to an endpoint inside a solid in X-ray). So the
+        // precise point kinds pass exactly as `off_plane_points` lets them,
+        // and so do edges — but only for a query that opts in
+        // (`see_through_points`): a tool that drops such a snap onto its
+        // plane and discloses it. Every other query keeps the plain filter.
         if let Some(plane) = query.constraint_plane {
+            let see_through = query.see_through_points && !self.face_policy.occludes();
             candidates.retain(|c| {
+                let point_kind = matches!(
+                    c.0,
+                    SnapKind::Endpoint
+                        | SnapKind::Midpoint
+                        | SnapKind::Center
+                        | SnapKind::Quadrant
+                        | SnapKind::Intersection
+                );
                 plane.signed_distance(c.3).abs() <= tol::PLANE_DIST
-                    || (query.off_plane_points
-                        && matches!(
-                            c.0,
-                            SnapKind::Endpoint
-                                | SnapKind::Midpoint
-                                | SnapKind::Center
-                                | SnapKind::Quadrant
-                                | SnapKind::Intersection
-                        ))
+                    || ((query.off_plane_points || see_through) && point_kind)
+                    || (see_through && c.0 == SnapKind::OnEdge)
             });
         }
 
@@ -3254,8 +3564,9 @@ impl InferenceScene {
         //       `t_fallback` being meaningfully nonzero (`> POINT_MERGE`),
         //       since with the ray aimed exactly down the anchor's
         //       perpendicular the "side" is itself noise. ---
+        let occludes = self.face_policy.occludes();
         let winner = candidates.iter().copied().find(|c| {
-            if self.is_occluded(origin, c.3, index, source) {
+            if occludes && self.is_occluded(origin, c.3, index, source) {
                 return false;
             }
             match lock_ctx {
@@ -3301,8 +3612,13 @@ impl InferenceScene {
                 if let Some((kind, _ang, _depth, pos, prov, _cdir)) = winner.as_ref() {
                     // A candidate snapped: project its position onto the locked line.
                     let projected = project_onto_line(anchor, lock_dir, *pos);
-                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
-                        Provenance::split(*prov);
+                    let (
+                        source,
+                        sketch_source,
+                        sketch_region_source,
+                        sketch_curve_source,
+                        crossed_edge,
+                    ) = Provenance::split(*prov);
                     Some(Snap {
                         position: projected,
                         kind: *kind,
@@ -3312,6 +3628,7 @@ impl InferenceScene {
                         sketch_curve_source,
                         direction: Some(lock_dir),
                         projected_from: Some(*pos),
+                        crossed_edge,
                     })
                 } else {
                     // Nothing snapped: the directional fallback (`fall`, the
@@ -3336,6 +3653,7 @@ impl InferenceScene {
                         sketch_curve_source: None,
                         direction: Some(lock_dir),
                         projected_from: None,
+                        crossed_edge: None,
                     })
                 }
             }
@@ -3343,8 +3661,13 @@ impl InferenceScene {
                 // No lock (or lock with no anchor): return the top-ranked
                 // candidate that is actually visible (see the occlusion cull above).
                 winner.map(|(kind, _ang, _depth, pos, prov, snap_dir)| {
-                    let (source, sketch_source, sketch_region_source, sketch_curve_source) =
-                        Provenance::split(prov);
+                    let (
+                        source,
+                        sketch_source,
+                        sketch_region_source,
+                        sketch_curve_source,
+                        crossed_edge,
+                    ) = Provenance::split(prov);
                     Snap {
                         position: pos,
                         kind,
@@ -3354,6 +3677,7 @@ impl InferenceScene {
                         sketch_curve_source,
                         direction: snap_dir,
                         projected_from: None,
+                        crossed_edge,
                     }
                 })
             }
@@ -3373,6 +3697,8 @@ impl InferenceScene {
     /// to the hit, so a caller can reject a hit beyond its render far plane —
     /// the raw world-ray otherwise "sees" solids the user cannot (a drag must
     /// never move an object off-screen).
+    ///
+    /// Always `None` under [`FacePolicy::Absent`]: faces are not targets.
     pub fn pick_face(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
         self.pick_face_from(ray, &|_| None)
     }
@@ -3385,7 +3711,20 @@ impl InferenceScene {
         source: MemberSource<'_>,
     ) -> Option<(SnapSource, f64)> {
         let index = self.spatial_index();
-        self.pick_face_impl(ray, Some(&index), source)
+        self.pick_face_impl(ray, Some(&index), source, true)
+    }
+
+    /// [`Self::pick_face_from`] that ignores the [`FacePolicy`]: the
+    /// nearest face the ray passes through, even in Wireframe. For camera
+    /// questions (where to orbit around), not editing ones — a face that is
+    /// no input target is still where the geometry is.
+    pub fn pick_face_geometry_from(
+        &self,
+        ray: &PickRay,
+        source: MemberSource<'_>,
+    ) -> Option<(SnapSource, f64)> {
+        let index = self.spatial_index();
+        self.pick_face_impl(ray, Some(&index), source, false)
     }
 
     /// Reference implementation of [`pick_face`](Self::pick_face) with the
@@ -3394,7 +3733,7 @@ impl InferenceScene {
     /// part of the supported API.
     #[doc(hidden)]
     pub fn pick_face_linear(&self, ray: &PickRay) -> Option<(SnapSource, f64)> {
-        self.pick_face_impl(ray, None, &|_| None)
+        self.pick_face_impl(ray, None, &|_| None, true)
     }
 
     /// Shared body of `pick_face`/`pick_face_linear`. The indexed superset
@@ -3406,7 +3745,11 @@ impl InferenceScene {
         ray: &PickRay,
         index: Option<&SceneIndex>,
         source: MemberSource<'_>,
+        respect_policy: bool,
     ) -> Option<(SnapSource, f64)> {
+        if respect_policy && !self.face_policy.faces_are_targets() {
+            return None;
+        }
         let dir = ray.direction.normalized().ok()?;
         let origin = ray.origin;
         let face_ids: Vec<usize> = match index {
@@ -4147,6 +4490,166 @@ fn line_segment_intersection(o: Point3, d: Vec3, a: Point3, b: Point3) -> Option
     Some(on_seg)
 }
 
+/// Who owns an edge, for the edge × edge crossing test: edges pair only
+/// across owners. A placed edge's owner is its placement (index into
+/// `InferenceScene::placements`), so two placements of one member — or two
+/// members of one instance — are separate geometry, as they are to the
+/// kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EdgeOwner {
+    World(ObjectId),
+    Placement(usize),
+    Sketch(SketchId),
+}
+
+/// One edge in a query's crossing pool (see `resolve_impl`).
+#[derive(Debug, Clone, Copy)]
+struct CrossingEdge {
+    a: Point3,
+    b: Point3,
+    /// The edge's angular distance from the pick ray (its OnEdge metric):
+    /// the order pairs are tested in.
+    ang: f64,
+    owner: EdgeOwner,
+    edge: CrossedEdge,
+}
+
+/// How many pairs of `pool` have different owners: all pairs, less those
+/// within each owner's group.
+fn cross_owner_pairs(pool: &[CrossingEdge]) -> usize {
+    let mut owners: Vec<EdgeOwner> = pool.iter().map(|e| e.owner).collect();
+    owners.sort_unstable();
+    let pairs = |n: usize| n * n.saturating_sub(1) / 2;
+    let same: usize = owners
+        .chunk_by(|x, y| x == y)
+        .map(|group| pairs(group.len()))
+        .sum();
+    pairs(owners.len()) - same
+}
+
+/// What [`walk_cross_owner_pairs`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PairWalk {
+    /// Cross-owner pairs visited.
+    tested: usize,
+    /// Loop steps taken: every pair visited, plus every step over a run of
+    /// the later edge's own owner. Bounded by the cap.
+    steps: usize,
+    /// Cross-owner pairs the cap left unvisited (0 when the walk ran to
+    /// its end).
+    skipped: usize,
+}
+
+/// Visits the cross-owner pairs `(e, f)` of `pool` (`e` before `f`) in
+/// nearest-first order: every pair among the first `j` edges before any
+/// pair with edge `j + 1`, and the earlier edge ascending within those. At
+/// most `cap` steps are taken, and every step counts: a pair visited, or a
+/// skip over a run of `f`'s own owner.
+///
+/// The pool is cut into maximal runs of one owner, and edge `f` walks the
+/// runs before its own, stepping over those of its owner whole. Two
+/// neighboring runs never share an owner, so the runs `f` steps over number
+/// at most one more than the other-owner runs it visits, and the walk costs
+/// at most `2 * pairs + edges` steps, never the `edges²` of every pair. A
+/// pool of one owner returns at once, with no step taken.
+fn walk_cross_owner_pairs(
+    pool: &[CrossingEdge],
+    cap: usize,
+    mut visit: impl FnMut(&CrossingEdge, &CrossingEdge),
+) -> PairWalk {
+    let mut walk = PairWalk {
+        tested: 0,
+        steps: 0,
+        skipped: 0,
+    };
+    let Some(first) = pool.first() else {
+        return walk;
+    };
+    if pool.iter().all(|e| e.owner == first.owner) {
+        return walk;
+    }
+    // Maximal runs of one owner, as `start..end` index ranges.
+    let mut runs: Vec<std::ops::Range<usize>> = Vec::new();
+    for (i, e) in pool.iter().enumerate() {
+        match runs.last_mut() {
+            Some(r) if pool[r.start].owner == e.owner => r.end = i + 1,
+            _ => runs.push(i..i + 1),
+        }
+    }
+    for (r, run) in runs.iter().enumerate() {
+        let owner = pool[run.start].owner;
+        for f in &pool[run.clone()] {
+            for earlier in &runs[..r] {
+                if walk.steps == cap {
+                    walk.skipped = cross_owner_pairs(pool) - walk.tested;
+                    return walk;
+                }
+                if pool[earlier.start].owner == owner {
+                    walk.steps += 1;
+                    continue;
+                }
+                for e in &pool[earlier.clone()] {
+                    if walk.steps == cap {
+                        walk.skipped = cross_owner_pairs(pool) - walk.tested;
+                        return walk;
+                    }
+                    walk.steps += 1;
+                    walk.tested += 1;
+                    visit(e, f);
+                }
+            }
+        }
+    }
+    walk
+}
+
+/// Where segments `[a0, a1]` and `[b0, b1]` truly cross in 3D: their closest
+/// points lie within [`tol::POINT_MERGE`] of each other and strictly inside
+/// both segments — more than [`tol::POINT_MERGE`] from all four endpoints,
+/// since an endpoint already has its own Endpoint snap. Returns the
+/// midpoint of the two closest points. `None` for parallel (including
+/// collinear, overlapping) or degenerate segments, which have no single
+/// crossing.
+fn segment_crossing(a0: Point3, a1: Point3, b0: Point3, b1: Point3) -> Option<Point3> {
+    let da = a1 - a0;
+    let db = b1 - b0;
+    let aa = da.dot(da);
+    let bb = db.dot(db);
+    if aa < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH
+        || bb < tol::NORMALIZE_MIN_LENGTH * tol::NORMALIZE_MIN_LENGTH
+    {
+        return None; // degenerate segment
+    }
+    let ab = da.dot(db);
+    // denom / (aa·bb) = sin²θ — the same parallel floor as
+    // `line_line_intersection`.
+    let denom = aa * bb - ab * ab;
+    if denom < aa * bb * tol::NORMALIZE_MIN_LENGTH {
+        return None;
+    }
+    let w = a0 - b0;
+    let aw = da.dot(w);
+    let bw = db.dot(w);
+    let s = (ab * bw - bb * aw) / denom;
+    let t = (aa * bw - ab * aw) / denom;
+    if !(0.0..=1.0).contains(&s) || !(0.0..=1.0).contains(&t) {
+        return None; // the lines' closest approach is off a segment
+    }
+    let pa = a0 + da * s;
+    let pb = b0 + db * t;
+    if (pa - pb).length() > tol::POINT_MERGE {
+        return None; // skew: the edges pass near, not through, each other
+    }
+    let p = midpoint(pa, pb);
+    if [a0, a1, b0, b1]
+        .iter()
+        .any(|&end| p.approx_eq(end, tol::POINT_MERGE))
+    {
+        return None; // at an endpoint: the Endpoint snap covers it
+    }
+    Some(p)
+}
+
 /// The point where two infinite lines cross, or `None` when parallel or
 /// skew beyond [`tol::POINT_MERGE`]. Returns the midpoint of the closest
 /// pair (exact crossing → the crossing itself).
@@ -4418,9 +4921,11 @@ mod tests {
         // (see `rank_groups_coarsen_the_declaration_order_without_reordering_it`).
         assert!(SnapKind::Endpoint < SnapKind::Center);
         assert!(SnapKind::Center < SnapKind::Quadrant);
-        assert!(SnapKind::Quadrant < SnapKind::Midpoint);
-        assert!(SnapKind::Midpoint < SnapKind::Intersection);
-        assert!(SnapKind::Intersection < SnapKind::Tangent);
+        // A crossing outranks a midpoint (midpoints are on every edge,
+        // crossings are rare), but stays below the exact named points.
+        assert!(SnapKind::Quadrant < SnapKind::Intersection);
+        assert!(SnapKind::Intersection < SnapKind::Midpoint);
+        assert!(SnapKind::Midpoint < SnapKind::Tangent);
         // OnGuide then OnAxis sit between Tangent and OnEdge, in that order
         // (tool-parity playtest-2 review finding D): a deliberately-placed
         // guide outranks an INFERRED soft-axis cue, which in turn still
@@ -4597,8 +5102,249 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         assert!(scene.resolve(&query).is_none());
+    }
+
+    #[test]
+    fn segment_crossing_finds_only_true_interior_crossings() {
+        let p = Point3::new;
+        // A true crossing, off both midpoints, in a tilted frame.
+        let x = segment_crossing(
+            p(0.0, 0.0, 0.0),
+            p(2.0, 2.0, 2.0),
+            p(0.5, 0.5, -1.0),
+            p(0.5, 0.5, 3.0),
+        )
+        .expect("crosses at (0.5, 0.5, 0.5)");
+        assert!(x.approx_eq(p(0.5, 0.5, 0.5), tol::POINT_MERGE), "{x:?}");
+        // Skew by 1e-6: no crossing.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(0.5, 1e-6, -1.0),
+                p(0.5, 1e-6, 1.0),
+            ),
+            None
+        );
+        // The lines cross, but off the second segment.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(0.5, 0.0, 0.5),
+                p(0.5, 0.0, 1.0),
+            ),
+            None
+        );
+        // A T: the second segment ENDS on the first one's interior.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(0.5, 0.0, 0.0),
+                p(0.5, 0.0, 1.0),
+            ),
+            None
+        );
+        // Two edges sharing an endpoint.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(2.0, 1.0, 0.0),
+            ),
+            None
+        );
+        // Collinear and overlapping: no single crossing.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(2.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+                p(3.0, 0.0, 0.0),
+            ),
+            None
+        );
+        // Degenerate.
+        assert_eq!(
+            segment_crossing(
+                p(0.0, 0.0, 0.0),
+                p(0.0, 0.0, 0.0),
+                p(-1.0, 0.0, 0.0),
+                p(1.0, 0.0, 0.0),
+            ),
+            None
+        );
+    }
+
+    proptest! {
+        /// Two segments built to pass through a common interior point `p`
+        /// cross there, in either argument order; nudged apart along their
+        /// common normal by 1e-6 they do not.
+        #[test]
+        fn segment_crossing_recovers_a_built_crossing(
+            p in (-5.0f64..5.0, -5.0f64..5.0, -5.0f64..5.0),
+            u in (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            v in (-1.0f64..1.0, -1.0f64..1.0, -1.0f64..1.0),
+            s in 0.05f64..0.95,
+            t in 0.05f64..0.95,
+            len_a in 0.1f64..4.0,
+            len_b in 0.1f64..4.0,
+        ) {
+            let p = Point3::new(p.0, p.1, p.2);
+            let u = Vec3::new(u.0, u.1, u.2);
+            let v = Vec3::new(v.0, v.1, v.2);
+            let n = u.cross(v);
+            prop_assume!(u.length() > 0.1 && v.length() > 0.1);
+            // Well away from parallel.
+            prop_assume!(n.length() > 0.1 * u.length() * v.length());
+            let (u, v) = (u.normalized().unwrap(), v.normalized().unwrap());
+            let a0 = p - u * (s * len_a);
+            let a1 = p + u * ((1.0 - s) * len_a);
+            let b0 = p - v * (t * len_b);
+            let b1 = p + v * ((1.0 - t) * len_b);
+            let x = segment_crossing(a0, a1, b0, b1);
+            prop_assert!(x.is_some_and(|x| x.approx_eq(p, 1e-9)), "{:?}", x);
+            let y = segment_crossing(b0, b1, a0, a1);
+            prop_assert!(y.is_some_and(|y| y.approx_eq(p, 1e-9)), "{:?}", y);
+            let off = n.normalized().unwrap() * 1e-6;
+            prop_assert_eq!(segment_crossing(a0, a1, b0 + off, b1 + off), None);
+        }
+    }
+
+    #[test]
+    fn cross_owner_pairs_counts_only_pairs_across_owners() {
+        let edge = |owner| CrossingEdge {
+            a: Point3::new(0.0, 0.0, 0.0),
+            b: Point3::new(1.0, 0.0, 0.0),
+            ang: 0.0,
+            owner,
+            edge: CrossedEdge::Sketch(SketchId::default(), SketchEdgeId::default()),
+        };
+        let w = EdgeOwner::World(ObjectId::default());
+        let pool = [
+            edge(w),
+            edge(EdgeOwner::Placement(0)),
+            edge(w),
+            edge(EdgeOwner::Placement(1)),
+            edge(EdgeOwner::Sketch(SketchId::default())),
+        ];
+        // 5 edges = 10 pairs, less the one pair inside the World group.
+        assert_eq!(cross_owner_pairs(&pool), 9);
+        assert_eq!(cross_owner_pairs(&pool[..1]), 0);
+        assert_eq!(cross_owner_pairs(&[edge(w), edge(w)]), 0);
+    }
+
+    /// A pool edge owned by `owner`, its index in `ang` so a visit names it.
+    fn walk_edge(owner: EdgeOwner, i: usize) -> CrossingEdge {
+        CrossingEdge {
+            a: Point3::new(0.0, 0.0, 0.0),
+            b: Point3::new(1.0, 0.0, 0.0),
+            ang: i as f64,
+            owner,
+            edge: CrossedEdge::Sketch(SketchId::default(), SketchEdgeId::default()),
+        }
+    }
+
+    /// Every pair the walk visits, as pool indices, with its result.
+    fn walk_pairs(pool: &[CrossingEdge], cap: usize) -> (Vec<(usize, usize)>, PairWalk) {
+        let mut seen = Vec::new();
+        let walk = walk_cross_owner_pairs(pool, cap, |e, f| {
+            seen.push((e.ang as usize, f.ang as usize))
+        });
+        (seen, walk)
+    }
+
+    #[test]
+    fn the_pair_walk_does_no_work_with_one_owner() {
+        let w = EdgeOwner::World(ObjectId::default());
+        let pool: Vec<_> = (0..5000).map(|i| walk_edge(w, i)).collect();
+        let (seen, walk) = walk_pairs(&pool, CROSSING_PAIR_CAP);
+        assert!(seen.is_empty());
+        assert_eq!(
+            walk,
+            PairWalk {
+                tested: 0,
+                steps: 0,
+                skipped: 0
+            }
+        );
+        let (seen, walk) = walk_pairs(&[], CROSSING_PAIR_CAP);
+        assert!(seen.is_empty());
+        assert_eq!(walk.steps, 0);
+    }
+
+    /// Many edges of one owner and two foreign ones, wherever the foreign
+    /// two fall in the order: the walk visits exactly the cross-owner
+    /// pairs, in the order the all-pairs loop would test them, in at most
+    /// twice the pairs plus the edges steps (the all-pairs loop would take
+    /// about 125,000 here).
+    #[test]
+    fn the_pair_walk_visits_only_cross_owner_pairs_nearest_first() {
+        let w = EdgeOwner::World(ObjectId::default());
+        let (a, b) = (EdgeOwner::Placement(0), EdgeOwner::Placement(1));
+        let n = 500;
+        for (pa, pb) in [(0, 1), (n, n + 1), (0, n + 1), (n / 2, n / 3), (7, 8)] {
+            let pool: Vec<_> = (0..n + 2)
+                .map(|i| {
+                    let owner = if i == pa {
+                        a
+                    } else if i == pb {
+                        b
+                    } else {
+                        w
+                    };
+                    walk_edge(owner, i)
+                })
+                .collect();
+            let reference: Vec<(usize, usize)> = (1..pool.len())
+                .flat_map(|j| (0..j).map(move |i| (i, j)))
+                .filter(|&(i, j)| pool[i].owner != pool[j].owner)
+                .collect();
+            let (seen, walk) = walk_pairs(&pool, usize::MAX);
+            assert_eq!(seen, reference, "foreign at {pa}, {pb}");
+            assert_eq!(walk.tested, cross_owner_pairs(&pool));
+            assert_eq!(walk.tested, 2 * n + 1);
+            assert!(
+                walk.steps <= 2 * walk.tested + pool.len(),
+                "{} steps for {} pairs",
+                walk.steps,
+                walk.tested
+            );
+            assert_eq!(walk.skipped, 0);
+
+            // Under a cap, the walk is the same walk cut short: the first
+            // pairs of it, never more steps than the cap.
+            let (cut, walk) = walk_pairs(&pool, 300);
+            assert_eq!(walk.steps, 300);
+            assert_eq!(walk.skipped, reference.len() - cut.len());
+            assert!(walk.skipped > 0);
+            assert_eq!(cut, reference[..cut.len()], "foreign at {pa}, {pb}");
+            assert_eq!(walk.tested, cut.len());
+        }
+    }
+
+    /// Owners interleaved edge by edge (no run longer than one): every
+    /// step is a pair or a single skip, and a cap that lands exactly on the
+    /// last pair leaves nothing skipped.
+    #[test]
+    fn the_pair_walk_counts_every_step_and_only_caps_with_pairs_left() {
+        let pool: Vec<_> = (0..40)
+            .map(|i| walk_edge(EdgeOwner::Placement(i % 3), i))
+            .collect();
+        let (seen, full) = walk_pairs(&pool, usize::MAX);
+        assert_eq!(seen.len(), cross_owner_pairs(&pool));
+        let (_, exact) = walk_pairs(&pool, full.steps);
+        assert_eq!(exact, full);
+        assert_eq!(exact.skipped, 0);
+        let (_, short) = walk_pairs(&pool, full.steps - 1);
+        assert_eq!(short.steps, full.steps - 1);
+        assert_eq!(short.skipped, full.tested - short.tested);
+        assert_eq!(short.skipped, 1, "the last step of this walk is a pair");
     }
 
     #[test]
@@ -4942,6 +5688,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("a corner is within the cone");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -5011,6 +5758,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("something visible in the wide cone");
         assert!(
@@ -5034,6 +5782,7 @@ mod tests {
                 constraint_plane: Some(top),
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("an on-plane candidate (top face / its edges) remains");
         assert!(
@@ -5070,6 +5819,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the visible top face is under the cursor");
         assert_eq!(
@@ -5114,6 +5864,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("a visible +X-face corner is in the cone");
         assert_eq!(
@@ -5178,6 +5929,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the sub-face seen through the parent's hole is visible");
         assert!(
@@ -5211,6 +5963,7 @@ mod tests {
                 constraint_plane: Some(top),
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the on-plane top corner is still snappable");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -5879,6 +6632,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("X-axis point (5,0,0) is within the cone");
         assert_eq!(snap.kind, SnapKind::OnAxis, "kind should be OnAxis");
@@ -5910,6 +6664,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("origin is directly on the ray");
         assert_eq!(snap.kind, SnapKind::Endpoint, "origin snaps as Endpoint");
@@ -5942,6 +6697,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("cube vertex (1,0,0) is on this ray");
         assert_eq!(
@@ -5991,6 +6747,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("ray passes through the guide line");
         assert_eq!(snap.kind, SnapKind::OnGuide);
@@ -6027,6 +6784,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("ray points straight at the guide point");
         assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -6065,6 +6823,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("cube vertex and guide line are both on this ray");
         assert_eq!(
@@ -6092,6 +6851,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("cube edge midpoint and guide line are both on this ray");
         assert_eq!(
@@ -6142,6 +6902,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the guide line is on this ray");
         assert_eq!(free.kind, SnapKind::OnGuide);
@@ -6159,6 +6920,7 @@ mod tests {
             constraint_plane: Some(ground),
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         });
         assert!(
             constrained.is_none(),
@@ -6213,6 +6975,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("both the guide and the soft-axis line pass through this ray");
         assert_eq!(
@@ -6285,6 +7048,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         assert!(
             scene.resolve(&unscaled).is_none(),
@@ -6294,6 +7058,7 @@ mod tests {
         let widened = SnapQuery {
             soft_axis_aperture_scale: Some(2.0),
             off_plane_points: false,
+            see_through_points: false,
             ..unscaled
         };
         let snap = scene
@@ -6324,6 +7089,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         }
     }
 
@@ -6533,6 +7299,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         assert!(scene.resolve(&query).is_some());
 
@@ -6582,6 +7349,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("sketch endpoint is on this ray");
         assert_eq!(endpoint_snap.kind, SnapKind::Endpoint);
@@ -6603,6 +7371,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("sketch midpoint is on this ray");
         assert_eq!(mid_snap.kind, SnapKind::Midpoint);
@@ -6645,6 +7414,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
 
         // Midpoint: carries the sketch provenance.
@@ -6699,6 +7469,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         assert!(scene.resolve(&query).is_some());
 
@@ -6751,6 +7522,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
 
         let snap = scene
@@ -6827,6 +7599,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the guide crossing snaps");
         assert_eq!(snap.kind, SnapKind::Intersection);
@@ -6950,6 +7723,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("a snap over the region fill");
         assert_eq!(over_fill.kind, SnapKind::OnFace);
@@ -6987,6 +7761,7 @@ mod tests {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("a snap past the region edge");
         assert_eq!(past_edge.kind, SnapKind::Endpoint);
@@ -7106,6 +7881,7 @@ mod tests {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let snap = scene
             .resolve(&query)

@@ -57,7 +57,13 @@
  *     exactly that distance from A along the LIVE cursor direction (the
  *     same semantics as LineTool's typed segment length). Refused — buffer
  *     kept, gesture unchanged — when there's no cursor direction yet (mouse
- *     hasn't moved off A) or the typed distance is below ARC_MIN_CHORD_M.
+ *     hasn't moved off A, or points straight off a non-ground plane, so it
+ *     lands on A; a toast says which) or the typed distance is below
+ *     ARC_MIN_CHORD_M. On the ground, a cursor straight above or below A
+ *     (the Blue axis) is NOT flattened: the chord goes straight up and the
+ *     arc moves onto a vertical plane through it, exactly as a Line
+ *     re-homes (`_planeCursor`, `_placePlaneB`); a click there does the
+ *     same.
  *
  *   - Bulge stage (A, B placed): typed length sets |sagitta| to exactly that
  *     distance, on whichever side of the chord the cursor is CURRENTLY on
@@ -95,19 +101,19 @@ import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { V3 } from '../viewport/geoHelpers'
-import { facePlaneBasis, rayPlaneIntersect } from '../viewport/geoHelpers'
+import { facePlaneBasis } from '../viewport/geoHelpers'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { displayedLength, isFreePick, sagittaForDisplayedRadius } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { segmentLength, directionBetween } from './lineInput'
+import { segmentLength, directionBetween, rehomePlaneNormal } from './lineInput'
 import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
-import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
+import { drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, distanceOffPlane, FACE_PLANE_EPS_M, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane } from './faceDraw'
 import { PlanePin } from './planePin'
 import {
   ARC_MIN_CHORD_M,
@@ -133,6 +139,27 @@ export type OnMeasurement = (text: string) => void
 function flatBulgeHint(): string {
   return t`Pull out the bulge`
 }
+
+/** Toast for a typed chord length with no direction to apply it in: the
+ *  cursor is still on A (`_commitTypedPlaneChord`/`_commitTypedFaceChord`). */
+const ARC_NO_DIRECTION_MESSAGE = 'Move the cursor to point the arc, then type the length.'
+
+/** The same refusal when the cursor IS pointing, but straight off the arc's
+ *  plane, so dropped onto the plane it lands on A: a snap straight off a
+ *  non-ground plane, or a point straight over a ground A while an arrow
+ *  lock or a Shift pin holds the ground (the chosen plane holds, and those
+ *  stages offer no soft Blue axis from A — `snapConstraint` — so only a
+ *  real point straight over A gets here). An unlocked, unpinned ground A
+ *  never does: a cursor straight over it re-homes the arc (`_planeCursor`).
+ *  A click there gets the same toast (`_onPointerDownPlane`). An arrow key
+ *  re-locks the plane through A (chord stage only). */
+const ARC_OFF_PLANE_MESSAGE =
+  'An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length.'
+
+/** How far (metres) a snap may sit from straight over a ground A and still
+ *  count as on the Blue axis through it (`_isStraightOverA`) — the same
+ *  degenerate-segment line LineTool's `_isStraightOverAnchor` uses. */
+const STRAIGHT_OVER_EPS_M = 1e-9
 
 /** How the committed arc is closed (Alt cycles, in this order). */
 export type ArcCompletion = 'open' | 'pie' | 'segment'
@@ -166,6 +193,10 @@ type PlaneStage =
       target: SketchTarget
       a: V3
       natural: { plane: DrawPlane; target: SketchTarget }
+      /** Set when an arrow lock moved a FACE-anchored chord onto this plane
+       *  (GitHub #51): releasing the lock goes back to that face instead of
+       *  to `natural`. */
+      fromFace?: FaceChordStage
     }
   | {
       kind: 'bulge'
@@ -174,20 +205,28 @@ type PlaneStage =
       a: V3
       b: V3
       natural: { plane: DrawPlane; target: SketchTarget }
+      /** Carried from the chord stage so Esc back to it keeps the face. */
+      fromFace?: FaceChordStage
+      /** Set when B went straight up or down from a ground A (the Blue
+       *  axis, `_isStraightOverA`) and the gesture moved onto a vertical
+       *  plane through the chord (`_placePlaneB`): the chord stage's plane
+       *  and target before that, which Esc back to the chord restores. */
+      rehomedFrom?: { plane: DrawPlane; target: SketchTarget }
     }
 
 /** Face gesture: same stages, on a locked face plane. */
+type FaceChordStage = {
+  kind: 'chord'
+  object: bigint
+  face: bigint
+  normal: V3
+  /** A world-space point that lies on the face plane (the first click position) */
+  planePoint: V3
+  a: V3
+}
 type FaceStage =
   | { kind: 'idle' }
-  | {
-      kind: 'chord'
-      object: bigint
-      face: bigint
-      normal: V3
-      /** A world-space point that lies on the face plane (the first click position) */
-      planePoint: V3
-      a: V3
-    }
+  | FaceChordStage
   | {
       kind: 'bulge'
       object: bigint
@@ -429,27 +468,71 @@ export class ArcTool implements Tool {
    *  `[snap.x, snap.y, 0]` (no basis math, snap required) — the legacy fast
    *  path, bit-identical to before this module existed. On any other plane:
    *  the snap (already plane-constrained via `snapConstraint`) if present,
-   *  else ray∩plane. */
+   *  else ray∩plane.
+   *
+   *  One exception on the ground, mirroring LineTool's `_planeCursor`: in
+   *  the chord stage, a snap straight above or below A (the Blue axis, or
+   *  any point vertically over it — `_isStraightOverA`) keeps its height.
+   *  Flattened it would land on A itself, so a typed chord had no direction
+   *  and a click was dropped as a zero chord; kept whole, the chord goes
+   *  straight up and `_placePlaneB` moves the gesture onto a vertical plane
+   *  through it, as Line re-homes its segment. */
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
+    this._lastViewDir = ray.direction
+    this._cursorStraightOver = false
     if (plane.ground) {
       if (snap === null) return null
+      if (this._isStraightOverA(snap)) {
+        this._snapProjected = false
+        this._cursorStraightOver = true
+        return [snap.x, snap.y, snap.z]
+      }
       // Records whether the z about to be discarded was actually carrying
       // information — see `snapProjected`.
       this._snapProjected = snap.z !== 0
       return [snap.x, snap.y, 0]
     }
-    this._snapProjected = false
-    if (snap !== null) return [snap.x, snap.y, snap.z]
-    return pointOnPlane(ray, plane)
+    // A non-ground plane is frozen like a face: an off-plane snap (X-ray)
+    // drops onto it, disclosed (`cursorOnFrozenPlane`).
+    const at = cursorOnFrozenPlane(snap, ray, plane.origin, plane.normal)
+    this._snapProjected = at?.projected ?? false
+    return at?.point ?? null
   }
 
-  /** See `Tool.snapProjected`. Set by `_planeCursor`, which is where the
-   *  drawing plane's z actually replaces the snap's. */
+  /** Whether `snap` sits straight above or below a ground-plane chord
+   *  stage's A, with no arrow lock or Shift pin choosing the plane (an
+   *  explicit plane holds — `_planeCursor`). False in every other stage. */
+  private _isStraightOverA(snap: Snap): boolean {
+    if (this.planeStage.kind !== 'chord' || !this.planeStage.plane.ground) return false
+    if (this.idlePlaneLock !== null || this.pin.current !== null) return false
+    const { a } = this.planeStage
+    if (Math.hypot(snap.x - a[0], snap.y - a[1]) > STRAIGHT_OVER_EPS_M) return false
+    return Math.abs(snap.z - a[2]) > STRAIGHT_OVER_EPS_M
+  }
+
+  /** The last pointer ray's direction — the view `_rehomedChordPlane`
+   *  turns the vertical plane toward. */
+  private _lastViewDir: V3 | null = null
+
+  /** Whether the last `_planeCursor` kept a snap straight over a ground A
+   *  whole (`_isStraightOverA`) — the one case `_placePlaneB` re-homes. */
+  private _cursorStraightOver = false
+
+  /** `_cursorStraightOver` as it was for `_lastPlaneCursor`, so a typed
+   *  chord along that cursor re-homes exactly when a click there would. */
+  private _lastPlaneCursorStraightOver = false
+
+  /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
+   *  where the drawing plane replaces an off-plane snap (the ground drops its
+   *  height; a face or sketch plane drops it straight onto itself). */
   snapProjected(): boolean {
-    return this._snapProjected
+    // Only a gesture under way projects anything: once the stage is back to
+    // idle (a commit, Esc, a context change) the last verdict must not ride
+    // along on ordinary hover cues.
+    return this._snapProjected && (this.faceStage.kind !== 'idle' || this.planeStage.kind !== 'idle')
   }
 
-  /** Whether the last `_planeCursor` discarded a non-zero snap z. */
+  /** Whether the last `_planeCursor` / `_faceCursor` moved the snap onto its plane. */
   private _snapProjected = false
 
   /**
@@ -480,14 +563,14 @@ export class ArcTool implements Tool {
    * - Face mode, gesture in progress: return the already-locked face plane.
    * - Plane mode, gesture in progress on a NON-ground plane (sketch mode):
    *   same — return the frozen plane. Ground-anchored: no constraint
-   *   (today's behavior, unchanged).
+   *   plane; the chord stage passes A as the soft-axis anchor.
    * - Idle: pick the hovered face (if an eligible one is under the cursor)
    *   and return its plane so the FIRST-click endpoint lands precisely on
    *   the face; absent that, a top-level hover over a non-ground sketch
    *   returns ITS plane.
    * - Otherwise (ground mode): return null (unconstrained).
    */
-  snapConstraint(ray: Ray): { constraintPlane?: { point: [number, number, number]; normal: [number, number, number] } } | null {
+  snapConstraint(ray: Ray): { anchor?: [number, number, number]; constraintPlane?: { point: [number, number, number]; normal: [number, number, number] }; seeThroughPoints?: boolean } | null {
     if (this.faceStage.kind !== 'idle') {
       // Gesture in progress: lock to the established face plane
       return {
@@ -495,16 +578,31 @@ export class ArcTool implements Tool {
           point: this.faceStage.planePoint,
           normal: this.faceStage.normal,
         },
+        // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
+        // X-ray and Wireframe may offer hidden points through it.
+        seeThroughPoints: true,
       }
     }
 
     if (this.planeStage.kind !== 'idle') {
-      if (this.planeStage.plane.ground) return null
+      if (this.planeStage.plane.ground) {
+        // The chord stage on the ground offers the soft axes through A, as
+        // Line's anchored chain does: Red and Green along the ground, and
+        // Blue straight up, which `_planeCursor` keeps whole so the chord
+        // re-homes onto a vertical plane (`_placePlaneB`). Not under an
+        // arrow lock or Shift pin: that plane holds (`_isStraightOverA`),
+        // so a Blue snap would only flatten onto A.
+        const offersAxes = this.planeStage.kind === 'chord' && this.idlePlaneLock === null && this.pin.current === null
+        return offersAxes ? { anchor: this.planeStage.a } : null
+      }
       return {
         constraintPlane: {
           point: this.planeStage.plane.origin,
           normal: this.planeStage.plane.normal,
         },
+        // Dropped onto the plane and disclosed (`cursorOnFrozenPlane`), so
+        // X-ray and Wireframe may offer hidden points through it.
+        seeThroughPoints: true,
       }
     }
 
@@ -522,7 +620,7 @@ export class ArcTool implements Tool {
 
     const plane = this._idleHoverPlane(ray)
     if (!plane.ground) {
-      return { constraintPlane: { point: plane.origin, normal: plane.normal } }
+      return { constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: true }
     }
     return null
   }
@@ -635,6 +733,7 @@ export class ArcTool implements Tool {
    *  and Shift pin previews both draw through it) and, for the pin, the
    *  plane the next click would land on (`_idleHoverPlane`). */
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
+    this._snapProjected = false
     if (snap === null) return
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
@@ -746,6 +845,9 @@ export class ArcTool implements Tool {
       // Idle plane lock via arrow keys (design §5.2) — consumed by neither
       // hover nor preview, only by the next first click.
       if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+        // Keydown autorepeat would flip the lock on every repeat (a held
+        // arrow alternating plane and face); only the first press counts.
+        if (ev.repeat) return
         this.idlePlaneLock = nextIdlePlaneLock(this.idlePlaneLock, ev.key)
         this.pin.clear() // an arrow lock displaces a Shift pin, and vice versa
         // A fresh/changed lock has no tracked hover yet (design §6 bullet 1).
@@ -760,23 +862,50 @@ export class ArcTool implements Tool {
     // commits only on the third click). Scoped to the chord stage: once B is
     // also placed (bulge stage), the plane is pinned by BOTH A and B — an
     // arbitrary axis lock through A alone could no longer honestly contain
-    // B, so re-locking there is out of scope (see the module doc). Also
-    // scoped to plane mode, for the same face-plane reason every other draw
-    // tool's §2a block is.
-    if (
-      this.planeStage.kind === 'chord' &&
-      (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown')
-    ) {
-      const { a, natural } = this.planeStage
-      const next = nextGestureLockPlane(
-        this.idlePlaneLock, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext,
-      )
-      this.idlePlaneLock = next.lock
-      this.planeStage = { kind: 'chord', plane: next.plane, target: next.target, a, natural }
-      this._lastPlaneCursor = null
-      this._clearPreview()
-      this.onMeasurementCb('')
-      return
+    // B, so re-locking there is out of scope (see the module doc).
+    //
+    // A FACE-anchored chord takes the lock too (GitHub #51 — see
+    // RectangleTool's identical block): the gesture leaves the face for the
+    // locked plane through A, and releasing the lock puts it back on that
+    // face. Inside an entered object the face holds.
+    if (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft' || ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      // Keydown autorepeat would flip the lock on every repeat (a held
+      // arrow alternating plane and face); only the first press counts.
+      if (ev.repeat) return
+      if (this.faceStage.kind === 'chord') {
+        if (this._activeContext !== null) return
+        const fromFace = this.faceStage
+        const { a } = fromFace
+        const natural = groundNaturalTarget(this._editContext, a)
+        const next = nextGestureLockPlane(null, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext)
+        if (next.lock === null) return // Down with no lock: nothing to release
+        this.idlePlaneLock = next.lock
+        this.faceStage = { kind: 'idle' }
+        this.planeStage = { kind: 'chord', plane: next.plane, target: next.target, a, natural, fromFace }
+        this._lastFaceCursor = null
+        this._lastPlaneCursor = null
+        this._clearPreview()
+        this.onMeasurementCb('')
+        return
+      }
+      if (this.planeStage.kind === 'chord') {
+        const { a, natural, fromFace } = this.planeStage
+        const next = nextGestureLockPlane(
+          this.idlePlaneLock, ev.key, a, natural, getDrawingAxes(this.wasmScene), this._editContext,
+        )
+        this.idlePlaneLock = next.lock
+        if (next.lock === null && fromFace !== undefined) {
+          this.planeStage = { kind: 'idle' }
+          this.faceStage = fromFace
+        } else {
+          this.planeStage = { kind: 'chord', plane: next.plane, target: next.target, a, natural, fromFace }
+        }
+        this._lastPlaneCursor = null
+        this._lastFaceCursor = null
+        this._clearPreview()
+        this.onMeasurementCb('')
+        return
+      }
     }
 
     if (ev.key === 'Alt') {
@@ -828,8 +957,9 @@ export class ArcTool implements Tool {
   /** Esc steps back one stage: bulge → chord (A kept), chord → idle. */
   private _stepBack(): void {
     if (this.planeStage.kind === 'bulge') {
-      const { plane, target, a, natural } = this.planeStage
-      this.planeStage = { kind: 'chord', plane, target, a, natural }
+      const { a, natural, fromFace, rehomedFrom } = this.planeStage
+      const { plane, target } = rehomedFrom ?? this.planeStage
+      this.planeStage = { kind: 'chord', plane, target, a, natural, fromFace }
       this.typed = ''
       this._lastPlaneCursor = null
       this._lastSagittaSign = null
@@ -892,17 +1022,22 @@ export class ArcTool implements Tool {
 
   /** Chord stage (plane mode, ground or non-ground): place B at `distance`
    *  from A along the live cursor direction. Refused (buffer kept) with no
-   *  direction yet, or a sub-ARC_MIN_CHORD_M distance. */
+   *  direction yet, or a sub-ARC_MIN_CHORD_M distance; the no-direction
+   *  refusal says why. A Blue-axis hover over a ground A points straight up
+   *  (`_planeCursor`), and `_placePlaneB` re-homes the arc onto a vertical
+   *  plane through the chord. */
   private _commitTypedPlaneChord(distance: number): void {
     if (this.planeStage.kind !== 'chord') return
     if (distance < ARC_MIN_CHORD_M) return
-    const cursor = this._lastPlaneCursor
-    if (cursor === null) return
     const { a } = this.planeStage
-    const dir = directionBetween(a, cursor)
-    if (dir === null) return
+    const cursor = this._lastPlaneCursor
+    const dir = cursor === null ? null : directionBetween(a, cursor)
+    if (cursor === null || dir === null) {
+      this.onToast(cursor !== null && this._snapProjected ? ARC_OFF_PLANE_MESSAGE : ARC_NO_DIRECTION_MESSAGE)
+      return
+    }
     const endpoint = pointAlong(a, dir, distance)
-    this._placePlaneB(endpoint)
+    this._placePlaneB(endpoint, this._lastPlaneCursorStraightOver)
   }
 
   /** Bulge stage (plane mode): commit the arc with |sagitta| == `distance`,
@@ -939,10 +1074,12 @@ export class ArcTool implements Tool {
     if (this.faceStage.kind !== 'chord') return
     if (distance < ARC_MIN_CHORD_M) return
     const cursor = this._lastFaceCursor
-    if (cursor === null) return
     const { a } = this.faceStage
-    const dir = directionBetween(a, cursor)
-    if (dir === null) return
+    const dir = cursor === null ? null : directionBetween(a, cursor)
+    if (cursor === null || dir === null) {
+      this.onToast(ARC_NO_DIRECTION_MESSAGE)
+      return
+    }
     const endpoint = pointAlong(a, dir, distance)
     this._placeFaceB(endpoint)
   }
@@ -1094,6 +1231,7 @@ export class ArcTool implements Tool {
       return
     }
     this._lastPlaneCursor = cursor
+    this._lastPlaneCursorStraightOver = this._cursorStraightOver
 
     if (this.planeStage.kind === 'chord') {
       // Stage 2: rubber-band the chord A→cursor, report chord length.
@@ -1176,10 +1314,17 @@ export class ArcTool implements Tool {
       const shown = displayedLength(segmentLength(this.planeStage.a, cursor))
       if (isFreePick(snap, this.planeStage.a) && shown >= ARC_MIN_CHORD_M) {
         this._lastPlaneCursor = cursor
+        this._lastPlaneCursorStraightOver = this._cursorStraightOver
         this._commitTypedPlaneChord(shown)
         return
       }
-      this._placePlaneB(cursor)
+      // A snap dropped onto the plane right at A (straight over it, on a
+      // plane that holds) is refused aloud, not dropped as a zero chord.
+      if (this._snapProjected && segmentLength(this.planeStage.a, cursor) < ARC_MIN_CHORD_M) {
+        this.onToast(ARC_OFF_PLANE_MESSAGE)
+        return
+      }
+      this._placePlaneB(cursor, this._cursorStraightOver)
       return
     }
 
@@ -1215,17 +1360,44 @@ export class ArcTool implements Tool {
 
   /** Place chord endpoint B (plane mode) — shared by the pointer-click and
    *  typed (`_commitTypedPlaneChord`) paths. Ignores a degenerate
-   *  (sub-ARC_MIN_CHORD_M) chord. */
-  private _placePlaneB(b: V3): void {
+   *  (sub-ARC_MIN_CHORD_M) chord. `straightOver`: B came from a cursor
+   *  `_planeCursor` kept straight over a ground A (`_isStraightOverA`) —
+   *  the only case that re-homes. Any other B stays on the frozen plane,
+   *  even one a hair off it (`cursorOnFrozenPlane` passes a snap within its
+   *  own tolerance through unprojected). */
+  private _placePlaneB(b: V3, straightOver: boolean): void {
     if (this.planeStage.kind !== 'chord') return
-    const { plane, target, a, natural } = this.planeStage
+    const { plane, target, a, natural, fromFace } = this.planeStage
     if (segmentLength(a, b) < ARC_MIN_CHORD_M) return
-    this.planeStage = { kind: 'bulge', plane, target, a, b, natural }
+    // B straight over a ground A (`_planeCursor`) has left the ground: the
+    // bulge continues on a vertical plane through the chord.
+    if (straightOver) {
+      const rehomed = this._rehomedChordPlane(a, b)
+      this.planeStage = {
+        kind: 'bulge', plane: rehomed.plane, target: rehomed.target, a, b, natural, fromFace,
+        rehomedFrom: { plane, target },
+      }
+    } else {
+      this.planeStage = { kind: 'bulge', plane, target, a, b, natural, fromFace }
+    }
     this.typed = ''
     this._lastPlaneCursor = null
     this._lastSagittaSign = null
     this._clearPreview()
     this.onMeasurementCb('')
+  }
+
+  /** The plane a chord that left its frozen plane moves onto (only a chord
+   *  straight off the ground reaches here — see `_planeCursor`): through A,
+   *  holding the chord, turned toward the view — the plane LineTool's
+   *  `_rehomeChain` picks for a first segment (`rehomePlaneNormal` with no
+   *  previous direction). */
+  private _rehomedChordPlane(a: V3, b: V3): { plane: DrawPlane; target: SketchTarget } {
+    const dir = directionBetween(a, b) ?? [0, 0, 1]
+    const normal = rehomePlaneNormal(dir, null, this._lastViewDir ?? [0, 0, -1])
+    const { u, v } = facePlaneBasis(normal) ?? { u: [1, 0, 0] as V3, v: [0, 1, 0] as V3 }
+    const plane: DrawPlane = { origin: a, normal, u, v, ground: isGroundPlane(a, normal) }
+    return { plane, target: { kind: 'plane', plane, instance: this._activeInstance } }
   }
 
   /** The faceted ground-plane polyline for chord a→b with sagitta s (z=0). */
@@ -1392,11 +1564,9 @@ export class ArcTool implements Tool {
   private _faceCursor(snap: Snap | null, ray: Ray): V3 | null {
     if (this.faceStage.kind === 'idle') return null
     const { planePoint, normal } = this.faceStage
-    if (snap !== null) {
-      const p: V3 = [snap.x, snap.y, snap.z]
-      if (Math.abs(distanceOffPlane(p, planePoint, normal)) <= FACE_PLANE_EPS_M) return p
-    }
-    return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
+    const at = cursorOnFrozenPlane(snap, ray, planePoint, normal)
+    this._snapProjected = at?.projected ?? false
+    return at?.point ?? null
   }
 
   /** In-plane (u,v) signed sagitta of `cursor` relative to the chord a→b on

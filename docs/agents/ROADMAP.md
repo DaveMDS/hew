@@ -462,7 +462,13 @@ below.
   through a gesture's anchor — crosses an edge, the crossing itself snaps
   (an intersection carrying the edge and the axis), so dragging along an
   axis reaches the far edge of a face instead of sliding past it on the
-  axis line. Candidates within a pixel of each other on screen rank by
+  axis line. Where edges of two separate owners (Objects, component
+  placements, sketches) truly cross in 3D, the crossing snaps too, as an
+  intersection carrying both edges: separate Objects never merge, so
+  nothing else puts a point there. Only the edges through the pick cone
+  are paired, at most 2,000 pairs a query (past that the query offers no
+  crossing and counts the skip), and screen-space crossings of edges that
+  only overlap on screen are not offered. Candidates within a pixel of each other on screen rank by
   depth, nearest first, so a stack of corners seen from a nearly-vertical
   Top view — top plate, sole plate, slab — resolves to the one in front
   rather than to whichever the camera's slight tilt happens to lean toward.

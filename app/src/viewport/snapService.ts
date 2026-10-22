@@ -208,6 +208,7 @@ export class SnapService {
     offPlanePoints: boolean,
     softAxisApertureScale?: number,
     pick?: boolean,
+    seeThroughPoints?: boolean,
   ): Snap | null {
     try {
       const [ox, oy, oz] = ray.origin
@@ -226,6 +227,7 @@ export class SnapService {
         softAxisApertureScale ?? null,
         offPlanePoints,
         pick ?? false,
+        seeThroughPoints ?? false,
       )
       return result !== undefined ? snapJsToSnap(result) : null
     } catch (err) {
@@ -304,6 +306,13 @@ export class SnapService {
      * midpoint is 10 px away.
      */
     pick?: boolean,
+    /**
+     * The tool drops an off-plane snap onto its `constraintPlane` and says
+     * so ("projected"), so in X-ray and Wireframe hidden points and edges
+     * behind the face it is held to may be offered (the kernel's
+     * `see_through_points`). Unset: the plain plane filter in every mode.
+     */
+    seeThroughPoints?: boolean,
   ): { snap: Snap | null; fromKernel: boolean } {
     const anchorArr = anchor !== undefined ? new Float64Array(anchor) : null
     const constraintPlaneArr =
@@ -321,7 +330,7 @@ export class SnapService {
     //    the hysteresis step below.
     let acquired = this.query(
       ray, SNAP_RADIUS_PX * apertureScale, viewportHeightPx, basis, anchorArr, lockAxis, constraintPlaneArr,
-      offPlanePoints ?? false, undefined, pick,
+      offPlanePoints ?? false, undefined, pick, seeThroughPoints,
     )
     if (facesOnly && acquired !== null && acquired.kind !== 'on-face') {
       acquired = null
@@ -347,6 +356,7 @@ export class SnapService {
         offPlanePoints ?? false,
         SOFT_AXIS_BREAK_APERTURE_SCALE,
         pick,
+        seeThroughPoints,
       )
       if (held !== null && sameTarget(held, this.lastSnap)) {
         this.lastSnap = held

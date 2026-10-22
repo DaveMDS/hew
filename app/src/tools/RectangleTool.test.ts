@@ -1,10 +1,11 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { RectangleTool } from './RectangleTool'
 import type { Snap } from './types'
 import { draftMock } from './draftMock'
 import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 
 /** A ray straight down (−Z) through world (x, y) — hits a z=1 top face at (x, y, 1). */
@@ -252,6 +253,11 @@ describe('RectangleTool — instance editing context (component-edit-parity.md p
     ;(scene.instance_pose as ReturnType<typeof vi.fn>).mockReturnValue(
       new Float64Array([1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0]),
     )
+    // The local face plane z = -5, which this pose (y' = -z) puts at world
+    // Y = 5: the plane the clicks below lie on. (The first click is now
+    // checked against the face's real plane, so the fixture's plane has to
+    // be the one its story describes.)
+    ;(scene.face_plane as ReturnType<typeof vi.fn>).mockReturnValue(new Float64Array([0, 0, -5, 0, 0, 1]))
     const { tool } = makeTool(scene)
     tool.setEditContext({ kind: 'instance', id: INSTANCE, component: COMPONENT })
     tool.setFaceEligibility((_object, instance) => instance === INSTANCE)
@@ -852,5 +858,113 @@ describe('RectangleTool — a clicked value is exactly the displayed value', () 
       const loop2 = draftLoop(scene2)
       expect(Math.max(...[0, 3, 6, 9].map((i) => loop2[i]))).toBe(0.00939876)
     })
+  })
+})
+
+// #51a audit: the rectangle's plane is fixed by the first corner and the
+// cursor only says which way each side grows, so a Blue hover straight over
+// a ground corner (flattened onto it) still draws the typed W,D on the
+// ground, growing +X/+Y like a typed size before any cursor movement.
+describe('RectangleTool — typed size with the cursor on the Blue axis (#51a)', () => {
+  it('draws the typed W,D on the ground plane instead of doing nothing', () => {
+    const scene = makeWasmScene()
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 0 }), rayThrough(1, 2))
+    tool.onPointerMove(makeSnap({ x: 1, y: 2, z: 3, kind: 'on-axis', direction: [0, 0, 1] }), rayThrough(1, 2))
+    for (const ch of '3,2') tool.onKey({ key: ch } as KeyboardEvent)
+    tool.onKey({ key: 'Enter' } as KeyboardEvent)
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const pts = draftLoop(scene)
+    const xs = [pts[0], pts[3], pts[6], pts[9]]
+    const ys = [pts[1], pts[4], pts[7], pts[10]]
+    const zs = [pts[2], pts[5], pts[8], pts[11]]
+    expect([Math.min(...xs), Math.max(...xs)]).toEqual([1, 4])
+    expect([Math.min(...ys), Math.max(...ys)]).toEqual([2, 4])
+    expect(zs).toEqual([0, 0, 0, 0])
+  })
+})
+
+describe('RectangleTool — X-ray: a hidden snap off the face drops onto it, disclosed (cursorOnFrozenPlane)', () => {
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  // Runs under the mode it is named for.
+  beforeEach(() => setPickRenderMode('xray'))
+  afterEach(() => setPickRenderMode('shaded'))
+
+  it('opts in to see-through points, lands on the point dropped onto the face (not the ray hit), says "projected", and clears it when idle', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), down(0, 0))
+    expect(tool.snapConstraint(down(0, 0))?.seeThroughPoints).toBe(true)
+    // Shaded's own case is unchanged: an on-face snap is taken exactly.
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5, z: 1, kind: 'endpoint' }), down(1, 0.5))
+    expect(tool.snapProjected()).toBe(false)
+    // A hidden midpoint 0.4 below the face, the cursor ray elsewhere.
+    const hidden = makeSnap({ x: 1, y: 0.5, z: 0.6, kind: 'midpoint' })
+    tool.onPointerMove(hidden, down(1.2, 0.5))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(hidden, down(1.2, 0.5))
+    const segs = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => c.slice(1, 7) as number[])
+    expect(segs.length).toBeGreaterThan(0)
+    for (const s of segs) {
+      expect(s[2]).toBeCloseTo(1, 12)
+      expect(s[5]).toBeCloseTo(1, 12)
+    }
+    // The far corner is the hidden point dropped straight onto the face.
+    const far = Array.from(draftLoop(scene)).slice(6, 9)
+    expect(far[0]).toBeCloseTo(1, 12)
+    expect(far[1]).toBeCloseTo(0.5, 12)
+
+    // Back to idle: no stale "projected" on the next ordinary hover.
+    expect(tool.snapProjected()).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 0.3, y: 0.3, z: 1, kind: 'on-face' }), down(0.3, 0.3))
+    expect(tool.snapProjected()).toBe(false)
+  })
+})
+
+describe('RectangleTool — X-ray: a hidden point that is no part of the face, clicked first, drops onto the face (firstPointOnFace)', () => {
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  // Runs under the mode it is named for.
+  beforeEach(() => setPickRenderMode('xray'))
+  afterEach(() => setPickRenderMode('shaded'))
+
+  it('the idle hover says "projected", the first click anchors ON the face plane, and the gesture stays on it', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    // A crossing 0.4 below the top face: no vertex or edge of the face, so
+    // no face is adopted through it.
+    const crossing = makeSnap({ x: 1, y: 0.5, z: 0.6, kind: 'intersection' })
+    tool.onPointerMove(crossing, down(1.2, 0.5))
+    expect(tool.snapProjected(), 'the hover says what the click will do').toBe(true)
+    tool.onPointerDown(crossing, down(1.2, 0.5))
+    expect(tool.snapProjected(), 'the click dropped it').toBe(true)
+    tool.onPointerDown(makeSnap({ x: 1.6, y: 0.9, z: 1, kind: 'on-face' }), down(1.6, 0.9))
+    const segs = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => c.slice(1, 7) as number[])
+    expect(segs.length).toBeGreaterThan(0)
+    for (const s of segs) {
+      expect(s[2]).toBeCloseTo(1, 12)
+      expect(s[5]).toBeCloseTo(1, 12)
+    }
+    // The rectangle's first corner is the crossing dropped onto the face.
+    expect(Array.from(draftLoop(scene)).slice(0, 3).map((v) => Number(v.toFixed(12)))).toEqual([1, 0.5, 1])
+
+    // An ordinary on-face hover is not "projected".
+    tool.onPointerMove(makeSnap({ x: 0.3, y: 0.3, z: 1, kind: 'on-face' }), down(0.3, 0.3))
+    expect(tool.snapProjected()).toBe(false)
+  })
+
+  it('the idle hover over a face opts in to hidden points only in X-ray', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    try {
+      for (const [mode, expected] of [['shaded', false], ['wireframe', false], ['xray', true]] as const) {
+        setPickRenderMode(mode)
+        expect(tool.snapConstraint(down(0.5, 0.5))?.seeThroughPoints ?? false, mode).toBe(expected)
+      }
+    } finally {
+      setPickRenderMode('shaded')
+    }
   })
 })

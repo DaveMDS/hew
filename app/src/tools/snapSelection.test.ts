@@ -462,6 +462,20 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
       .toMatchObject({ kind: 'object', id: 42n })
   })
 
+  it('in X-ray and Wireframe nothing occludes: the definition sketch behind the face is selectable', () => {
+    const scene = fakeScene({
+      drawn: { 0: lineThroughOrigin(4, OWNED_42) },
+      instanceEdge: { sketch: 31n, edge: 4n, depth: 9 },
+      face: { object: 42n, instance: 7n, depth: 5 },
+    })
+    const seeThrough = { ...deps(scene, INSTANCE_CTX, 100, WPP, eligible42), facesOcclude: false }
+    expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, seeThrough))
+      .toEqual(draft('draft-edge', INSTANCE_PLANE, K(4)))
+    // Shaded, said explicitly, keeps the face in the way.
+    const shaded = { ...deps(scene, INSTANCE_CTX, 100, WPP, eligible42), facesOcclude: true }
+    expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, shaded)).toMatchObject({ kind: 'object', id: 42n })
+  })
+
   it('the fallback solid pick is bounded by the AXIAL far plane, not the radial distance (FIX 2)', () => {
     // Off-centre ray (cos 0.6 with the camera forward): a VISIBLE solid at
     // RADIAL 150 sits at AXIAL 90 < far 100 → armed (the old radial-vs-far

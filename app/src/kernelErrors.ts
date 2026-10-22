@@ -393,6 +393,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Hew's own request to the model kernel named an axis it doesn't recognize. If this keeps happening, use Report Bug.`,
   BadFormat:
     msg`Hew's own request to the model kernel named an image format it doesn't recognize. If this keeps happening, use Report Bug.`,
+  BadRenderMode:
+    msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,
 }
 

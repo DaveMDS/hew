@@ -76,7 +76,7 @@ Turn on **Cut list page** and Hew appends a table of every part — each object 
 
 ## What prints and what doesn't
 
-Dimensions and text print at the size they show on screen. Guides are off by default; turn them on if you want them on the page. A section cut prints if one is active — but the section plane widget itself never does. Grid and axes are off by default and only offered in Standard mode. Selection highlights, hover states, and tool previews never print, in either mode — the page always shows the model, not your editing session.
+Dimensions and text print at the size they show on screen. Guides are off by default; turn them on if you want them on the page. A section cut prints if one is active — but the section plane widget itself never does. If View ▸ X-ray or Wireframe is on, the page shows the model that way (Scaled Line art then prints as a bitmap rather than vector line work). Grid and axes are off by default and only offered in Standard mode. Selection highlights, hover states, and tool previews never print, in either mode — the page always shows the model, not your editing session.
 
 Print preferences — paper, margins, style per mode, the last scale you used — are remembered on the machine you're printing from, not saved into the `.hew` file. The very first time, paper defaults to your operating system's own default on desktop, or to Letter in the US, Canada, Mexico, and the Philippines and A4 everywhere else.
 

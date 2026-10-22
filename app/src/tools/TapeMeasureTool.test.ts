@@ -703,6 +703,60 @@ describe('TapeMeasureTool — scoped-rescale arm gate (adversarial-review findin
     expect(onToast).toHaveBeenCalledTimes(1)
   })
 
+  // An edge crossing carries only the first crossed edge's provenance; the
+  // other edge through the same point may be outside the session, so a
+  // crossing never anchors a scoped rescale, at either end.
+  const crossing = (x: number) =>
+    makeSnap({ x, y: 0, z: 0, kind: 'intersection', elementKind: 'edge', object: 7n, element: 1n })
+  const inScope = () => ({ objectIds: new Set([7n]), instanceIds: new Set<bigint>(), sketchIds: new Set<bigint>() })
+
+  it('declines when the FIRST endpoint is an edge crossing, though its reported edge is in scope', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope(inScope())
+
+    tool.onPointerDown(crossing(0), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/outside the open group or component/i)
+  })
+
+  it('declines when the SECOND endpoint is an edge crossing, live and from the recall', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+    tool.setSessionScope(inScope())
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerMove(crossing(2), RAY)
+    typeAndEnter(tool, '3')
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(1)
+
+    // Measured with two clicks, then typed: the recalled arm declines too.
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    tool.onPointerMove(crossing(2), RAY)
+    tool.onPointerDown(crossing(2), RAY)
+    typeAndEnter(tool, '3')
+    expect(onRescaleArmed).not.toHaveBeenCalled()
+    expect(onToast).toHaveBeenCalledTimes(2)
+    expect(onToast.mock.calls[1][0]).toMatch(/outside the open group or component/i)
+  })
+
+  it('with no session open, a crossing arms the whole-model resize as before', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onRescaleArmed, onToast } = makeTool(scene)
+
+    tool.onPointerDown(crossing(0), RAY)
+    tool.onPointerMove(makeSnap({ x: 2, y: 0, z: 0, kind: 'endpoint', object: 7n }), RAY)
+    typeAndEnter(tool, '3')
+
+    expect(onRescaleArmed).toHaveBeenCalledTimes(1)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
   it('an INSTANCE-attributed endpoint (object reached through a placed component) is gated on the instance id, not the definition-local object id', () => {
     const { scene } = makeWasmScene()
     const { tool, onRescaleArmed } = makeTool(scene)
@@ -1707,5 +1761,95 @@ describe('TapeMeasureTool — a clicked distance is exactly the displayed distan
     } finally {
       setLengthUnit(prev)
     }
+  })
+})
+
+// #51b: where edges of two separate Objects pass through each other, the
+// engine offers the crossing as an `intersection` snap carrying the first
+// edge's provenance (and the second edge's, which the tool does not read).
+// It reaches Tape Measure through the ordinary snap pipeline, so the tool
+// starts from it like any other point on an edge.
+describe('TapeMeasureTool — starts from an edge-crossing snap (#51b)', () => {
+  // The reported two-box case: obj_9's top-back edge (along +X) crosses
+  // obj_7's front-left vertical edge here.
+  const CROSSING: [number, number, number] = [0.5001, 0.0714, 0.1826]
+  const CROSSING_XYZ = () => ({ x: CROSSING[0], y: CROSSING[1], z: CROSSING[2] })
+  const crossingSnap = (): Snap =>
+    makeSnap({
+      x: CROSSING[0], y: CROSSING[1], z: CROSSING[2],
+      kind: 'intersection', elementKind: 'edge', object: 9n, element: 3n,
+    })
+
+  it('measures from the crossing', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool, onMeasurement } = makeTool(scene, { measureOnly: true, onGesturePoint })
+
+    tool.onPointerDown(crossingSnap(), RAY)
+    expect(points[0]).toEqual([CROSSING])
+
+    // obj_7's top corner straight above the crossing.
+    const top = makeSnap({ x: CROSSING[0], y: CROSSING[1], z: 0.5, kind: 'endpoint' })
+    tool.onPointerMove(top, RAY)
+    tool.onPointerDown(top, RAY)
+    expect(points[1]).toEqual([CROSSING, [CROSSING[0], CROSSING[1], 0.5]])
+    expect(onMeasurement).toHaveBeenCalledWith(formatLength(0.5 - CROSSING[2]), false)
+  })
+
+  it('in the editor, measures from the crossing too instead of starting a parallel guide', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool, onGuideCreated, onMeasurement } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(crossingSnap(), RAY)
+    // The crossed edge is never looked up: the crossing is a point.
+    expect(scene.edge_endpoints).not.toHaveBeenCalled()
+    expect(points[0]).toEqual([CROSSING])
+    expect(tool.statusHint()).toMatch(/^Click the second point to read the distance/)
+
+    const top = makeSnap({ x: CROSSING[0], y: CROSSING[1], z: 0.5, kind: 'endpoint' })
+    tool.onPointerMove(top, RAY)
+    tool.onPointerDown(top, RAY)
+    expect(points[1]).toEqual([CROSSING, [CROSSING[0], CROSSING[1], 0.5]])
+    expect(onMeasurement).toHaveBeenCalledWith(formatLength(0.5 - CROSSING[2]), false)
+    expect(onGuideCreated).not.toHaveBeenCalled()
+  })
+
+  it('a crossing of sketch edges measures from the point as well', () => {
+    const { scene } = makeWasmScene()
+    const points: (readonly [number, number, number][])[] = []
+    const onGesturePoint = vi.fn((p: readonly [number, number, number][]) => points.push(p))
+    const { tool } = makeTool(scene, { onGesturePoint })
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2, z: 0, kind: 'intersection', elementKind: 'sketch-edge', sketch: 4n, element: 1n }), RAY)
+    expect(scene.sketch_edge_endpoints).not.toHaveBeenCalled()
+    expect(points[0]).toEqual([[1, 2, 0]])
+    expect(tool.statusHint()).toMatch(/^Click the second point to read the distance/)
+  })
+
+  it('a plain edge next to the crossing still starts a parallel guide', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ ...CROSSING_XYZ(), kind: 'on-edge', elementKind: 'edge', object: 9n, element: 3n }), RAY)
+    expect(scene.edge_endpoints).toHaveBeenCalledWith(9n, 3n)
+    expect(tool.statusHint()).toMatch(/^Click to place the parallel guide/)
+  })
+
+  it('hovering a crossing says the click measures from it; moving off it restores the plain hint', () => {
+    const { scene } = makeWasmScene()
+    const { tool } = makeTool(scene)
+    const idle = 'Click a point to measure from — or click an edge to drop a parallel guide.'
+
+    expect(tool.statusHint()).toBe(idle)
+    tool.onPointerMove(crossingSnap(), RAY)
+    expect(tool.statusHint()).toBe('Click to measure from the crossing.')
+    tool.onPointerMove(makeSnap({ ...CROSSING_XYZ(), kind: 'on-edge', elementKind: 'edge', object: 9n, element: 3n }), RAY)
+    expect(tool.statusHint()).toBe(idle)
+    tool.onPointerMove(crossingSnap(), RAY)
+    tool.onPointerMove(null, RAY)
+    expect(tool.statusHint()).toBe(idle)
   })
 })

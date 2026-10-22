@@ -1,9 +1,10 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { LineTool } from './LineTool'
 import type { Snap } from './types'
 import { setLengthUnit, getLengthUnit } from '../settings/units'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 import { draftMock } from './draftMock'
 
@@ -654,5 +655,105 @@ describe('LineTool — a clicked length is exactly the displayed length', () => 
     } finally {
       setLengthUnit(prev)
     }
+  })
+})
+
+describe('LineTool — X-ray: a hidden snap off the face chain drops onto it, disclosed', () => {
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  // Runs under the mode it is named for.
+  beforeEach(() => setPickRenderMode('xray'))
+  afterEach(() => setPickRenderMode('shaded'))
+  const segs = (scene: WasmScene) =>
+    (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls.map((c) => c.slice(1, 7) as number[])
+
+  it('a later segment lands on the hidden point dropped onto the face, with the "projected" cue', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    // The idle hover over the face opts in only in X-ray.
+    setPickRenderMode('xray')
+    try {
+      expect(tool.snapConstraint(down(0, 0))?.seeThroughPoints).toBe(true)
+    } finally {
+      setPickRenderMode('shaded')
+    }
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), down(0, 0))
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 1, kind: 'on-face' }), down(1, 0))
+    expect(tool.snapConstraint(down(1, 0))?.seeThroughPoints).toBe(true)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.4, z: 1, kind: 'on-face' }), down(1, 0.4))
+    expect(tool.snapProjected()).toBe(false)
+    const hidden = makeSnap({ x: 1, y: 0.5, z: 0.6, kind: 'midpoint' })
+    tool.onPointerMove(hidden, down(1.2, 0.5))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(hidden, down(1.2, 0.5))
+    const last = segs(scene).at(-1)!
+    expect(last.slice(3, 6).map((v) => Number(v.toFixed(12)))).toEqual([1, 0.5, 1])
+  })
+
+  it('the first segment discloses the ray hit that replaces an off-face snap', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), down(0, 0))
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5, z: 1, kind: 'on-face' }), down(1, 0.5))
+    expect(tool.snapProjected()).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 1, y: 0.5, z: 0.6, kind: 'midpoint' }), down(1.2, 0.5))
+    expect(tool.snapProjected()).toBe(true)
+  })
+})
+
+describe('LineTool — a hidden point that is no part of the face, clicked first, drops onto it; "projected" never outlives a gesture', () => {
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  // Runs under the mode it is named for.
+  beforeEach(() => setPickRenderMode('xray'))
+  afterEach(() => setPickRenderMode('shaded'))
+
+  it('the idle hover and the first click over a face drop a hidden crossing onto the face, disclosed', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    const crossing = makeSnap({ x: 1, y: 0.5, z: 0.6, kind: 'intersection' })
+    tool.onPointerMove(crossing, down(1.2, 0.5))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(crossing, down(1.2, 0.5))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(makeSnap({ x: 1.6, y: 0.9, z: 1, kind: 'on-face' }), down(1.6, 0.9))
+    const first = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls[0].slice(1, 7) as number[]
+    expect(first.slice(0, 3).map((v) => Number(v.toFixed(12)))).toEqual([1, 0.5, 1])
+    // The far end is the displayed value (rounded to the readout), on the face.
+    expect(first[5]).toBeCloseTo(1, 12)
+  })
+
+  it('the idle hover over a face opts in to hidden points only in X-ray', () => {
+    const scene = makeWasmScene({ pick: () => makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    try {
+      for (const [mode, expected] of [['shaded', false], ['wireframe', false], ['xray', true]] as const) {
+        setPickRenderMode(mode)
+        expect(tool.snapConstraint(down(0.5, 0.5))?.seeThroughPoints ?? false, mode).toBe(expected)
+      }
+    } finally {
+      setPickRenderMode('shaded')
+    }
+  })
+
+  it('after a ground chain closes on an off-plane click, the idle hover is not "projected"', () => {
+    const scene = {
+      ...makeWasmScene(),
+      ...draftMock({ regionsCreated: (n) => (n === 2 ? [1n] : []) }).members,
+    } as unknown as WasmScene
+    const { tool } = makeTool(scene)
+    const ground = (x: number, y: number) => makeSnap({ x, y, z: 0, kind: 'endpoint' })
+    tool.onPointerDown(ground(0, 0), down(0, 0))
+    tool.onPointerDown(ground(1, 0), down(1, 0))
+    tool.onPointerDown(ground(1, 1), down(1, 1))
+    // The closing click snaps a point above the start: its height drops.
+    const above = makeSnap({ x: 0, y: 0, z: 0.5, kind: 'endpoint' })
+    tool.onPointerMove(above, down(0, 0))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(above, down(0, 0))
+    expect(tool.snapProjected(), 'the chain closed: idle').toBe(false)
+    // The close itself clears the verdict, not only the idle gate in front
+    // of it: nothing stale is left for the next chain's first read.
+    expect((tool as unknown as { _snapProjected: boolean })._snapProjected).toBe(false)
+    tool.onPointerMove(ground(2, 2), down(2, 2))
+    expect(tool.snapProjected()).toBe(false)
   })
 })

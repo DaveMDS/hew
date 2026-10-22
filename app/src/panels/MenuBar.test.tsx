@@ -480,6 +480,26 @@ describe('MenuBar', () => {
     expect(onToggleGrid).toHaveBeenCalledOnce()
   })
 
+  it('shows checkmarks for X-ray and Wireframe independently', () => {
+    render(<MenuBar {...defaultProps} xray={true} wireframe={false} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('X-ray').closest('div')?.textContent).toContain('✓')
+    expect(screen.getByText('Wireframe').closest('div')?.textContent).not.toContain('✓')
+  })
+
+  it('calls onToggleXray / onToggleWireframe from the View menu', () => {
+    const onToggleXray = vi.fn()
+    const onToggleWireframe = vi.fn()
+    render(<MenuBar {...defaultProps} onToggleXray={onToggleXray} onToggleWireframe={onToggleWireframe} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('X-ray'))
+    expect(onToggleXray).toHaveBeenCalledOnce()
+    expect(onToggleWireframe).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    fireEvent.mouseDown(screen.getByText('Wireframe'))
+    expect(onToggleWireframe).toHaveBeenCalledOnce()
+  })
+
   // --- View > Section Cut (D3, section-plane-polish) ---
 
   it('shows no checkmark for Section Cut when no section is placed (sectionPlaneChecked=false)', () => {

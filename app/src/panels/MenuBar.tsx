@@ -161,6 +161,12 @@ export interface MenuBarProps {
   showGrid?: boolean
   /** Whether construction guides are shown (View ▸ Guides). */
   showGuides?: boolean
+  /** Whether X-ray is on (View ▸ X-ray). */
+  xray?: boolean
+  /** Whether Wireframe is on (View ▸ Wireframe). */
+  wireframe?: boolean
+  onToggleXray?: () => void
+  onToggleWireframe?: () => void
   /** Toggle the world axes. */
   onToggleAxes?: () => void
   /** Reset the movable drawing axes to world identity (View ▸ Reset Drawing Axes). */
@@ -747,6 +753,10 @@ export function MenuBar({
   onToggleAxes,
   onResetAxes,
   onToggleGrid,
+  xray = false,
+  wireframe = false,
+  onToggleXray,
+  onToggleWireframe,
   onToggleGuides,
   onDeleteGuides,
   sectionPlaneChecked = false,
@@ -1110,6 +1120,16 @@ export function MenuBar({
               checked={sectionPlaneChecked}
               disabled={!sectionPlaneExists}
               onClick={withClose(() => onToggleSectionActive?.())}
+            />
+            <CheckMenuItem
+              label="X-ray"
+              checked={xray}
+              onClick={withClose(() => onToggleXray?.())}
+            />
+            <CheckMenuItem
+              label="Wireframe"
+              checked={wireframe}
+              onClick={withClose(() => onToggleWireframe?.())}
             />
             <div style={SEPARATOR_STYLE} />
             {/* Panel toggles — HIG puts show/hide of interface panels in the

@@ -354,3 +354,56 @@ describe('LineTool — face chain points are the displayed length', () => {
     expect(path.slice(6)).toEqual([0.50043, 0.80077, 1])
   })
 })
+
+// #51b: where edges of two separate Objects pass through each other, the
+// engine offers the crossing as an `intersection` snap carrying both edges
+// (covered by the inference specs). It reaches the Line tool through the
+// ordinary snap pipeline, so a line starts from it exactly.
+describe('LineTool — starts from an edge-crossing snap (#51b)', () => {
+  // The reported two-box case: obj_9's top-back edge crosses obj_7's
+  // front-left vertical edge at CROSSING, on obj_7's front face (y = 0.0714).
+  const CROSSING: [number, number, number] = [0.5001, 0.0714, 0.1826]
+  const Y = 0.0714
+  /** Object 7's front face 3, which the pick ray to the crossing lands on. */
+  function frontFaceScene() {
+    const scene = makeScene()
+    scene.face_normal = vi.fn(() => new Float64Array([0, -1, 0]))
+    scene.face_plane = vi.fn(() => new Float64Array([0, Y, 0, 0, -1, 0]))
+    scene.face_boundary = vi.fn(() => new Float32Array([
+      0.5001, Y, 0, 1.2, Y, 0, 1.2, Y, 0.5, 0.5001, Y, 0.5,
+    ]))
+    return scene
+  }
+  const rayFromFront = (p: readonly [number, number, number]): Ray => ({
+    origin: [p[0], p[1] - 5, p[2]], direction: [0, 1, 0],
+  })
+
+  for (const [label, object, element] of [
+    ["obj_9's edge first", 9n, 21n],
+    ["obj_7's edge first", 7n, 11n],
+  ] as const) {
+    it(`the first segment starts exactly at the crossing (${label})`, () => {
+      const scene = frontFaceScene()
+      const { tool, onToast } = makeTool(scene)
+      const crossing = makeSnap({
+        x: CROSSING[0], y: CROSSING[1], z: CROSSING[2],
+        kind: 'intersection', object, element, elementKind: 'edge',
+      })
+      tool.onPointerDown(crossing, rayFromFront(CROSSING))
+      expect(tool.capturingInput()).toBe(true)
+
+      // Across obj_7's front face to a point on its right edge.
+      const end: [number, number, number] = [1.2, Y, 0.3]
+      tool.onPointerDown(
+        makeSnap({ x: end[0], y: end[1], z: end[2], kind: 'on-edge', object: 7n, element: 12n, elementKind: 'edge' }),
+        rayFromFront(end),
+      )
+      expect(onToast).not.toHaveBeenCalled()
+      expect(scene.log.segments).toHaveLength(1)
+      expect(scene.log.segments[0].slice(0, 3)).toEqual(CROSSING)
+      expect(scene.log.segments[0].slice(3, 6)).toEqual(end)
+      // Drawn on obj_7's front face, the face under the cursor.
+      expectFaceDrafts(scene, 1)
+    })
+  }
+})

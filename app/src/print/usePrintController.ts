@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { plural, t } from '@lingui/core/macro'
 import type { ViewportApi } from '../viewport/Viewport'
+import type { RenderMode } from '../viewport/SceneRenderer'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { lineArtSvgForTile, projectAnnotationOverlay, requestLineDrawing, type AnnotationOverlay, type LineDrawingData } from './lineArt'
 import { buildPrintPdf } from './pdf'
@@ -281,6 +282,14 @@ function selectionName(scene: WasmScene | null, sel: { objects: bigint[]; instan
   }
 }
 
+/** True when the window is in X-ray or Wireframe: the vector line drawing
+ *  knows nothing of either, so the job prints as a bitmap of what is shown.
+ *  An api without `getRenderMode` (older or fake) is normal rendering. */
+export function modeForcesBitmap(api: { getRenderMode?: () => RenderMode }): boolean {
+  const mode = api.getRenderMode?.()
+  return mode !== undefined && mode !== 'shaded'
+}
+
 export function usePrintController({ getViewportApi, getScene, getScenes, documentName, sceneName, printHost, savePdf, onPagesReady, compact = false }: PrintControllerProps): PrintController {
   const format = getLengthUnit()
   const [opts, setOptsState] = useState<PrintOptions>(() => {
@@ -429,6 +438,12 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
       const liveSection = api.getSectionState()
       const sectionState = sc !== null && sc.section !== undefined ? sc.section : liveSection
       const hidden = sc?.hidden ?? api.getHiddenIds()
+      // The vector drawing is a hidden-line projection of the edges and knows
+      // nothing of X-ray or Wireframe, so those modes print as a bitmap of
+      // what is on screen.
+      if (modeForcesBitmap(api)) {
+        return { svgs: [], drawing: null, annotations: null, fallbackNote: 'Line art printed as a bitmap — X-ray and Wireframe print as shown on screen.' }
+      }
       const res = requestLineDrawing({
         scene,
         camera: first,

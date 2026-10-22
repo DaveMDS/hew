@@ -7,8 +7,8 @@
 //! treats ids as opaque labels.
 
 use inference::{
-    ApertureMode, ElementRef, InferenceScene, POINT_SNAP_REACH, PickRay, SOFT_AXIS_SCREEN_REACH,
-    Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
+    ApertureMode, CrossedEdge, ElementRef, FacePolicy, InferenceScene, POINT_SNAP_REACH, PickRay,
+    SOFT_AXIS_SCREEN_REACH, Snap, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use kernel::{
     AxesFrame, Guide, GuideId, InstanceId, Object, ObjectId, Plane, Point3, SketchEdgeId, SketchId,
@@ -67,6 +67,7 @@ fn query(ray: PickRay, aperture: f64) -> SnapQuery {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     }
 }
 
@@ -303,6 +304,7 @@ fn cone_query(aperture: f64) -> SnapQuery {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     }
 }
 
@@ -317,6 +319,7 @@ fn cylinder_query(radius: f64) -> SnapQuery {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     }
 }
 
@@ -486,6 +489,7 @@ fn axis_lock_projects_onto_the_locked_line() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("lock with anchor always resolves");
     // On the X axis through the anchor:
@@ -520,6 +524,7 @@ fn moved_axes_frame_reorients_the_axis_lock() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("lock with anchor always resolves");
     // On the frame's red axis (world +Y through the anchor): x and z pinned
@@ -908,6 +913,7 @@ fn index_invalidation_tracks_every_mutation() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let indexed = scene.resolve(&q);
         assert_eq!(indexed, scene.resolve_linear(&q), "index went stale");
@@ -2939,6 +2945,7 @@ fn soft_axis_snaps_through_the_anchor_within_tolerance() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -2971,6 +2978,7 @@ fn soft_axis_does_not_capture_from_across_the_screen() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     assert_eq!(scene.resolve(&q), None);
 
@@ -3011,6 +3019,7 @@ fn soft_axis_crossing_an_edge_snaps_the_crossing_as_an_intersection() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("the crossing is under the cursor");
     assert_eq!(
@@ -3086,6 +3095,7 @@ fn a_vertex_at_an_axis_crossing_still_wins() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("the corner is dead-on");
     assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -3110,6 +3120,7 @@ fn soft_axis_does_not_snap_outside_its_tolerance() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     assert!(
         scene.resolve(&q).is_none(),
@@ -3161,6 +3172,7 @@ fn soft_axis_beats_a_coincident_on_face_hit() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -3194,6 +3206,7 @@ fn point_snaps_still_beat_soft_axis() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("the corner is dead-on");
     assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -3221,6 +3234,7 @@ fn hard_lock_wins_over_what_would_otherwise_be_soft_axis_inference() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -3258,6 +3272,7 @@ fn moved_axes_frame_reorients_soft_axis_candidates() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -3300,6 +3315,7 @@ fn edge_on_axis_produces_no_soft_candidate() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     assert!(
         scene.resolve(&q).is_none(),
@@ -3364,6 +3380,7 @@ fn soft_axis_admission_does_not_widen_with_an_oblique_camera() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     assert!(
         scene.resolve(&q).is_none(),
@@ -3408,6 +3425,7 @@ fn soft_axis_admits_a_dead_on_aim_at_a_multi_metre_drag_from_an_oblique_camera()
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -3466,6 +3484,7 @@ fn hard_lock_is_never_hijacked_by_an_unrelated_soft_axis_candidate() {
         constraint_plane: Some(plane),
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene
         .resolve(&q)
@@ -3560,6 +3579,7 @@ fn staircase_query(target: Point3, off_plane_points: bool) -> SnapQuery {
         ),
         soft_axis_aperture_scale: None,
         off_plane_points,
+        see_through_points: false,
     }
 }
 
@@ -3620,6 +3640,7 @@ fn staircase_third_segment_query(target: Point3) -> SnapQuery {
         ),
         soft_axis_aperture_scale: None,
         off_plane_points: true,
+        see_through_points: false,
     }
 }
 
@@ -3787,6 +3808,7 @@ fn locked_resolve_lands_on_the_gesture_side_for_both_signs_on_all_axes() {
                     constraint_plane: None,
                     soft_axis_aperture_scale: None,
                     off_plane_points: false,
+                    see_through_points: false,
                 })
                 .expect("a lock with an anchor always resolves");
             let station = (snap.position - anchor).dot(u);
@@ -3900,6 +3922,7 @@ fn a_locked_hover_on_geometry_resolves_its_station_from_every_camera() {
                     constraint_plane: None,
                     soft_axis_aperture_scale: None,
                     off_plane_points: false,
+                    see_through_points: false,
                 })
                 .expect("a lock with an anchor always resolves");
             assert_eq!(
@@ -3978,6 +4001,7 @@ fn locked_hover_on_the_anchor_resolves_the_anchor_exactly() {
                     constraint_plane: None,
                     soft_axis_aperture_scale: None,
                     off_plane_points: false,
+                    see_through_points: false,
                 })
                 .expect("a lock with an anchor always resolves");
             assert!(
@@ -4036,6 +4060,7 @@ fn locked_resolve_off_the_anchor_keeps_a_far_real_edge_at_its_true_station() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         })
         .expect("a lock with an anchor always resolves");
     assert_eq!(
@@ -4097,6 +4122,7 @@ fn collinear_guide_parameterized_near_the_camera_cannot_corrupt_a_locked_hover()
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         })
         .expect("a lock with an anchor always resolves");
     assert!(
@@ -4142,6 +4168,7 @@ fn unlocked_anchored_hover_matches_the_anchorless_answer_exactly() {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the world X axis is under this ray")
     };
@@ -4197,6 +4224,7 @@ fn locked_resolve_keeps_a_skew_guides_natural_clamp() {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("the guide is under this ray")
     };
@@ -4243,6 +4271,7 @@ fn collinear_guide_matches_the_fallback_at_an_aimed_station() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         })
         .expect("a lock with an anchor always resolves");
     assert!(
@@ -4298,6 +4327,7 @@ fn locked_hover_on_the_anchor_still_takes_real_geometry_at_its_true_station() {
                 constraint_plane: None,
                 soft_axis_aperture_scale: None,
                 off_plane_points: false,
+                see_through_points: false,
             })
             .expect("a lock with an anchor always resolves");
         // The blue drawing axis through the origin IS the lock line here and
@@ -4350,6 +4380,7 @@ fn locked_resolve_still_takes_a_sliding_candidate_at_its_real_station() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         })
         .expect("a lock with an anchor always resolves");
     assert_eq!(snap.kind, SnapKind::OnEdge);
@@ -4387,6 +4418,7 @@ fn off_plane_points_never_defeats_occlusion() {
             constraint_plane: Some(top),
             soft_axis_aperture_scale: None,
             off_plane_points: true,
+            see_through_points: false,
         })
         .expect("the visible top face keeps a candidate in the cone");
     assert!(
@@ -4415,6 +4447,7 @@ fn item7_query(target: Point3) -> SnapQuery {
         ),
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     }
 }
 
@@ -4551,6 +4584,7 @@ fn stacked_corner_in_a_slightly_tilted_top_view_prefers_the_nearest() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let snap = scene.resolve(&q).expect("a corner is within reach");
     assert_eq!(snap.kind, SnapKind::Endpoint);
@@ -4602,6 +4636,7 @@ fn a_widened_release_query_ranks_with_the_acquire_tie_band() {
         constraint_plane: None,
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     };
     let acquire = scene.resolve(&base).expect("both inside the aperture");
     assert!(
@@ -4654,6 +4689,7 @@ fn sketch_registration_replaces_and_removes_only_its_own_entries() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         })
     };
     let mut scene = InferenceScene::new();
@@ -4929,4 +4965,870 @@ fn a_deferred_member_in_the_way_is_extracted_for_occlusion() {
         deferred.resolve_linear(&q()),
         "the linear reference agrees once both are extracted"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Edge × edge crossings between different owners (#51b).
+//
+// Separate Objects never merge, so where an edge of one passes through an
+// edge of another there is no vertex to snap to. The crossing is offered as
+// `Intersection` — only a true 3D crossing (within `tol::POINT_MERGE`),
+// only between different owners, never at an endpoint of either edge — with
+// both edges as provenance: the first in `source`/`sketch_source`, the other
+// in `crossed_edge`.
+// ---------------------------------------------------------------------------
+
+/// An axis-aligned box Object spanning `lo`..`hi`.
+fn box_object(lo: Point3, hi: Point3) -> Object {
+    let (x0, y0, z0, x1, y1, z1) = (lo.x, lo.y, lo.z, hi.x, hi.y, hi.z);
+    Object::from_polygons(
+        &[
+            Point3::new(x0, y0, z0),
+            Point3::new(x1, y0, z0),
+            Point3::new(x1, y1, z0),
+            Point3::new(x0, y1, z0),
+            Point3::new(x0, y0, z1),
+            Point3::new(x1, y0, z1),
+            Point3::new(x1, y1, z1),
+            Point3::new(x0, y1, z1),
+        ],
+        &[
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ],
+    )
+    .unwrap()
+}
+
+fn oid(n: u64) -> ObjectId {
+    ObjectId::from(slotmap::KeyData::from_ffi(1 << 32 | n))
+}
+
+fn sid(n: u64) -> SketchId {
+    SketchId::from(slotmap::KeyData::from_ffi(1 << 32 | n))
+}
+
+fn eid(n: u64) -> SketchEdgeId {
+    SketchEdgeId::from(slotmap::KeyData::from_ffi(1 << 32 | n))
+}
+
+/// Box A: its top-front edge runs (0,0,1)–(2,0,1).
+fn crossing_box_a() -> Object {
+    box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(2.0, 1.0, 1.0))
+}
+
+/// Box B, in front of A: its back-left vertical edge (0.7,0,0)–(0.7,0,2.6)
+/// passes through A's top-front edge at [`CROSSING`] — 0.3 from either
+/// edge's midpoint, and far from every corner.
+fn crossing_box_b() -> Object {
+    box_object(Point3::new(0.7, -1.0, 0.0), Point3::new(1.5, 0.0, 2.6))
+}
+
+const CROSSING: Point3 = Point3::new(0.7, 0.0, 1.0);
+
+/// Looking at [`CROSSING`] from the left, in front and above: nothing
+/// stands between the eye and the crossing.
+fn crossing_query(aim: Point3) -> SnapQuery {
+    query(ray_at(Point3::new(-2.0, -0.5, 3.0), aim), NARROW)
+}
+
+fn assert_at(snap: &Snap, p: Point3) {
+    assert!(snap.position.approx_eq(p, tol::POINT_MERGE), "{snap:?}");
+}
+
+#[test]
+fn edges_of_two_objects_crossing_snap_as_an_intersection() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &crossing_box_a(), &Transform::IDENTITY);
+    scene.add_object(oid(2), &crossing_box_b(), &Transform::IDENTITY);
+    // A hair off the crossing, still well inside the pick cone.
+    let q = crossing_query(Point3::new(0.71, 0.0, 1.01));
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    let first = snap.source.expect("the first edge's provenance");
+    assert!(matches!(first.element, ElementRef::Edge(_)));
+    let Some(CrossedEdge::Object(second)) = snap.crossed_edge else {
+        panic!("the second edge's provenance: {snap:?}");
+    };
+    assert!(matches!(second.element, ElementRef::Edge(_)));
+    let mut owners = [first.object, second.object];
+    owners.sort();
+    assert_eq!(owners, [oid(1), oid(2)], "one edge from each Object");
+    assert_eq!(snap.direction, None, "an edge crossing names no direction");
+    assert_eq!(
+        scene.resolve(&q),
+        scene.resolve_linear(&q),
+        "the indexed and linear walks agree"
+    );
+}
+
+/// The reporter's case (#51): the top-back edge of a low box crosses the
+/// front-left vertical edge of a taller box behind it at
+/// (0.5001, 0.0714, 0.1826). The coordinates are exact here, so it is a
+/// true crossing. The low box's edge midpoint sits only 0.1 mm away at
+/// x = 0.5, well inside a normal-zoom pick cone, and the crossing still
+/// wins: a crossing outranks a midpoint (midpoints are on every edge,
+/// crossings are rare).
+#[test]
+fn the_reported_two_box_crossing_is_a_true_crossing() {
+    let mut scene = InferenceScene::new();
+    let low = box_object(Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0714, 0.1826));
+    let tall = box_object(Point3::new(0.5001, 0.0714, 0.0), Point3::new(1.2, 0.8, 0.5));
+    scene.add_object(oid(9), &low, &Transform::IDENTITY);
+    scene.add_object(oid(7), &tall, &Transform::IDENTITY);
+    let crossing = Point3::new(0.5001, 0.0714, 0.1826);
+    let eye = Point3::new(0.2, -1.0, 0.8);
+    // Zoomed far in: only the crossing is in the cone.
+    let snap = resolve(&scene, query(ray_at(eye, crossing), 2e-5)).expect("dead on the crossing");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, crossing);
+    assert!(snap.crossed_edge.is_some());
+    // Normal zoom: an 8 px radius in a 45° view about 1.2 m away is some
+    // 6 mrad, and the midpoint 0.1 mm off is ~0.08 mrad from the ray.
+    let normal = query(ray_at(eye, crossing), 6e-3);
+    let mut only_low = InferenceScene::new();
+    only_low.add_object(oid(9), &low, &Transform::IDENTITY);
+    let alone = resolve(&only_low, normal).expect("the midpoint is in the cone");
+    assert_eq!(
+        alone.kind,
+        SnapKind::Midpoint,
+        "the midpoint is in reach: {alone:?}"
+    );
+    let snap = resolve(&scene, normal).expect("the crossing is under the cursor");
+    assert_eq!(
+        snap.kind,
+        SnapKind::Intersection,
+        "the crossing beats the midpoint: {snap:?}"
+    );
+    assert_at(&snap, crossing);
+    // A few pixels off the crossing, still nearer the midpoint than the
+    // crossing is, the crossing holds.
+    let off = query(ray_at(eye, Point3::new(0.4999, 0.0714, 0.1828)), 6e-3);
+    let snap = resolve(&scene, off).expect("near the crossing");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    // A crossing is a named point: it reaches as far as a midpoint does
+    // (`POINT_SNAP_REACH` apertures), so a cursor 1.4 apertures off it
+    // (about 11 px of an 8 px radius) still takes the crossing, not the
+    // midpoint beside it.
+    let to = crossing - eye;
+    let dist = to.length();
+    let side = to.cross(Vec3::new(0.0, 0.0, 1.0)).normalized().unwrap();
+    let aim = crossing + side * (dist * (1.4 * 6e-3_f64).tan());
+    let past_aperture = query(ray_at(eye, aim), 6e-3);
+    let snap = resolve(&scene, past_aperture).expect("within a point's reach");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, crossing);
+}
+
+#[test]
+fn edges_that_nearly_miss_do_not_snap_as_an_intersection() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &crossing_box_a(), &Transform::IDENTITY);
+    // B pulled forward by a micrometre: its edge passes 1e-6 in front of
+    // A's, a thousand times the scene tolerance.
+    let b = box_object(Point3::new(0.7, -1.0, 0.0), Point3::new(1.5, -1e-6, 2.6));
+    scene.add_object(oid(2), &b, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&crossing_query(Point3::new(0.71, 0.0, 1.01)))
+        .expect("both edges are under the cursor");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_eq!(snap.crossed_edge, None);
+}
+
+/// An edge that ends ON another Object's edge (a T) already has its own
+/// Endpoint snap there; the meeting is not offered again as a crossing.
+#[test]
+fn edges_meeting_at_an_endpoint_keep_the_endpoint_snap() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &crossing_box_a(), &Transform::IDENTITY);
+    // C stands on A's top-front edge: its back-left vertical edge starts at
+    // (0.7, 0, 1), inside A's edge.
+    let c = box_object(Point3::new(0.7, -1.0, 1.0), Point3::new(1.5, 0.0, 2.6));
+    scene.add_object(oid(2), &c, &Transform::IDENTITY);
+    let snap = scene
+        .resolve(&crossing_query(Point3::new(0.71, 0.0, 1.01)))
+        .expect("the corner is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Endpoint, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    assert!(matches!(
+        snap.source.map(|s| s.element),
+        Some(ElementRef::Vertex(_))
+    ));
+    assert_eq!(snap.crossed_edge, None);
+}
+
+/// Two crossing edges of ONE Object are not offered: the kernel already
+/// splits edges within an Object, so a crossing there is either a vertex
+/// or geometry the Object's owner must resolve, not a snap. Built from two
+/// open quads whose edges cross; the same two quads as separate Objects
+/// do snap, so the spec exercises the owner rule and nothing else.
+#[test]
+fn edges_of_one_object_do_not_snap_as_a_crossing() {
+    let p = [
+        // Quad 1 in the plane y = 0: top edge (0,0,1)–(2,0,1).
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 1.0),
+        Point3::new(0.0, 0.0, 1.0),
+        // Quad 2 in the plane x = 0.7: edge (0.7,0,-0.9)–(0.7,0,2.6).
+        Point3::new(0.7, -1.0, -0.9),
+        Point3::new(0.7, 0.0, -0.9),
+        Point3::new(0.7, 0.0, 2.6),
+        Point3::new(0.7, -1.0, 2.6),
+    ];
+    let quad1 = vec![0, 1, 2, 3];
+    let quad2 = vec![4, 5, 6, 7];
+    let one = Object::from_polygons(&p, &[quad1.clone(), quad2.clone()]).unwrap();
+    let only1 = Object::from_polygons(&p[..4], &[quad1]).unwrap();
+    let only2 = Object::from_polygons(&p[4..], &[vec![0, 1, 2, 3]]).unwrap();
+    let q = crossing_query(Point3::new(0.71, 0.0, 1.01));
+
+    let mut together = InferenceScene::new();
+    together.add_object(oid(1), &one, &Transform::IDENTITY);
+    let snap = together
+        .resolve(&q)
+        .expect("both edges are under the cursor");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+
+    let mut apart = InferenceScene::new();
+    apart.add_object(oid(1), &only1, &Transform::IDENTITY);
+    apart.add_object(oid(2), &only2, &Transform::IDENTITY);
+    let snap = apart.resolve(&q).expect("both edges are under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+}
+
+#[test]
+fn an_object_edge_crossing_a_placed_instance_edge_snaps() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &crossing_box_a(), &Transform::IDENTITY);
+    // B as a component member placed by an instance, offset so the
+    // placement transform is exercised.
+    let b_at_origin = box_object(Point3::new(0.0, -1.0, 0.0), Point3::new(0.8, 0.0, 2.6));
+    scene.set_def_member(oid(2), &b_at_origin);
+    let instance = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 5));
+    scene.add_placement(
+        instance,
+        oid(2),
+        &Transform::translation(Vec3::new(0.7, 0.0, 0.0)),
+    );
+    let q = crossing_query(Point3::new(0.71, 0.0, 1.01));
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    let sources = [
+        snap.source,
+        snap.crossed_edge.and_then(|c| match c {
+            CrossedEdge::Object(s) => Some(s),
+            CrossedEdge::Sketch(..) => None,
+        }),
+    ];
+    assert!(
+        sources
+            .iter()
+            .any(|s| s.and_then(|s| s.instance) == Some(instance)),
+        "one edge is the instance's: {snap:?}"
+    );
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+#[test]
+fn a_sketch_edge_crossing_an_object_edge_snaps() {
+    let mut scene = InferenceScene::new();
+    scene.add_object(oid(1), &crossing_box_a(), &Transform::IDENTITY);
+    // A drawn line in the plane y = 0 crossing A's top-front edge.
+    scene.add_sketch(
+        sid(1),
+        &[(
+            eid(1),
+            Point3::new(0.7, 0.0, 0.2),
+            Point3::new(0.7, 0.0, 2.6),
+        )],
+    );
+    let snap = scene
+        .resolve(&crossing_query(Point3::new(0.71, 0.0, 1.01)))
+        .expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    // Either edge may come first; together they are the two edges.
+    let first = match (snap.source, snap.sketch_source) {
+        (Some(s), None) => CrossedEdge::Object(s),
+        (None, Some((s, e))) => CrossedEdge::Sketch(s, e),
+        other => panic!("exactly one first edge: {other:?}"),
+    };
+    let second = snap.crossed_edge.expect("the second edge");
+    let sketch = CrossedEdge::Sketch(sid(1), eid(1));
+    assert!(
+        (first == sketch && matches!(second, CrossedEdge::Object(o) if o.object == oid(1)))
+            || (second == sketch && matches!(first, CrossedEdge::Object(o) if o.object == oid(1))),
+        "one Object edge and the sketch edge: {snap:?}"
+    );
+}
+
+#[test]
+fn edges_of_two_sketches_cross_but_one_sketch_does_not() {
+    // In the plane z = 0.5, clear of the drawing axes (an axis crossing
+    // would snap there too).
+    let a = (Point3::new(-1.0, 0.3, 0.5), Point3::new(3.0, 0.3, 0.5));
+    let b = (Point3::new(0.7, -2.0, 0.5), Point3::new(0.7, 1.0, 0.5));
+    let crossing = Point3::new(0.7, 0.3, 0.5);
+    let q = query(
+        ray_at(Point3::new(0.2, -1.0, 3.0), Point3::new(0.71, 0.31, 0.5)),
+        NARROW,
+    );
+
+    let mut two = InferenceScene::new();
+    two.add_sketch(sid(1), &[(eid(1), a.0, a.1)]);
+    two.add_sketch(sid(2), &[(eid(2), b.0, b.1)]);
+    let snap = two.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, crossing);
+    let mut edges = [
+        snap.sketch_source.expect("first sketch edge"),
+        match snap.crossed_edge {
+            Some(CrossedEdge::Sketch(s, e)) => (s, e),
+            other => panic!("second sketch edge: {other:?}"),
+        },
+    ];
+    edges.sort();
+    assert_eq!(edges, [(sid(1), eid(1)), (sid(2), eid(2))]);
+
+    let mut one = InferenceScene::new();
+    one.add_sketch(sid(1), &[(eid(1), a.0, a.1), (eid(2), b.0, b.1)]);
+    let snap = one.resolve(&q).expect("both edges are under the cursor");
+    assert_ne!(snap.kind, SnapKind::Intersection, "{snap:?}");
+}
+
+/// A dense spot cannot stall a pointer move: a query tests at most
+/// `CROSSING_PAIR_CAP` cross-owner pairs, nearest edges first, and counts
+/// the pairs it left untested in `crossing_stats` rather than dropping them
+/// silently.
+#[test]
+fn crossing_pairs_past_the_cap_are_skipped_and_counted() {
+    let cap = inference::CROSSING_PAIR_CAP as u64;
+    let pairs = |n: u64| n * (n - 1) / 2;
+    let center = Point3::new(0.3, 0.2, 0.0);
+    // `n` lines in the ground plane, each its own sketch, fanned through
+    // `center` (off every line's midpoint and far from its endpoints).
+    let fan = |n: u64| {
+        let mut scene = InferenceScene::new();
+        for i in 0..n {
+            let t = std::f64::consts::PI * i as f64 / n as f64;
+            let d = Vec3::new(t.cos(), t.sin(), 0.0);
+            scene.add_sketch(sid(i + 1), &[(eid(i + 1), center - d * 0.3, center + d)]);
+        }
+        scene
+    };
+    let q = query(ray_at(Point3::new(0.4, 0.4, 3.0), center), NARROW);
+
+    // Under the cap: every pair is tested.
+    let n = 20;
+    let scene = fan(n);
+    let snap = scene
+        .resolve(&q)
+        .expect("the fan's center is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, center);
+    let stats = scene.crossing_stats();
+    assert_eq!(stats.pairs_tested, pairs(n));
+    assert_eq!((stats.queries_capped, stats.pairs_skipped), (0, 0));
+
+    // Past it: exactly `cap` pairs are tested, the rest counted.
+    let n = 80;
+    assert!(pairs(n) > cap);
+    let scene = fan(n);
+    let snap = scene
+        .resolve(&q)
+        .expect("the fan's center is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    let stats = scene.crossing_stats();
+    assert_eq!(stats.pairs_tested, cap);
+    assert_eq!(stats.queries_capped, 1);
+    assert_eq!(stats.pairs_skipped, pairs(n) - cap);
+}
+
+/// Under the cap, the edges nearest the cursor pair first: two crossing
+/// edges right under it still snap with dozens of other edges in the cone.
+/// The distractors are registered BEFORE the crossing pair, so the pair
+/// comes last in emission order and only the nearest-first order can reach
+/// it inside the cap.
+#[test]
+fn the_nearest_edges_pair_first_past_the_cap() {
+    let center = Point3::new(0.3, 0.2, 0.0);
+    let mut scene = InferenceScene::new();
+    // Seventy parallel distractors just below the ground plane, each its
+    // own sketch: inside the pick cone, farther from the ray than the two
+    // below, crossing nothing.
+    let n = 70;
+    let d = Vec3::new(1.0, -1.0, 0.0) * std::f64::consts::FRAC_1_SQRT_2;
+    for i in 0..n {
+        let p = Point3::new(0.304, 0.204, -0.002 * (i + 1) as f64);
+        scene.add_sketch(sid(i + 1), &[(eid(i + 1), p - d * 0.3, p + d)]);
+    }
+    // The two edges crossing at `center`, off their midpoints.
+    scene.add_sketch(
+        sid(n + 1),
+        &[(
+            eid(n + 1),
+            Point3::new(0.0, 0.2, 0.0),
+            Point3::new(1.3, 0.2, 0.0),
+        )],
+    );
+    scene.add_sketch(
+        sid(n + 2),
+        &[(
+            eid(n + 2),
+            Point3::new(0.3, -0.1, 0.0),
+            Point3::new(0.3, 1.2, 0.0),
+        )],
+    );
+    let q = query(ray_at(Point3::new(0.35, 0.3, 3.0), center), NARROW);
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, center);
+    let stats = scene.crossing_stats();
+    assert_eq!(stats.queries_capped, 1, "the spec must exercise the cap");
+    let total = (n + 2) * (n + 1) / 2;
+    assert!(
+        total - (2 * n + 1) > inference::CROSSING_PAIR_CAP as u64,
+        "in emission order the cap ends before the crossing pair"
+    );
+    assert_eq!(stats.pairs_tested, inference::CROSSING_PAIR_CAP as u64);
+    assert_eq!(stats.pairs_skipped, total - stats.pairs_tested);
+}
+
+/// A cone full of ONE owner's edges (a dense import seen from afar) costs
+/// the pair walk nothing for those edges: they never pair with each other,
+/// and the walk steps over them rather than through every pair of them.
+/// With two foreign edges among them, only the cross-owner pairs are
+/// tested, in a number of steps bounded by them, not by the 45,451 pairs
+/// of all 302 edges.
+#[test]
+fn edges_of_one_owner_cost_the_crossing_walk_nothing() {
+    let center = Point3::new(0.3, 0.2, 0.5);
+    let n = 300u64;
+    // One sketch of `n` lines fanned through `center`, off every line's
+    // midpoint and far from its endpoints.
+    let fan: Vec<_> = (0..n)
+        .map(|i| {
+            let t = std::f64::consts::PI * i as f64 / n as f64;
+            let d = Vec3::new(t.cos(), t.sin(), 0.0);
+            (eid(i + 1), center - d * 0.3, center + d)
+        })
+        .collect();
+    let q = query(ray_at(Point3::new(0.4, 0.4, 3.0), center), NARROW);
+
+    let mut alone = InferenceScene::new();
+    alone.add_sketch(sid(1), &fan);
+    alone.resolve(&q);
+    assert_eq!(
+        alone.crossing_stats(),
+        inference::CrossingStats::default(),
+        "one owner: no pair, no step"
+    );
+
+    let mut scene = InferenceScene::new();
+    scene.add_sketch(sid(1), &fan);
+    for k in 0..2u64 {
+        let t = 0.37 + 0.9 * k as f64;
+        let d = Vec3::new(t.cos(), t.sin(), 0.0);
+        scene.add_sketch(
+            sid(10 + k),
+            &[(eid(1000 + k), center - d * 0.4, center + d * 0.9)],
+        );
+    }
+    let snap = scene
+        .resolve(&q)
+        .expect("the fan's center is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, center);
+    let stats = scene.crossing_stats();
+    let cross_pairs = 2 * n + 1;
+    assert_eq!(stats.pairs_tested, cross_pairs);
+    assert_eq!((stats.queries_capped, stats.pairs_skipped), (0, 0));
+    assert!(
+        stats.pair_steps <= 2 * cross_pairs + n + 2,
+        "{} steps for {cross_pairs} pairs",
+        stats.pair_steps
+    );
+}
+
+/// Two instances of one component are separate geometry, as they are to
+/// the kernel: where an edge of one crosses an edge of the other, that
+/// crossing snaps, carrying both instances.
+#[test]
+fn edges_of_two_instances_of_one_component_cross() {
+    // One member: an open quad in the plane y = 0, x 0..2, z 0..1.
+    let quad = Object::from_polygons(
+        &[
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 0.0),
+            Point3::new(2.0, 0.0, 1.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ],
+        &[vec![0, 1, 2, 3]],
+    )
+    .unwrap();
+    let mut scene = InferenceScene::new();
+    scene.set_def_member(oid(2), &quad);
+    let first = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 5));
+    let second = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 6));
+    // The first as drawn: its top edge runs (0,0,1)–(2,0,1).
+    scene.add_placement(first, oid(2), &Transform::IDENTITY);
+    // The second turned a quarter about Y and moved: its bottom edge
+    // becomes the vertical (0.7,0,2.6)–(0.7,0,0.6), crossing the first's
+    // top edge at `CROSSING`.
+    let turned = Transform::from_affine(&[
+        0.0, 0.0, 1.0, 0.7, //
+        0.0, 1.0, 0.0, 0.0, //
+        -1.0, 0.0, 0.0, 2.6,
+    ]);
+    scene.add_placement(second, oid(2), &turned);
+    let q = crossing_query(Point3::new(0.71, 0.0, 1.01));
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    let Some(CrossedEdge::Object(other)) = snap.crossed_edge else {
+        panic!("the second edge's provenance: {snap:?}");
+    };
+    let mut instances = [snap.source.and_then(|s| s.instance), other.instance];
+    instances.sort();
+    let mut want = [Some(first), Some(second)];
+    want.sort();
+    assert_eq!(instances, want, "one edge from each instance: {snap:?}");
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// Two members of ONE instance are separate Objects inside it: their edges
+/// crossing snap, both carrying that instance.
+#[test]
+fn edges_of_two_members_of_one_instance_cross() {
+    let p = [
+        // Member 1 in the plane y = 0: top edge (0,0,1)–(2,0,1).
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 1.0),
+        Point3::new(0.0, 0.0, 1.0),
+        // Member 2 in the plane x = 0.7: edge (0.7,0,-0.9)–(0.7,0,2.6).
+        Point3::new(0.7, -1.0, -0.9),
+        Point3::new(0.7, 0.0, -0.9),
+        Point3::new(0.7, 0.0, 2.6),
+        Point3::new(0.7, -1.0, 2.6),
+    ];
+    let one = Object::from_polygons(&p[..4], &[vec![0, 1, 2, 3]]).unwrap();
+    let two = Object::from_polygons(&p[4..], &[vec![0, 1, 2, 3]]).unwrap();
+    let mut scene = InferenceScene::new();
+    scene.set_def_member(oid(2), &one);
+    scene.set_def_member(oid(3), &two);
+    let instance = InstanceId::from(slotmap::KeyData::from_ffi(1 << 32 | 5));
+    scene.add_placement(instance, oid(2), &Transform::IDENTITY);
+    scene.add_placement(instance, oid(3), &Transform::IDENTITY);
+    let q = crossing_query(Point3::new(0.71, 0.0, 1.01));
+    let snap = scene.resolve(&q).expect("the crossing is under the cursor");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, CROSSING);
+    let first = snap.source.expect("the first edge");
+    let Some(CrossedEdge::Object(second)) = snap.crossed_edge else {
+        panic!("the second edge's provenance: {snap:?}");
+    };
+    assert_eq!(
+        (first.instance, second.instance),
+        (Some(instance), Some(instance))
+    );
+    let mut members = [first.object, second.object];
+    members.sort();
+    assert_eq!(members, [oid(2), oid(3)], "one edge from each member");
+    assert_eq!(scene.resolve(&q), scene.resolve_linear(&q));
+}
+
+/// When a caller weights `Intersection` past `OnEdge`, the crossing pool
+/// takes edges at `Intersection`'s reach, not at `OnEdge`'s: two edges
+/// passing beyond the OnEdge reach but inside the boosted one still offer
+/// their crossing. Unboosted, the same aim snaps nothing.
+#[test]
+fn a_boosted_intersection_reach_pools_edges_past_the_on_edge_reach() {
+    // In the plane z = 0.5, clear of the drawing axes.
+    let mut scene = InferenceScene::new();
+    scene.add_sketch(
+        sid(1),
+        &[(
+            eid(1),
+            Point3::new(-1.0, 0.3, 0.5),
+            Point3::new(3.0, 0.3, 0.5),
+        )],
+    );
+    scene.add_sketch(
+        sid(2),
+        &[(
+            eid(2),
+            Point3::new(0.7, -2.0, 0.5),
+            Point3::new(0.7, 1.0, 0.5),
+        )],
+    );
+    let crossing = Point3::new(0.7, 0.3, 0.5);
+    // Straight down, 0.015 m off each edge (0.021 m off the crossing),
+    // with a 0.01 m pick radius: both edges lie past the OnEdge reach.
+    let aim = Point3::new(0.715, 0.315, 0.5);
+    let at = |weights: SnapWeights| SnapQuery {
+        weights,
+        aperture_mode: ApertureMode::Cylinder,
+        ..query(
+            PickRay {
+                origin: aim + Vec3::new(0.0, 0.0, 3.0),
+                direction: Vec3::new(0.0, 0.0, -1.0),
+            },
+            0.01,
+        )
+    };
+    let plain = at(SnapWeights::default());
+    assert_eq!(
+        scene.resolve(&plain),
+        None,
+        "nothing within the plain reach"
+    );
+    let boosted = at(SnapWeights::default().with(SnapKind::Intersection, 3.0));
+    let snap = scene
+        .resolve(&boosted)
+        .expect("the crossing is within the boosted reach");
+    assert_eq!(snap.kind, SnapKind::Intersection, "{snap:?}");
+    assert_at(&snap, crossing);
+    assert!(snap.crossed_edge.is_some());
+    assert_eq!(scene.resolve(&boosted), scene.resolve_linear(&boosted));
+}
+
+// ---------------------------------------------------------------------------
+// Face policy: the picking rule of a whole-model view mode. Shaded faces
+// occlude and are targets (`Opaque`); X-ray faces occlude nothing but stay
+// targets (`SeeThrough`); wireframe faces neither occlude nor exist for
+// input (`Absent`).
+// ---------------------------------------------------------------------------
+
+const POLICIES: [FacePolicy; 3] = [
+    FacePolicy::Opaque,
+    FacePolicy::SeeThrough,
+    FacePolicy::Absent,
+];
+
+fn cube_scene_with(policy: FacePolicy) -> InferenceScene {
+    let mut scene = cube_scene();
+    scene.set_face_policy(policy);
+    scene
+}
+
+#[test]
+fn the_face_policy_defaults_to_opaque() {
+    assert_eq!(InferenceScene::new().face_policy(), FacePolicy::Opaque);
+    assert!(FacePolicy::Opaque.occludes() && FacePolicy::Opaque.faces_are_targets());
+    assert!(!FacePolicy::SeeThrough.occludes() && FacePolicy::SeeThrough.faces_are_targets());
+    assert!(!FacePolicy::Absent.occludes() && !FacePolicy::Absent.faces_are_targets());
+}
+
+/// The back-bottom edge's midpoint (0.5, 1, 0) seen through the front face:
+/// hidden in shaded, reachable once nothing occludes.
+#[test]
+fn a_hidden_midpoint_is_unreachable_when_faces_occlude_and_reachable_otherwise() {
+    let eye = Point3::new(0.5, -3.0, 3.0);
+    let hidden_mid = Point3::new(0.5, 1.0, 0.0);
+    for policy in POLICIES {
+        let scene = cube_scene_with(policy);
+        let q = query(ray_at(eye, hidden_mid), NARROW);
+        let snap = resolve(&scene, q);
+        assert_eq!(
+            snap,
+            scene.resolve_linear(&q),
+            "{policy:?}: indexed and linear agree"
+        );
+        match policy {
+            FacePolicy::Opaque => {
+                let snap = snap.expect("the front face is under the cursor");
+                assert_eq!(
+                    snap.kind,
+                    SnapKind::OnFace,
+                    "shaded: the front face, not the hidden midpoint"
+                );
+                assert!(
+                    (snap.position.y).abs() <= tol::PLANE_DIST,
+                    "on the front face: {snap:?}"
+                );
+            }
+            FacePolicy::SeeThrough | FacePolicy::Absent => {
+                let snap = snap.expect("the hidden midpoint is in the cone");
+                assert_eq!(snap.kind, SnapKind::Midpoint, "{policy:?}: {snap:?}");
+                assert!(
+                    snap.position.approx_eq(hidden_mid, tol::POINT_MERGE),
+                    "{snap:?}"
+                );
+                assert!(snap.source.is_some(), "the hidden edge's provenance");
+            }
+        }
+    }
+}
+
+/// Looking straight down through the top face (z = 1) and the bottom face
+/// (z = 0) behind it: the bottom face is never the pick, by snap or by
+/// `pick_face`. X-ray picks the front face exactly as shaded does; wireframe
+/// picks no face at all.
+#[test]
+fn a_face_behind_another_is_never_the_pick() {
+    let ray = ray_at(Point3::new(0.4, 0.6, 5.0), Point3::new(0.4, 0.6, 0.0));
+    for policy in POLICIES {
+        let scene = cube_scene_with(policy);
+        let q = query(ray, NARROW);
+        let snap = resolve(&scene, q);
+        assert_eq!(
+            snap,
+            scene.resolve_linear(&q),
+            "{policy:?}: indexed and linear agree"
+        );
+        let pick = scene.pick_face(&ray);
+        assert_eq!(
+            pick,
+            scene.pick_face_linear(&ray),
+            "{policy:?}: indexed and linear agree"
+        );
+        if policy.faces_are_targets() {
+            let snap = snap.expect("the top face is under the cursor");
+            assert_eq!(snap.kind, SnapKind::OnFace, "{policy:?}");
+            assert!(
+                (snap.position.z - 1.0).abs() <= tol::PLANE_DIST,
+                "{policy:?}: the top face: {snap:?}"
+            );
+            let (_, depth) = pick.expect("a face is under the cursor");
+            assert!(
+                (depth - 4.0).abs() <= 1e-9,
+                "{policy:?}: the top face is 4 m away, got {depth}"
+            );
+        } else {
+            assert_eq!(
+                snap, None,
+                "wireframe: no face to land on, nothing else in the cone"
+            );
+            assert_eq!(pick, None, "wireframe: faces are not pick targets");
+        }
+    }
+}
+
+/// Wireframe has no `OnFace` at all, a sketch-region fill included, and
+/// a sketch region does not occlude either.
+#[test]
+fn no_face_snaps_at_all_when_faces_are_absent() {
+    let mut scene = cube_scene_with(FacePolicy::Absent);
+    let corner = |x: f64, y: f64| Point3::new(x, y, 2.0);
+    scene.add_sketch_faces(
+        sid(1),
+        &[inference::SketchRegionFace {
+            region: kernel::SketchRegionId::default(),
+            plane: Plane::from_polygon(&[corner(-1.0, -1.0), corner(2.0, -1.0), corner(2.0, 2.0)])
+                .unwrap(),
+            boundary: vec![
+                corner(-1.0, -1.0),
+                corner(2.0, -1.0),
+                corner(2.0, 2.0),
+                corner(-1.0, 2.0),
+            ],
+            holes: vec![],
+        }],
+    );
+    let eye = Point3::new(0.3, -2.0, 4.0);
+    for i in 0..=10 {
+        for j in 0..=10 {
+            let aim = Point3::new(-0.5 + 0.2 * f64::from(i), -0.5 + 0.2 * f64::from(j), 0.5);
+            for aperture in [NARROW, WIDE] {
+                let q = query(ray_at(eye, aim), aperture);
+                let snap = resolve(&scene, q);
+                assert_eq!(snap, scene.resolve_linear(&q));
+                assert!(
+                    snap.is_none_or(|s| s.kind != SnapKind::OnFace),
+                    "aim {aim:?} at {aperture}: {snap:?}"
+                );
+            }
+        }
+    }
+    // The fill does not hide the cube's top corner below it.
+    let top = Point3::new(1.0, 1.0, 1.0);
+    let snap = resolve(&scene, query(ray_at(eye, top), NARROW)).expect("the corner is in the cone");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    assert!(snap.position.approx_eq(top, tol::POINT_MERGE));
+    // X-ray keeps the fill as the target (it is the nearest face), and it
+    // still does not hide the corner.
+    scene.set_face_policy(FacePolicy::SeeThrough);
+    let over_fill = resolve(
+        &scene,
+        query(ray_at(eye, Point3::new(0.4, 0.4, 2.0)), NARROW),
+    )
+    .expect("the fill");
+    assert_eq!(over_fill.kind, SnapKind::OnFace);
+    assert!(over_fill.sketch_region_source.is_some(), "{over_fill:?}");
+    let snap = resolve(&scene, query(ray_at(eye, top), NARROW)).expect("the corner is in the cone");
+    assert_eq!(snap.kind, SnapKind::Endpoint);
+    // Shaded: the fill hides it.
+    scene.set_face_policy(FacePolicy::Opaque);
+    let snap = resolve(&scene, query(ray_at(eye, top), NARROW)).expect("the fill");
+    assert_eq!(snap.kind, SnapKind::OnFace, "{snap:?}");
+}
+
+/// The drawing tools hold a hover over a face to that face's plane
+/// (`constraint_plane`). Under a non-occluding policy, a query that opts in
+/// (`see_through_points`, the tools that drop such a snap onto their plane
+/// and say so) is not vetoed from hidden geometry: in X-ray the Line tool
+/// snaps to an endpoint inside a solid through its face. In shaded the face
+/// plane still filters, and a query that does not opt in gets the plain
+/// filter in every mode.
+#[test]
+fn hidden_geometry_behind_the_constraining_face_is_reachable_only_when_opted_in_and_faces_do_not_occlude()
+ {
+    let eye = Point3::new(0.3, 0.2, 4.0);
+    let top =
+        Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    let on_top = |aim: Point3, see_through_points: bool| SnapQuery {
+        constraint_plane: Some(top),
+        see_through_points,
+        ..query(ray_at(eye, aim), NARROW)
+    };
+    let hidden_corner = Point3::new(1.0, 1.0, 0.0);
+    let hidden_edge = Point3::new(0.3, 1.0, 0.0);
+    for policy in POLICIES {
+        let scene = cube_scene_with(policy);
+        for opted_in in [false, true] {
+            let corner = resolve(&scene, on_top(hidden_corner, opted_in));
+            let edge = resolve(&scene, on_top(hidden_edge, opted_in));
+            assert_eq!(
+                corner,
+                scene.resolve_linear(&on_top(hidden_corner, opted_in))
+            );
+            if !policy.faces_are_targets() && !opted_in {
+                // Wireframe, plain filter: no face to land on, and the
+                // hidden geometry is off the plane.
+                assert_eq!(corner, None, "{corner:?}");
+                assert_eq!(edge, None, "{edge:?}");
+                continue;
+            }
+            let (corner, edge) = (corner.expect("a snap"), edge.expect("a snap"));
+            if policy.occludes() || !opted_in {
+                assert_eq!(
+                    corner.kind,
+                    SnapKind::OnFace,
+                    "{policy:?}, opted in {opted_in}: held to the face: {corner:?}"
+                );
+                assert_eq!(
+                    edge.kind,
+                    SnapKind::OnFace,
+                    "{policy:?}, opted in {opted_in}: held to the face: {edge:?}"
+                );
+            } else {
+                assert_eq!(corner.kind, SnapKind::Endpoint, "{policy:?}: {corner:?}");
+                assert!(corner.position.approx_eq(hidden_corner, tol::POINT_MERGE));
+                assert_eq!(edge.kind, SnapKind::OnEdge, "{policy:?}: {edge:?}");
+                assert!(
+                    (edge.position.y - 1.0).abs() <= 1e-9 && edge.position.z.abs() <= 1e-9,
+                    "{edge:?}"
+                );
+            }
+        }
+    }
 }

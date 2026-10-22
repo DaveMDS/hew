@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
-import { FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane } from './faceDraw'
+import { FacePickCache, cursorOnFrozenPlane, defaultFaceEligible, worldFaceNormal, worldFacePlane } from './faceDraw'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 import type { V3 } from '../viewport/geoHelpers'
 
@@ -258,5 +259,101 @@ describe('FacePickCache.faceThrough (boundary-click face resolution)', () => {
     const cache = new FacePickCache()
     const result = cache.faceThrough(scene, RAY, eligible, null, [[0, 0, 0]])
     expect(result).toEqual({ object: 20n, face: 2n, point: [0, 0, 0], normal: [0, 0, 1] })
+  })
+
+  it('X-ray: a point hidden behind a nearer face still finds the face it lies on; Wireframe adopts no face', () => {
+    // `pick_face` sees only the face in front (z = 1, which does not hold
+    // the point at z = 0) — or nothing at all in Wireframe. In X-ray the
+    // geometry pick, started just short of the point, reaches the face under
+    // it; in Wireframe faces are no input, so nothing is adopted.
+    const planes = new Map([
+      ['1:1', { point: [0, 0, 1] as V3, normal: [0, 0, 1] as V3 }],
+      ['2:2', { point: [0, 0, 0] as V3, normal: [0, 0, 1] as V3 }],
+    ])
+    const sceneWith = (front: { object: bigint; face: bigint } | undefined) => {
+      const scene = makeScene(() => front, planes) as unknown as Record<string, unknown>
+      const origins: number[] = []
+      scene.pick_face_geometry = vi.fn((_ox: number, _oy: number, oz: number) => {
+        origins.push(oz)
+        // Started past the front face: the face holding the point.
+        return oz < 1
+          ? { object: () => 2n, instance: () => undefined, face: () => 2n, depth: () => 0, free: vi.fn() }
+          : { object: () => 1n, instance: () => undefined, face: () => 1n, depth: () => 0, free: vi.fn() }
+      })
+      return { scene: scene as unknown as WasmScene, origins }
+    }
+    try {
+      setPickRenderMode('xray')
+      const { scene, origins } = sceneWith({ object: 1n, face: 1n })
+      const result = new FacePickCache().faceThrough(scene, RAY, eligible, null, [[0, 0.001, 0]])
+      expect(result).toMatchObject({ object: 2n, face: 2n, normal: [0, 0, 1] })
+      // Every fallback probe starts 2% short of the point, past the z = 1 face.
+      expect(origins.length).toBeGreaterThan(0)
+      for (const oz of origins) expect(oz).toBeCloseTo(0.1, 2)
+
+      setPickRenderMode('wireframe')
+      const wire = sceneWith(undefined)
+      expect(new FacePickCache().faceThrough(wire.scene, RAY, eligible, null, [[0, 0.001, 0]])).toBeNull()
+      expect(wire.origins).toHaveLength(0)
+    } finally {
+      setPickRenderMode('shaded')
+    }
+  })
+
+  it('a pick memoized for a ray is not served after a render-mode switch', () => {
+    const planes = new Map([['7:3', { point: [0, 0, 0] as V3, normal: [0, 0, 1] as V3 }]])
+    let hit: { object: bigint; face: bigint } | undefined = { object: 7n, face: 3n }
+    const scene = makeScene(() => hit, planes) as unknown as Record<string, unknown>
+    // The plain pick answers the exact ray too here.
+    scene.pick_face = vi.fn(() =>
+      hit && { object: () => hit!.object, instance: () => undefined, face: () => hit!.face, depth: () => 1, free: vi.fn() },
+    )
+    const cache = new FacePickCache()
+    try {
+      expect(cache.pickFor(scene as unknown as WasmScene, RAY, eligible)).toEqual({ object: 7n, face: 3n })
+      // Wireframe: the kernel picks no face for the same held ray.
+      hit = undefined
+      expect(cache.pickFor(scene as unknown as WasmScene, RAY, eligible), 'same mode: memoized').toEqual({ object: 7n, face: 3n })
+      setPickRenderMode('wireframe')
+      expect(cache.pickFor(scene as unknown as WasmScene, RAY, eligible), 'after the switch: picked afresh').toBeNull()
+      expect(cache.faceThrough(scene as unknown as WasmScene, RAY, eligible, null, [[0, 0, 0]])).toBeNull()
+    } finally {
+      setPickRenderMode('shaded')
+    }
+  })
+
+  it('a visible point never takes the geometry fallback', () => {
+    const planes = new Map([['7:3', { point: [0, 0, 0] as V3, normal: [0, 0, 1] as V3 }]])
+    const scene = makeScene({ object: 7n, face: 3n }, planes) as unknown as Record<string, unknown>
+    scene.pick_face_geometry = vi.fn()
+    new FacePickCache().faceThrough(scene as unknown as WasmScene, RAY, eligible, null, [[0, 0, 0]])
+    expect(scene.pick_face_geometry).not.toHaveBeenCalled()
+  })
+})
+
+describe('cursorOnFrozenPlane (a frozen draw plane meeting an off-plane snap)', () => {
+  const ray = { origin: [0.2, 0.3, 5] as V3, direction: [0, 0, -1] as V3 }
+  const snap = (x: number, y: number, z: number) => ({ x, y, z, kind: 'midpoint' }) as unknown as Parameters<typeof cursorOnFrozenPlane>[0]
+
+  it('takes an on-plane snap exactly, not projected', () => {
+    expect(cursorOnFrozenPlane(snap(1, 2, 1), ray, [0, 0, 1], [0, 0, 1])).toEqual({ point: [1, 2, 1], projected: false })
+  })
+
+  it('drops an off-plane snap (hidden geometry offered in X-ray) straight onto the plane, disclosed', () => {
+    const at = cursorOnFrozenPlane(snap(1, 0.7, 0.6), ray, [0, 0, 1], [0, 0, 1])
+    expect(at?.projected).toBe(true)
+    expect(at?.point[0]).toBeCloseTo(1)
+    expect(at?.point[1]).toBeCloseTo(0.7)
+    expect(at?.point[2]).toBeCloseTo(1)
+    // A tilted plane: the drop runs along its normal.
+    const n: V3 = [0, Math.SQRT1_2, Math.SQRT1_2]
+    const tilted = cursorOnFrozenPlane(snap(0, 1, 1), ray, [0, 0, 0], n)
+    expect(tilted?.projected).toBe(true)
+    expect(Math.abs(tilted!.point[1] * n[1] + tilted!.point[2] * n[2])).toBeLessThan(1e-12)
+  })
+
+  it('with no snap, the ray hit; parallel rays miss', () => {
+    expect(cursorOnFrozenPlane(null, ray, [0, 0, 1], [0, 0, 1])).toEqual({ point: [0.2, 0.3, 1], projected: false })
+    expect(cursorOnFrozenPlane(null, ray, [0, 0, 0], [1, 0, 0])).toBeNull()
   })
 })

@@ -329,6 +329,7 @@ fn to_query(spec: &QuerySpec) -> SnapQuery {
         }),
         soft_axis_aperture_scale: None,
         off_plane_points: false,
+        see_through_points: false,
     }
 }
 
@@ -492,6 +493,7 @@ fn intersection_snaps_agree_between_indexed_and_linear_paths() {
             constraint_plane: None,
             soft_axis_aperture_scale: None,
             off_plane_points: false,
+            see_through_points: false,
         };
         let indexed = scene.resolve(&query);
         let linear = scene.resolve_linear(&query);

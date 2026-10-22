@@ -3,7 +3,7 @@
  * pattern: drive the 3-click gesture (A, B, bulge) and assert the exact
  * kernel calls the tool commits (one draft per commit, unified drafting).
  */
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { ArcTool } from './ArcTool'
 import { draftMock } from './draftMock'
@@ -12,6 +12,7 @@ import type { Snap } from './types'
 import { setLengthUnit, getLengthUnit, parseLengthToMeters } from '../settings/units'
 import { sagittaForDisplayedRadius } from './displayedValue'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 
 // A ray straight down the -Z axis from above the origin (tuple-shaped, as the
@@ -1104,5 +1105,117 @@ describe('ArcTool — a flat (circle-less) arc', () => {
     expect((tool as unknown as Runner)._runArcDraft({ kind: 'ctx', ctx: '{"plane":[0,0,0,0,0,1]}' }, chain)).toBe(true)
     expect(segments).toHaveLength(3)
     expect(dm.log.curves.map((c) => c.kind)).toEqual(['curve', 'end'])
+  })
+})
+
+describe('ArcTool — typed chord with the cursor on the Blue axis (#51a)', () => {
+  const blue = (x: number, y: number, z: number): Snap =>
+    makeSnap({ x, y, z, kind: 'on-axis', direction: [0, 0, 1] })
+
+  it('hovering Blue straight above a ground A and typing a chord takes the chord straight up, as Line does', () => {
+    const { scene, segments } = makeWasmScene()
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2 }), RAY) // A on the ground
+    tool.onPointerMove(blue(1, 2, 3), RAY)            // Blue, straight up from A
+    typeDigits(tool, '5')
+    tool.onKey(makeKeyEvent('Enter'))                 // B = A + 5 up (ArcTool.rehome.test.ts)
+    tool.onPointerDown(makeSnap({ x: 2, y: 2, z: 2.5, kind: 'free' }), RAY) // bulge, on the new vertical plane
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const last = segments[segments.length - 1]
+    expect([last[3], last[4], last[5]]).toEqual([1, 2, 5])
+  })
+
+  it('a typed chord before the cursor has moved off A says to point the arc first', () => {
+    const { scene } = makeWasmScene()
+    const { tool, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2 }), RAY)
+    typeDigits(tool, '5')
+    tool.onKey(makeKeyEvent('Enter'))
+
+    expect(onToast).toHaveBeenCalledWith('Move the cursor to point the arc, then type the length.')
+  })
+
+  it('after the arrow-key re-lock the hint points to, the same Blue hover takes the typed chord straight up', () => {
+    const { scene, segments } = makeWasmScene()
+    ;(scene as unknown as { axes: () => Float64Array }).axes = () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 2 }), RAY)
+    tool.onKey(makeKeyEvent('ArrowRight'))            // plane through A, normal Red: holds Blue
+    tool.onPointerMove(blue(1, 2, 3), RAY)
+    typeDigits(tool, '5')
+    tool.onKey(makeKeyEvent('Enter'))                 // B = A + 5 up
+    tool.onPointerDown(makeSnap({ x: 1, y: 3, z: 2.5 }), RAY) // bulge, in that plane
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    const last = segments[segments.length - 1]
+    expect([last[3], last[4], last[5]]).toEqual([1, 2, 5])
+  })
+})
+
+describe('ArcTool — X-ray: a hidden snap off the face drops onto it, disclosed (cursorOnFrozenPlane)', () => {
+  const down = (x: number, y: number): Ray => ({ origin: [x, y, 5], direction: [0, 0, -1] })
+  // Runs under the mode it is named for.
+  beforeEach(() => setPickRenderMode('xray'))
+  afterEach(() => setPickRenderMode('shaded'))
+
+  it('the bulge point is the hidden snap dropped onto the face (not the ray hit), says "projected", and clears when idle', () => {
+    const { scene, segments } = makeWasmScene({ pick: makePick(7n, 3n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 1, kind: 'on-face' }), down(0, 0))
+    expect(tool.snapConstraint(down(0, 0))?.seeThroughPoints).toBe(true)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 1, kind: 'endpoint' }), down(1, 0))
+    // Shaded's own case is unchanged: an on-face snap is taken exactly.
+    tool.onPointerMove(makeSnap({ x: 0.5, y: 0.2, z: 1, kind: 'on-face' }), down(0.5, 0.2))
+    expect(tool.snapProjected()).toBe(false)
+    // A hidden midpoint below the face over the chord's middle; the ray
+    // meets the face farther out (y 0.45).
+    const hidden = makeSnap({ x: 0.5, y: 0.3, z: 0.6, kind: 'midpoint' })
+    tool.onPointerMove(hidden, down(0.5, 0.45))
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown(hidden, down(0.5, 0.45))
+    expect(segments.length).toBeGreaterThan(0)
+    for (const s of segments) {
+      expect(s[2]).toBeCloseTo(1, 12)
+      expect(s[5]).toBeCloseTo(1, 12)
+    }
+    const top = Math.max(...segments.flatMap((s) => [s[1], s[4]]))
+    // Facets fall a hair short of the true sagitta; the ray hit would be 0.45.
+    expect(Math.abs(top - 0.3)).toBeLessThan(1e-3)
+    expect(tool.snapProjected()).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 0.3, y: 0.3, z: 1, kind: 'on-face' }), down(0.3, 0.3))
+    expect(tool.snapProjected()).toBe(false)
+  })
+})
+
+describe('ArcTool — see-through snapping on the frozen and hovered planes', () => {
+  it('a chord on an arrow-locked (non-ground) plane offers hidden points through it', () => {
+    const { scene } = makeWasmScene()
+    ;(scene as unknown as { axes: () => Float64Array }).axes = () => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])
+    const { tool } = makeTool(scene)
+
+    tool.onKey(makeKeyEvent('ArrowRight'))            // plane through the click, normal Red
+    tool.onPointerDown(makeSnap({ x: 1, y: 2 }), RAY)
+    expect(tool.snapConstraint(RAY)).toEqual({
+      constraintPlane: { point: [1, 2, 0], normal: [1, 0, 0] },
+      seeThroughPoints: true,
+    })
+  })
+
+  it('an idle hover over an eligible face offers hidden points through its plane; over the ground, nothing is constrained', () => {
+    const { scene } = makeWasmScene({ pick: makePick(7n, 3n), faceNormal: [0, 0, 1], facePlane: [0, 0, 1, 0, 0, 1] })
+    const { tool } = makeTool(scene)
+    expect(tool.snapConstraint(RAY)).toEqual({
+      constraintPlane: { point: [0, 0, 1], normal: [0, 0, 1] },
+      seeThroughPoints: true,
+    })
+
+    const { scene: bare } = makeWasmScene()
+    expect(makeTool(bare).tool.snapConstraint(RAY)).toBeNull()
   })
 })

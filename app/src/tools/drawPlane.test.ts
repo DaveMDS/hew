@@ -14,6 +14,7 @@ import {
   type DrawPlane,
 } from './drawPlane'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { setPickRenderMode } from './pickPolicy'
 import type { Ray } from '../viewport/math'
 import type { EditContext } from './types'
 import type { V3 } from '../viewport/geoHelpers'
@@ -469,6 +470,24 @@ describe('SketchPickCache', () => {
     expect(cache.pickFor(scene, RAY)).toBeNull()
     expect(cache.pickFor(scene, RAY)).toBeNull()
     expect(scene.pick_sketch).toHaveBeenCalledTimes(1)
+  })
+
+  it('a render-mode switch invalidates the memo for the same Ray', () => {
+    const scene = { pick_sketch: vi.fn(() => 9n) } as unknown as WasmScene
+    const cache = new SketchPickCache()
+    const target = { plane: { origin: [0, 0, 0], normal: [0, 0, 1] }, target: { kind: 'new' } } as unknown as Parameters<SketchPickCache['targetFor']>[1] extends () => infer R ? R : never
+    const compute = vi.fn(() => target)
+    try {
+      cache.pickFor(scene, RAY)
+      cache.targetFor(RAY, compute)
+      setPickRenderMode('wireframe')
+      cache.pickFor(scene, RAY)
+      cache.targetFor(RAY, compute)
+      expect(scene.pick_sketch).toHaveBeenCalledTimes(2)
+      expect(compute).toHaveBeenCalledTimes(2)
+    } finally {
+      setPickRenderMode('shaded')
+    }
   })
 })
 

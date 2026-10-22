@@ -122,3 +122,123 @@ describe('LineTool — ground-anchored hard Z lock (the up-arrow "draw straight 
     expect(w.planeCalls).toEqual([[0, 0, 0, 0, 0, 1]])
   })
 })
+
+/** A Blue-axis inference straight above (or below) a ground anchor, as the
+ *  unconstrained ground-anchored snap resolves it: the full 3D point. */
+function blueSnap(p: readonly [number, number, number]): Snap {
+  return { x: p[0], y: p[1], z: p[2], kind: 'on-axis', direction: [0, 0, 1] }
+}
+
+function typeLength(tool: LineTool, text: string): void {
+  for (const ch of text) tool.onKey(makeKeyEvent(ch))
+  tool.onKey(makeKeyEvent('Enter'))
+}
+
+describe('LineTool — typed length with the cursor on the Blue axis (#51a)', () => {
+  it('a typed length while hovering a Blue-axis snap above a ground anchor draws a vertical segment of that length', () => {
+    const w = makeWasmScene()
+    const { tool, onToast, onCommit } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY) // ground anchor
+    tool.onPointerMove(blueSnap([2, 3, 4]), RAY) // on Blue, straight up, no arrow lock
+    typeLength(tool, '1.5')
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(w.segmentCalls).toEqual([[2, 3, 0, 2, 3, 1.5]])
+    // Re-homed exactly like the arrow-locked riser: one draft, begun on a
+    // genuine vertical plane through the anchor (see the Z-lock test above
+    // for why the normal is (0, 1, 0) under a straight-down view).
+    expect(w.planeCalls).toEqual([[2, 3, 0, 0, 1, 0]])
+  })
+
+  it('the chain stays on the vertical plane it re-homed onto after the typed riser', () => {
+    const w = makeWasmScene()
+    const { tool, onToast } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    tool.onPointerMove(blueSnap([2, 3, 4]), RAY)
+    typeLength(tool, '1.5')
+    // Next segment across the top of the riser, in that same vertical plane.
+    tool.onPointerDown({ x: 3, y: 3, z: 1.5, kind: 'free' }, RAY)
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(w.segmentCalls).toEqual([[2, 3, 0, 2, 3, 1.5], [2, 3, 1.5, 3, 3, 1.5]])
+    expect(w.planeCalls).toEqual([[2, 3, 0, 0, 1, 0], [2, 3, 0, 0, 1, 0]])
+  })
+
+  it('a Blue-axis snap straight BELOW the ground anchor draws the typed length downward', () => {
+    const w = makeWasmScene()
+    const { tool, onToast } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    tool.onPointerMove(blueSnap([2, 3, -4]), RAY)
+    typeLength(tool, '1.5')
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(w.segmentCalls).toEqual([[2, 3, 0, 2, 3, -1.5]])
+  })
+
+  it('a typed length with no direction at all says so instead of doing nothing', () => {
+    const w = makeWasmScene()
+    const { tool, onToast, onCommit } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY) // anchored, cursor never moved off it
+    typeLength(tool, '1.5')
+
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(w.segmentCalls).toHaveLength(0)
+    expect(onToast).toHaveBeenCalledWith('Move the cursor to point the line, then type the length.')
+  })
+
+  it('a hover back onto the anchor itself (no inference) also says so', () => {
+    const w = makeWasmScene()
+    const { tool, onToast } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    tool.onPointerMove(makeSnap([2, 3, 0]), RAY)
+    typeLength(tool, '1.5')
+
+    expect(w.segmentCalls).toHaveLength(0)
+    expect(onToast).toHaveBeenCalledWith('Move the cursor to point the line, then type the length.')
+  })
+
+  it('a plain click on a Blue-axis snap above the ground anchor commits the vertical segment it points at', () => {
+    const w = makeWasmScene()
+    const { tool, onToast, onCommit } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    tool.onPointerMove(blueSnap([2, 3, 4]), RAY)
+    tool.onPointerDown(blueSnap([2, 3, 4]), RAY)
+
+    expect(onToast).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(w.segmentCalls).toEqual([[2, 3, 0, 2, 3, 4]])
+    expect(w.planeCalls).toEqual([[2, 3, 0, 0, 1, 0]])
+  })
+
+  it('hovering the Blue axis shows the real vertical length in the measurement box', () => {
+    const w = makeWasmScene()
+    const { tool, onMeasurement } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    onMeasurement.mockClear()
+    tool.onPointerMove(blueSnap([2, 3, 4]), RAY)
+
+    expect(onMeasurement).toHaveBeenCalledWith(formatLength(4))
+    expect(tool.snapProjected()).toBe(false)
+  })
+
+  it('an ordinary off-axis snap with height is still flattened onto the ground and reported as projected', () => {
+    const w = makeWasmScene()
+    const { tool } = makeTool(w.scene)
+
+    tool.onPointerDown(makeSnap([2, 3, 0]), RAY)
+    tool.onPointerMove({ x: 5, y: 3, z: 2, kind: 'endpoint' }, RAY)
+    expect(tool.snapProjected()).toBe(true)
+    tool.onPointerDown({ x: 5, y: 3, z: 2, kind: 'endpoint' }, RAY)
+
+    expect(w.segmentCalls).toEqual([[2, 3, 0, 5, 3, 0]])
+    expect(w.planeCalls).toEqual([[0, 0, 0, 0, 0, 1]])
+  })
+})

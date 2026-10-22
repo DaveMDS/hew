@@ -31,7 +31,9 @@
  *   case) can genuinely leave z = 0, and `_commitPlaneSegment` re-homes the
  *   chain onto a real plane through the anchor when that happens (§2b),
  *   exactly as it already does for a lock leaving any other frozen plane —
- *   see `_planeCursor`'s doc. On a non-ground plane, the cursor is the snap
+ *   see `_planeCursor`'s doc. A snap straight above or below the anchor
+ *   (the Blue axis) keeps its height the same way, lock or no lock, since
+ *   flattened it would land on the anchor itself. On a non-ground plane, the cursor is the snap
  *   (already plane-constrained via `snapConstraint`) or, absent one,
  *   ray∩plane.
  *
@@ -100,7 +102,8 @@ import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget, type DraftTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnDrawPlane, planeKey, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, type DrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
-import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
+import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick, cursorOnFrozenPlane, firstPointOnFace } from './faceDraw'
+import { pickRenderMode } from './pickPolicy'
 import { PlanePin } from './planePin'
 import { isCoarsePointer } from '../platform'
 
@@ -157,6 +160,10 @@ const CHAIN_VERTEX_MERGE_EPS = 1e-9
  *  one-value band — agreeing on the magnitude but not on the boundary is not
  *  agreeing. */
 const DEGENERATE_SEGMENT_EPS = 1e-9
+
+/** Toast for a typed length with no direction to apply it in: the cursor
+ *  is still on the chain's last point (`_commitTyped`). */
+const NO_DIRECTION_MESSAGE = 'Move the cursor to point the line, then type the length.'
 
 /** Toast for a click that resolved onto the chain's last point while the
  *  cursor was somewhere else (a snap that collapsed back onto it). A click
@@ -660,6 +667,9 @@ export class LineTool implements Tool {
           point: this.faceStage.planePoint,
           normal: this.faceStage.normal,
         },
+        // Dropped onto the face and disclosed (`_faceCursor`), so X-ray and
+        // Wireframe may offer hidden points through it.
+        seeThroughPoints: true,
       }
     }
 
@@ -703,7 +713,12 @@ export class LineTool implements Tool {
 
     const plane = this._idleHoverPlane(ray)
     if (!plane.ground) {
-      return { ...lockPart, constraintPlane: { point: plane.origin, normal: plane.normal } }
+      // Only in X-ray may the hover reach hidden points through the face:
+      // a hidden edge or corner starts the chain on the face it lies on
+      // (`faceThrough`), any other hidden point is dropped onto the hovered
+      // face and disclosed (`firstPointOnFace`). Wireframe has no faces to
+      // adopt, so it keeps the plain plane filter here.
+      return { ...lockPart, constraintPlane: { point: plane.origin, normal: plane.normal }, seeThroughPoints: pickRenderMode() === 'xray' }
     }
     return Object.keys(lockPart).length > 0 ? lockPart : null
   }
@@ -743,7 +758,13 @@ export class LineTool implements Tool {
    *  and Shift pin previews both draw through it) and, for the pin, the
    *  plane the next click would land on (`_idleHoverPlane`). */
   private _trackIdleHover(snap: Snap | null, ray: Ray): void {
+    this._snapProjected = false
+    this._idleProjected = false
     if (snap === null) return
+    if (this._currentMode(ray, snap) === 'face') {
+      const face = this._facePickAt(snap, ray)
+      if (face !== null) this._idleProjected = firstPointOnFace(this.wasmScene, face, this._activeInstance, snap, ray).projected
+    }
     const through: V3 = [snap.x, snap.y, snap.z]
     this._lastIdleHoverPoint = through
     if (this.idlePlaneLock === null) this.pin.trackHover(this._idleHoverPlane(ray, snap), through)
@@ -886,15 +907,26 @@ export class LineTool implements Tool {
    *  unrotated drawing axes), the snap's z is exactly the anchor's z
    *  already, so this is bit-identical to the unlocked branch in that case.
    *
+   *  On the ground plane with NO lock, but a snap straight above or below
+   *  the chain's anchor (a Blue-axis inference, or any point vertically
+   *  over it — GitHub #51a): the full snap too, as an implicit Blue lock.
+   *  Flattening it would land exactly on the anchor, so the segment had no
+   *  direction at all: a typed length did nothing and a click was refused
+   *  as "the same point". Kept whole, it re-homes onto a vertical plane
+   *  through `_commitPlaneSegment` exactly like the up-arrow lock.
+   *
    *  On any OTHER (non-ground) plane: the snap (already plane-constrained
    *  via `snapConstraint`) if present, else ray∩plane — unchanged. */
   private _planeCursor(snap: Snap | null, ray: Ray, plane: DrawPlane): V3 | null {
     if (plane.ground) {
       if (snap === null) return null
+      if (this.lockAxis !== null || this._isStraightOverAnchor(snap)) {
+        this._snapProjected = false
+        return [snap.x, snap.y, snap.z]
+      }
       // Records whether the z about to be discarded was actually carrying
       // information — see `snapProjected`.
-      this._snapProjected = this.lockAxis === null && snap.z !== 0
-      if (this.lockAxis !== null) return [snap.x, snap.y, snap.z]
+      this._snapProjected = snap.z !== 0
       return [snap.x, snap.y, 0]
     }
     this._snapProjected = false
@@ -902,13 +934,36 @@ export class LineTool implements Tool {
     return pointOnPlane(ray, plane)
   }
 
-  /** See `Tool.snapProjected`. Set by `_planeCursor`, which is where the
-   *  drawing plane's z actually replaces the snap's. */
+  /** See `Tool.snapProjected`. Set by `_planeCursor` and `_faceCursor`,
+   *  where the drawing plane replaces an off-plane snap (the ground drops its
+   *  height; a face or sketch plane drops it straight onto itself). */
   snapProjected(): boolean {
-    return this._snapProjected
+    // Only a gesture under way projects anything: once the stage is back to
+    // idle (a closed loop, Esc, a context change) the last verdict must not
+    // ride along on ordinary hover cues. An idle hover reports what its
+    // click would do (`_idleProjected`).
+    const active = this.faceStage.kind !== 'idle' || this.planeStage.kind !== 'idle'
+    return active ? this._snapProjected : this._idleProjected
   }
 
-  /** Whether the last `_planeCursor` discarded a non-zero snap z. */
+  /** Whether the idle hover's first click would drop its snap onto the
+   *  hovered face (`firstPointOnFace`); set by `_trackIdleHover`. */
+  private _idleProjected = false
+
+  /** Whether `snap` sits straight above or below the anchored plane-mode
+   *  chain's current point: flattened onto the ground it would coincide
+   *  with the anchor, while its own height says it points somewhere real
+   *  (see `_planeCursor`). False with no anchored plane chain (the first
+   *  click always lands on the ground). */
+  private _isStraightOverAnchor(snap: Snap): boolean {
+    if (this.planeStage.kind !== 'anchored') return false
+    const anchor = this.planeStage.anchor
+    const flat: V3 = [snap.x, snap.y, anchor[2]]
+    if (segmentLength(anchor, flat) > DEGENERATE_SEGMENT_EPS) return false
+    return Math.abs(snap.z - anchor[2]) > DEGENERATE_SEGMENT_EPS
+  }
+
+  /** Whether the last `_planeCursor` / `_faceCursor` moved the snap onto its plane. */
   private _snapProjected = false
 
   /** Set when a single click closed a face loop (`_appendFacePoint`), so
@@ -1048,9 +1103,19 @@ export class LineTool implements Tool {
   private _faceCursor(snap: Snap | null, ray: Ray): V3 | null {
     if (this.faceStage.kind !== 'anchored') return null
     const { planePoint, normal } = this.faceStage
+    this._snapProjected = false
     if (snap === null) return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
     const p: V3 = [snap.x, snap.y, snap.z]
-    if (this.faceStage.points.length !== 1 || this.lockAxis !== null) return p
+    if (this.lockAxis !== null) return p
+    if (this.faceStage.points.length !== 1) {
+      // Later segments stay on the face (a face chain cannot re-home). The
+      // snap is held to it, except where a non-occluding render mode
+      // (X-ray, Wireframe) offers hidden geometry through it: that point
+      // drops onto the face, and the cue says "projected".
+      const at = cursorOnFrozenPlane(snap, ray, planePoint, normal)
+      this._snapProjected = at?.projected ?? false
+      return at?.point ?? null
+    }
     // First segment, unlocked: the snap was not held to the adopted face
     // (`snapConstraint`). On that face's plane it is simply the cursor. Off
     // it, the point may be on the neighbouring face the anchor also lies on
@@ -1063,6 +1128,9 @@ export class LineTool implements Tool {
       return p
     }
     if (this._readoptFaceForPoint(p, ray, snap)) return p
+    // The snapped point is not used (it is off the face); say so, as the
+    // later segments do, rather than let the cue claim it.
+    this._snapProjected = true
     return rayPlaneIntersect(ray.origin, ray.direction, planePoint, normal)
   }
 
@@ -1544,9 +1612,8 @@ export class LineTool implements Tool {
 
   /**
    * Commit a segment of the exact typed length from the last placed point,
-   * along normalize(cursor - last) (falling back to the last rubber-band
-   * direction if the cursor hasn't moved off the anchor yet). Ignored if no
-   * direction is available at all.
+   * along normalize(cursor - last). With no direction at all (the cursor
+   * never moved off the anchor) it says so rather than doing nothing.
    */
   private _commitTyped(distance: number): void {
     // A typed zero would place the last point again: say so in terms of
@@ -1559,9 +1626,13 @@ export class LineTool implements Tool {
     }
     if (this.planeStage.kind === 'anchored') {
       const { plane, target, anchor } = this.planeStage
+      // Hover, click, and typed length all read the same `_planeCursor`, which keeps a snap straight over the anchor, so the three agree.
       const cursor = this._lastPlaneCursor ?? anchor
       const dir = directionBetween(anchor, cursor)
-      if (dir === null) return
+      if (dir === null) {
+        this.onToast(NO_DIRECTION_MESSAGE)
+        return
+      }
       const endpoint = pointAlong(anchor, dir, distance)
       this._commitPlaneSegment(plane, target, anchor, endpoint)
     } else if (this.faceStage.kind === 'anchored') {
@@ -1569,7 +1640,10 @@ export class LineTool implements Tool {
       const last = points[points.length - 1]
       const cursor = this._lastFaceCursor ?? last
       const dir = directionBetween(last, cursor)
-      if (dir === null) return
+      if (dir === null) {
+        this.onToast(NO_DIRECTION_MESSAGE)
+        return
+      }
       const endpoint = pointAlong(last, dir, distance)
       this._appendFacePoint(endpoint)
     }
@@ -1753,6 +1827,7 @@ export class LineTool implements Tool {
       if (closed) {
         // The loop closed into a face — end the chain (idle, ready for a new line).
         this.planeStage = { kind: 'idle' }
+        this._snapProjected = false
         this.typed = ''
         this._lastPlaneCursor = null
         this._prevSegmentDir = null
@@ -1805,7 +1880,11 @@ export class LineTool implements Tool {
       if (eligible === null) return
 
       const { object: objectHandle, face: faceHandle, normal } = eligible
-      const anchor: V3 = [snap.x, snap.y, snap.z]
+      // On the face's plane: a hidden point that is no part of the face
+      // (X-ray) drops onto it, disclosed, like the later clicks.
+      const first = firstPointOnFace(this.wasmScene, eligible, this._activeInstance, snap, ray)
+      const anchor: V3 = first.point
+      this._snapProjected = first.projected
 
       this.faceStage = {
         kind: 'anchored',

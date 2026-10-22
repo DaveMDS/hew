@@ -258,17 +258,49 @@ describe('SnapService — precision mode', () => {
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
-    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+    expect(snapFn.mock.calls[0].at(-2)).toBe(false)
 
     snapFn.mockClear()
     svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
-    expect(snapFn.mock.calls[0].at(-1)).toBe(true)
+    expect(snapFn.mock.calls[0].at(-2)).toBe(true)
     hit = false
     snapFn.mockClear()
     svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
     expect(snapFn.mock.calls.length).toBe(2)
+    expect(snapFn.mock.calls[1].at(-2)).toBe(true)
+  })
+  it('passes `seeThroughPoints` to both the acquire and the release query, and false by default', () => {
+    const held = {
+      x: () => 0, y: () => 0, z: () => 0,
+      kind: () => 'midpoint',
+      direction: () => undefined,
+      projected_from: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => undefined,
+      element_kind: () => undefined,
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+    let hit = true
+    const snapFn = vi.fn(() => (hit ? held : undefined))
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+
+    svc.resolve(DOWN, 800, PERSPECTIVE_45)
+    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect(snapFn.mock.calls[0].at(-1)).toBe(true)
+    hit = false
+    snapFn.mockClear()
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect(snapFn.mock.calls.length).toBe(2)
     expect(snapFn.mock.calls[1].at(-1)).toBe(true)
   })
+
 })
 
 /** `Scene.snap`'s `soft_axis_aperture_scale` position. */
