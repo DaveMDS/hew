@@ -15,7 +15,10 @@
  *     it client-side from the render meshes the app already holds; shown for
  *     Object/Group/Component/multi-selection, hidden when the selection has
  *     no mesh, e.g. only Sketches)
- *   - Tags (removable chips + a "+" affordance that reveals the add field)
+ *   - Tags (removable chips + a "+" affordance that reveals the add field);
+ *     clicking a chip's name selects that tag in the Tags pane
+ *   - Materials (every distinct material on the selection, a swatch and a name
+ *     each; clicking one selects it in the Materials pane)
  *
  * A component instance gets the component treatment instead of the plain
  * Name field:
@@ -71,6 +74,8 @@ import { batchLabel, failureLine, runBatch, thickenOp } from '../health/healthBa
 import { ThickenDialog } from './ThickenDialog'
 import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBounds'
 import { formatLength } from '../settings/units'
+import { useLengthDisplay } from '../settings/useLengthDisplay'
+import { selectionMaterials } from './selectionMaterials'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
 import { isComposingKey } from '../input/keyboard'
@@ -116,6 +121,17 @@ interface Props {
    * render from.
    */
   onSelectMany: (nodes: NodeRef[]) => void
+  /**
+   * A tag chip's name was clicked: select that tag in the Tags pane (App
+   * reveals the pane, expands the tag's parents, scrolls the row into view).
+   * Not called for the chip's ×.
+   */
+  onSelectTag?: (path: string[]) => void
+  /**
+   * A Materials-row entry was clicked: select that material in the Materials
+   * pane (App reveals the pane and scrolls the swatch into view).
+   */
+  onSelectMaterial?: (id: bigint) => void
   /**
    * Surface a refusal. Segments is the panel's first control the kernel can
    * refuse, and a refusal has to be visible — never a field that silently
@@ -237,8 +253,10 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
   const { t } = useLingui()
+  // Re-render the length readouts when the format OR the Precision changes.
+  useLengthDisplay()
   const selectedCount = selectedIds.length
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
@@ -772,6 +790,15 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedIds, scene, docRev])
 
+  // ---- Materials row ---------------------------------------------------
+  // The union of every material on the selection (see selectionMaterials).
+  const materialIds = useMemo(() => {
+    const nodes = selectedIds.filter((n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance')
+    return nodes.length === 0 ? [] : selectionMaterials(scene, nodes)
+    // docRev: paint changes on every mutation without changing identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, scene, docRev])
+
   const handleAddTag = useCallback(() => {
     const segments = tagInput.split('/').map((s) => s.trim()).filter((s) => s.length > 0)
     if (segments.length === 0) return
@@ -937,6 +964,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                       key={path.join('/')}
                       path={path}
                       onRemove={() => handleRemoveTagFromAll(path)}
+                      onSelect={onSelectTag}
                       removeLabel={t`Remove tag ${tagPath} from all selected`}
                     />
                   )
@@ -974,6 +1002,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             )}
           </div>
         )}
+        {multi !== null && <MaterialsRow key={selectedKeyForReset} ids={materialIds} scene={scene} onSelect={onSelectMaterial} />}
       </div>
     )
   }
@@ -1288,6 +1317,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 key={path.join('/')}
                 path={path}
                 onRemove={() => handleRemoveTag(path)}
+                onSelect={onSelectTag}
               />
             ))}
           </div>
@@ -1327,6 +1357,104 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
           />
         )}
       </div>
+      )}
+
+      {/* Materials — everything painted on the selection, union over a
+       * group's or component's contents. Same eligibility as Tags. */}
+      {(nodeInfo.kind === 'object' || nodeInfo.kind === 'group' || nodeInfo.kind === 'instance') && (
+        <MaterialsRow key={selectedKeyForReset} ids={materialIds} scene={scene} onSelect={onSelectMaterial} />
+      )}
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// MaterialsRow — a swatch and a name per distinct material on the selection.
+// Clicking one selects it in the Materials pane. Read-only: there is no
+// remove affordance (unpainting is the Paint tool's job). Shows "None" when
+// nothing is painted; past MAX_MATERIAL_SWATCHES the rest fold into a
+// "+N more" button that expands the list.
+// ---------------------------------------------------------------------------
+
+/** Swatches shown before the rest fold into "+N more". */
+export const MAX_MATERIAL_SWATCHES = 12
+
+function MaterialsRow({
+  ids,
+  scene,
+  onSelect,
+}: {
+  ids: bigint[]
+  scene: WasmScene
+  onSelect?: (id: bigint) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const shown = expanded ? ids : ids.slice(0, MAX_MATERIAL_SWATCHES)
+  const hidden = ids.length - shown.length
+  return (
+    <div data-testid="object-info-materials">
+      <div style={LABEL_STYLE}>Materials</div>
+      {ids.length === 0 ? (
+        <div style={{ ...VALUE_STYLE, color: 'var(--text-secondary, #ccc)' }}>None</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+          {shown.map((id) => {
+            const info = scene.material_info(id)
+            if (info === undefined) return null
+            const name = info.name()
+            const hex = '#' + [info.r(), info.g(), info.b()].map((c) => c.toString(16).padStart(2, '0')).join('')
+            return (
+              <button
+                key={id.toString()}
+                data-testid="material-entry"
+                title="Show in Materials pane"
+                onClick={() => onSelect?.(id)}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  background: 'none',
+                  border: 'none',
+                  padding: '1px 0',
+                  textAlign: 'left',
+                  cursor: onSelect !== undefined ? 'pointer' : 'default',
+                  ...VALUE_STYLE,
+                  minWidth: 0,
+                }}
+              >
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: '14px',
+                    height: '14px',
+                    borderRadius: '2px',
+                    border: '1px solid var(--border-strong, #444)',
+                    background: hex,
+                    flexShrink: 0,
+                  }}
+                />
+                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+              </button>
+            )
+          })}
+          {hidden > 0 && (
+            <button
+              onClick={() => setExpanded(true)}
+              style={{
+                background: 'none',
+                border: 'none',
+                padding: '1px 0',
+                textAlign: 'left',
+                cursor: 'pointer',
+                color: 'var(--text-muted, #999)',
+                fontSize: '11px',
+                fontFamily: 'var(--font-family-ui)',
+              }}
+            >
+              +{hidden} more
+            </button>
+          )}
+        </div>
       )}
     </div>
   )
@@ -1369,10 +1497,13 @@ function TagChip({
   path,
   onRemove,
   removeLabel,
+  onSelect,
 }: {
   path: string[]
   onRemove: () => void
   removeLabel?: string
+  /** Click on the name (not the ×): select this tag in the Tags pane. */
+  onSelect?: (path: string[]) => void
 }) {
   const { t } = useLingui()
   const display = path.join(' / ')
@@ -1390,9 +1521,27 @@ function TagChip({
         fontFamily: 'var(--font-family-ui)',
       }}
     >
-      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <button
+        onClick={() => onSelect?.(path)}
+        title={t`Show in Tags pane`}
+        data-testid="tag-chip-select"
+        style={{
+          flex: 1,
+          minWidth: 0,
+          background: 'none',
+          border: 'none',
+          padding: 0,
+          font: 'inherit',
+          color: 'inherit',
+          textAlign: 'left',
+          cursor: onSelect !== undefined ? 'pointer' : 'default',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+      >
         {display}
-      </span>
+      </button>
       <button
         onClick={onRemove}
         aria-label={removeLabel ?? t`Remove tag ${display}`}

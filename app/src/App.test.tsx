@@ -111,6 +111,9 @@ const mockScene = {
   object_mesh: () => ({ positions: () => new Float32Array(), free: () => {} }),
   instance_pose: () => undefined as Float64Array | undefined,
   node_leaf_objects: () => new BigUint64Array(),
+  // Object Info's Materials row: nothing painted by default.
+  object_materials: () => new BigUint64Array(),
+  instance_expanded_members: () => new BigUint64Array(),
   set_hidden: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],
   component_name: () => undefined as string | undefined,
@@ -4066,5 +4069,82 @@ describe('App — the native save panel chooses the format', () => {
     expect(fakeFileHost.writeTo).not.toHaveBeenCalled()
     expect(fakeFileHost.saveAs).not.toHaveBeenCalled()
     expect(fakeFileHost.exportBinary).not.toHaveBeenCalled()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// App — Object Info links: a tag chip or a Materials-row entry goes through
+// revealInTray, which opens the collapsed pane and selects the target in it.
+// ---------------------------------------------------------------------------
+
+describe('App — revealInTray (Object Info tag chips and Materials row)', () => {
+  const saved = {
+    top: mockScene.top_level_nodes,
+    objectIds: mockScene.object_ids,
+    objectName: mockScene.object_name,
+    nodeTags: mockScene.node_tags,
+    materialIds: mockScene.material_ids,
+    materialInfo: mockScene.material_info,
+    objectMaterials: mockScene.object_materials,
+  }
+  const scrolled = vi.fn()
+  const originalScroll = Element.prototype.scrollIntoView
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    setTrayLayout(DEFAULT_TRAY_LAYOUT) // Tags and Materials start collapsed
+    Element.prototype.scrollIntoView = scrolled
+    mockScene.top_level_nodes = () => [{ kind: 'object', id: 1n }]
+    mockScene.object_ids = () => new BigUint64Array([1n])
+    mockScene.object_name = () => 'Beam'
+    mockScene.node_tags = () => ['Structure/Roof']
+    mockScene.material_ids = () => new BigUint64Array([10n])
+    mockScene.material_info = ((id: bigint) =>
+      id === 10n
+        ? { name: () => 'Oak', r: () => 200, g: () => 150, b: () => 100, a: () => 255, has_texture: () => false, world_w: () => 1, world_h: () => 1 }
+        : undefined) as unknown as typeof mockScene.material_info
+    mockScene.object_materials = () => new BigUint64Array([10n])
+  })
+
+  afterEach(() => {
+    mockScene.top_level_nodes = saved.top
+    mockScene.object_ids = saved.objectIds
+    mockScene.object_name = saved.objectName
+    mockScene.node_tags = saved.nodeTags
+    mockScene.material_ids = saved.materialIds
+    mockScene.material_info = saved.materialInfo
+    mockScene.object_materials = saved.objectMaterials
+    Element.prototype.scrollIntoView = originalScroll
+  })
+
+  const sectionHeader = (name: RegExp) => screen.getByRole('button', { name })
+
+  it('a tag chip opens the collapsed Tags pane, expands the parents, and selects the tag row', async () => {
+    await renderAndLoad()
+    fireEvent.click(screen.getByText('Beam')) // select the object in the Outliner
+    expect(sectionHeader(/^tags$/i).getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(screen.getByText('Structure / Roof'))
+
+    expect(sectionHeader(/^tags$/i).getAttribute('aria-expanded')).toBe('true')
+    const row = (await screen.findByText('Roof')).closest('[data-active]') as HTMLElement
+    expect(row.dataset.active).toBe('true')
+    expect(scrolled).toHaveBeenCalled()
+  })
+
+  it('a Materials-row entry opens the collapsed Materials pane and makes that material the current one without picking Paint', async () => {
+    await renderAndLoad()
+    fireEvent.click(screen.getByText('Beam'))
+    expect(sectionHeader(/^materials$/i).getAttribute('aria-expanded')).toBe('false')
+
+    fireEvent.click(within(screen.getByTestId('object-info-materials')).getByText('Oak'))
+
+    expect(sectionHeader(/^materials$/i).getAttribute('aria-expanded')).toBe('true')
+    const swatch = await screen.findByTitle('Oak')
+    expect(swatch.style.borderColor).toContain('accent-base')
+    expect(scrolled).toHaveBeenCalled()
+    // Selecting here does not switch tools the way picking in the palette does.
+    expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
+    expect(vi.mocked(Viewport).mock.calls.at(-1)?.[0]).toMatchObject({ activeTool: 'Select' })
   })
 })

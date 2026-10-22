@@ -1,4 +1,5 @@
 import { t } from '@lingui/core/macro'
+import { compareNames } from './nameSort'
 import { draftKindLabel, draftRef, draftRefAlive, resolveDraft, type OutlinerDrawing, type PlaneUnitsScene } from '../tools/planeUnits'
 
 /**
@@ -198,6 +199,46 @@ export function filterTreeKeys(
   }
   for (const node of topNodes) walk(node, [])
   return { matches, ancestors }
+}
+
+/** Kind order for the Outliner's Kind sort: objects, groups, components,
+ *  sketches, then the draft kinds. */
+export function outlinerKindRank(kind: NodeKind): number {
+  switch (kind) {
+    case 'object': return 0
+    case 'group': return 1
+    case 'instance': return 2
+    case 'sketch': return 3
+    case 'draft-island': return 4
+    case 'draft-curve': return 5
+    case 'draft-edge': return 6
+    case 'draft-region': return 7
+  }
+}
+
+/**
+ * Order the rows of ONE Outliner level. `'document'` keeps the given order;
+ * `'name'` sorts by the label each row prints (case-insensitive, numeric, so
+ * "Group 2" precedes "Group 10"); `'kind'` groups by kind, then by name.
+ * Display order only: each entry keeps the positional `index` its generated
+ * label was built from, so "Group 3" stays "Group 3". Stable, and returns a
+ * new array.
+ */
+export function sortOutlinerLevel<T extends { node: NodeRef }>(
+  entries: readonly T[],
+  mode: 'document' | 'name' | 'kind',
+  labelOf: (node: NodeRef) => string,
+): T[] {
+  if (mode === 'document') return [...entries]
+  const keyed = entries.map((entry) => ({ entry, label: labelOf(entry.node) }))
+  keyed.sort((a, b) => {
+    if (mode === 'kind') {
+      const byKind = outlinerKindRank(a.entry.node.kind) - outlinerKindRank(b.entry.node.kind)
+      if (byKind !== 0) return byKind
+    }
+    return compareNames(a.label, b.label)
+  })
+  return keyed.map((k) => k.entry)
 }
 
 /**

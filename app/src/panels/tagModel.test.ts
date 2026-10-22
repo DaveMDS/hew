@@ -18,6 +18,7 @@ import {
   collectTagDescendantNodes,
   tagPathKey,
   isPathUnder,
+  filterTagKeys,
   type TagTreeNode,
 } from './tagModel'
 import type { NodeRef } from './treeModel'
@@ -312,5 +313,44 @@ describe('isPathUnder', () => {
   it('handles empty anchor path (everything is under root)', () => {
     expect(isPathUnder(['A', 'B'], [])).toBe(true)
     expect(isPathUnder([], [])).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// filterTagKeys / name order
+// ---------------------------------------------------------------------------
+
+describe('filterTagKeys', () => {
+  const ref = (id: number): NodeRef => ({ kind: 'object', id: BigInt(id) })
+  const tree = buildTagTree([
+    { node: ref(1), path: ['Hardware', 'Screws'] },
+    { node: ref(2), path: ['Hardware', 'Nails'] },
+    { node: ref(3), path: ['Oak'] },
+  ])
+
+  it('returns null for a blank query', () => {
+    expect(filterTagKeys(tree, '  ')).toBeNull()
+  })
+
+  it('matches case-insensitively and lists the parent as an ancestor when only a child matches', () => {
+    const r = filterTagKeys(tree, 'SCREW')!
+    expect([...r.matches]).toEqual([tagPathKey(['Hardware', 'Screws'])])
+    expect([...r.ancestors]).toEqual([tagPathKey(['Hardware'])])
+  })
+
+  it('a matching parent is a match, its non-matching children are not shown', () => {
+    const r = filterTagKeys(tree, 'hardware')!
+    expect(r.matches.has(tagPathKey(['Hardware']))).toBe(true)
+    expect(r.matches.has(tagPathKey(['Hardware', 'Nails']))).toBe(false)
+    expect(r.ancestors.size).toBe(0)
+  })
+
+  it('orders tags by name, case-insensitive and numeric', () => {
+    const t = buildTagTree([
+      { node: ref(1), path: ['Layer 10'] },
+      { node: ref(2), path: ['layer 2'] },
+      { node: ref(3), path: ['Attic'] },
+    ])
+    expect(t.map((n) => n.segment)).toEqual(['Attic', 'layer 2', 'Layer 10'])
   })
 })

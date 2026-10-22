@@ -11,11 +11,12 @@
  * scenePanels.test.tsx use), so no wasm/loader mock is required.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { DocumentTree } from './DocumentTree'
 import { makeLabelFor, nodeKey, type NodeRef } from './treeModel'
 import { draftRef, outlinerDrawing, type OutlinerDrawing } from '../tools/planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { getOutlinerSort, setOutlinerSort } from '../settings/view'
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function makeScene(overrides: Record<string, any> = {}): WasmScene {
@@ -332,5 +333,211 @@ describe('DocumentTree — filter keeps positional labels', () => {
     fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'Group 3' } })
     expect(screen.getByText('Group 3')).toBeInTheDocument()
     expect(screen.queryByText('Group 1')).not.toBeInTheDocument()
+  })
+})
+
+const SORT_NAMES: Record<string, string> = { document: 'Document order', name: 'Name', kind: 'Kind' }
+const pickSort = (mode: string): void => {
+  fireEvent.click(screen.getByRole('radio', { name: SORT_NAMES[mode] }))
+}
+
+describe('DocumentTree — sort control', () => {
+  const o = (id: number): NodeRef => ({ kind: 'object', id: BigInt(id) })
+  const g = (id: number): NodeRef => ({ kind: 'group', id: BigInt(id) })
+  const i = (id: number): NodeRef => ({ kind: 'instance', id: BigInt(id) })
+  const names = (): string[] =>
+    Array.from(document.querySelectorAll('[data-testid="outliner-row-label"]')).map((e) => e.textContent ?? '')
+
+  // Top level (document order): Zed (object), Group 2 (unnamed), beta (group),
+  // Door (component), Apple (object), Group 10 is nested inside beta with
+  // Gamma (object) and an unnamed group "Group 1" (position 0 inside beta).
+  const scene = makeScene({
+    top_level_nodes: () => [o(1), g(2), g(3), i(4), o(5)],
+    group_members: (id: bigint) => (id === 3n ? [g(6), o(7)] : []),
+    object_name: (id: bigint) => ({ 1: 'Zed', 5: 'apple', 7: 'Gamma' } as Record<number, string>)[Number(id)],
+    group_name: (id: bigint) => (id === 3n ? 'beta' : undefined),
+    instance_name: () => undefined,
+    instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+    component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
+  })
+  const renderTree = () => render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
+
+  beforeEach(() => {
+    localStorage.clear()
+    setOutlinerSort('document')
+  })
+
+  it('defaults to Document order', () => {
+    expect(getOutlinerSort()).toBe('document')
+    renderTree()
+    expect(screen.getByRole('radio', { name: 'Document order' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByRole('radio', { name: 'Name' })).toHaveAttribute('aria-checked', 'false')
+    expect(screen.getByRole('radio', { name: 'Kind' })).toHaveAttribute('aria-checked', 'false')
+    expect(names()).toEqual(['Zed', 'Group 2', 'beta', 'Door', 'apple'])
+  })
+
+  it('is a three-button radio group with a roving tab stop, and the arrow keys move and select', () => {
+    renderTree()
+    const group = screen.getByRole('radiogroup', { name: 'Sort outliner' })
+    expect(group.querySelectorAll('[role="radio"]')).toHaveLength(3)
+    const doc = screen.getByRole('radio', { name: 'Document order' })
+    const name = screen.getByRole('radio', { name: 'Name' })
+    const kind = screen.getByRole('radio', { name: 'Kind' })
+    expect([doc.tabIndex, name.tabIndex, kind.tabIndex]).toEqual([0, -1, -1])
+    expect(name).toHaveAttribute('title', 'Name')
+    doc.focus()
+    fireEvent.keyDown(doc, { key: 'ArrowRight' })
+    expect(getOutlinerSort()).toBe('name')
+    expect(name).toHaveAttribute('aria-checked', 'true')
+    expect(document.activeElement).toBe(name)
+    fireEvent.keyDown(name, { key: 'ArrowRight' })
+    expect(getOutlinerSort()).toBe('kind')
+    fireEvent.keyDown(kind, { key: 'ArrowRight' })
+    expect(getOutlinerSort()).toBe('document')
+    fireEvent.keyDown(doc, { key: 'ArrowLeft' })
+    expect(getOutlinerSort()).toBe('kind')
+  })
+
+  it('Name sorts case-insensitively; the generated "Group 2" keeps its number', () => {
+    renderTree()
+    pickSort('name')
+    expect(names()).toEqual(['apple', 'beta', 'Door', 'Group 2', 'Zed'])
+  })
+
+  it('Kind groups objects, groups, components, then orders by name within a kind', () => {
+    renderTree()
+    pickSort('kind')
+    expect(names()).toEqual(['apple', 'Zed', 'beta', 'Group 2', 'Door'])
+  })
+
+  it('applies per level: a group\'s members sort inside it, keeping their positional labels', () => {
+    renderTree()
+    pickSort('name')
+    // Open beta (a collapsed group): its members are Group 1 (unnamed, position 0) and Gamma.
+    fireEvent.click(screen.getAllByText('▸')[0])
+    const all = names()
+    const at = all.indexOf('beta')
+    expect(all.slice(at + 1, at + 3)).toEqual(['Gamma', 'Group 1'])
+  })
+
+  it('persists per person under hew.settings.outlinerSort', () => {
+    renderTree()
+    pickSort('kind')
+    expect(localStorage.getItem('hew.settings.outlinerSort')).toBe('kind')
+    expect(getOutlinerSort()).toBe('kind')
+  })
+
+  it('the filter still narrows, and the breadcrumb still shows the open group, under Name sort', () => {
+    setOutlinerSort('name')
+    render(
+      <DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} activeContext={[g(3)]} />,
+    )
+    expect(screen.getAllByText('beta').length).toBeGreaterThan(0)
+    fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'apple' } })
+    expect(screen.getByText('apple')).toBeInTheDocument()
+    expect(screen.queryByText('Zed')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Model' })).toBeInTheDocument()
+  })
+})
+
+describe('DocumentTree — sort covers free sketches, session members, and imprints', () => {
+  const o = (id: number): NodeRef => ({ kind: 'object', id: BigInt(id) })
+  const g = (id: number): NodeRef => ({ kind: 'group', id: BigInt(id) })
+  const i = (id: number): NodeRef => ({ kind: 'instance', id: BigInt(id) })
+  const free5: Store = { kind: 'free', sketch: 5 }
+  const names = (): string[] =>
+    Array.from(document.querySelectorAll('[data-testid="outliner-row-label"]')).map((e) => e.textContent ?? '')
+  const sortTo = (mode: string): void => {
+    pickSort(mode)
+  }
+
+  beforeEach(() => {
+    localStorage.clear()
+    setOutlinerSort('document')
+  })
+
+  it('free-sketch rows sort with the top level: Name puts "Sketch 1" before "Zebra", Kind puts sketches after components', () => {
+    const scene = drawingScene({
+      drawn: { 0: [{ key: 30, stores: [free5, free5, free5, free5] }] },
+      sketches: { 5: 0 },
+      extra: {
+        top_level_nodes: () => [o(1), i(4)],
+        object_name: (id: bigint) => (id === 1n ? 'Zebra' : undefined),
+        instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+        component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
+      },
+    })
+    render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
+    expect(names()).toEqual(['Zebra', 'Door', 'Sketch 1'])
+    sortTo('name')
+    expect(names()).toEqual(['Door', 'Sketch 1', 'Zebra'])
+    sortTo('kind')
+    expect(names()).toEqual(['Zebra', 'Door', 'Sketch 1'])
+  })
+
+  it('keeps each sketch\'s number when sorting and still selects the right one', () => {
+    const scene = drawingScene({
+      drawn: { 0: [{ key: 30, stores: [free5, free5, free5, free5] }, { key: 31, stores: [free5, free5, free5, free5], ox: 3 }] },
+      sketches: { 5: 0 },
+      extra: { top_level_nodes: () => [o(1)], object_name: () => 'Aardvark' },
+    })
+    const onSelect = vi.fn()
+    render(<DocumentTree {...baseProps} scene={scene} onSelect={onSelect} />)
+    sortTo('name')
+    expect(names()).toEqual(['Aardvark', 'Sketch 1', 'Sketch 2'])
+    fireEvent.click(screen.getByText('Sketch 2'))
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 31n }), false)
+  })
+
+  it('the filter still hides non-matching sketches under a sort', () => {
+    const scene = drawingScene({
+      drawn: { 0: [{ key: 30, stores: [free5, free5, free5, free5] }, { key: 31, stores: [free5, free5, free5, free5], ox: 3 }] },
+      sketches: { 5: 0 },
+      extra: { top_level_nodes: () => [o(1)], object_name: () => 'Aardvark' },
+    })
+    render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
+    sortTo('name')
+    fireEvent.change(screen.getByLabelText('Filter outliner'), { target: { value: 'sketch 2' } })
+    expect(names()).toEqual(['Sketch 2'])
+  })
+
+  it('session-member rows sort by Name and by Kind, keeping positional labels', () => {
+    const scene = makeScene({
+      top_level_nodes: () => [o(1), g(2), i(4), o(5)],
+      object_name: (id: bigint) => ({ 1: 'Zed', 5: 'apple' } as Record<number, string>)[Number(id)],
+      instance_def: (id: bigint) => (id === 4n ? 40n : undefined),
+      component_name: (id: bigint) => (id === 40n ? 'Door' : undefined),
+    })
+    const props = {
+      ...baseProps,
+      scene,
+      onSelect: vi.fn(),
+      sessionStack: [{ node: g(9), label: 'Open' }],
+      sessionMembers: [o(1), g(2), i(4), o(5)],
+    }
+    render(<DocumentTree {...props} />)
+    expect(names()).toEqual(['Open', 'Zed', 'Group 2', 'Door', 'apple'])
+    sortTo('name')
+    expect(names()).toEqual(['Open', 'apple', 'Door', 'Group 2', 'Zed'])
+    sortTo('kind')
+    expect(names()).toEqual(['Open', 'apple', 'Zed', 'Group 2', 'Door'])
+  })
+
+  it('imprint rows under an object sort by name under Name and Kind, and keep drawing order in Document', () => {
+    const scene = drawingScene({
+      drawn: {
+        [FACE_Z]: [
+          { key: 10, stores: [topo1], kind: 'rect' },
+          { key: 11, stores: [topo1], kind: 'circle', ox: 3 },
+        ],
+      },
+      faces: { 10: FACE_Z },
+    })
+    render(<DocumentTree {...baseProps} scene={scene} onSelect={vi.fn()} />)
+    expect(names()).toEqual(['Panel', 'Rectangle', 'Circle'])
+    sortTo('name')
+    expect(names()).toEqual(['Panel', 'Circle', 'Rectangle'])
+    sortTo('kind')
+    expect(names()).toEqual(['Panel', 'Circle', 'Rectangle'])
   })
 })

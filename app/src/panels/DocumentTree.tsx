@@ -31,6 +31,7 @@ import {
   collectDescendants,
   filterTreeKeys,
   dropTargetFor,
+  sortOutlinerLevel,
   type NodeRef,
   type NodeKind,
 } from './treeModel'
@@ -38,6 +39,14 @@ import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '.
 import { isSketchScopedKind } from './treeModel'
 import type { HealthClass } from '../health/healthReport'
 import { OUTLINER_TOOLTIP } from '../health/healthCopy'
+import {
+  getOutlinerSort,
+  subscribeOutlinerSort,
+  setOutlinerSort,
+  type OutlinerSort,
+} from '../settings/view'
+import { OutlinerSortToggle } from './OutlinerSortToggle'
+import { useViewSetting } from '../settings/useViewSetting'
 
 interface Props {
   scene: WasmScene
@@ -424,7 +433,44 @@ export function DocumentTree({
 
   // Label resolver for breadcrumbs AND the filter below (same text, so a
   // filter match is exactly what the row itself displays).
-  const labelFor = makeLabelFor(scene, treeIndex, frameLabelByKey, () => drawing)
+  const labelFor = useMemo(
+    () => makeLabelFor(scene, treeIndex, frameLabelByKey, () => drawing),
+    // docRev: names change without the scene identity changing.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [scene, treeIndex, frameLabelByKey, drawing, docRev],
+  )
+
+  // Row order at every level (a per-person setting, not saved in the file).
+  // Display only: each row keeps the document-order index its generated
+  // label ("Group 3") was numbered from, so sorting never renumbers.
+  const sortMode: OutlinerSort = useViewSetting(getOutlinerSort, subscribeOutlinerSort)
+  // Free sketches are top-level rows too: they sort with the rest (by the
+  // "Sketch N" label they print; N is their stable position among sketches),
+  // and in document order they follow the other top-level rows.
+  const sortedTop = useMemo(
+    () =>
+      sortOutlinerLevel(
+        [
+          ...topNodes.map((node, index) => ({ node, index, free: false })),
+          ...sketches.map((s, index) => ({ node: s.ref, index, free: true })),
+        ],
+        sortMode,
+        (node) => {
+          const at = sketchIndex.get(nodeKey(node))
+          return at !== undefined ? entityLabel('sketch', at) : labelFor(node)
+        },
+      ),
+    [topNodes, sketches, sketchIndex, sortMode, labelFor],
+  )
+  const sortedSessionMembers = useMemo(
+    () =>
+      sortOutlinerLevel(
+        (sessionMembers ?? []).map((node, sessionIndex) => ({ node, sessionIndex })),
+        sortMode,
+        labelFor,
+      ),
+    [sessionMembers, sortMode, labelFor],
+  )
 
   // ---------------------------------------------------------------------
   // Filter (MaterialPalette's filter pattern): case-insensitive substring
@@ -726,7 +772,8 @@ export function DocumentTree({
 
       {/* Filter — MaterialPalette's filter pattern (⌕ / × clear). Matches
           the same label text every row renders below. */}
-      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center', flex: 1 }}>
         <span
           aria-hidden="true"
           style={{
@@ -785,6 +832,9 @@ export function DocumentTree({
           </button>
         )}
       </div>
+      {/* Sort — applies at every level; display order only. */}
+      <OutlinerSortToggle value={sortMode} onChange={setOutlinerSort} />
+      </div>
 
       {/* Unified node tree: root Model row, top-level nodes, then
           free-standing sketches. An empty document renders no content rows
@@ -812,7 +862,7 @@ export function DocumentTree({
             onClick={() => {}}
           />
         ))}
-        {sessionStack.length > 0 && (sessionMembers ?? []).map((node, sessionIndex) => (
+        {sessionStack.length > 0 && sortedSessionMembers.map(({ node, sessionIndex }) => (
           <NodeRow
               drawing={drawing}
             key={`session-member:${nodeKey(node)}`}
@@ -845,6 +895,8 @@ export function DocumentTree({
             onSelect={onSelect}
             onEnterContext={onEnterContext}
             filterResult={null}
+            sortMode={sortMode}
+            labelOf={labelFor}
             expandedMap={expandedMap}
             setNodeExpanded={setNodeExpanded}
           dropHighlightKey={dropHighlightKey}
@@ -852,7 +904,29 @@ export function DocumentTree({
           onStartDrag={startRowDrag}
           />
         ))}
-        {topNodes.map((node, index) => {
+        {sortedTop.map(({ node, index, free }) => {
+          if (free) {
+            if (
+              filterActive &&
+              !entityLabel('sketch', index).toLowerCase().includes(filterQuery)
+            ) {
+              return null
+            }
+            return (
+              <Row
+                key={nodeKey(node)}
+                label={entityLabel('sketch', index)}
+                icon={<NodeIcon kind="sketch" />}
+                selected={isSelected(node)}
+                isPrimary={primaryKey === nodeKey(node)}
+                active={false}
+                dimmed={fullPath.length > 0}
+                indent={0}
+                rowRef={primaryKey === nodeKey(node) ? selectedRowRef : undefined}
+                onClick={(additive) => onSelect(node, additive)}
+              />
+            )
+          }
           // The innermost session frame's members are rendered nested under
           // its header above — skip their loose top-level row so they don't
           // appear twice. (Every OTHER open frame's own node is already
@@ -892,28 +966,13 @@ export function DocumentTree({
               onSelect={onSelect}
               onEnterContext={onEnterContext}
               filterResult={filterResult}
+              sortMode={sortMode}
+              labelOf={labelFor}
               expandedMap={expandedMap}
               setNodeExpanded={setNodeExpanded}
           dropHighlightKey={dropHighlightKey}
           dragSourceKeys={dragSourceKeys}
           onStartDrag={startRowDrag}
-            />
-          )
-        })}
-        {visibleSketches.map(({ ref: node }) => {
-          const index = sketchIndex.get(nodeKey(node)) ?? -1
-          return (
-            <Row
-              key={nodeKey(node)}
-              label={entityLabel('sketch', index)}
-              icon={<NodeIcon kind="sketch" />}
-              selected={isSelected(node)}
-              isPrimary={primaryKey === nodeKey(node)}
-              active={false}
-              dimmed={fullPath.length > 0}
-              indent={0}
-              rowRef={primaryKey === nodeKey(node) ? selectedRowRef : undefined}
-              onClick={(additive) => onSelect(node, additive)}
             />
           )
         })}
@@ -1040,6 +1099,8 @@ const NodeRow = memo(function NodeRowInner({
   onSelect,
   onEnterContext,
   filterResult,
+  sortMode,
+  labelOf,
   expandedMap,
   setNodeExpanded,
   dropHighlightKey,
@@ -1079,6 +1140,10 @@ const NodeRow = memo(function NodeRowInner({
   /** Active text filter (`null` = no filter): drives force-expand of an
    *  ancestor group and the dimmed "ancestor, not a match itself" styling. */
   filterResult: { matches: Set<string>; ancestors: Set<string> } | null
+  /** Row order at this and every nested level (display only). */
+  sortMode: OutlinerSort
+  /** The shared label resolver the Name and Kind sorts compare. */
+  labelOf: (node: NodeRef) => string
   expandedMap: Map<string, boolean>
   setNodeExpanded: (key: string, value: boolean) => void
   /** The `nodeKey` currently highlighted as a VALID drag-and-drop target
@@ -1185,7 +1250,10 @@ const NodeRow = memo(function NodeRowInner({
           isDropTarget={dropHighlightKey === key}
           onRowPointerDown={(e) => onStartDrag(node, e)}
         />
-        {imprints.map((unit) => {
+        {(sortMode === 'document'
+          ? imprints
+          : sortOutlinerLevel(imprints.map((unit) => ({ node: unit.ref, unit })), 'name', labelOf).map((e) => e.unit)
+        ).map((unit) => {
           const ref = unit.ref
           const refKey = nodeKey(ref)
           return (
@@ -1262,8 +1330,11 @@ const NodeRow = memo(function NodeRowInner({
   )
   // Each child keeps its position among ALL members: an unnamed child's
   // "Group N" must not shift when a filter hides its siblings.
-  const visibleMembers = members
-    .map((child, position) => ({ child, position }))
+  const visibleMembers = sortOutlinerLevel(
+    members.map((child, position) => ({ node: child, child, position })),
+    sortMode,
+    labelOf,
+  )
     .filter(
       ({ child }) =>
         filterResult === null ||
@@ -1323,6 +1394,8 @@ const NodeRow = memo(function NodeRowInner({
           onSelect={onSelect}
           onEnterContext={onEnterContext}
           filterResult={filterResult}
+          sortMode={sortMode}
+          labelOf={labelOf}
           expandedMap={expandedMap}
           setNodeExpanded={setNodeExpanded}
           dropHighlightKey={dropHighlightKey}
@@ -1553,7 +1626,7 @@ function Row({
         </button>
       )}
       {icon}
-      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
+      <span data-testid="outliner-row-label" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
       {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}><Trans>editing</Trans></span>}
       {onToggleAllHidden !== undefined && (
         <button

@@ -50,6 +50,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel } from './treeModel'
 import type { NodeRef } from './treeModel'
 import { isComposingKey } from '../input/keyboard'
+import { compareNames } from './nameSort'
 
 interface Props {
   scene: WasmScene
@@ -255,7 +256,9 @@ export function ComponentsPanel({
     const name = rawName !== undefined && rawName.length > 0 ? rawName : entityLabel('instance', index)
     return { id, name }
   })
-  const filteredRows = normalizedFilter === '' ? rows : rows.filter((r) => r.name.toLowerCase().includes(normalizedFilter))
+  const matchingRows = normalizedFilter === '' ? rows : rows.filter((r) => r.name.toLowerCase().includes(normalizedFilter))
+  // Listed by name (case-insensitive, numeric); the numbers above stay put.
+  const filteredRows = [...matchingRows].sort((a, b) => compareNames(a.name, b.name))
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>

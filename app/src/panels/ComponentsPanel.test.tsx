@@ -92,6 +92,18 @@ describe('ComponentsPanel filter', () => {
     expect(onSelectNodes).not.toHaveBeenCalled()
   })
 
+  it('lists definitions by name, case-insensitive and numeric ("door 2" before "Door 10")', () => {
+    const names: Record<string, string> = { '1': 'Window', '2': 'Door 10', '3': 'door 2', '4': 'bolt' }
+    const scene = makeScene({
+      component_ids: () => new BigUint64Array([1n, 2n, 3n, 4n]),
+      component_name: (id: bigint) => names[id.toString()],
+    })
+    render(<ComponentsPanel {...baseProps} scene={scene} />)
+    expect(screen.getAllByTestId('components-row-name').map((e) => e.textContent)).toEqual([
+      'bolt', 'door 2', 'Door 10', 'Window',
+    ])
+  })
+
   it('keeps an unnamed definition\'s positional fallback numbering stable while filtering', () => {
     const scene = makeScene({
       component_ids: () => new BigUint64Array([1n, 2n]),

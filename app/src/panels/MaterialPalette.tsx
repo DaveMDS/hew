@@ -35,6 +35,7 @@ import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { libraryStore } from '../io/libraryStore'
 import { isComposingKey } from '../input/keyboard'
+import { compareNames } from './nameSort'
 
 interface Props {
   scene: WasmScene
@@ -45,6 +46,10 @@ interface Props {
    *  exercise cross-load behavior. */
   docGeneration?: number
   currentMaterialId: bigint
+  /** Bumped by App when something outside the palette (Object Info's
+   *  Materials row) selects `currentMaterialId` and wants it scrolled into
+   *  view even though the selection did not change. */
+  revealNonce?: number
   /** The user picked a swatch — make it current AND pick up the Paint tool. */
   onSelectMaterial: (id: bigint) => void
   /** A material was just added — make it current, but do NOT switch tools (the
@@ -173,6 +178,7 @@ export function MaterialPalette({
   docRev,
   docGeneration = 0,
   currentMaterialId,
+  revealNonce,
   onSelectMaterial,
   onMaterialCreated,
   onDocumentChanged,
@@ -206,7 +212,12 @@ export function MaterialPalette({
     }
   }, [])
 
+  // Listed by name (case-insensitive, numeric: "Paint 2" before "Paint 10").
+  // Materials with the same name keep their creation order.
   const materialIds = Array.from(scene.material_ids())
+    .map((id) => ({ id, name: scene.material_info(id)?.name() ?? '' }))
+    .sort((a, b) => compareNames(a.name, b.name))
+    .map((m) => m.id)
 
   // --- Filter state ---
   // Live, case-insensitive substring match on material name. Applied at
@@ -253,7 +264,7 @@ export function MaterialPalette({
   const pendingScrollRef = useRef(false)
   useEffect(() => {
     pendingScrollRef.current = true
-  }, [currentMaterialId])
+  }, [currentMaterialId, revealNonce])
   useEffect(() => {
     if (!pendingScrollRef.current) return
     if (normalizedFilter !== '' && currentMaterialId !== MATERIAL_SENTINEL) {

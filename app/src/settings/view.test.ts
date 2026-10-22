@@ -86,6 +86,7 @@ describe('settings-changed from another window (desktop shell)', () => {
     })
     vi.resetModules()
     const fresh = await import('./view')
+    await vi.waitFor(() => expect(callbacks).toHaveLength(6))
     const handlers = callbacks
     expect(handlers.length).toBeGreaterThan(0)
     const cb = vi.fn()
@@ -99,6 +100,10 @@ describe('settings-changed from another window (desktop shell)', () => {
     expect(fresh.getSmoothCamera()).toBe(false)
     expect(fresh.getMeasurementsPosition()).toBe('bottom-right')
     expect(fresh.getShowToolHints()).toBe(false)
+    send({ outlinerSort: 'name' })
+    expect(fresh.getOutlinerSort()).toBe('name')
+    send({ outlinerSort: 'sideways' })
+    expect(fresh.getOutlinerSort()).toBe('name')
     // Another setting's payload, junk values, and non-objects leave it alone.
     const calls = cb.mock.calls.length
     send({ theme: 'dark' })

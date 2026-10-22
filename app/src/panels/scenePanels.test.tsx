@@ -10,7 +10,7 @@
 
 import { objectBoundsFromMesh } from '../test/meshBounds'
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, onTestFinished } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import { MaterialPalette } from './MaterialPalette'
 import { DocumentTree } from './DocumentTree'
@@ -101,6 +101,8 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_name: (_id: bigint) => undefined as string | undefined,
     instance_name: (_id: bigint) => undefined as string | undefined,
     node_tags: (_kind: number, _id: bigint) => [] as string[],
+    object_materials: (_id: bigint) => [] as bigint[],
+    instance_expanded_members: (_id: bigint) => [] as bigint[],
     tag_meta_paths: () => [] as string[],
     tag_meta_hidden: () => new Uint8Array(),
     set_tag_hidden: vi.fn(),
@@ -1644,6 +1646,23 @@ describe('MaterialPalette', () => {
     expect(screen.getByTitle('Default (unpainted)')).toBeInTheDocument()
   })
 
+  it('lists materials by name, case-insensitive and numeric ("paint 2" before "Paint 10")', () => {
+    const named = (name: string) => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false })
+    const infos: Record<string, ReturnType<typeof named>> = {
+      '1': named('Paint 10'), '2': named('zinc'), '3': named('paint 2'), '4': named('Brick'),
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n, 2n, 3n, 4n]),
+      material_info: (id: bigint) => infos[id.toString()],
+    })
+    render(<MaterialPalette {...baseProps} scene={scene} />)
+    const order = ['Brick', 'paint 2', 'Paint 10', 'zinc']
+    const swatches = order.map((n) => screen.getByTitle(n))
+    for (let i = 1; i < swatches.length; i++) {
+      expect(swatches[i - 1].compareDocumentPosition(swatches[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+  })
+
   it('shows "No materials match" when the filter matches nothing, and the × clears it back to the full list', () => {
     const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
     const scene = makeScene({
@@ -1729,6 +1748,22 @@ describe('MaterialPalette', () => {
     rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} docRev={1} />)
 
     expect(Element.prototype.scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('a revealNonce bump re-scrolls to an already-current material, and an unchanged nonce does not', () => {
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([1n, 2n]),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+    })
+    const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={2n} revealNonce={1} />)
+    const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>
+    scroll.mockClear()
+
+    rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={2n} revealNonce={1} docRev={1} />)
+    expect(scroll).not.toHaveBeenCalled()
+
+    rerender(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={2n} revealNonce={2} />)
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' })
   })
 
   it('opacity slider is disabled when the Default swatch is selected', () => {
@@ -2929,6 +2964,23 @@ describe('TagsPanel', () => {
     expect(screen.queryByText(/hew_export_tags/i)).not.toBeInTheDocument()
   })
 
+  it('Filter tags narrows the list, and a parent stays (dimmed) when only a child matches', () => {
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n, 2n, 3n]),
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Hardware/Screws'] : id === 2n ? ['Hardware'] : ['Oak']),
+    })
+    render(<TagsPanel {...baseTagProps} scene={scene} />)
+    expect(screen.getByText('Oak')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Filter tags'), { target: { value: 'SCREW' } })
+    expect(screen.getByText('Screws')).toBeInTheDocument()
+    expect(screen.getByText('Hardware')).toBeInTheDocument()
+    expect(screen.queryByText('Oak')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Filter tags'), { target: { value: 'zzz' } })
+    expect(screen.getByText('No tags match')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+    expect(screen.getByText('Oak')).toBeInTheDocument()
+  })
+
   it('clicking a tag row selects every item carrying it or a nested tag; the eye/delete buttons do not', () => {
     const scene = makeScene({
       object_ids: () => new BigUint64Array([1n, 2n, 3n]),
@@ -3110,5 +3162,34 @@ describe('TagsPanel', () => {
     // Sibling/ancestor rows are not highlighted.
     const structureRow = screen.getByText('Structure').closest('div') as HTMLElement
     expect(structureRow.style.background).not.toContain('accent-tint-18')
+  })
+
+  it('a reveal that asks to select expands the parents, scrolls, and makes the row active; a plain reveal does not', () => {
+    const scene = makeScene({
+      object_ids: () => new BigUint64Array([1n]),
+      node_tags: (_kind: number, id: bigint) => (id === 1n ? ['Structure/Roof'] : []),
+    })
+    const scrolled = vi.fn()
+    const originalScroll = Element.prototype.scrollIntoView
+    Element.prototype.scrollIntoView = scrolled
+    onTestFinished(() => {
+      Element.prototype.scrollIntoView = originalScroll
+    })
+    const activeOf = (label: string) => (screen.getByText(label).closest('[data-active]') as HTMLElement).dataset.active
+    const key = JSON.stringify(['Structure', 'Roof'])
+    const { rerender } = render(<TagsPanel {...baseTagProps} scene={scene} />)
+    fireEvent.click(screen.getByText('▾')) // collapse Structure
+    // The palette's plain jump flashes but does not select.
+    rerender(<TagsPanel {...baseTagProps} scene={scene} revealTag={{ key, nonce: 1 }} />)
+    expect(activeOf('Roof')).toBe('false')
+    // Object Info's chip asks to select too.
+    fireEvent.click(screen.getByText('▾'))
+    rerender(<TagsPanel {...baseTagProps} scene={scene} revealTag={{ key, nonce: 2, select: true }} />)
+    expect(screen.getByText('Roof')).toBeInTheDocument()
+    expect(activeOf('Roof')).toBe('true')
+    expect(scrolled).toHaveBeenCalled()
+    // The flash clearing keeps the selection.
+    rerender(<TagsPanel {...baseTagProps} scene={scene} revealTag={null} />)
+    expect(activeOf('Roof')).toBe('true')
   })
 })

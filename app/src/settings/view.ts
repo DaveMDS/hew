@@ -237,3 +237,26 @@ export const getMeasurementsPosition = measurementsPosition.get
 export const setMeasurementsPosition = measurementsPosition.set
 export const subscribeMeasurementsPosition = measurementsPosition.subscribe
 
+// ---------------------------------------------------------------------------
+// Outliner sort
+// ---------------------------------------------------------------------------
+
+/** How the Outliner orders the rows at each level. */
+export type OutlinerSort = 'document' | 'name' | 'kind'
+
+export const OUTLINER_SORT_LABELS: Record<OutlinerSort, string> = {
+  document: 'Document order',
+  name: 'Name',
+  kind: 'Kind',
+}
+
+function parseOutlinerSort(raw: unknown): OutlinerSort | undefined {
+  return raw === 'document' || raw === 'name' || raw === 'kind' ? raw : undefined
+}
+
+const outlinerSort = makeSetting<OutlinerSort>(
+  'hew.settings.outlinerSort', 'outlinerSort', 'document', parseOutlinerSort, (v) => v,
+)
+export const getOutlinerSort = outlinerSort.get
+export const setOutlinerSort = outlinerSort.set
+export const subscribeOutlinerSort = outlinerSort.subscribe

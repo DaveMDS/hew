@@ -18,7 +18,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { buildTagTree, collectTagDescendantNodes, tagPathKey, type TagTreeNode } from './tagModel'
+import { buildTagTree, collectTagDescendantNodes, filterTagKeys, tagPathKey, type TagTreeNode } from './tagModel'
 import { nodeRefFromJs, nodeKindToNumber, type NodeRef } from './treeModel'
 import { isComposingKey } from '../input/keyboard'
 
@@ -28,6 +28,10 @@ import { isComposingKey } from '../input/keyboard'
 export interface TagReveal {
   key: string
   nonce: number
+  /** Also make the row the panel's active (highlighted) one, as if clicked
+   *  once — Object Info's tag chips ask for this. The scene selection is
+   *  left alone, so Object Info keeps showing what was selected. */
+  select?: boolean
 }
 
 interface Props {
@@ -79,6 +83,15 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
   const [editingText, setEditingText] = useState('')
   const [editingError, setEditingError] = useState<string | null>(null)
   const lastClickRef = useRef<{ key: string; at: number } | null>(null)
+
+  // A reveal that asks to select makes its row the active one. Keyed on the
+  // nonce so a repeat jump to the same tag re-selects after another click.
+  useEffect(() => {
+    if (revealTag?.select === true) {
+      setActiveKey(revealTag.key)
+      lastClickRef.current = null
+    }
+  }, [revealTag?.nonce, revealTag?.select, revealTag?.key])
 
   const startRename = (node: TagTreeNode) => {
     if (onRenameTag === undefined) return
@@ -171,14 +184,112 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
     return keys
   }, [revealTag])
 
+  // Filter — the Outliner's matching rules: a case-insensitive substring on
+  // the name each row shows; a parent shows (and opens, dimmed) when only a
+  // child matches.
+  const [filter, setFilter] = useState('')
+  const filterInputRef = useRef<HTMLInputElement>(null)
+  const filterResult = useMemo(() => filterTagKeys(tagTree, filter), [tagTree, filter])
+  const filterEmpty = filterResult !== null && filterResult.matches.size === 0
+
+  // A reveal for a row the filter hides would otherwise do nothing visible:
+  // clear the filter first (MaterialPalette's reveal pattern), so the row
+  // mounts and opens/scrolls itself.
+  useEffect(() => {
+    if (revealTag == null || filterResult === null) return
+    const find = (nodes: TagTreeNode[]): TagTreeNode | null => {
+      for (const n of nodes) {
+        if (tagPathKey(n.path) === revealTag.key) return n
+        const hit = find(n.children)
+        if (hit !== null) return hit
+      }
+      return null
+    }
+    const target = find(tagTree)
+    if (target !== null && !isShownByFilter(target, filterResult)) setFilter('')
+    // Only a NEW reveal request re-evaluates; typing in the filter must not.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [revealTag?.nonce])
+
   // No tags → render nothing (no boilerplate empty state).
   if (tagTree.length === 0) return null
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+      {/* Filter — the Outliner's filter box (⌕ / × clear). */}
+      <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+        <span
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: '6px',
+            color: 'var(--text-faint, #888)',
+            fontSize: '11px',
+            pointerEvents: 'none',
+          }}
+        >
+          ⌕
+        </span>
+        <input
+          ref={filterInputRef}
+          type="text"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="Filter tags…"
+          aria-label="Filter tags"
+          style={{
+            flex: 1,
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            background: 'var(--surface-input, #444)',
+            color: 'var(--text-primary, #eee)',
+            border: 'none',
+            borderRadius: '3px',
+            padding: '3px 20px',
+            boxSizing: 'border-box',
+          }}
+        />
+        {filter !== '' && (
+          <button
+            type="button"
+            onClick={() => {
+              setFilter('')
+              filterInputRef.current?.focus()
+            }}
+            aria-label="Clear filter"
+            style={{
+              position: 'absolute',
+              right: '4px',
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-faint, #888)',
+              cursor: 'pointer',
+              fontSize: '13px',
+              lineHeight: 1,
+              padding: '2px',
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
-        {tagTree.map((node) => (
+        {filterEmpty && (
+          <div
+            style={{
+              padding: '6px 8px',
+              fontSize: '12px',
+              fontFamily: 'var(--font-family-ui)',
+              color: 'var(--text-faint, #888)',
+              fontStyle: 'italic',
+            }}
+          >
+            No tags match
+          </div>
+        )}
+        {tagTree.filter((node) => isShownByFilter(node, filterResult)).map((node) => (
           <TagRow
+            filterResult={filterResult}
             key={tagPathKey(node.path)}
             node={node}
             depth={0}
@@ -229,6 +340,7 @@ function TagRow({
   onDeleteTag,
   revealTag,
   revealExpandKeys,
+  filterResult,
   ...rowInteraction
 }: {
   node: TagTreeNode
@@ -238,13 +350,24 @@ function TagRow({
   onDeleteTag: (path: string[]) => void
   revealTag: TagReveal | null
   revealExpandKeys: Set<string>
+  filterResult: TagFilterResult
 } & RowInteraction) {
   const { t } = useLingui()
   const tagName = node.segment
   const { activeKey, editingKey, editingText, editingError, onClickRow, onStartRename, onEditingTextChange, onCommitRename, onCancelRename, canRename } = rowInteraction
-  const [expanded, setExpanded] = useState(true)
-  const hasChildren = node.children.length > 0
+  const [expandedState, setExpanded] = useState(true)
   const key = tagPathKey(node.path)
+  // A filter match below forces this row open; it dims when it is only the
+  // way to a match (the Outliner's treatment).
+  const isFilterAncestor = filterResult?.ancestors.has(key) ?? false
+  const expanded = expandedState || isFilterAncestor
+  // Held open by the filter: the chevron is inert (as in the Outliner, where
+  // a filter-forced row re-opens at once) and says so, rather than flipping
+  // hidden state that only shows once the filter is cleared.
+  const chevronLocked = isFilterAncestor
+  const dimmedByFilter = filterResult !== null && !filterResult.matches.has(key) && isFilterAncestor
+  const visibleChildren = node.children.filter((c) => isShownByFilter(c, filterResult))
+  const hasChildren = node.children.length > 0
   const hidden = hiddenTagPaths.has(key)
   const isActive = activeKey === key
   const isEditing = editingKey === key
@@ -287,6 +410,7 @@ function TagRow({
           paddingLeft: `${8 + depth * 16}px`,
           paddingRight: '4px',
           background: isRevealed || isActive ? 'var(--accent-tint-18)' : 'transparent',
+          opacity: dimmedByFilter ? 0.6 : undefined,
         }}
       >
         {/* Expand/collapse button for tag folders with children */}
@@ -294,14 +418,18 @@ function TagRow({
           <button
             onClick={(e) => {
               e.stopPropagation()
+              if (chevronLocked) return
               setExpanded((v) => !v)
             }}
             onDoubleClick={(e) => e.stopPropagation()}
+            aria-disabled={chevronLocked ? 'true' : undefined}
+            title={chevronLocked ? 'Held open while filtering' : undefined}
             style={{
               background: 'none',
               border: 'none',
               color: 'var(--text-tertiary, #aaa)',
-              cursor: 'pointer',
+              cursor: chevronLocked ? 'default' : 'pointer',
+              opacity: chevronLocked ? 0.5 : undefined,
               padding: '0 2px',
               fontSize: '10px',
               lineHeight: 1,
@@ -437,7 +565,7 @@ function TagRow({
       )}
 
       {/* Children — shown when expanded */}
-      {hasChildren && expanded && node.children.map((child) => (
+      {hasChildren && expanded && visibleChildren.map((child) => (
         <TagRow
           key={tagPathKey(child.path)}
           node={child}
@@ -447,11 +575,21 @@ function TagRow({
           onDeleteTag={onDeleteTag}
           revealTag={revealTag}
           revealExpandKeys={revealExpandKeys}
+          filterResult={filterResult}
           {...rowInteraction}
         />
       ))}
     </>
   )
+}
+
+type TagFilterResult = ReturnType<typeof filterTagKeys>
+
+/** Whether a tag row shows under the active filter (no filter shows all). */
+function isShownByFilter(node: TagTreeNode, filterResult: TagFilterResult): boolean {
+  if (filterResult === null) return true
+  const key = tagPathKey(node.path)
+  return filterResult.matches.has(key) || filterResult.ancestors.has(key)
 }
 
 /**

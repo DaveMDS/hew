@@ -2574,6 +2574,33 @@ export default function App() {
   /** Active Tags-panel reveal (palette jump); cleared after a short flash. */
   const [revealTag, setRevealTag] = useState<TagReveal | null>(null)
   const revealNonceRef = useRef(0)
+  /** Bumped on each Object Info → Materials reveal so the palette scrolls the
+   *  swatch into view even when it was already the current material. */
+  const [materialRevealNonce, setMaterialRevealNonce] = useState(0)
+
+  /** The one "select and reveal" for Object Info's links: bring the tray back,
+   *  open the pane, select the target in it, and have the pane expand and
+   *  scroll to it. A tag target is a path (selected, parents expanded, row
+   *  scrolled into view); a material target is a handle (made the palette's
+   *  current material — without picking up the Paint tool — and scrolled
+   *  into view). The scene selection is left alone, so Object Info keeps
+   *  showing what the person had selected. */
+  const revealInTray = useCallback((pane: 'tags' | 'materials', target: string[] | bigint) => {
+    showTray()
+    if (pane === 'tags' && Array.isArray(target)) {
+      setShowTags(true)
+      const nonce = ++revealNonceRef.current
+      setRevealTag({ key: JSON.stringify(target), nonce, select: true })
+      // The flash fades; the selection (the panel's active row) stays.
+      setTimeout(() => {
+        setRevealTag((cur) => (cur?.nonce === nonce ? null : cur))
+      }, 2000)
+    } else if (pane === 'materials' && typeof target === 'bigint') {
+      setShowMaterials(true)
+      setCurrentMaterialId(target)
+      setMaterialRevealNonce((n) => n + 1)
+    }
+  }, [showTray])
 
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
@@ -7609,6 +7636,8 @@ export default function App() {
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
               onSelectMany={handleReplaceSelection}
+              onSelectTag={(path) => revealInTray('tags', path)}
+              onSelectMaterial={(id) => revealInTray('materials', id)}
               sessionStack={sessionStack}
               sessionMembers={sessionMembers}
               onShowHealth={handleShowObjectHealth}
@@ -7643,6 +7672,7 @@ export default function App() {
               docRev={docRev}
               docGeneration={docGeneration}
               currentMaterialId={currentMaterialId}
+              revealNonce={materialRevealNonce}
               onSelectMaterial={handleSelectMaterial}
               onMaterialCreated={setCurrentMaterialId}
               onDocumentChanged={handleDocumentChanged}

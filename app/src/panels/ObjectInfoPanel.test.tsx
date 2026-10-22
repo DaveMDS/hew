@@ -11,7 +11,7 @@
  * only, erased at runtime — the same convention ComponentsPanel.test.tsx /
  * scenePanels.test.tsx use), so no wasm/loader mock is required.
  */
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -441,6 +441,7 @@ describe('ObjectInfoPanel — selection path line', () => {
       node_parent: (kind: number, id: bigint) => parents.get(`${kind}:${id}`),
       group_name: (id: bigint) => names[String(id)],
       node_tags: () => [],
+      object_materials: () => [],
       object_solid: () => true,
       object_name: (id: bigint) => (id === 10n ? 'Door' : id === 12n ? 'Floor' : undefined),
     })
@@ -505,3 +506,154 @@ describe('ObjectInfoPanel — whole sketch labels', () => {
   })
 })
 
+// ---------------------------------------------------------------------------
+// Tag chips select the tag; the Materials row lists the union of paint.
+// ---------------------------------------------------------------------------
+
+describe('ObjectInfoPanel — tag chips', () => {
+  function tagScene(tagsOf: (id: bigint) => string[]) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }],
+      node_tags: (_k: number, id: bigint) => tagsOf(id),
+      node_parent: () => undefined,
+      object_solid: () => true,
+      object_name: (id: bigint) => `Obj${id}`,
+      object_materials: () => [],
+    })
+  }
+
+  it('clicking a chip name selects that tag; the × removes without selecting', () => {
+    const onSelectTag = vi.fn()
+    const remove = vi.fn()
+    const scene = tagScene(() => ['Structure/Roof'])
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        onTagsChanged={baseProps.onTagsChanged}
+        onSelectTag={onSelectTag}
+        scene={{ ...scene, remove_node_tag: remove } as unknown as WasmScene}
+        selectedIds={[{ kind: 'object', id: 1n }]}
+      />,
+    )
+    fireEvent.click(screen.getByText('Structure / Roof'))
+    expect(onSelectTag).toHaveBeenCalledWith(['Structure', 'Roof'])
+    fireEvent.click(screen.getByLabelText('Remove tag Structure / Roof'))
+    expect(remove).toHaveBeenCalledTimes(1)
+    expect(onSelectTag).toHaveBeenCalledTimes(1)
+  })
+
+  it('chips in a multi-selection select the tag too', () => {
+    const onSelectTag = vi.fn()
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        onSelectTag={onSelectTag}
+        scene={tagScene(() => ['Walls'])}
+        selectedIds={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
+      />,
+    )
+    fireEvent.click(screen.getByText('Walls'))
+    expect(onSelectTag).toHaveBeenCalledWith(['Walls'])
+  })
+})
+
+describe('ObjectInfoPanel — Materials row', () => {
+  const MAT: Record<string, { name: string; rgb: [number, number, number] }> = {
+    '10': { name: 'Red', rgb: [255, 0, 0] },
+    '11': { name: 'Blue', rgb: [0, 0, 255] },
+    '12': { name: 'Oak', rgb: [200, 150, 100] },
+  }
+  // o1: base Red + a Blue face. o2: Oak. o3: Oak + Red. o4: nothing.
+  // g1 = {o2, g2{o3}}; component def 7 = {o1, o4}, instance 5 places it.
+  const objectMats: Record<string, bigint[]> = { '1': [10n, 11n], '2': [12n], '3': [12n, 10n], '4': [] }
+  function matScene(extra: Record<string, unknown> = {}) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'group', id: 1n }, { kind: 'instance', id: 5n }, { kind: 'object', id: 4n }],
+      group_members: (id: bigint) =>
+        id === 1n ? [{ kind: 'object', id: 2n }, { kind: 'group', id: 2n }] : id === 2n ? [{ kind: 'object', id: 3n }] : [],
+      node_tags: () => [],
+      node_parent: () => undefined,
+      object_solid: () => true,
+      object_name: (id: bigint) => `Obj${id}`,
+      group_name: () => 'Grp',
+      instance_name: () => undefined,
+      instance_def: () => 7n,
+      component_name: () => 'Def',
+      instances_of: () => [5n],
+      instance_expanded_members: () => [1n, 4n],
+      instance_pose: () => undefined,
+      object_materials: (id: bigint) => objectMats[String(id)] ?? [],
+      material_info: (id: bigint) => {
+        const m = MAT[String(id)]
+        return m === undefined ? undefined : { name: () => m.name, r: () => m.rgb[0], g: () => m.rgb[1], b: () => m.rgb[2] }
+      },
+      ...extra,
+    })
+  }
+  const names = () => screen.queryAllByTestId('material-entry').map((e) => e.textContent)
+
+  it('lists an object\'s base material and per-face paint, each once', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={matScene()} selectedIds={[{ kind: 'object', id: 1n }]} />)
+    expect(names()).toEqual(['Red', 'Blue'])
+  })
+
+  it('unions a group\'s painted objects recursively', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={matScene()} selectedIds={[{ kind: 'group', id: 1n }]} />)
+    expect(names()).toEqual(['Oak', 'Red'])
+  })
+
+  it('unions a component instance\'s definition contents', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={matScene()} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    expect(names()).toEqual(['Red', 'Blue'])
+  })
+
+  it('unions a multi-selection', () => {
+    render(
+      <ObjectInfoPanel {...baseProps} scene={matScene()} selectedIds={[{ kind: 'object', id: 1n }, { kind: 'group', id: 1n }]} />,
+    )
+    expect(names()).toEqual(['Red', 'Blue', 'Oak'])
+  })
+
+  it('shows "None" when nothing is painted', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={matScene()} selectedIds={[{ kind: 'object', id: 4n }]} />)
+    expect(names()).toEqual([])
+    expect(within(screen.getByTestId('object-info-materials')).getByText('None')).toBeTruthy()
+  })
+
+  it('clicking an entry selects that material; there is no remove control', () => {
+    const onSelectMaterial = vi.fn()
+    render(
+      <ObjectInfoPanel {...baseProps} onSelectMaterial={onSelectMaterial} scene={matScene()} selectedIds={[{ kind: 'object', id: 1n }]} />,
+    )
+    fireEvent.click(screen.getByText('Blue'))
+    expect(onSelectMaterial).toHaveBeenCalledWith(11n)
+    expect(within(screen.getByTestId('object-info-materials')).queryByRole('button', { name: /remove|×/i })).toBeNull()
+  })
+
+  it('folds past 12 swatches into "+N more", which expands', () => {
+    const many = Array.from({ length: 15 }, (_v, i) => BigInt(100 + i))
+    const scene = matScene({
+      object_materials: () => many,
+      material_info: (id: bigint) => ({ name: () => `M${id}`, r: () => 1, g: () => 2, b: () => 3 }),
+    })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 1n }]} />)
+    expect(names()).toHaveLength(12)
+    fireEvent.click(screen.getByText('+3 more'))
+    expect(names()).toHaveLength(15)
+    expect(screen.queryByText(/more$/)).toBeNull()
+  })
+
+  it('folds again when the selection changes (the expanded state does not carry over)', () => {
+    const many = Array.from({ length: 15 }, (_v, i) => BigInt(100 + i))
+    const scene = matScene({
+      object_materials: () => many,
+      material_info: (id: bigint) => ({ name: () => `M${id}`, r: () => 1, g: () => 2, b: () => 3 }),
+    })
+    const { rerender } = render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 1n }]} />)
+    fireEvent.click(screen.getByText('+3 more'))
+    expect(names()).toHaveLength(15)
+    rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 2n }]} />)
+    expect(names()).toHaveLength(12)
+    expect(screen.getByText('+3 more')).toBeTruthy()
+  })
+})

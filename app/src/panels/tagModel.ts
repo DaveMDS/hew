@@ -20,6 +20,7 @@
  */
 
 import type { NodeRef } from './treeModel'
+import { compareNames } from './nameSort'
 
 /** Delimiter between the display name and the tag data (underscore-tolerant). */
 const DELIM_RE = /_+HEWTAG_+/
@@ -129,12 +130,44 @@ export function buildTagTree(
   }
 
   // Sort roots and children alphabetically for stable display.
-  roots.sort((a, b) => a.segment.localeCompare(b.segment))
+  roots.sort((a, b) => compareNames(a.segment, b.segment))
   for (const root of byPath.values()) {
-    root.children.sort((a, b) => a.segment.localeCompare(b.segment))
+    root.children.sort((a, b) => compareNames(a.segment, b.segment))
   }
 
   return roots
+}
+
+/**
+ * Filter the tag tree the way the Outliner filters its rows: a
+ * case-insensitive substring match on the name each row shows. Returns the
+ * keys (`tagPathKey`) of matching tags and of the ancestors that lead to a
+ * match, so a parent still shows (and opens) when only a child matches.
+ * `null` when the query is blank (no filter).
+ */
+export function filterTagKeys(
+  tree: readonly TagTreeNode[],
+  query: string,
+): { matches: Set<string>; ancestors: Set<string> } | null {
+  const q = query.trim().toLowerCase()
+  if (q === '') return null
+  const matches = new Set<string>()
+  const ancestors = new Set<string>()
+  const walk = (node: TagTreeNode, path: readonly TagTreeNode[]): boolean => {
+    const isMatch = node.segment.toLowerCase().includes(q)
+    let anyBelow = false
+    for (const child of node.children) {
+      if (walk(child, [...path, node])) anyBelow = true
+    }
+    if (isMatch) matches.add(tagPathKey(node.path))
+    if (isMatch || anyBelow) {
+      for (const a of path) ancestors.add(tagPathKey(a.path))
+      return true
+    }
+    return false
+  }
+  for (const root of tree) walk(root, [])
+  return { matches, ancestors }
 }
 
 /**

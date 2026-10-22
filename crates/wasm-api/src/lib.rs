@@ -7681,6 +7681,31 @@ impl Scene {
         })
     }
 
+    /// The distinct live palette materials an Object carries: its base
+    /// material, every face's front material, and every face's back
+    /// material, each listed once in first-seen order. Unpainted faces add
+    /// nothing, so an unpainted Object returns an empty list. Read-only and
+    /// cheap (no tessellation); Object Info's Materials row calls it per leaf
+    /// Object to build the union over a group or component. Works for world
+    /// Objects and definition members alike; empty for a stale/hidden handle.
+    pub fn object_materials(&self, object: u64) -> Vec<u64> {
+        let Some(obj) = self.doc.object(object_id(object)) else {
+            return Vec::new();
+        };
+        let mut seen: Vec<MaterialId> = Vec::new();
+        let candidates = std::iter::once(obj.default_material()).chain(
+            obj.faces()
+                .iter()
+                .flat_map(|(_, f)| [f.material, f.back_material]),
+        );
+        for m in candidates.flatten() {
+            if self.doc.material(m).is_some() && !seen.contains(&m) {
+                seen.push(m);
+            }
+        }
+        seen.into_iter().map(|m| m.data().as_ffi()).collect()
+    }
+
     /// Paint `face` of `object` with `material`. Sentinel `u64::MAX`
     /// resets the face to the default (unpainted) material. Painting is
     /// undoable; the kernel records a `PaintFace` document action. Touching a
@@ -13139,6 +13164,107 @@ mod tests {
             "replaying a structural/metadata session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// `object_materials` lists each distinct material once: base plus face
+    /// paint, empty when unpainted, and drops a deleted material.
+    #[test]
+    fn object_materials_lists_distinct_base_and_face_materials() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        assert!(scene.object_materials(a).is_empty(), "unpainted");
+
+        let red = scene.add_material("Red".to_string(), 220, 30, 30, 255);
+        let blue = scene.add_material("Blue".to_string(), 30, 30, 220, 255);
+        scene.set_object_material(a, red).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        scene.paint_face(pick.object(), pick.face(), blue).unwrap();
+        let got = scene.object_materials(a);
+        assert_eq!(got.len(), 2, "base + one painted face, each once");
+        assert!(got.contains(&red) && got.contains(&blue));
+
+        scene.delete_material(blue).unwrap();
+        assert_eq!(scene.object_materials(a), vec![red], "deleted dropped");
+        assert!(scene.object_materials(u64::MAX).is_empty(), "stale handle");
+    }
+
+    /// `object_materials` also reports a material painted on a face's BACK
+    /// (a `.skp` face painted on its back): the candidate list includes
+    /// `back_material`, and a material used on both sides still counts once.
+    #[test]
+    fn object_materials_includes_back_painted_materials() {
+        use kernel::{ImportNode, ImportScene, ImportSceneExtra, Material, MeshExtra, MeshRecipe};
+
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(1.0, 1.0, 1.0),
+            Point3::new(0.0, 1.0, 1.0),
+        ];
+        let faces: Vec<Vec<usize>> = vec![
+            vec![0, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        let none = kernel::NO_MATERIAL;
+        let mut backs = vec![none; 6];
+        backs[0] = 0; // Teal on one face's back only
+        backs[1] = 1; // Gold on a back, and also on a front below
+        let mut fronts = vec![none; 6];
+        fronts[2] = 1;
+        let recipe = ImportScene {
+            materials: vec![
+                Material::solid("Teal".to_string(), Rgba8::rgba(0, 128, 128, 255)),
+                Material::solid("Gold".to_string(), Rgba8::rgba(255, 200, 0, 255)),
+            ],
+            defs: Vec::new(),
+            roots: vec![ImportNode::Mesh(MeshRecipe {
+                name: "cube".to_string(),
+                positions,
+                face_materials: fronts,
+                face_uv_frames: vec![None; 6],
+                face_holes: vec![Vec::new(); 6],
+                faces,
+                base_material: none,
+                tags: Vec::new(),
+                extra: MeshExtra {
+                    face_back_materials: backs,
+                    ..MeshExtra::default()
+                },
+            })],
+            guides: Vec::new(),
+            tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
+            view_style: None,
+            extra: ImportSceneExtra::default(),
+        };
+        let mut scene = Scene::new();
+        scene
+            .doc
+            .ingest(recipe, Vec::new())
+            .expect("ingest the cube");
+        let object = scene.object_ids()[0];
+        let names: Vec<String> = scene
+            .object_materials(object)
+            .into_iter()
+            .map(|m| scene.material_info(m).expect("a live material").name())
+            .collect();
+        assert_eq!(names.len(), 2, "each of the two materials once: {names:?}");
+        assert!(
+            names.contains(&"Teal".to_string()),
+            "a material painted only on a back face is listed: {names:?}"
+        );
+        assert!(names.contains(&"Gold".to_string()));
     }
 
     /// The v1.1 assets lane's palette/definition lifecycle ops — material
