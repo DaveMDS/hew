@@ -1242,6 +1242,42 @@ fn check_persistence(doc: &Document, what: &str) -> Result<(), TestCaseError> {
     Ok(())
 }
 
+/// KB-22: `save()` returns and its bytes reopen, and every sketch the
+/// document enumerates (world sketches plus each live definition's own)
+/// names an owning definition that is itself enumerable. Run after every
+/// op, undo, and redo — lighter than [`check_persistence`] (no state-hash or
+/// byte comparison), so the full unwind/replay can afford it at each step.
+fn check_save_and_sketch_owners(doc: &Document, what: &str) -> Result<(), TestCaseError> {
+    let comps = doc.component_ids();
+    let mut sketches = doc.sketch_ids();
+    for &cid in &comps {
+        sketches.extend(
+            doc.def_member_sketches(cid)
+                .expect("live component resolves")
+                .into_iter()
+                .filter(|&s| doc.sketch(s).is_some()),
+        );
+    }
+    for sid in sketches {
+        if let Some(owner) = doc.sketch_owner_component(sid) {
+            prop_assert!(
+                comps.contains(&owner),
+                "{}: sketch {:?} is owned by {:?}, which is not enumerable",
+                what,
+                sid,
+                owner
+            );
+        }
+    }
+    let bytes = doc.save();
+    if let Err(e) = Document::load(&bytes) {
+        return Err(TestCaseError::fail(format!(
+            "{what}: load(save(doc)) failed: {e}"
+        )));
+    }
+    Ok(())
+}
+
 /// Canonical, slot-order-independent document fingerprint: per visible
 /// object, its sorted vertex positions (rounded well below any op tolerance)
 /// and sorted face sizes; plus node/instance/component counts. Two documents
@@ -3777,6 +3813,7 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
             return Ok(());
         }
         check_doc(&doc, step, "apply")?;
+        check_save_and_sketch_owners(&doc, &format!("step {step}"))?;
         // Every committed state reopens: an op that left a face the
         // loader rejects would lose the user's file on the next save.
         check_persistence(&doc, &format!("step {step}"))?;
@@ -3804,6 +3841,7 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
                 }
             }
             check_doc(doc, n, label)?;
+            check_save_and_sketch_owners(doc, &format!("{label} #{n}"))?;
             n += 1;
         }
         Ok(true)
@@ -3819,6 +3857,7 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
                 }
             }
             check_doc(doc, n, label)?;
+            check_save_and_sketch_owners(doc, &format!("{label} #{n}"))?;
             n += 1;
         }
         Ok(true)
@@ -3853,6 +3892,95 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         "second full redo did not reproduce the maximal state"
     );
     Ok(())
+}
+
+/// KB-22, the fuzzer's original seed: a sketch drawn into a definition
+/// (by a refused in-instance Follow Me) while its `delete_definition` sat
+/// undone on the redo stack made `save()` panic on the redo. The minimized
+/// spec lives in `definition_delete_undo_specs.rs`; this replays the exact
+/// case under every harness invariant.
+#[test]
+fn kb22_save_after_redoing_a_definition_delete() {
+    let seeds: Vec<BoxSeed> = vec![
+        (
+            (-5.7950551958729335, -3.9242074461820176),
+            (1.9773289823311382, 1.8691345160206931),
+            1.127080679912591,
+        ),
+        (
+            (-2.9851796139686115, 0.8923326424736255),
+            (1.4053546085447017, 2.05801571414664),
+            0.6467165493011736,
+        ),
+        (
+            (-0.7605684166980339, 1.9920919085928452),
+            (4.683170220651774, 1.9623960650445467),
+            4.109616389142183,
+        ),
+    ];
+    let ops = vec![
+        DocOp::Undo,
+        DocOp::AddLinearDimension {
+            obj_sel: 7004580106481675702,
+            v_a: 827558879587809830,
+            v_b: 10900233935612383634,
+            offset: (-3.1734708095408712, -4.261111886731595, -3.600808611614945),
+        },
+        DocOp::MakeComponent {
+            node_sel: 10689752944661742954,
+        },
+        DocOp::DeleteDefinition {
+            comp_sel: 14005115186812097118,
+        },
+        DocOp::AddRadialDimension {
+            obj_sel: 14451272870395314874,
+            v_sel: 4746832276610707069,
+            radius: 0.3718003241348433,
+            leader: (7.348305143132818, 0.26421970565703307, -1.573646005427876),
+        },
+        DocOp::PlaceInstance {
+            comp_sel: 15399635707428390039,
+            axis: (
+                0.7764453856001974,
+                -0.7897148451646767,
+                -0.41544960718106744,
+            ),
+            angle: 2.4295502668537754,
+            scale: Vec3::new(2.4713741962902827, 1.4709511129002013, 2.3926172376292794),
+            offset: (5.677597158460211, -7.764147646974772, -3.452170459670012),
+        },
+        DocOp::Undo,
+        DocOp::PlaceInstance {
+            comp_sel: 8879482871949261076,
+            axis: (
+                -0.29419302784396073,
+                -0.20032373423046143,
+                -0.2077593077523247,
+            ),
+            angle: 0.5915691299998936,
+            scale: Vec3::new(2.3321617982776313, 2.3321617982776313, 2.3321617982776313),
+            offset: (-1.6532238151952883, 0.9951831924552207, -2.9806115608068953),
+        },
+        DocOp::DefOp {
+            comp_sel: 11882322038670728699,
+            member_sel: 13421546395919311841,
+            face_sel: 9582150626024753920,
+            distance: 2.4044418853681666,
+        },
+        DocOp::Undo,
+        DocOp::SetFaceUvFrame {
+            obj_sel: 5908377362997804141,
+            face_sel: 7753915013767089619,
+            frame_sel: 5699336088435063196,
+        },
+        DocOp::FollowMeAroundMemberFaceInInstance {
+            inst_sel: 13900433402026004742,
+            member_sel: 623422252848888087,
+            face_sel: 3873899750457946790,
+            stop_len: Some(2.349734431957779),
+        },
+    ];
+    run_doc_case(seeds, ops).expect("KB-22 replay holds every invariant");
 }
 
 proptest! {

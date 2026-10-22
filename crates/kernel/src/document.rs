@@ -1819,8 +1819,12 @@ enum DocAction {
         /// per-row `hidden` flag, so a hidden definition must own no live
         /// rows. Undo un-hides exactly this set with the definition.
         hidden_nodes: Vec<NodeId>,
-        /// The definition's own sketches, hidden the same way.
-        hidden_sketches: Vec<SketchId>,
+        // No sketch list: a definition's own sketches live and die with the
+        // definition itself (`Document::sketch_tombstoned`), so nothing about
+        // them is recorded. A recorded list went stale when a sketch was
+        // drawn into the definition (unrecorded, see
+        // `Document::begin_sketch_on_plane_in_instance`) while this delete
+        // sat undone on the redo stack (KB-22).
     },
     /// `set_node_name` / `add_node_tag` / `remove_node_tag` changed a tree
     /// node's display name or tag list (or both). Undo restores `prev_name` /
@@ -9278,8 +9282,17 @@ impl Document {
             annotations.push((id, prev, rec.tags.clone()));
         }
         let mut sketches: Vec<SketchTagTransition> = Vec::new();
+        // Dead sketches keep their tags, like hidden rows above — including
+        // a deleted definition's own, which are dead by derivation rather
+        // than listed in `hidden_sketches`.
+        let dead: BTreeSet<SketchId> = self
+            .sketch_tags
+            .keys()
+            .copied()
+            .filter(|id| self.sketch_tombstoned(id))
+            .collect();
         for (&id, tags) in self.sketch_tags.iter_mut() {
-            if self.hidden_sketches.contains(&id) || !tags.iter().any(|t| covers(t)) {
+            if dead.contains(&id) || !tags.iter().any(|t| covers(t)) {
                 continue;
             }
             let prev = tags.clone();
@@ -9429,8 +9442,17 @@ impl Document {
             annotations.push((id, prev, rec.tags.clone()));
         }
         let mut sketches: Vec<SketchTagTransition> = Vec::new();
+        // Dead sketches keep their tags, like hidden rows above — including
+        // a deleted definition's own, which are dead by derivation rather
+        // than listed in `hidden_sketches`.
+        let dead: BTreeSet<SketchId> = self
+            .sketch_tags
+            .keys()
+            .copied()
+            .filter(|id| self.sketch_tombstoned(id))
+            .collect();
         for (&id, tags) in self.sketch_tags.iter_mut() {
-            if self.hidden_sketches.contains(&id) || !tags.iter().any(|t| covers(t)) {
+            if dead.contains(&id) || !tags.iter().any(|t| covers(t)) {
                 continue;
             }
             let prev = tags.clone();
@@ -10017,17 +10039,12 @@ impl Document {
                 .filter(|(_, r)| !r.hidden && r.def == component)
                 .map(|(id, _)| NodeId::Instance(id)),
         );
-        let hidden_sketches: Vec<SketchId> = self
-            .def_sketches
-            .iter()
-            .filter(|(sid, c)| **c == component && !self.sketch_tombstoned(sid))
-            .map(|(sid, _)| *sid)
-            .collect();
-        self.set_definition_hidden(component, &hidden_nodes, &hidden_sketches, true);
+        // The definition's own sketches need no tombstone of their own:
+        // hiding the definition is what hides them (`sketch_tombstoned`).
+        self.set_definition_hidden(component, &hidden_nodes, true);
         self.undo.push(DocAction::DefinitionDeleted {
             component,
             hidden_nodes,
-            hidden_sketches,
         });
         let actions: Vec<DocAction> = self.undo.actions.drain(undo_start..).collect();
         self.undo.push(DocAction::Compound {
@@ -10070,14 +10087,11 @@ impl Document {
 
     /// Flips the tombstone state of a definition and the rows
     /// [`DocAction::DefinitionDeleted`] recorded with it — the one place
-    /// delete, undo, and redo all go through, so they cannot disagree.
-    fn set_definition_hidden(
-        &mut self,
-        component: ComponentId,
-        nodes: &[NodeId],
-        sketches: &[SketchId],
-        hidden: bool,
-    ) {
+    /// delete, undo, and redo all go through, so they cannot disagree. The
+    /// definition's own sketches follow its `hidden` flag by derivation
+    /// ([`Document::sketch_tombstoned`]), including any drawn into it after
+    /// the delete was recorded, so none are flipped here.
+    fn set_definition_hidden(&mut self, component: ComponentId, nodes: &[NodeId], hidden: bool) {
         for &n in nodes {
             match n {
                 NodeId::Object(id) => self.objects[id].hidden = hidden,
@@ -10085,14 +10099,19 @@ impl Document {
                 NodeId::Instance(id) => self.instances[id].hidden = hidden,
             }
         }
-        for &sid in sketches {
-            if hidden {
-                self.hidden_sketches.insert(sid);
-            } else {
-                self.hidden_sketches.remove(&sid);
-            }
-        }
         self.components[component].hidden = hidden;
+    }
+
+    /// The live sketches `component` owns directly, in key order. Liveness
+    /// is derived ([`Document::sketch_tombstoned`]): a hidden definition has
+    /// none, and a sketch deleted on its own (or whose creation is undone)
+    /// is excluded.
+    fn live_def_sketches_of(&self, component: ComponentId) -> Vec<SketchId> {
+        self.def_sketches
+            .iter()
+            .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
+            .map(|(&sid, _)| sid)
+            .collect()
     }
 
     /// How many live instances place `component` directly — world
@@ -19200,31 +19219,17 @@ impl Document {
                     if let (Some(pg), Some(prev)) = (parent, prev_parent_members) {
                         self.groups[pg].members = prev.clone();
                     }
-                    // Any sketch owned by this definition that is still live
-                    // has no world home once the definition hides — hide it
-                    // too, exactly as the standalone `MadeComponent` undo
-                    // does (component-edit-parity.md phase K1). The text
-                    // placement's own glyph sketch is hidden again by the
-                    // bundle's `SketchGesture` arm right after this one
-                    // (idempotent), but a sketch drawn INTO the text
-                    // definition AFTER the placement (`begin_sketch_on_plane
-                    // _in_instance` pushes no undo action of its own until a
-                    // gesture lands) is invisible to the bundle — without
-                    // this it stayed live with its owner pointing at the
-                    // now-hidden definition, and `Document::save` panicked
-                    // encoding `sketch_owner` (the document_fuzz PlaceText →
-                    // refused FollowMe-in-instance → Undo seed). Recomputed
-                    // by ownership rather than stored, for the same LIFO-
-                    // replay reason as the standalone arm.
-                    let orphaned: Vec<SketchId> = self
-                        .def_sketches
-                        .iter()
-                        .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
-                        .map(|(&sid, _)| sid)
-                        .collect();
-                    for &sid in &orphaned {
-                        self.hidden_sketches.insert(sid);
-                    }
+                    // Every sketch this definition owns — including one
+                    // drawn INTO the text definition after the placement
+                    // (`begin_sketch_on_plane_in_instance` records nothing
+                    // until a gesture lands, so the bundle cannot know it) —
+                    // goes dark with the definition by derivation
+                    // (`sketch_tombstoned`), exactly as the standalone
+                    // `MadeComponent` undo; nothing is written to
+                    // `hidden_sketches`, so the redo cannot revive a sketch
+                    // whose own creation is still undone. Listed only to
+                    // report the change.
+                    let orphaned = self.live_def_sketches_of(component);
                     self.instances[instance].hidden = true;
                     self.components[component].hidden = true;
                     let leaves: Vec<ObjectId> =
@@ -19361,23 +19366,13 @@ impl Document {
                             self.instances[i].parent = None;
                         }
                     }
-                    // Un-hide any sketch this definition owned when the
-                    // placement was undone — the matching undo arm's
-                    // counterpart, mirroring the standalone `MadeComponent`
-                    // redo (component-edit-parity.md phase K1). The glyph
-                    // sketch itself is then re-revealed by the bundle's
-                    // `SketchGesture` arm as well (idempotent).
-                    let restored: Vec<SketchId> = self
-                        .def_sketches
-                        .iter()
-                        .filter(|&(sid, &c)| c == component && self.sketch_tombstoned(sid))
-                        .map(|(&sid, _)| sid)
-                        .collect();
-                    for &sid in &restored {
-                        self.hidden_sketches.remove(&sid);
-                    }
+                    // Revealing the definition brings back the sketches it
+                    // owned when the placement was undone (derived, see the
+                    // undo arm); the glyph sketch itself is re-revealed by
+                    // the bundle's `SketchGesture` arm.
                     self.components[component].hidden = false;
                     self.instances[instance].hidden = false;
+                    let restored = self.live_def_sketches_of(component);
                     if let Some(pg) = parent {
                         self.splice_in_parent(pg, selected, NodeId::Instance(instance));
                     }
@@ -20151,25 +20146,16 @@ impl Document {
                     self.groups[pg].members = prev.clone();
                 }
                 // Any sketch drawn INTO this definition after the fold
-                // (component-edit-parity.md phase K1 — `member_prior_parents`
-                // predates that capability, so it only ever lists the
-                // original fold's objects) has no world home to return to:
-                // hide it too, exactly like a birthed member the fold itself
-                // never touches. Recomputed by ownership rather than stored,
-                // since nothing else can retarget `def_sketches` for a
-                // now-about-to-be-hidden component between this undo and its
-                // matching redo (LIFO replay). Sketches owned by the
-                // returning objects go back to the world with them first.
+                // (component-edit-parity.md phase K1) has no world home to
+                // return to; it goes dark with the definition by derivation
+                // (`sketch_tombstoned`), like a birthed member the fold never
+                // touches. Nothing is written to `hidden_sketches`: the
+                // redo's reveal then brings back exactly what was live here,
+                // and never a sketch whose own creation is still undone.
+                // Sketches owned by the returning objects go back to the
+                // world with them first.
                 self.resync_owned_frames();
-                let sketches_touched: Vec<SketchId> = self
-                    .def_sketches
-                    .iter()
-                    .filter(|&(sid, &c)| c == component && !self.sketch_tombstoned(sid))
-                    .map(|(&sid, _)| sid)
-                    .collect();
-                for &sid in &sketches_touched {
-                    self.hidden_sketches.insert(sid);
-                }
+                let sketches_touched = self.live_def_sketches_of(component);
                 self.instances[instance].hidden = true;
                 self.components[component].hidden = true;
                 // Verbatim restore, not a re-derived liveness check — see
@@ -20429,18 +20415,9 @@ impl Document {
                 self.instances[instance].name = prev_instance_name.clone();
                 self.set_def_subtree_hidden(new_def, true);
                 // Any sketch drawn INTO the private copy (component-edit-
-                // parity.md phase K1) has no home once `new_def` is hidden —
-                // hide it too, exactly like `MadeComponent`'s undo does for
-                // its dissolved definition.
-                let sketches_touched: Vec<SketchId> = self
-                    .def_sketches
-                    .iter()
-                    .filter(|&(sid, &c)| c == new_def && !self.sketch_tombstoned(sid))
-                    .map(|(&sid, _)| sid)
-                    .collect();
-                for &sid in &sketches_touched {
-                    self.hidden_sketches.insert(sid);
-                }
+                // parity.md phase K1) goes dark with `new_def` by derivation
+                // (`sketch_tombstoned`), as in `MadeComponent`'s undo.
+                let sketches_touched = self.live_def_sketches_of(new_def);
                 self.components[new_def].hidden = true;
                 DocChange {
                     instances_touched: vec![instance],
@@ -20817,10 +20794,9 @@ impl Document {
             DocAction::DefinitionDeleted {
                 component,
                 hidden_nodes,
-                hidden_sketches,
             } => {
                 let component = *component;
-                self.set_definition_hidden(component, hidden_nodes, hidden_sketches, false);
+                self.set_definition_hidden(component, hidden_nodes, false);
                 self.component_change(component)
             }
             DocAction::NodeMetaChanged {
@@ -21754,21 +21730,13 @@ impl Document {
                         self.instances[i].parent = None;
                     }
                 }
-                // Un-hide any sketch this definition owned when it was
-                // dissolved (the matching undo's counterpart above). The
-                // re-folded objects' own sketches fold with them.
+                // Revealing the definition brings back the sketches it owned
+                // when it was dissolved (derived, see the undo arm above).
+                // The re-folded objects' own sketches fold with them.
                 self.resync_owned_frames();
-                let sketches_touched: Vec<SketchId> = self
-                    .def_sketches
-                    .iter()
-                    .filter(|&(sid, &c)| c == component && self.sketch_tombstoned(sid))
-                    .map(|(&sid, _)| sid)
-                    .collect();
-                for &sid in &sketches_touched {
-                    self.hidden_sketches.remove(&sid);
-                }
                 self.components[component].hidden = false;
                 self.instances[instance].hidden = false;
+                let sketches_touched = self.live_def_sketches_of(component);
                 if let Some(pg) = parent {
                     self.splice_in_parent(pg, selected, NodeId::Instance(instance));
                 }
@@ -22017,17 +21985,9 @@ impl Document {
             } => {
                 self.components[new_def].hidden = false;
                 self.set_def_subtree_hidden(new_def, false);
-                // Un-hide any sketch `new_def` owned when it was dissolved
-                // (the matching undo's counterpart above).
-                let sketches_touched: Vec<SketchId> = self
-                    .def_sketches
-                    .iter()
-                    .filter(|&(sid, &c)| c == new_def && self.sketch_tombstoned(sid))
-                    .map(|(&sid, _)| sid)
-                    .collect();
-                for &sid in &sketches_touched {
-                    self.hidden_sketches.remove(&sid);
-                }
+                // Revealing `new_def` brings back the sketches it owned when
+                // it was dissolved (derived, see the undo arm above).
+                let sketches_touched = self.live_def_sketches_of(new_def);
                 self.instances[instance].def = new_def;
                 // Re-clear the instance name a promotion moved onto the new
                 // definition (exact by LIFO: at redo time the name is the
@@ -22227,10 +22187,9 @@ impl Document {
             DocAction::DefinitionDeleted {
                 component,
                 hidden_nodes,
-                hidden_sketches,
             } => {
                 let component = *component;
-                self.set_definition_hidden(component, hidden_nodes, hidden_sketches, true);
+                self.set_definition_hidden(component, hidden_nodes, true);
                 self.component_change(component)
             }
             DocAction::NodeMetaChanged {
