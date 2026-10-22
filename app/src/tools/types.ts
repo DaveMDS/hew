@@ -273,6 +273,40 @@ export interface Tool {
   onPointerUp?(snap: Snap | null, ray: Ray): void
 
   /**
+   * (optional) Click-drag-release participation (GitHub #52b, SketchUp's
+   * second way to give a gesture its two points): `true` for a tool whose
+   * gesture has a start point and an end point. With it, a left press that
+   * STARTS the gesture (the tool idle before the press, mid-gesture after)
+   * and travels past the drag threshold before its release has that release
+   * delivered as the second click — through `onPointerDown`, at the release
+   * snap, so commits, typed values and inference are exactly a click's. A
+   * short press stays a plain click; a press in any later stage is never
+   * armed. The shared mechanism lives in viewport/dragCommit.ts; a tool
+   * declares only this flag. Leave it unset for a tool whose press or
+   * release already means something of its own (Select's drag-move and
+   * marquee, Follow Me's `onPointerUp` sweep, Walk, Position Texture, …).
+   */
+  readonly dragCommits?: boolean
+
+  /**
+   * (optional) "A gesture is between its first point and its last", for the
+   * drag gate above, when `capturingInput()` cannot say it alone because it
+   * is also true for a post-commit typing window (Move's and Rotate's array
+   * copies, the chain Line holds for a dragged line's retype). Absent, the
+   * gate reads `capturingInput()`.
+   */
+  gestureInFlight?(): boolean
+
+  /**
+   * (optional) Called right after a drag-release was delivered as the
+   * second click (see `dragCommits`), for a tool whose second click alone
+   * would not end the gesture the way a drag should. Line: a dragged line
+   * is one segment and the chain ends (SketchUp), where a clicked one
+   * keeps chaining.
+   */
+  onDragCommitted?(): void
+
+  /**
    * (optional) Raw canvas-relative CSS-pixel pointer position, called on
    * EVERY pointer move alongside `onPointerMove` (both fire — this is
    * additive, not a replacement) with the live `PointerEvent.buttons`

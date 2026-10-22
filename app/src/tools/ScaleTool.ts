@@ -257,6 +257,8 @@ type RetypeSpec = {
 
 export class ScaleTool implements Tool {
   readonly name = 'Scale'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

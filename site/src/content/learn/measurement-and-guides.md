@@ -41,6 +41,8 @@ The Tape Measure does two jobs, chosen by where your *first* click lands:
 
 **Measure a distance.** Click any point, move, and read the live distance; click again to finish. If the second click lands on empty space, Hew drops a **guide point** there and — when the two points aren't the same — an infinite **guide line** through both of them, the same pair SketchUp drops. If the second click lands on real geometry, you get only the measurement; nothing is created. Hold `⌘`/`Ctrl` through either kind of click to measure without dropping anything, for whenever you only want the readout.
 
+Both jobs also take a drag: press on the first point or the edge, drag, and let go where the second click would go.
+
 **Drop a parallel guide.** Click on an **edge** — of a solid, a sketch you've drawn, a group member, or a component instance — then move sideways. A guide line parallel to that edge follows at the offset shown in the readout. Click to place it, or type an exact offset and press `Enter`. This is the classic SketchUp workflow for laying out a design before drawing it. A **world axis** works as the source edge too: click anywhere along the red, green, or blue axis (the On Axis cue confirms the pick) and pull sideways. So does an existing guide line — one guide can father a whole ladder of parallels.
 
 ### Working off the ground plane
@@ -80,6 +82,8 @@ The Protractor (Tools ▸ Protractor) measures an angle and drops an **angular g
 2. Click the **apex** (where the angle's corner sits).
 3. Click along a **baseline** (the zero direction).
 4. Sweep to the angle (it snaps near the axes) and click, or type degrees and press `Enter`.
+
+The apex and the baseline also take a drag: press on the apex, drag along the baseline, let go, then sweep and click as before.
 
 The result is a guide line through the apex at that angle.
 

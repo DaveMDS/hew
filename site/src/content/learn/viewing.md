@@ -83,7 +83,7 @@ None of this does anything under Parallel Projection — a parallel view has no 
 ## Standard views and framing
 
 - The viewport's top-left chips jump straight to **Top**, **Iso**, or **Front**.
-- **Camera ▸ Standard Views** offers all seven: Top, Bottom, Front, Back, Left, Right, and Iso. All are also in the command palette ("Standard View: …").
+- **Camera ▸ Standard Views** offers all seven: Top, Bottom, Front, Back, Left, Right, and Iso. All are also in the command palette ("Standard View: …"). Top, Bottom, Front, Back, Left, and Right only turn the camera about the point you're orbiting and keep your zoom, so the model stays the same size on screen; Iso re-frames the whole model.
 
 ![The Top button looking straight down at a two-part bracket](/docs/views-top.webp)
 ![The Front button switching the same bracket to a straight-on front view](/docs/views-front.webp)

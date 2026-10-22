@@ -14,6 +14,8 @@ Push/Pull (`P`) is the tool that moves your model between 2D and 3D. It does thr
 2. Move the cursor — a live ghost preview of the result follows, measured perpendicular to the face. The readout shows the current depth.
 3. Click again to commit, or type an exact depth (any length format, e.g. `18mm`) and press `Enter`.
 
+You can also press on the face, drag, and let go: letting go commits the push/pull at that depth, and a distance typed right after still redoes it.
+
 Press `Esc` at any point to cancel. Committing with no real distance is refused ("Move more before committing push/pull").
 
 Type a distance right after that click commits, too: the push/pull you just made redoes at the new distance — a positive number keeps the direction you just pushed or pulled, a negative one flips it — as many times as you like, until you click another face, press `Esc`, or switch tools. A double-click repeats the last distance in one step. One `Undo` afterward removes the whole push/pull, no matter how many times you retyped it.

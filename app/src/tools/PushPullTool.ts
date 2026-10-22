@@ -182,6 +182,8 @@ type RetypeSpec = {
 
 export class PushPullTool implements Tool {
   readonly name = 'Push/Pull'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

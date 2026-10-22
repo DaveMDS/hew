@@ -116,6 +116,8 @@ type RetypeSpec = { target: OffsetTarget; distance: number }
 
 export class OffsetTool implements Tool {
   readonly name = 'Offset'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

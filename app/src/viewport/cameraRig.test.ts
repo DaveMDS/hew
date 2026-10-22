@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
-import { CameraRig, MIN_FOV_DEG, MAX_FOV_DEG, isBehindCamera } from './cameraRig'
+import { CameraRig, MIN_FOV_DEG, MAX_FOV_DEG, isBehindCamera, turnedEyePosition } from './cameraRig'
 import { tanHalfFovRad, worldPerPixelPerspective } from './math'
 
 describe('CameraRig — construction', () => {
@@ -396,5 +396,23 @@ describe('isBehindCamera — projection-agnostic via camera-space z', () => {
     cam.lookAt(0, 0, 0)
     cam.updateMatrixWorld()
     expect(isBehindCamera(cam.position.clone(), cam)).toBe(true)
+  })
+})
+
+describe('turnedEyePosition', () => {
+  it('keeps the distance to the target and points along the eye direction', () => {
+    const target = new THREE.Vector3(3, -2, 1)
+    const p = turnedEyePosition(target, new THREE.Vector3(0, 0, 2), 7.5)
+    expect(p.distanceTo(target)).toBeCloseTo(7.5, 10)
+    expect(p.x).toBeCloseTo(3, 10)
+    expect(p.y).toBeCloseTo(-2, 10)
+    expect(p.z).toBeCloseTo(8.5, 10)
+  })
+  it('does not mutate its inputs', () => {
+    const target = new THREE.Vector3(1, 1, 1)
+    const eye = new THREE.Vector3(0, -3, 0)
+    turnedEyePosition(target, eye, 2)
+    expect(target.toArray()).toEqual([1, 1, 1])
+    expect(eye.toArray()).toEqual([0, -3, 0])
   })
 })

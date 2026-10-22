@@ -384,3 +384,11 @@ export function apertureForPixelRadiusOn(rig: CameraRig, pixelRadius: number, vi
 export function isBehindCamera(p: THREE.Vector3, camera: THREE.Camera): boolean {
   return p.clone().applyMatrix4(camera.matrixWorldInverse).z >= 0
 }
+
+/** Camera position after turning about `target` to look along `eye`
+ * (target → camera) at the same `distance`. The standard views other than
+ * Iso use this with the current target and distance, so the on-screen scale
+ * is unchanged; `eye` need not be normalized. */
+export function turnedEyePosition(target: THREE.Vector3, eye: THREE.Vector3, distance: number): THREE.Vector3 {
+  return target.clone().addScaledVector(eye.clone().normalize(), distance)
+}

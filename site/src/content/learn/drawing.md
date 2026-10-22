@@ -20,6 +20,8 @@ Selection matches what you drew. Clicking a straight line selects just that line
 
 While any drawing tool is active, the status bar explains the next step, the top-right readout shows live dimensions, and everything you type goes into that readout (see "Typing exact values" below).
 
+As in SketchUp, a tool's first two points also take a drag: press on the first point, drag, and let go on the second (a rectangle's two corners, a circle's or polygon's center and rim, an arc's chord, an offset's start and end), and a value typed right after you let go applies just as it would after a click; a short press is still a click, so click, move, click works exactly as before.
+
 ## Line (`L`)
 
 Draws a chain of straight edges.
@@ -30,6 +32,7 @@ Draws a chain of straight edges.
 
 To finish a chain *without* closing it: click the last point again (or double-click it), press `Enter` with nothing typed, or press `Esc` once. Pressing `Esc` again cancels the tool's gesture entirely.
 
+Press on the first point, drag, and let go on the second instead, and you get a single segment: the chain ends there, ready for a new line, and a length typed right after you let go resizes that segment.
 
 **Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing.
 

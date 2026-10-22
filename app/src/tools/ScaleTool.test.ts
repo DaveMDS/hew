@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { ScaleTool } from './ScaleTool'
+import { DragCommitGate } from '../viewport/dragCommit'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
@@ -245,6 +246,22 @@ describe('ScaleTool — grip gizmo', () => {
     // Same cursor (z=1.5), now anchored at center (z=0.5): factor = (1.5-0.5)/(1-0.5) = 2.
     expect(affine[10]).toBeCloseTo(2)
     expect(affine[11]).toBeCloseTo(-0.5)
+  })
+
+  it('click-drag-release: a Ctrl tap while the grab is armed (before any move) center-anchors the drag the release commits', () => {
+    const { tool, wasmScene } = makeBoxTool()
+    const gate = new DragCommitGate()
+    // The grab arms the gate (idle before, dragging after).
+    expect(gate.press(tool, 1, 100, 100, () => tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1 }), rayAt([1, 1, 1])))).toBe(true)
+    // The Viewport's clean Ctrl tap lands here, before the pointer moves.
+    tool.toggleCenterAnchor()
+    tool.onPointerMove(makeSnap({ x: 1, y: 1, z: 1.5 }), rayAt([1, 1, 1.5]))
+    gate.move(1, 100, 40)
+    expect(gate.release(tool, 1, 100, 40, () => tool.onPointerDown(makeSnap({ x: 1, y: 1, z: 1.5 }), rayAt([1, 1, 1.5])))).toBe(true)
+    const affine = lastAffine(wasmScene)
+    expect(affine[10]).toBeCloseTo(2) // (1.5 - 0.5) / (1 - 0.5), about the center
+    expect(affine[11]).toBeCloseTo(-0.5)
+    expect(tool.capturingInput()).toBe(false) // committed by the release, back to idle
   })
 
   it('dragging a grip past its anchor clamps to MIN_SCALE, never reflects', () => {

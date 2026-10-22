@@ -95,7 +95,7 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName } from './moveInput'
-import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { displayedLength, isFreePick } from './displayedValue'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
@@ -292,9 +292,14 @@ const RETYPE_POINTER_STILL_COS = Math.cos(0.005)
 
 export class LineTool implements Tool {
   readonly name = 'Line'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
+    if (this._dragDone && this.retype.isOpen) {
+      return t`Type a length to resize the line you just drew, or click to start a new one.`
+    }
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       if (this.retype.isOpen) {
         return t`Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish.`
@@ -643,7 +648,11 @@ export class LineTool implements Tool {
    */
   snapConstraint(ray: Ray): SnapConstraint | null {
     const lockPart: { anchor?: [number, number, number]; lockAxis?: 0 | 1 | 2 } = {}
-    const anchorPoint = this._currentAnchor()
+    // After a dragged line (`_dragDone`) the chain held for its retype
+    // window is no gesture: the next press is a FIRST click and must resolve
+    // exactly as an idle one would — no anchor, no frozen plane.
+    const live = !this._dragDone
+    const anchorPoint = live ? this._currentAnchor() : null
     if (anchorPoint !== null) {
       lockPart.anchor = anchorPoint
       if (this.lockAxis !== null) {
@@ -651,7 +660,7 @@ export class LineTool implements Tool {
       }
     }
 
-    if (this.faceStage.kind === 'anchored') {
+    if (live && this.faceStage.kind === 'anchored') {
       // The FIRST segment of a face chain is not held to the adopted face:
       // the anchor sits on an edge two faces share as often as not, and
       // which of them the user means is only known from where the second
@@ -673,7 +682,7 @@ export class LineTool implements Tool {
       }
     }
 
-    if (this.planeStage.kind === 'anchored') {
+    if (live && this.planeStage.kind === 'anchored') {
       if (this.planeStage.plane.ground) {
         // No constraint plane while ground-anchored; just the axis lock (if any).
         return Object.keys(lockPart).length > 0 ? lockPart : null
@@ -987,6 +996,40 @@ export class LineTool implements Tool {
    *  this same gesture's. */
   private _finishedByReclick = false
 
+  /**
+   * A line drawn by click-drag-release (GitHub #52b, `onDragCommitted`): one
+   * segment, and the chain is over — SketchUp's rule. The chain is still
+   * held anchored underneath, ONLY so the retype window keeps working (a
+   * length typed right after the release resizes the line, as after a
+   * click, through the very same `_retypeLast` → `_relaySegment` path); to
+   * the user the tool is idle: no rubber band, letter shortcuts are free
+   * (`capturesKey`), and the first real pointer move, any press, an arrow
+   * key or Shift ends the chain for good (`_dropDragDone`).
+   */
+  private _dragDone = false
+
+  /** The line drawn by click-drag-release is settled: end the chain it
+   *  kept for its retype window. True when there was one to end. */
+  private _dropDragDone(): boolean {
+    if (!this._dragDone) return false
+    this._endChain()
+    return true
+  }
+
+  /** Click-drag-release (Tool.onDragCommitted): the release just placed the
+   *  segment's far end; a dragged line is one segment, so the chain ends —
+   *  except for the retype window, see `_dragDone`. A release that
+   *  committed nothing (refused, or no cursor on the plane) leaves the chain
+   *  anchored exactly as a plain click would: the window is open only when
+   *  this delivery placed a segment (the press closed any earlier one). */
+  onDragCommitted(): void {
+    if (!this.capturingInput()) return
+    if (!this.retype.isOpen) return
+    this._dragDone = true
+    this._clearPreview()
+    this.wasmScene.clear_transient_segments()
+  }
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._lastViewDir = ray.direction
     this._lastRayDir = ray.direction
@@ -997,6 +1040,11 @@ export class LineTool implements Tool {
       const d = this._retypeRayDir
       const dot = d[0] * ray.direction[0] + d[1] * ray.direction[1] + d[2] * ray.direction[2]
       if (dot < RETYPE_POINTER_STILL_COS) this.retype.close()
+    }
+    if (this._dragDone) {
+      // Still inside the dragged line's retype window: nothing to preview.
+      if (this.retype.isOpen) return
+      this._dropDragDone()
     }
     if (this._currentMode(ray, snap) === 'face') {
       this._onPointerMoveFace(snap, ray)
@@ -1012,6 +1060,7 @@ export class LineTool implements Tool {
     if (this.retype.isOpen && this._retypeScreen !== null) {
       if (Math.hypot(xPx - this._retypeScreen[0], yPx - this._retypeScreen[1]) > RETYPE_POINTER_STILL_PX) {
         this.retype.close()
+        this._dropDragDone()
       }
     }
   }
@@ -1210,6 +1259,8 @@ export class LineTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    // After a dragged line every press starts a new one.
+    this._dropDragDone()
     this._lastRayDir = ray.direction
     this._closedByClick = false
     this._finishedByReclick = false
@@ -1246,7 +1297,26 @@ export class LineTool implements Tool {
    * but IS armed for Escape's purposes.
    */
   hasArmedGesture(): boolean {
-    return this.capturingInput() || this.idlePlaneLock !== null || this.pin.current !== null
+    // A dragged line's held chain (`_dragDone`) is not armed: the tool reads
+    // as idle to the host's guards (breadcrumbs, isolation, context pops).
+    // Escape still reaches `onKey` whenever the host does not use it itself.
+    const anchored = this.capturingInput() && !this._dragDone
+    return anchored || this.idlePlaneLock !== null || this.pin.current !== null
+  }
+
+  /** For the drag gate (Tool.gestureInFlight): the chain held only for a
+   *  dragged line's retype window (`_dragDone`) is no gesture — the next
+   *  press starts one, and may itself be dragged. */
+  gestureInFlight(): boolean {
+    return !this._dragDone && this.capturingInput()
+  }
+
+  /** Per-key capture (Tool.capturesKey): an anchored chain keeps the whole
+   *  keyboard; after a dragged line (`_dragDone`) only the retype buffer's
+   *  keys are taken, as for a closed shape's idle retype window. */
+  capturesKey(key: string): boolean {
+    if (this._dragDone) return this.retype.isOpen && idleRetypeCapturesKey(key, this.typed, isLengthInputKey)
+    return this.capturingInput()
   }
 
   onKey(ev: KeyboardEvent): void {
@@ -1262,6 +1332,13 @@ export class LineTool implements Tool {
       }
       this._onEscape()
       return
+    }
+
+    // After a dragged line, only the retype buffer's keys belong to that
+    // line; an arrow (a plane lock) is for the next one. Modifier keydowns
+    // (Shift for a typed `"`) leave it alone.
+    if (this._dragDone && (!this.retype.isOpen || ev.key.startsWith('Arrow'))) {
+      this._dropDragDone()
     }
 
     if (!this.capturingInput()) {
@@ -1384,7 +1461,10 @@ export class LineTool implements Tool {
    * arrow lock takes precedence and is left alone.
    */
   setShiftHeld(held: boolean): void {
-    if (!this.capturingInput()) {
+    // After a dragged line Shift is an idle Shift: it toggles the plane pin
+    // for the NEXT line (applied when its press arrives) and leaves the
+    // dragged line's retype buffer alone — `36"` needs Shift for the quote.
+    if (!this.capturingInput() || this._dragDone) {
       // Idle: Shift toggles the plane PIN (planePin.ts; GitHub issue 14) —
       // the plane the last hover recorded becomes the chain's drawing
       // plane until Shift is pressed again or Escape releases it. A pin
@@ -1477,6 +1557,7 @@ export class LineTool implements Tool {
    * was already committed as it was placed, in both modes.
    */
   private _endChain(): void {
+    this._dragDone = false
     this.retype.close()
     // Idle hovers never run `_planeCursor`, so a "projected" verdict left
     // by a ground chain's last hover would otherwise stick to every chip
@@ -1532,6 +1613,7 @@ export class LineTool implements Tool {
   }
 
   cancel(): void {
+    this._dragDone = false
     this.retype.close()
     this._closedByClick = false
     this._finishedByReclick = false
@@ -2064,6 +2146,7 @@ export class LineTool implements Tool {
    *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
   disarmRetype(): void {
     this.retype.close()
+    this._dropDragDone()
   }
 
   // ------------------------------------------------------------------ preview

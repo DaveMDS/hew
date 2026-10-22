@@ -140,6 +140,8 @@ type RetypeSpec = { nodes: NodeRef[]; vector: [number, number, number]; copy: bo
 
 export class MoveTool implements Tool {
   readonly name = 'Move'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -339,6 +341,12 @@ export class MoveTool implements Tool {
     if (nodes.every((n) => allFree(this.wasmScene, n))) return null
     const pl = planeOfCtx(ctx)
     return pl === null ? null : { point: [...pl.point], normal: [...pl.normal] }
+  }
+
+  /** The two-click move itself, without the post-commit array window that
+   *  `capturingInput` also covers (the drag gate, Tool.gestureInFlight). */
+  gestureInFlight(): boolean {
+    return this.stage.kind === 'base'
   }
 
   capturingInput(): boolean {

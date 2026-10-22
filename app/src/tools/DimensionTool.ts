@@ -548,6 +548,8 @@ type Classification =
 
 export class DimensionTool implements Tool {
   readonly name = 'Dimension'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   statusHint(): string {
     const lockedAxis = this.planeLock !== null ? axisLockColorName(this.planeLock) : null

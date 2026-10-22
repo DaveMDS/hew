@@ -24,6 +24,7 @@ import { CircleTool } from './CircleTool'
 import { PolygonTool } from './PolygonTool'
 import { ArcTool } from './ArcTool'
 import { draftMock } from './draftMock'
+import { DragCommitGate } from '../viewport/dragCommit'
 import { isGroundPlane } from './drawPlane'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -159,6 +160,25 @@ const DRIVERS: Driver[] = [
     finish: (tool, b) => tool.onPointerDown(makeSnap(b), RAY),
   },
 ]
+
+// Click-drag-release (#52b): an arrow key pressed DURING the drag locks the
+// plane exactly as between two clicks; the release commits on it.
+describe.each(DRIVERS)('$name — an arrow key during a click-drag-release', ({ make, anchor, finish }) => {
+  it('the press anchors, the arrow re-locks through the anchor, the release commits on that plane', () => {
+    const { scene, planeCalls } = makeWasmScene()
+    const tool = make(scene) as DrawToolUnderTest & Parameters<DragCommitGate['press']>[0]
+    const gate = new DragCommitGate()
+    expect(gate.press(tool, 1, 100, 100, () => anchor(tool, [2, 3, 0]))).toBe(true)
+    gate.move(1, 140, 120)
+    tool.onKey(makeKeyEvent('ArrowRight'))
+    gate.move(1, 180, 60)
+    expect(gate.release(tool, 1, 180, 60, () => finish(tool, [2, 9, 5]))).toBe(true)
+    expect(groundBegins(scene)).toBe(0)
+    expect(planeCalls).toHaveLength(1)
+    expect(planeCalls[0]).toEqual([2, 3, 0, 1, 0, 0])
+    expect(tool.capturingInput()).toBe(false)
+  })
+})
 
 describe.each(DRIVERS)('$name — mid-gesture plane lock (design §2a)', ({ name, make, anchor, finish }) => {
   it('an arrow key AFTER the anchor re-locks the plane through the anchor, at world identity', () => {

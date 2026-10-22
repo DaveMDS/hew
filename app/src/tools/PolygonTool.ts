@@ -183,6 +183,8 @@ type RetypeSpec = {
 
 export class PolygonTool implements Tool {
   readonly name = 'Polygon'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {

@@ -39,6 +39,8 @@ Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) select
 1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere. (With nothing selected, this click also selects the object under the cursor.)
 2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds.
 
+Move, Rotate, and Scale also take a drag: press on the first point (Move's base point, Rotate's pivot, a Scale grip), drag, and let go where the second click would go; a short press is still a click, and a value typed right after you let go applies just as it would after a click.
+
 **Exact distance:** after the base point, type a length (`1.5m`, `8"`) and press `Enter` — the selection moves exactly that far in the direction you were dragging (or along the locked axis).
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.

@@ -21,6 +21,7 @@ import * as THREE from 'three'
 import { setLengthUnit, getLengthUnit } from '../settings/units'
 import { MoveTool } from './MoveTool'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
+import { DragCommitGate } from '../viewport/dragCommit'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
@@ -1470,5 +1471,31 @@ describe('MoveTool — one gesture, one undo step (history bracket)', () => {
     expect(t.scene.undo_depth()).toBe(0)
     expect(t.drawing.units).toEqual(before) // the drawing moved by the landed draft came back
     expect(t.scene.scene_undo).not.toHaveBeenCalled()
+  })
+})
+
+// Click-drag-release (#52b, viewport/dragCommit.ts): the ×N array window keeps
+// `capturingInput()` true at idle, so the gate reads `gestureInFlight()`.
+describe('MoveTool — click-drag-release gate', () => {
+  it('a press during the ×N window arms a drag; the drag release moves; a mid-gesture press never arms', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.tool.capturingInput()).toBe(true) // the array window
+    expect(t.tool.gestureInFlight()).toBe(false)
+
+    const gate = new DragCommitGate()
+    const press = () => t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(gate.press(t.tool, 1, 100, 100, press)).toBe(true)
+    expect(t.tool.gestureInFlight()).toBe(true)
+    // A press now (mid-gesture) is a plain click, never armed.
+    expect(new DragCommitGate().press(t.tool, 2, 0, 0, () => { /* not delivered */ })).toBe(false)
+    gate.move(1, 160, 100)
+    const commits = t.scene.duplicate_selection_array.mock.calls.length + t.onCommit.mock.calls.length
+    expect(gate.release(t.tool, 1, 160, 100, () => t.tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0)))).toBe(true)
+    expect(t.scene.duplicate_selection_array.mock.calls.length + t.onCommit.mock.calls.length).toBeGreaterThan(commits)
+    expect(t.tool.gestureInFlight()).toBe(false)
   })
 })

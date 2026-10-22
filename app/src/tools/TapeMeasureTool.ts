@@ -504,6 +504,8 @@ function perpComponent(
 
 export class TapeMeasureTool implements Tool {
   readonly name = 'Tape Measure'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** The current editing context (component-edit-parity.md phase A1) —
    *  consulted by `_tryResolveEdge`: a `sketch-edge` snap with no `instance`

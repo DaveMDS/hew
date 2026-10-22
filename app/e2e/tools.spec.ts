@@ -868,9 +868,9 @@ test('Scale: a real Control keypress toggles the center anchor mid-drag', async 
     await page.mouse.down() // grab
     if (withCtrl) await page.keyboard.press('Control') // clean tap -> center anchor
     await page.mouse.move(target.x, target.y, { steps: 10 }) // drag
-    await page.mouse.up()
-    await page.mouse.move(target.x, target.y)
-    await page.mouse.down() // commit
+    // The release commits (click-drag-release, GitHub #52b). A further
+    // click here would no longer be the commit: it lands on the scaled
+    // box's new +X grip and grabs it, starting a second scale.
     await page.mouse.up()
     await page.waitForTimeout(120)
   }

@@ -225,6 +225,8 @@ type RetypeSpec = { nodes: NodeRef[]; pivot: Vec3; axis: Vec3; theta: number; co
 
 export class RotateTool implements Tool {
   readonly name = 'Rotate'
+  /** Click-drag-release works as well as click-click (Tool.dragCommits). */
+  readonly dragCommits = true
 
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
@@ -390,6 +392,12 @@ export class RotateTool implements Tool {
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
+
+  /** The rotate gesture itself, without the post-commit array window that
+   *  `capturingInput` also covers (the drag gate, Tool.gestureInFlight). */
+  gestureInFlight(): boolean {
+    return this.stage.kind !== 'idle'
+  }
 
   capturingInput(): boolean {
     return this.stage.kind === 'pivot' || this.stage.kind === 'ref' || this.arrayHot !== null

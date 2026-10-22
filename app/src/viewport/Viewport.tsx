@@ -105,7 +105,7 @@ import {
   type CameraViewLimits,
 } from './math'
 import { dynamicClipPlanes, groundHitIsUsable, targetAtDepth, zoomFloorFor } from './cameraDepth'
-import { CameraRig, type Projection, isBehindCamera } from './cameraRig'
+import { CameraRig, type Projection, isBehindCamera, turnedEyePosition } from './cameraRig'
 import { guideSpanOf, stretchToUse } from './guideWindow'
 import { fovReadoutText, activeCameraToolForName } from './fovReadout'
 import { parseFovEntry } from './fovUnits'
@@ -128,6 +128,7 @@ import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
 import { dragMoveTargets, exceedsDragThreshold } from './dragMove'
+import { DragCommitGate } from './dragCommit'
 import {
   loupePress,
   loupeMove,
@@ -905,8 +906,9 @@ export interface ViewportApi {
   setHealthOverlay: (overlay: HealthOverlay | null) => void
   /**
    * Reposition the orbit camera to a standard axis-aligned or isometric view
-   * (Camera ▸ Standard Views), re-framing the scene each time. The current
-   * (perspective) projection is retained. No model geometry changes.
+   * (Camera ▸ Standard Views). Only Iso re-frames the scene; the six axis
+   * views turn the camera about the current target, keeping the distance and
+   * the orthographic zoom. The current projection is retained. No model geometry changes.
    */
   setStandardView: (view: StandardView) => void
   /**
@@ -3621,6 +3623,27 @@ export default function Viewport({
     }
     let dragMove: DragMove | null = null
 
+    // Click-drag-release for two-point tools (GitHub #52b, dragCommit.ts):
+    // a press that starts a participating tool's gesture arms the gate; a
+    // release past the drag threshold is delivered as the second click.
+    // `dragCommitHoldsControls` records that the gate switched OrbitControls
+    // off for a TOUCH press (a mouse left button never orbits under a tool —
+    // `mouseButtons.LEFT` is null — but `touches.ONE` still rotates), so
+    // `endDragCommit` can switch it back on from every exit path.
+    const dragCommitGate = new DragCommitGate()
+    let dragCommitHoldsControls = false
+    function releaseDragCommitControls(): void {
+      if (!dragCommitHoldsControls) return
+      dragCommitHoldsControls = false
+      controls.enabled = true
+    }
+    /** Drop an armed click-drag-release press (pointercancel, blur, tool
+     *  switch, a fresh press) and give the camera its touch drag back. */
+    function endDragCommit(): void {
+      dragCommitGate.cancel()
+      releaseDragCommitControls()
+    }
+
     // Annotation offset/leader drag (docs/design/dimensions-text.md "Tools
     // & UX": "drag moves the offset/text placement"). A press directly on
     // the picked annotation (see `pickAnnotation` below) arms this; past
@@ -5581,52 +5604,54 @@ export default function Viewport({
       // tiny tilt baked into their eye direction — see POLE_TILT).
       const spec = STANDARD_VIEWS[view]
 
-      // Re-frame the scene each time (like zoomExtents, same group set —
-      // sketches count as model geometry, guides stay excluded, hidden
-      // geometry is skipped), falling back to the current target/distance
-      // when nothing is visible.
+      // A Scene transition's tween would keep re-posing the rig every frame
+      // and land on the scene's pose, silently losing this click.
+      cancelCameraTween()
+
+      // The visible bounds (like zoomExtents, same group set — sketches count
+      // as model geometry, guides stay excluded, hidden geometry is skipped)
+      // serve two purposes. Every view uses them to resync the world-length
+      // view limits (delta-review Finding 2). Only Iso also re-frames from
+      // them; the six axis views just turn the camera about the current orbit
+      // target and keep the distance and the orthographic zoom, so the
+      // on-screen scale never changes (#52).
       const box = new THREE.Box3()
       expandByVisibleObject(box, sceneRenderer.objectsGroup)
       expandByVisibleObject(box, sceneRenderer.instancesGroup)
       expandByVisibleObject(box, sceneRenderer.sketchGroup)
+      const reframe = view === 'iso' && !box.isEmpty()
 
       const center = new THREE.Vector3()
       let distance: number
       let radius = 0
-      if (box.isEmpty()) {
-        // Nothing visible to derive a fit distance from — preserve the
-        // current framing verbatim, same as the pre-fix behavior. There is
-        // no ground-truth fit distance here to resync the limits against,
-        // so (like `zoomExtents`' own early return on an empty box) this
-        // branch skips `syncWorldLengthViewState` entirely rather than
-        // resyncing against a distance that doesn't describe the model.
+      if (!box.isEmpty()) {
+        // Resync the limits from the model's fit distance, exactly like
+        // `zoomExtents`, so a rescale+undo does not leave stale clamps.
+        radius = box.getBoundingSphere(new THREE.Sphere()).radius
+        const fitDistance = rig.perspectiveFramingDistance(radius, 1.2)
+        const limits = zoomExtentsViewLimits(fitDistance)
+        syncWorldLengthViewState(limits.far / worldLimits.far)
+        if (reframe) {
+          box.getCenter(center)
+          distance = fitDistance
+        } else {
+          center.copy(controls.target)
+          distance = controls.getDistance()
+        }
+      } else {
+        // Empty scene: no fit distance to resync against (like `zoomExtents`'
+        // own early return), so keep the current target and distance.
         center.copy(controls.target)
         distance = controls.getDistance()
-      } else {
-        box.getCenter(center)
-        radius = box.getBoundingSphere(new THREE.Sphere()).radius
-        distance = rig.perspectiveFramingDistance(radius, 1.2)
-
-        // Resync the view limits from this same fit distance, exactly like
-        // `zoomExtents` (delta-review Finding 2) — Top/Front/Iso duplicated
-        // the framing pipeline but not the resync, so after a rescale+undo
-        // the standard views kept clamping at the stale limits even though
-        // `zoomExtents` had already recovered. Same shared helper, same
-        // ratio derivation.
-        const limits = zoomExtentsViewLimits(distance)
-        const ratio = limits.far / worldLimits.far
-        syncWorldLengthViewState(ratio)
       }
 
       const eye = new THREE.Vector3(spec.eye[0], spec.eye[1], spec.eye[2]).normalize()
       camera.up.set(0, 0, 1)
       controls.target.copy(center)
-      camera.position.copy(center).addScaledVector(eye, distance)
-      // Parallel path keeps the eye direction (above) and sizes the frustum
-      // from the box radius instead of distance (design §1) — only when
-      // there IS a box to frame; an empty scene keeps the current frustum
-      // size, matching the perspective branch's "keep current distance".
-      if (rig.projection === 'parallel' && !box.isEmpty()) {
+      camera.position.copy(turnedEyePosition(center, eye, distance))
+      // Parallel: only Iso sizes the frustum from the box radius (design §1);
+      // the axis views and the empty scene keep the current frustum and zoom.
+      if (rig.projection === 'parallel' && reframe) {
         rig.frameOrthoToRadius(radius, 1.2, el.clientWidth / el.clientHeight)
       }
       camera.updateProjectionMatrix()
@@ -7374,6 +7399,10 @@ export default function Viewport({
       // there — both are readOnly-only state).
       cancelTapeLoupe()
       deferredTapDrag = null
+      // Nor does an armed click-drag-release: its release must not reach the
+      // NEW tool as a click (the gate also checks the tool), and a touch
+      // press's switched-off camera controls come back on.
+      endDragCommit()
       // Exiting a walkthrough tool (design §4) — see the const's doc above.
       // `dist` MUST be read before `controls.target` is overwritten below:
       // `controls.getDistance()` measures FROM the (still stale, pre-reseed)
@@ -8493,6 +8522,9 @@ export default function Viewport({
     // was actually in when the blur happened.
     function onWindowBlurClearsLoupe(): void {
       cancelTapeLoupe()
+      // The same swallowed release would strand an armed click-drag-release
+      // (and, for touch, the camera's switched-off controls).
+      endDragCommit()
     }
     window.addEventListener('blur', onWindowBlurClearsLoupe)
 
@@ -8948,6 +8980,23 @@ export default function Viewport({
         }
       }
 
+      // Armed click-drag-release (dragCommit.ts): only measures travel; the
+      // tool keeps getting its ordinary moves below, so the rubber band and
+      // inference follow the drag exactly as they follow a hover.
+      // Another pointer's moves while one is drawing are stray (above): they
+      // must not drag the preview over to the second finger.
+      if (dragCommitGate.isArmed && ev.pointerId !== dragCommitGate.pointerId) return
+      if (dragCommitGate.pointerId === ev.pointerId) {
+        if ((ev.buttons & 1) === 0) {
+          // The release happened outside our listeners (focus loss) — drop
+          // it; the gesture simply continues click-click.
+          endDragCommit()
+        } else {
+          const [px, py] = canvasPoint(ev)
+          dragCommitGate.move(ev.pointerId, px, py)
+        }
+      }
+
       // Armed drag-to-move: past the threshold, hand the gesture to a
       // one-shot Move tool; while it runs, FALL THROUGH to normal routing so
       // the Move tool gets live snapped pointer moves (inference, axis
@@ -9312,10 +9361,19 @@ export default function Viewport({
       ) {
         return
       }
+      // The same rule for an armed click-drag-release (dragCommit.ts): while
+      // one finger is drawing, another finger's press is stray input —
+      // ignored entirely (no click, the gate stays armed, a touch press's
+      // camera stays off) so the first finger's release still delivers.
+      if (dragCommitGate.isArmed && ev.pointerId !== dragCommitGate.pointerId) return
       // Counted here, before any of the early returns below, so the sequence
       // reflects every primary press the canvas actually received rather than
       // only the ones that reach the tool-routing guard further down.
       const clickCount = Math.max(ev.detail, multiClick.press(ev))
+      // Any primary press ends a click-drag-release still armed from an
+      // earlier one (its release never reached us, or a second finger came
+      // down); only the delivery further below can arm a new one.
+      endDragCommit()
       // A Shift-fov drag is already armed by now — onFovDragPointerDownCapture
       // (an `el`-level capture-phase listener, wired further down) runs
       // BEFORE this bubble-phase handler and before OrbitControls' own
@@ -9522,7 +9580,27 @@ export default function Viewport({
         ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
         : null
       const { snap } = snapService.resolve(ray, viewportH, basis, constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
-      activeTool.onPointerDown(snap, ray)
+      // The press is the first click, as always; the gate (dragCommit.ts)
+      // only watches the tool's stage either side of it. Never under
+      // `readOnly`: Shop Mode's only drawing-side tool, Tape Measure, has its
+      // own loupe gesture above, and a drag there belongs to the camera.
+      const [pressX, pressY] = canvasPoint(ev)
+      const armedDrag = readOnlyRef.current
+        ? (activeTool.onPointerDown(snap, ray), false)
+        : dragCommitGate.press(activeTool, ev.pointerId, pressX, pressY, () => activeTool.onPointerDown(snap, ray))
+      if (armedDrag) {
+        // Track the drag even when it leaves the canvas, so its release
+        // still reaches onPointerUp (the dragMove precedent).
+        renderer.domElement.setPointerCapture(ev.pointerId)
+        // A one-finger touch drag would otherwise also rotate the camera
+        // (OrbitControls' `touches.ONE`); a drag that is drawing never
+        // orbits. OrbitControls re-reads `enabled` on every move and its
+        // pointerup ignores it, so switching it off mid-press is clean.
+        if (ev.pointerType === 'touch' && controls.enabled) {
+          controls.enabled = false
+          dragCommitHoldsControls = true
+        }
+      }
       // Shop-mode playtest finding 3: touch has no hover, so `onPointerMove`
       // (the only other `publishSnapCues` caller) never runs before a plain
       // tap — SnapDot/InferenceTooltip would otherwise never appear at all
@@ -9722,6 +9800,17 @@ export default function Viewport({
       }
 
       const isMod = ev.metaKey || ev.ctrlKey
+
+      // A key that commits or ends the gesture mid-drag (a typed Enter,
+      // Escape) spends the armed click-drag-release (dragCommit.ts): the
+      // release must not become one more click — Line's typed Enter commits
+      // a segment and stays anchored, so the release would draw a second.
+      if (
+        dragCommitGate.isArmed && !isMod && (ev.key === 'Enter' || ev.key === 'Escape') &&
+        !keyboardBelongsToFieldOrDialog(ev.target)
+      ) {
+        dragCommitGate.spend()
+      }
 
       // Esc aborts an in-flight Shift-fov drag before anything else
       // (camera-playtest2.md §3) — restores MOUSE.DOLLY, no fov rollback
@@ -9956,6 +10045,10 @@ export default function Viewport({
     function onPointerUp(ev: PointerEvent): void {
       recordPointerInput('pointerup', ev)
       if (ev.button !== 0) return
+      // A stray pointer's release while another is drawing (see the press
+      // guard in onPointerDown): ignored, and kept out of the multi-click
+      // tracker, whose open press is the drawing pointer's.
+      if (dragCommitGate.isArmed && ev.pointerId !== dragCommitGate.pointerId) return
       // Closes the press counted in onPointerDown. Recorded before any of the
       // early returns below for the same reason the press is: a release
       // consumed by a camera or FOV drag still ends that press, and a press
@@ -10033,6 +10126,34 @@ export default function Viewport({
           ;(activeTool as { onPointerUp(snap: Snap | null, ray: Ray): void }).onPointerUp(snap, ray)
           scheduleRender()
         }
+      }
+
+      // Click-drag-release (dragCommit.ts): the release of a press that
+      // started a participating tool's gesture and travelled past the drag
+      // threshold is that gesture's second click, resolved and delivered
+      // exactly as the press path delivers a click. A short press is left
+      // alone — the gesture continues click-click.
+      if (dragCommitGate.pointerId === ev.pointerId) {
+        const activeTool = toolController.activeTool
+        const [px, py] = canvasPoint(ev)
+        const delivered = dragCommitGate.release(activeTool, ev.pointerId, px, py, () => {
+          const [ndcX, ndcY] = pointerToNDC(ev, renderer.domElement)
+          const ray = makeWorldRay(ndcX, ndcY, camera)
+          const constraint = 'snapConstraint' in activeTool
+            ? (activeTool as { snapConstraint(ray?: Ray): SnapConstraint | null }).snapConstraint(ray)
+            : null
+          const { snap } = snapService.resolve(ray, el.clientHeight, apertureBasis(), constraint?.anchor, constraint?.lockAxis, constraint?.constraintPlane, constraint?.offPlanePoints, undefined, constraint?.facesOnly, toolController.activeToolName === 'Select', constraint?.seeThroughPoints)
+          activeTool.onPointerDown(snap, ray)
+        })
+        releaseDragCommitControls()
+        if (delivered) {
+          // A delivered drag is never half of a double-click, whatever the
+          // multi-click tracker's own (wider, for touch) slop made of it.
+          multiClick.reset()
+          drawPlaneCueLayer.update(queryDrawPlaneCue(activeTool), getDrawingAxes(wasmScene))
+          scheduleRender()
+        }
+        return
       }
 
       // Annotation drag release: an ACTIVE drag commits the new offset/
@@ -10147,6 +10268,7 @@ export default function Viewport({
       // still-armed drag.
       abortFovDrag(ev.pointerId)
       clearMarquee()
+      if (dragCommitGate.pointerId === ev.pointerId) endDragCommit()
       // Both scoped to the arming pointer too (ADVERSARIAL-REVIEW finding
       // 4) — this listener fires for every pointer's own cancel, same as
       // `abortFovDrag`'s own reasoning just above, so an unrelated

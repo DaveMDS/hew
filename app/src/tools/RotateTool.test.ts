@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
 import { RotateTool } from './RotateTool'
+import { DragCommitGate } from '../viewport/dragCommit'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -1645,5 +1646,28 @@ describe('RotateTool — one gesture, one undo step (history bracket)', () => {
     expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
     expect(t.wasmScene.undo_depth()).toBe(1)
     expect(t.wasmScene.brackets.labels).toEqual(['Rotate'])
+  })
+})
+
+// Click-drag-release (#52b, viewport/dragCommit.ts): the ×N array window keeps
+// `capturingInput()` true at idle, so the gate reads `gestureInFlight()`.
+describe('RotateTool — click-drag-release gate', () => {
+  it('a press during the ×N window arms a drag that sets the reference; a mid-gesture press never arms', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.tool.capturingInput()).toBe(true) // the array window
+    expect(t.tool.gestureInFlight()).toBe(false)
+
+    const gate = new DragCommitGate()
+    t.tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    expect(gate.press(t.tool, 1, 100, 100, () => t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)))).toBe(true)
+    expect(new DragCommitGate().press(t.tool, 2, 0, 0, () => { /* not delivered */ })).toBe(false)
+    gate.move(1, 160, 100)
+    expect(gate.release(t.tool, 1, 160, 100, () => t.tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)))).toBe(true)
+    // The release set the reference: the tool now asks for the angle.
+    expect(t.tool.gestureInFlight()).toBe(true)
+    expect(t.tool.statusHint()).not.toContain('center of rotation')
   })
 })
