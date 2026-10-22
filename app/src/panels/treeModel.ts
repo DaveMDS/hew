@@ -228,6 +228,20 @@ export function buildTreeIndexMap(
   return indices
 }
 
+/**
+ * The Outliner's positional index of `node` (its place among its parent's
+ * children), or null when the node is not in the tree. A group session hides
+ * its group in the kernel, so callers read this BEFORE opening the session
+ * and keep the label they build from it.
+ */
+export function treeIndexOf(
+  node: NodeRef,
+  topNodes: NodeRef[],
+  getGroupMembers: (groupId: bigint) => NodeRef[],
+): number | null {
+  return buildTreeIndexMap(topNodes, getGroupMembers).get(nodeKey(node)) ?? null
+}
+
 /** Kind of a top-level document entity shown in the tree. */
 export type EntityKind = 'object' | 'sketch' | 'group' | 'instance'
 
@@ -243,7 +257,21 @@ export interface Crumb {
  * kind's list; labels are 1-based ("Object 1", "Sketch 1", "Group 1").
  * Generated app-side from handle order — no kernel naming, not persisted.
  */
-export function entityLabel(kind: EntityKind, index: number): string {
+export function entityLabel(kind: EntityKind, index: number | null): string {
+  // No known position (a node outside the tree): the unnumbered name is
+  // honest where a number would be a guess.
+  if (index === null) {
+    switch (kind) {
+      case 'object':
+        return t({ context: 'unnamed item', comment: 'Default label for an unnamed object whose position is unknown', message: 'Object' })
+      case 'group':
+        return t({ context: 'unnamed item', comment: 'Default label for an unnamed group whose position is unknown', message: 'Group' })
+      case 'instance':
+        return t({ context: 'unnamed item', comment: 'Default label for an unnamed component whose position is unknown', message: 'Component' })
+      default:
+        return t({ context: 'unnamed item', comment: 'Default label for an unnamed sketch whose position is unknown', message: 'Sketch' })
+    }
+  }
   const n = index + 1
   switch (kind) {
     case 'object':
@@ -278,7 +306,7 @@ export function resolveLabel(
   kernelName: string | undefined,
   defName: string | undefined,
   kind: EntityKind,
-  index: number,
+  index: number | null,
 ): string {
   // A name that is purely a tag suffix (unnamed group/object that the Ruby
   // tagged) strips to empty → fall through to the positional label, not a blank.
@@ -361,7 +389,7 @@ export function makeLabelFor(
         const ids = scene.sketch_ids !== undefined ? Array.from(scene.sketch_ids()) : []
         at = ids.findIndex((id) => id === node.id)
       }
-      return entityLabel('sketch', at >= 0 ? at : 0)
+      return entityLabel('sketch', at >= 0 ? at : null)
     }
     const idx = treeIndex.get(nodeKey(node)) ?? 0
     if (node.kind === 'group') {

@@ -352,7 +352,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         Array.from(scene.sketch_island_ids(sid)).map((island) => ({ sid, island })),
       )
       const idx = flat.findIndex((f) => f.sid === sketchId && f.island === islands[0])
-      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : 0)
+      const sketchLabel = entityLabel('sketch', idx >= 0 ? idx : null)
       return {
         ctx: undefined as string | undefined,
         curveKey: null as string | null,

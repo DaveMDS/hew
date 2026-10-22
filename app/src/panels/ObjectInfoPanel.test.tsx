@@ -485,3 +485,23 @@ describe('ObjectInfoPanel — selection path line', () => {
     expect(screen.queryByRole('button', { name: 'Kitchen' })).toBeNull()
   })
 })
+
+describe('ObjectInfoPanel — whole sketch labels', () => {
+  const sketchScene = (listed: bigint[]) =>
+    makeScene({
+      sketch_ids: () => listed,
+      all_sketch_ids: () => listed,
+      sketch_island_ids: (sid: bigint) => [sid * 10n],
+    })
+  it('numbers a listed sketch by its position', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={sketchScene([4n, 7n])} selectedIds={[{ kind: 'sketch', id: 7n }]} />)
+    expect(screen.getByText('Sketch 2')).toBeInTheDocument()
+  })
+  it('an unplaced sketch reads "Sketch", never "Sketch 1"', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={sketchScene([4n])} selectedIds={[{ kind: 'sketch', id: 99n }]} />)
+    // The Type row and the Name row both read the bare word.
+    expect(screen.getAllByText('Sketch')).toHaveLength(2)
+    expect(screen.queryByText('Sketch 1')).not.toBeInTheDocument()
+  })
+})
+

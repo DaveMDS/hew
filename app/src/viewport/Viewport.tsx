@@ -123,7 +123,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, normalizedRect, type MarqueeMode, type MarqueeRect } from './marquee'
@@ -5032,7 +5032,7 @@ export default function Viewport({
         node,
         label: node.kind === 'instance'
           ? componentSessionLabel(node.id)
-          : groupSessionInfoRef.current.get(node.id)?.label ?? resolveLabel(undefined, undefined, 'group', 0),
+          : groupSessionInfoRef.current.get(node.id)?.label ?? resolveLabel(undefined, undefined, 'group', groupTreeIndex(node.id)),
       }))
       if (!sameSessionStack(lastPushedSessionRef.current, labeled)) {
         lastPushedSessionRef.current = labeled
@@ -5122,13 +5122,21 @@ export default function Viewport({
 
     /** The group's position among its siblings, as the Outliner numbers
      *  unnamed groups ("Group 2" is the second child of its parent). */
+    function groupTreeIndex(groupId: bigint): number | null {
+      return treeIndexOf(
+        { kind: 'group', id: groupId },
+        wasmScene.top_level_nodes().map(nodeRefFromJs),
+        (gid) => wasmScene.group_members(gid).map(nodeRefFromJs),
+      )
+    }
+
     /** Open a GROUP session on `groupId` — captures its display label BEFORE
      *  the kernel hides the group, since `group_name` isn't readable once it
      *  does (scope itself now comes from the kernel's own live
      *  `session_members()` inside `refreshSessionScope`, not an app-side
      *  snapshot — finding 2, group-session.md). */
     function runOpenGroupSession(groupId: bigint): boolean {
-      const label = resolveLabel(wasmScene.group_name(groupId), undefined, 'group', 0)
+      const label = resolveLabel(wasmScene.group_name(groupId), undefined, 'group', groupTreeIndex(groupId))
       try {
         wasmScene.open_group_session(groupId)
       } catch (err) {

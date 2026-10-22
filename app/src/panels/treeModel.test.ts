@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   entityLabel,
+  makeLabelFor,
   resolveLabel,
   breadcrumb,
   isTreeRowDimmed,
@@ -20,6 +21,7 @@ import {
   stripTagSuffix,
   collectLeafIds,
   buildTreeIndexMap,
+  treeIndexOf,
   nodeKey,
   structuralSelection,
   pruneDeadSelection,
@@ -1018,5 +1020,49 @@ describe('dropTargetFor', () => {
 
   it('refuses a multi-node drag when one of the dragged groups would contain the target', () => {
     expect(dropTargetFor([a, g], h, view())).toBeNull()
+  })
+})
+
+describe('treeIndexOf (group session label)', () => {
+  const grp = (id: bigint): NodeRef => ({ kind: 'group', id })
+
+  it('two unnamed groups: opening the second reads "Group 2", not "Group 1"', () => {
+    const top = [grp(10n), grp(20n)]
+    const index = treeIndexOf(grp(20n), top, () => [])
+    expect(resolveLabel(undefined, undefined, 'group', index)).toBe('Group 2')
+    expect(resolveLabel(undefined, undefined, 'group', treeIndexOf(grp(10n), top, () => []))).toBe('Group 1')
+  })
+
+  it('counts a nested group by its place inside its parent', () => {
+    const members = new Map<bigint, NodeRef[]>([[10n, [{ kind: 'object', id: 1n }, grp(30n)]]])
+    expect(treeIndexOf(grp(30n), [grp(10n)], (id) => members.get(id) ?? [])).toBe(1)
+  })
+
+  it('returns null for a node that is not in the tree', () => {
+    expect(treeIndexOf(grp(99n), [grp(10n)], () => [])).toBeNull()
+  })
+
+  it('an unplaced unnamed group is labeled "Group", never a wrong number', () => {
+    const index = treeIndexOf(grp(99n), [grp(10n)], () => [])
+    expect(resolveLabel(undefined, undefined, 'group', index)).toBe('Group')
+  })
+})
+
+describe('makeLabelFor — sketches', () => {
+  const scene = (ids: bigint[]) => ({
+    group_name: () => undefined,
+    object_name: () => undefined,
+    instance_name: () => undefined,
+    instance_def: () => undefined,
+    component_name: () => undefined,
+    sketch_ids: () => ids,
+  })
+  it('numbers a listed sketch by its position', () => {
+    const label = makeLabelFor(scene([4n, 7n]), new Map())
+    expect(label({ kind: 'sketch', id: 7n })).toBe('Sketch 2')
+  })
+  it('an unplaced sketch is "Sketch", never a wrong "Sketch 1"', () => {
+    const label = makeLabelFor(scene([4n]), new Map())
+    expect(label({ kind: 'sketch', id: 99n })).toBe('Sketch')
   })
 })

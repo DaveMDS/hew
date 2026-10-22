@@ -374,9 +374,10 @@ test('group session: Tape Measure rescale is scoped to the open group — member
   await page.keyboard.press('Enter')
 
   // The dialog names the group, not "the model" — the group is unnamed, so
-  // it reads "Group 1" (the same `resolveLabel` fallback the breadcrumb and
-  // Outliner already use).
-  const dialog = page.getByRole('dialog', { name: 'Resize Group 1' })
+  // it reads by its Outliner number (the same `resolveLabel` fallback the
+  // breadcrumb and Outliner use): the group is the second top-level sibling
+  // here, after the box it holds was grouped, so "Group 2".
+  const dialog = page.getByRole('dialog', { name: 'Resize Group 2' })
   await dialog.waitFor({ timeout: 5000 })
   await expect(page.getByRole('dialog', { name: 'Resize the model' })).toHaveCount(0)
   await page.getByRole('button', { name: 'Resize' }).click()
