@@ -114,30 +114,58 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     onClose()
   }
 
-  const onKeyDown = (ev: React.KeyboardEvent) => {
-    if (isComposingKey(ev)) return
-    if (ev.key === 'Escape') {
-      ev.preventDefault()
-      ev.stopPropagation()
-      onClose()
-      return
+  // The palette owns the keyboard while it is open, wherever focus is. The
+  // handler sits on `window` in the capture phase: if focus has left the
+  // search field (a click on the header or scrollbar, a WebView quirk), the
+  // arrows, Enter, and Escape still work, and neither they nor a stray
+  // letter reach the global tool shortcuts. Latest state is read through a
+  // ref so the listener is attached once per open.
+  const liveRef = useRef({ shown, selectedIndex, run, onClose })
+  liveRef.current = { shown, selectedIndex, run, onClose }
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (isComposingKey(ev)) return
+      const live = liveRef.current
+      const swallow = () => {
+        ev.preventDefault()
+        ev.stopPropagation()
+      }
+      if (ev.key === 'Escape') {
+        swallow()
+        live.onClose()
+        return
+      }
+      if (ev.key === 'ArrowDown') {
+        swallow()
+        setSelectedIndex((i) => Math.min(i + 1, live.shown.length - 1))
+        return
+      }
+      if (ev.key === 'ArrowUp') {
+        swallow()
+        setSelectedIndex((i) => Math.max(i - 1, 0))
+        return
+      }
+      if (ev.key === 'Enter') {
+        swallow()
+        const entry = live.shown[live.selectedIndex]
+        if (entry !== undefined) live.run(entry)
+        return
+      }
+      // Anything else typed while focus is elsewhere belongs in the search
+      // field: put focus back (the browser then types the character there)
+      // and keep the key from also switching tools. Chords stay the app's.
+      const input = inputRef.current
+      if (input === null || ev.target === input) return
+      if (ev.ctrlKey || ev.metaKey || ev.altKey) return
+      if (ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Delete') {
+        input.focus()
+        ev.stopPropagation()
+      }
     }
-    if (ev.key === 'ArrowDown') {
-      ev.preventDefault()
-      setSelectedIndex((i) => Math.min(i + 1, shown.length - 1))
-      return
-    }
-    if (ev.key === 'ArrowUp') {
-      ev.preventDefault()
-      setSelectedIndex((i) => Math.max(i - 1, 0))
-      return
-    }
-    if (ev.key === 'Enter') {
-      ev.preventDefault()
-      const entry = shown[selectedIndex]
-      if (entry !== undefined) run(entry)
-    }
-  }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [open])
 
   if (!open) return null
 
@@ -194,7 +222,6 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
           // get their click.
           if (e.target !== inputRef.current) e.preventDefault()
         }}
-        onKeyDown={onKeyDown}
         style={{
           width: '550px',
           maxHeight: '70vh',

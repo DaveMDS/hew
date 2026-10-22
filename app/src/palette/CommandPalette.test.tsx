@@ -220,4 +220,62 @@ describe('CommandPalette', () => {
       if (i < count - 1) fireEvent.keyDown(dialog, { key: 'ArrowDown' })
     }
   })
+  describe('when focus has left the search field (#38)', () => {
+    function openAndBlur() {
+      const onRun = vi.fn()
+      const onClose = vi.fn()
+      render(<CommandPalette open onClose={onClose} onRun={onRun} />)
+      const input = screen.getByPlaceholderText(/search tools, actions, help/i)
+      input.focus()
+      input.blur()
+      expect(document.activeElement).toBe(document.body)
+      return { onRun, onClose, input }
+    }
+
+    it('arrows and Enter still drive the list, and never reach the global shortcuts', () => {
+      const { onRun } = openAndBlur()
+      const global = vi.fn()
+      window.addEventListener('keydown', global)
+      try {
+        fireEvent.keyDown(document.body, { key: 'ArrowDown' })
+        fireEvent.keyDown(document.body, { key: 'Enter' })
+        expect(onRun).toHaveBeenCalledWith('tool-pushpull')
+        expect(global).not.toHaveBeenCalled()
+      } finally {
+        window.removeEventListener('keydown', global)
+      }
+    })
+
+    it('Escape still closes it', () => {
+      const { onClose } = openAndBlur()
+      fireEvent.keyDown(document.body, { key: 'Escape' })
+      expect(onClose).toHaveBeenCalledOnce()
+    })
+
+    it('a letter puts focus back in the search field and keeps the tool shortcuts from firing', () => {
+      const { input } = openAndBlur()
+      const global = vi.fn()
+      window.addEventListener('keydown', global)
+      try {
+        fireEvent.keyDown(document.body, { key: 'r' })
+        expect(input).toHaveFocus()
+        expect(global).not.toHaveBeenCalled()
+      } finally {
+        window.removeEventListener('keydown', global)
+      }
+    })
+
+    it('leaves Ctrl and Cmd chords alone', () => {
+      openAndBlur()
+      const global = vi.fn()
+      window.addEventListener('keydown', global)
+      try {
+        fireEvent.keyDown(document.body, { key: 'k', ctrlKey: true })
+        expect(global).toHaveBeenCalledOnce()
+      } finally {
+        window.removeEventListener('keydown', global)
+      }
+    })
+  })
+
 })
