@@ -97,6 +97,8 @@ crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
                       clean-room OpenSKP reader (see rule 7)
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
+crates/image-import/  PNG/JPEG -> a placed picture (one painted face in a
+                      component, the .skp image shape); reads only the size
 crates/hlr/           hidden-line removal: visible line work of a view as 2D
                       segments (+ SVG), for vector Line-art printing and export
 crates/pdfwrite/      hand-written PDF 1.4 writer for Save PDF… and the
@@ -140,6 +142,10 @@ Hew's Objects/Instances, then hand off to the kernel:
   crate is unit-blind (the caller resolves a `unit_scale`); its stored
   facet normals are unreliable and are ignored, same as every other
   importer's foreign normals.
+- `image-import` places a PNG or JPEG as a picture, in the shape a `.skp`
+  image arrives in: one face painted with the picture inside a component
+  named after the file. It reads only the picture's size from its header
+  (plus a JPEG's EXIF orientation); the bytes are kept as they are.
 
 A STEP/IGES path is planned as an out-of-process OpenCASCADE converter
 (a Tauri sidecar rather than a linked crate, because OpenCASCADE is a

@@ -131,6 +131,39 @@ fn ingest_degenerate_mesh_is_skipped_not_fatal() {
     assert_eq!(report.skipped[0].name, "bad");
 }
 
+/// `MeshRecipe::check_builds` answers, without a document, exactly what
+/// `ingest` does with the mesh: a mesh it builds checks `Ok`, and a mesh it
+/// skips checks as the error whose text is the skip's reason — a degenerate
+/// face, and a quad too small for its plane to be found.
+#[test]
+fn check_builds_agrees_with_ingest() {
+    let mut tiny = box_recipe("tiny");
+    for p in &mut tiny.positions {
+        *p = Point3::new(p.x * 1e-7, p.y * 1e-7, p.z * 1e-7);
+    }
+    for (recipe, builds) in [
+        (box_recipe("good"), true),
+        (open_box_recipe("open"), true),
+        (degenerate_recipe("bad"), false),
+        (tiny, false),
+    ] {
+        let name = recipe.name.clone();
+        let check = recipe.check_builds();
+        let mut doc = Document::new();
+        let (report, _) = doc
+            .ingest(empty_scene(vec![ImportNode::Mesh(recipe)]), vec![])
+            .unwrap();
+        assert_eq!(check.is_ok(), builds, "{name}: {check:?}");
+        match check {
+            Ok(()) => assert!(report.skipped.is_empty(), "{name}"),
+            Err(e) => {
+                assert_eq!(report.skipped.len(), 1, "{name}");
+                assert_eq!(report.skipped[0].reason, e.to_string(), "{name}");
+            }
+        }
+    }
+}
+
 /// Multi-node recipe → ingest → undo hides all → redo brings all back.
 /// Ids are stable across the cycle.
 #[test]

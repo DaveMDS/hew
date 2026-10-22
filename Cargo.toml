@@ -16,6 +16,7 @@ members = [
     "crates/skp-import",
     "crates/skp-export",
     "crates/stl-import",
+    "crates/image-import",
     "crates/library",
     "crates/hew-cli",
     "crates/hew-relay",
@@ -54,6 +55,7 @@ gltf-import = { path = "crates/gltf-import" }
 skp-import = { path = "crates/skp-import" }
 skp-export = { path = "crates/skp-export" }
 stl-import = { path = "crates/stl-import" }
+image-import = { path = "crates/image-import" }
 library = { path = "crates/library" }
 # Clean-room SketchUp .skp reader (the 2026 container and the 2017 format):
 # a crates.io semver pin on the hosted OpenSKP releases, so CI resolves it

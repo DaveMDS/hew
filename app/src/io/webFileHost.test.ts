@@ -28,6 +28,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { WebFileHost, anchorDownload } from './webFileHost'
+import { FileReadError } from './fileHost'
 
 // jsdom doesn't implement the Blob URL APIs — stub them so anchorDownload's
 // tests below can run without a real browser, mirroring LibraryDialog.test.tsx's
@@ -102,6 +103,29 @@ describe('WebFileHost fallback <input> accept attribute', () => {
     void new WebFileHost().openAny()
     const input = document.querySelector('input[type=file]') as HTMLInputElement
     expect(input.accept).toBe('.hew,.dae,.skp,.glb,.gltf,.stl')
+  })
+})
+
+describe('WebFileHost.openImage fallback', () => {
+  /** Picks `file` in the hidden <input> openImage() appended. */
+  function pick(file: unknown): void {
+    const input = document.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [file] })
+    input.dispatchEvent(new Event('change'))
+  }
+
+  it('a picked picture whose bytes cannot be read rejects with FileReadError, not a cancel', async () => {
+    const opened = new WebFileHost().openImage()
+    pick({ name: 'wall.png', arrayBuffer: () => Promise.reject(new DOMException('gone', 'NotReadableError')) })
+    const err = await opened.then(() => null, (e: unknown) => e)
+    expect(err).toBeInstanceOf(FileReadError)
+    expect((err as FileReadError).fileName).toBe('wall.png')
+  })
+
+  it('a readable pick resolves with its name and bytes', async () => {
+    const opened = new WebFileHost().openImage()
+    pick({ name: 'wall.png', arrayBuffer: () => Promise.resolve(new Uint8Array([1, 2, 3]).buffer) })
+    expect(await opened).toEqual({ name: 'wall.png', bytes: new Uint8Array([1, 2, 3]) })
   })
 })
 

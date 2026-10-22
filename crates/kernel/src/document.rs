@@ -22933,20 +22933,9 @@ fn ingest_build_mesh(
         .iter()
         .map(|&d| dense_to_mat(d))
         .collect();
-    // Propagate per-face UV frames from the recipe ( extension). If the
-    // recipe's face_uv_frames is empty or short, pad with None.
-    let face_uv_frames: Vec<Option<crate::material::UvFrame>> = (0..recipe.faces.len())
-        .map(|i| recipe.face_uv_frames.get(i).copied().flatten())
-        .collect();
-    // Use the holes-aware import path. For non-holed meshes face_holes is all
-    // empty vecs (byte-identical behaviour to the no-holes path).
-    match Object::from_polygons_with_holes_import(
-        &recipe.positions,
-        &recipe.faces,
-        &recipe.face_holes,
-        &face_mats,
-        &face_uv_frames,
-    ) {
+    // The one build path `MeshRecipe::check_builds` also takes, so a check
+    // made before ingesting answers exactly what this build will do.
+    match recipe.build_object(&face_mats) {
         Err(e) => {
             skipped.push(crate::import::SkippedMesh {
                 name: recipe.name,

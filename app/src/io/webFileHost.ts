@@ -21,6 +21,7 @@
 
 import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import { FileReadError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 import { isCoarsePointer } from '../platform'
 
@@ -301,6 +302,54 @@ export class WebFileHost implements FileHost {
     // the file went, just now returning the name instead of `true`.
     anchorDownloadAs(bytes, name, fileType.mime)
     return name
+  }
+
+  async openImage(): Promise<{ name: string; bytes: Uint8Array } | null> {
+    if (hasFSAA()) {
+      let handles: FileSystemFileHandle[]
+      try {
+        handles = await showOpenFilePicker({
+          multiple: false,
+          types: [{ description: 'Pictures (PNG, JPEG)', accept: { 'image/png': ['.png'], 'image/jpeg': ['.jpg', '.jpeg'] } }],
+          excludeAcceptAllOption: false,
+        })
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return null
+        throw err
+      }
+      const handle = handles[0]
+      if (handle === undefined) return null
+      try {
+        const file = await handle.getFile()
+        return { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) }
+      } catch (err) {
+        throw new FileReadError(handle.name, err)
+      }
+    }
+    // Fallback: hidden <input type=file> (as openForImport). A read that
+    // fails rejects, so it is reported rather than read as a cancel.
+    return new Promise((resolve, reject) => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      if (!isCoarsePointer()) input.accept = '.png,.jpg,.jpeg,image/png,image/jpeg'
+      input.style.display = 'none'
+      document.body.appendChild(input)
+      const onChange = () => {
+        input.removeEventListener('change', onChange)
+        document.body.removeChild(input)
+        const file = input.files?.[0]
+        if (file == null) {
+          resolve(null)
+          return
+        }
+        file.arrayBuffer().then(
+          (buf) => resolve({ name: file.name, bytes: new Uint8Array(buf) }),
+          (err: unknown) => reject(new FileReadError(file.name, err)),
+        )
+      }
+      input.addEventListener('change', onChange)
+      input.click()
+    })
   }
 
   async openForImport(): Promise<ImportPick | null> {

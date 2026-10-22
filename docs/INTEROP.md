@@ -18,6 +18,7 @@ bring outside geometry in, or send Hew models out to other tools. SketchUp
 | glTF / GLB | Export | Supported | Binary `.glb`, written by the shared kernel-side writer in `mesh-export`. Y-up, meters. |
 | STL | Export | Supported | Binary STL, Z-up, millimeters (the slicer convention). Export is gated on the model being watertight — a non-solid Object is flagged before writing. |
 | STL | Import | Supported | Binary and ASCII, auto-detected (`stl-import`). STL carries no units, so the app asks for the source unit on import. |
+| PNG / JPEG picture | Import (place) | Supported | File ▸ Import Image…, a dropped picture, or `hew.doc.import` of a `.png`/`.jpg` (`image-import`): placed as a component holding one face painted with the picture, the shape a `.skp` image arrives in. The bytes are kept verbatim; over 64 megapixels is refused. |
 | OBJ | Import / Export | Not implemented | No OBJ path exists in either direction. |
 | 3MF | Export | Supported | OPC container with explicit millimeter units, Z-up; one `<object>` per world object / instance member carrying its display name and per-face colors (core-spec `basematerials`). Solid-gated like STL. |
 | 3MF | Import | Not implemented | No `.3mf` reader exists yet. |

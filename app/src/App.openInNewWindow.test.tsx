@@ -468,11 +468,23 @@ describe('App — native drag-drop follows the pristine-else-new-window rule (Ta
     expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
   })
 
+  it('reads a dropped picture to arm Place Image, opening nothing', async () => {
+    await renderAndLoad()
+    const handler = await findDragDropHandler()
+
+    handler({ payload: { type: 'drop', paths: ['/tmp/plan.png'], position: { x: 10, y: 20 } } } as never)
+
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith('read_file', { path: '/tmp/plan.png' }))
+    expect(mockScene.load).not.toHaveBeenCalled()
+    expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+  })
+
+  // (A .png is no longer an example: a dropped picture arms Place Image.)
   it('ignores a non-.hew path in a drop payload (unchanged pre-existing filter)', async () => {
     await renderAndLoad()
     const handler = await findDragDropHandler()
 
-    handler({ payload: { type: 'drop', paths: ['/tmp/not-a-hew-file.png'] } })
+    handler({ payload: { type: 'drop', paths: ['/tmp/not-a-hew-file.txt'] } })
 
     // Nothing to await for a no-op; give any accidental async work a tick.
     await new Promise((r) => setTimeout(r, 0))

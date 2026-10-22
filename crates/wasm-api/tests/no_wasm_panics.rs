@@ -37,6 +37,7 @@ const CRATES: &[&str] = &[
     "gltf-import",
     "skp-import",
     "stl-import",
+    "image-import",
     "mesh-heal",
     "wasm-api",
 ];

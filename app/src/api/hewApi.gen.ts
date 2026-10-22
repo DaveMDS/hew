@@ -288,7 +288,7 @@ export interface DocHealthResult {
 }
 
 /**
- * `hew.doc.import` (v1) — Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.
+ * `hew.doc.import` (v1) — Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline, or place a PNG/JPEG picture (a component holding one face painted with it, at origin/u/v, width meters wide). Additive: existing geometry is untouched.
  * Tier: Standard · Class: solitary · Served: host
  * Refusals: host_capability_missing, units_required, load_failed, unsupported_format
  */
@@ -297,8 +297,16 @@ export interface DocImportParams {
   bytes_base64?: string
   /** COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg} */
   images?: UnspecifiedShape
+  /** a picture's (.png/.jpg/.jpeg) lower-left corner, meters; default [0,0,0] */
+  origin?: [number, number, number]
   path: string
+  /** a picture's width direction; default [1,0,0] */
+  u?: [number, number, number]
   units?: "m" | "mm" | "cm" | "in"
+  /** toward a picture's top (not parallel to u); default [0,1,0] */
+  v?: [number, number, number]
+  /** a picture's width in meters (its height follows from its proportions); default 1 */
+  width?: number
 }
 
 export interface DocImportResult {

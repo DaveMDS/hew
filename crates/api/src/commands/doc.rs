@@ -340,6 +340,17 @@ struct ImportParams {
     /// COLLADA texture images the file refers to, by the uri it uses.
     #[serde(default)]
     images: Option<std::collections::BTreeMap<String, ImportImageParam>>,
+    /// A picture's (`.png`/`.jpg`/`.jpeg`) lower-left corner, its width
+    /// direction, a direction toward its top, and its width in meters
+    /// (defaults: the origin, +X, +Y, 1 m). Other formats ignore them.
+    #[serde(default)]
+    origin: Option<[f64; 3]>,
+    #[serde(default)]
+    u: Option<[f64; 3]>,
+    #[serde(default)]
+    v: Option<[f64; 3]>,
+    #[serde(default)]
+    width: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -356,9 +367,17 @@ fn import_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         units,
         bytes_base64,
         images,
+        origin,
+        u,
+        v,
+        width,
     } = parse(params)?;
     let mut options = ImportOptions {
         units,
+        origin,
+        u,
+        v,
+        width,
         ..ImportOptions::default()
     };
     if let Some(b64) = bytes_base64 {

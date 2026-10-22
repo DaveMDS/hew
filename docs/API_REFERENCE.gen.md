@@ -1023,7 +1023,7 @@ Model health: every open object (world or component member) with its verdict, op
 - **Class:** solitary
 - **Served:** host
 
-Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.
+Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline, or place a PNG/JPEG picture (a component holding one face painted with it, at origin/u/v, width meters wide). Additive: existing geometry is untouched.
 
 **Params schema:**
 
@@ -1042,8 +1042,26 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
       "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
       "type": "object"
     },
+    "origin": {
+      "description": "a picture's (.png/.jpg/.jpeg) lower-left corner, meters; default [0,0,0]",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
     "path": {
       "type": "string"
+    },
+    "u": {
+      "description": "a picture's width direction; default [1,0,0]",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
     },
     "units": {
       "enum": [
@@ -1053,6 +1071,20 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
         "in"
       ],
       "type": "string"
+    },
+    "v": {
+      "description": "toward a picture's top (not parallel to u); default [0,1,0]",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "width": {
+      "description": "a picture's width in meters (its height follows from its proportions); default 1",
+      "exclusiveMinimum": 0,
+      "type": "number"
     }
   },
   "required": [

@@ -199,6 +199,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The rotation axis needs two distinct points. Pick a second point further from the first.`,
   Reflection:
     msg`This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.`,
+  DegenerateTextureFrame:
+    msg`That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.`,
   InvalidRescaleFactor:
     msg`That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance.`,
 
@@ -393,6 +395,13 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Hew's own request to the model kernel named an axis it doesn't recognize. If this keeps happening, use Report Bug.`,
   BadFormat:
     msg`Hew's own request to the model kernel named an image format it doesn't recognize. If this keeps happening, use Report Bug.`,
+  BadImagePlacement:
+    msg`Hew's own request to the model kernel placed a picture on a plane it can't hold. If this keeps happening, use Report Bug.`,
+  // ------------------------------------------------------- Place Image
+  ImageUnreadable: msg`Hew can't read that picture. Save it as a PNG or JPEG and place it again.`,
+  ImageTooLarge: msg`That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead.`,
+  ImageTooSmall: msg`That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width.`,
+  ImageTooBig: msg`That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width.`,
   BadRenderMode:
     msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,

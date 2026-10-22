@@ -344,6 +344,9 @@ impl Host for LiveHost {
         let record: Box<dyn FnOnce() + '_>;
         let load_failed =
             |e: &dyn std::fmt::Display| Refusal::api("load_failed", &format!("{path}: {e}"));
+        if let Some("png" | "jpg" | "jpeg") = ext.as_deref() {
+            return import_picture(doc, path, bytes, options);
+        }
         let (scene, missing, warnings) = match ext.as_deref() {
             Some("stl") => {
                 let units = options.units.as_deref();
@@ -436,7 +439,7 @@ impl Host for LiveHost {
                 return Err(Refusal::api(
                     "unsupported_format",
                     &format!(
-                        "Unrecognized import extension for \"{path}\" — expected .stl, .gltf/.glb, .dae, or .skp."
+                        "Unrecognized import extension for \"{path}\" — expected .stl, .gltf/.glb, .dae, .skp, or a .png/.jpg picture."
                     ),
                 ));
             }
@@ -615,6 +618,97 @@ fn sha256_hex(bytes: &[u8]) -> String {
         out.push_str(&format!("{byte:02x}"));
     }
     out
+}
+
+/// `hew.doc.import` of a picture: placed exactly as [`crate::Scene::place_image`]
+/// places one (`image_import`), at the request's `origin`/`u`/`v`/`width`
+/// (each defaulting to [`image_import::Placement::from_parts`]'s), named
+/// after the file, and recorded as that call so a bug-report recording
+/// replays it. `crates/hew-cli`'s headless host does the same over the
+/// same crate.
+fn import_picture(
+    doc: &mut kernel::Document,
+    path: &str,
+    bytes: &[u8],
+    options: &api::ImportOptions,
+) -> Result<serde_json::Value, Refusal> {
+    let placement =
+        image_import::Placement::from_parts(options.origin, options.u, options.v, options.width);
+    let name = image_import::picture_name(path);
+    let out = image_import::import(bytes, None, &name, &placement)
+        .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let (format, width, height) = (out.info.format, out.width, out.height);
+    let report = ingest_picture(doc, path, out.scene)?;
+    let p = |q: kernel::Point3| [q.x, q.y, q.z];
+    let d = |q: kernel::Vec3| [q.x, q.y, q.z];
+    crate::recording::record_import("place_image", bytes, |b| {
+        crate::recording::RecordedCall::PlaceImage {
+            image: b,
+            format: match format {
+                kernel::ImageFormat::Jpeg => 1,
+                kernel::ImageFormat::Png => 0,
+            },
+            name,
+            origin: p(placement.origin),
+            u: d(placement.u),
+            v: d(placement.v),
+            width,
+        }
+    });
+    Ok(picture_report(&report, width, height))
+}
+
+/// Ingests a picture's recipe, checked first ([`image_import::check`]), so
+/// a recipe the kernel would not build is refused before anything changes:
+/// the document, its undo and redo history and its palette stay as they
+/// were. Past the check, a face the kernel skipped would be a kernel bug;
+/// it is still refused, never reported as a success, and the refusal says
+/// the document may hold part of the import.
+fn ingest_picture(
+    doc: &mut kernel::Document,
+    path: &str,
+    scene: kernel::ImportScene,
+) -> Result<kernel::ImportReport, Refusal> {
+    image_import::check(&scene)
+        .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let (report, _change) = doc
+        .ingest(scene, Vec::new())
+        .map_err(|e| Refusal::from_document_error(&e))?;
+    if image_import::placed(&report).is_none() {
+        let why = report
+            .skipped
+            .first()
+            .map_or("nothing was placed", |s| s.reason.as_str());
+        return Err(Refusal::api(
+            "load_failed",
+            &format!(
+                "{path}: the picture was not placed whole ({why}); the document may hold part of the import"
+            ),
+        ));
+    }
+    Ok(report)
+}
+
+/// The import report of a placed picture: the usual counts plus the
+/// picture's placed size in meters.
+pub(crate) fn picture_report(
+    report: &kernel::ImportReport,
+    width: f64,
+    height: f64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "objects_created": report.objects_created,
+        "watertight": report.watertight,
+        "leaky": report.leaky,
+        "health": api::health_counts_json(&report.health),
+        "skipped": report.skipped.iter().map(|s| serde_json::json!({
+            "name": s.name,
+            "reason": s.reason,
+        })).collect::<Vec<_>>(),
+        "textures_missing": report.textures_missing,
+        "warnings": [],
+        "picture": { "width": width, "height": height },
+    })
 }
 
 #[cfg(test)]
@@ -1148,5 +1242,54 @@ mod tests {
                 .expect("declared")
                 .mutates_document
         );
+    }
+
+    /// A picture recipe the kernel would not build is refused before the
+    /// document is touched: the saved bytes, the undo depth, the redo
+    /// history (an earlier undone picture still redoes) and the palette
+    /// are all as they were, rather than an ingest taken back by an undo
+    /// that wipes the redo and leaves the picture's material behind.
+    #[test]
+    fn a_picture_the_kernel_would_not_build_is_refused_before_anything_changes() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&300u32.to_be_bytes());
+        png.extend_from_slice(&100u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let recipe = || {
+            image_import::import(&png, None, "speck", &image_import::Placement::ground(1.0))
+                .unwrap()
+        };
+        let mut doc = kernel::Document::new();
+        ingest_picture(&mut doc, "kept.png", recipe().scene).unwrap();
+        ingest_picture(&mut doc, "undone.png", recipe().scene).unwrap();
+        doc.undo().unwrap();
+        let before = doc.save();
+        let (undo, redo) = (doc.undo_depth(), doc.redo_depth());
+        let materials = doc.material_ids().len();
+        assert_eq!(redo, 1);
+
+        let mut out = recipe();
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = kernel::Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+        }
+        let Err(refusal) = ingest_picture(&mut doc, "speck.png", out.scene) else {
+            panic!("a face the kernel would skip is refused");
+        };
+        assert_eq!(refusal.name, "load_failed");
+        assert!(
+            refusal.explanation.contains("can't be built"),
+            "{}",
+            refusal.explanation
+        );
+        assert_eq!(doc.save(), before, "the document is unchanged");
+        assert_eq!((doc.undo_depth(), doc.redo_depth()), (undo, redo));
+        assert_eq!(doc.material_ids().len(), materials, "no material left");
+        doc.redo().unwrap();
+        assert_eq!(doc.instance_ids().len(), 2, "the undone picture redoes");
     }
 }

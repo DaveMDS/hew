@@ -75,7 +75,7 @@ import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
-import { makeFileHost, isTauri, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
 import {
   SAVE_PANEL_FORMATS,
   exportChoiceFrom,
@@ -145,6 +145,7 @@ import { itemFileName } from './library/fileNaming'
 import type { LibraryCategory, LibraryItem } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { parseInsertResult } from './tools/LibraryPlaceTool'
+import { readImageInfo, pictureName, isPictureFileName } from './tools/imageInfo'
 import {
   getClipboard,
   hasClipboardContent,
@@ -1327,7 +1328,7 @@ export default function App() {
     // happening; the tool-name label falls back to Select, matching the
     // rail's own `activeTool` state, which armLibraryPlacement never changes.
     // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifiers
-    setToolName(name === 'LibraryPlace' ? 'Select' : name)
+    setToolName(name === 'LibraryPlace' || name === 'PlaceImage' ? 'Select' : name)
     setSnapKind(kind)
   }, [])
 
@@ -3383,6 +3384,54 @@ export default function App() {
     }
   }, [confirmDiscard, handleToast, runImportPick, componentFrameOpen])
 
+  // Place Image (File ▸ Import Image…, a picture dropped on the viewport):
+  // arm the placement gesture with the picture. Unlike File ▸ Import…, it
+  // adds to the current document — nothing is replaced. The picture's size
+  // is read from its header first, so an unreadable or oversized picture is
+  // refused with the same words the kernel would use, before anything is
+  // decoded. `at` is a drop point (client pixels): the ghost starts there.
+  const startImagePlacement = useCallback((fileName: string, bytes: Uint8Array, at?: { clientX: number; clientY: number }) => {
+    // The kernel refuses an import while a component is open
+    // (ExplodeSessionScope); say so now rather than after two clicks.
+    if (componentFrameOpen) {
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
+    const read = readImageInfo(bytes)
+    if (!read.ok) {
+      handleToast(kernelErrorMessage(read.code, ''), read.code)
+      return
+    }
+    viewportApi.current?.armImagePlacement(
+      {
+        bytes,
+        format: read.info.format,
+        name: pictureName(fileName),
+        pixelWidth: read.info.width,
+        pixelHeight: read.info.height,
+      },
+      at,
+    )
+  }, [componentFrameOpen, handleToast])
+
+  const importImage = useCallback(async () => {
+    if (componentFrameOpen) {
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
+    let picked: { name: string; bytes: Uint8Array } | null
+    try {
+      picked = (await fileHostRef.current.openImage?.()) ?? null
+    } catch (err: unknown) {
+      handleToast(err instanceof FileReadError
+        ? "Couldn't read that picture. Check that the file is still there, then pick it again."
+        : `Couldn't open the picture: ${friendlyErrorText(err)}`)
+      return
+    }
+    if (picked === null) return
+    startImagePlacement(picked.name, picked.bytes)
+  }, [componentFrameOpen, handleToast, startImagePlacement])
+
   // Scene thumbnail cache (docs/design/scenes.md §5 "Add"): persist the
   // controller's CURRENT thumbnail map under the just-written bytes' own
   // content hash, so a later re-open of this exact save finds them again
@@ -4958,6 +5007,8 @@ export default function App() {
   const newDocumentRef = useRef(newDocument)
   const openDocumentRef = useRef(openDocument)
   const importDocumentRef = useRef(importDocument)
+  const importImageRef = useRef(importImage)
+  const startImagePlacementRef = useRef(startImagePlacement)
   // saveDocumentRef/saveAsDocumentRef are declared earlier (with docSessionRef)
   // so confirmDiscard/the unsaved-changes dialog can use them too — this
   // block only keeps them current, like every other ref here.
@@ -4969,6 +5020,8 @@ export default function App() {
   useEffect(() => { newDocumentRef.current = newDocument }, [newDocument])
   useEffect(() => { openDocumentRef.current = openDocument }, [openDocument])
   useEffect(() => { importDocumentRef.current = importDocument }, [importDocument])
+  useEffect(() => { importImageRef.current = importImage }, [importImage])
+  useEffect(() => { startImagePlacementRef.current = startImagePlacement }, [startImagePlacement])
   useEffect(() => { saveDocumentRef.current = saveDocument }, [saveDocument])
   useEffect(() => { saveAsDocumentRef.current = saveAsDocument }, [saveAsDocument])
   useEffect(() => { handleUndoRef.current = handleUndo }, [handleUndo])
@@ -5370,6 +5423,7 @@ export default function App() {
       case 'new':      newDocumentRef.current(); break
       case 'open':     openDocumentRef.current(); break
       case 'import':   importDocumentRef.current(); break
+      case 'import-image': void importImageRef.current(); break
       case 'export':   void openExport(); break
       case 'print':    setPrintDialogOpen(true); break
       // macOS native "Open on Phone…" — always enabled natively (macOS has
@@ -5959,7 +6013,24 @@ export default function App() {
         getCurrentWebview().onDragDropEvent((event) => {
           if (event.payload.type === 'drop') {
             const doc = event.payload.paths.find((p) => /\.(hew|skp)$/i.test(p))
-            if (doc) openPathRef.current(doc)
+            if (doc) {
+              openPathRef.current(doc)
+              return
+            }
+            // A dropped picture arms Place Image at the drop point (the
+            // shell approved the dropped path for reading).
+            const picture = event.payload.paths.find(isPictureFileName)
+            if (picture !== undefined) {
+              const { x, y } = event.payload.position ?? { x: 0, y: 0 }
+              const dpr = window.devicePixelRatio || 1
+              import('@tauri-apps/api/core')
+                .then(({ invoke }) => invoke<ArrayBuffer>('read_file', { path: picture }))
+                .then((buf) => {
+                  const name = picture.split(/[/\\]/).pop() ?? picture
+                  startImagePlacementRef.current(name, new Uint8Array(buf), { clientX: x / dpr, clientY: y / dpr })
+                })
+                .catch((err: unknown) => handleToastRef.current(`Couldn't open the picture: ${friendlyErrorText(err)}`))
+            }
           }
         }),
       )
@@ -6365,6 +6436,7 @@ export default function App() {
       // MenuBar/palette already are, so the kernel refusal stays a backstop
       // rather than a toast a user actually meets.
       'file-import': !componentFrameOpen,
+      'file-import-image': !componentFrameOpen,
       // Revert to Saved: a file to return to and changes to throw away.
       'file-revert': revertable,
       'draw-3d-text': !componentFrameOpen,
@@ -6432,6 +6504,17 @@ export default function App() {
     ev.preventDefault()
     const file = ev.dataTransfer.files[0]
     if (file == null) return
+    if (isPictureFileName(file.name)) {
+      // A dropped picture arms Place Image at the drop point; it does not
+      // place by itself, and nothing about the document is replaced.
+      const at = { clientX: ev.clientX, clientY: ev.clientY }
+      try {
+        startImagePlacement(file.name, new Uint8Array(await file.arrayBuffer()), at)
+      } catch (err: unknown) {
+        handleToast(`Couldn't open the picture: ${friendlyErrorText(err)}`)
+      }
+      return
+    }
     if (/\.skp$/i.test(file.name)) {
       // A dropped `.skp` opens as the document's own file. The File System
       // Access handle (Chromium) must be requested synchronously — a
@@ -6466,7 +6549,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(t`Drop open failed: ${ph({ reason: friendlyErrorText(err) })}`)
     })
-  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp, startImagePlacement])
 
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
@@ -7001,6 +7084,7 @@ export default function App() {
         onRevertToSaved={() => setRevertPromptOpen(true)}
         revertToSavedDisabled={!revertable}
         onImport={importDocument}
+        onImportImage={() => void importImage()}
         onExport={() => void openExport()}
         onPrint={() => setPrintDialogOpen(true)}
         onSaveToLibrary={() => menuActionRef.current('save-to-library-doc')}

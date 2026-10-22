@@ -902,6 +902,17 @@ Semantics notes, normative:
   import-time questions as explicit parameters; notably STL, which
   carries no units, refuses typed unless `units` is given — there is no
   one to prompt.
+  A `.png`, `.jpg` or `.jpeg` path places the picture instead, exactly
+  as the app's Place Image does: a component definition named after the
+  file (without its extension) holding one face painted with the
+  picture, stretched over the face once, and one top-level instance of
+  it. `origin` is the picture's lower-left corner, `u` the direction its
+  bottom edge runs, `v` a direction toward its top (not parallel to
+  `u`), and `width` its width in meters; the height follows from the
+  picture's proportions. Defaults: the ground at the world origin, `u`
+  `[1,0,0]`, `v` `[0,1,0]`, 1 m wide. The bytes are kept as they are; a
+  picture over 64 megapixels, or one whose size cannot be read, refuses
+  `load_failed`. The report adds `picture: {width, height}`.
 - `hew.solid.extrude` consumes a region exactly as the push/pull tool
   does: the profile becomes the new solid's base face and leaves the
   sketch. `hew.solid.push_pull` on an existing solid's face carries the

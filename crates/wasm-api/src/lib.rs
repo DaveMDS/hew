@@ -207,6 +207,16 @@ impl ApiError {
     }
 }
 
+/// What [`Scene::place_image`] made: its definition and instance handles
+/// and the face's size in meters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlacedImage {
+    definition: u64,
+    instance: u64,
+    width: f64,
+    height: f64,
+}
+
 impl From<ApiError> for JsValue {
     fn from(e: ApiError) -> JsValue {
         JsValue::from_str(&e.0)
@@ -9158,6 +9168,169 @@ impl Scene {
         Ok((report, out.warnings))
     }
 
+    /// Place a picture (Place Image): `image` is a PNG or JPEG's encoded
+    /// bytes, kept verbatim; `format` says which (`0` PNG, `1` JPEG — the
+    /// [`Scene::add_texture_material`] codes; bytes in the other format are
+    /// refused). The picture's lower-left corner goes at `origin` (3
+    /// floats), its bottom edge runs along `u` and its top lies toward `v`
+    /// (3 floats each; `v` need only not be parallel to `u`), `width`
+    /// meters wide along `u` and as tall as its own proportions make it.
+    ///
+    /// What it builds is what a `.skp` image arrives as
+    /// (`crates/image-import`): a component definition named `name` (the
+    /// file's name without its extension; blank falls back to "Image")
+    /// holding one face painted with a textured material of the same name
+    /// whose tile is the face's size, stretched over the face once, and one
+    /// top-level instance of it posed by the placement frame. One undo
+    /// step, like every import. Refused while a component is open
+    /// (`ExplodeSessionScope`), as every import is.
+    ///
+    /// Returns `{ definition: bigint, instance: bigint, width: number,
+    /// height: number }` (meters).
+    ///
+    /// # Errors
+    /// - `ImageUnreadable` — not a PNG/JPEG whose size can be read, or not
+    ///   in the format `format` names.
+    /// - `ImageTooLarge` — more than 64 megapixels.
+    /// - `BadImagePlacement` — a non-finite or degenerate frame, or a width
+    ///   that is not a positive length.
+    /// - `ImageTooSmall` — a side of the placed picture under
+    ///   `image_import::MIN_SIDE` (one micrometer): a face the kernel can't
+    ///   build. Nothing is placed and no undo step is left.
+    /// - `ImageTooBig` — a side of the placed picture over
+    ///   `image_import::MAX_SIDE` (1,000 km). Nothing is placed either.
+    /// - `BadFormat` — `format` is neither 0 nor 1.
+    /// - `BadVector` — `origin`/`u`/`v` is not 3 floats.
+    /// - a kernel refusal (`ExplodeSessionScope`, …).
+    #[allow(clippy::too_many_arguments)]
+    pub fn place_image(
+        &mut self,
+        image: &[u8],
+        format: u8,
+        name: String,
+        origin: &[f64],
+        u: &[f64],
+        v: &[f64],
+        width: f64,
+    ) -> Result<JsValue, ApiError> {
+        let placed = self.place_image_core(image, format, name, origin, u, v, width)?;
+        let out = JsObject::new();
+        let set = |k: &str, v: JsValue| {
+            Reflect::set(&out, &JsValue::from_str(k), &v).expect("plain object");
+        };
+        set("definition", JsValue::from(placed.definition));
+        set("instance", JsValue::from(placed.instance));
+        set("width", JsValue::from_f64(placed.width));
+        set("height", JsValue::from_f64(placed.height));
+        Ok(out.into())
+    }
+
+    /// [`Scene::place_image`] minus the JS-value plumbing.
+    #[allow(clippy::too_many_arguments)]
+    fn place_image_core(
+        &mut self,
+        image: &[u8],
+        format: u8,
+        name: String,
+        origin: &[f64],
+        u: &[f64],
+        v: &[f64],
+        width: f64,
+    ) -> Result<PlacedImage, ApiError> {
+        let fmt = match format {
+            0 => ImageFormat::Png,
+            1 => ImageFormat::Jpeg,
+            _ => {
+                return Err(ApiError(
+                    "BadFormat: image format must be 0 (PNG) or 1 (JPEG)".to_string(),
+                ));
+            }
+        };
+        let vec3 = |a: &[f64], what: &str| -> Result<[f64; 3], ApiError> {
+            <[f64; 3]>::try_from(a).map_err(|_| {
+                ApiError(format!(
+                    "BadVector: {what} must be 3 floats, got {}",
+                    a.len()
+                ))
+            })
+        };
+        let (o, uu, vv) = (vec3(origin, "origin")?, vec3(u, "u")?, vec3(v, "v")?);
+        let placement = image_import::Placement {
+            origin: Point3::new(o[0], o[1], o[2]),
+            u: Vec3::new(uu[0], uu[1], uu[2]),
+            v: Vec3::new(vv[0], vv[1], vv[2]),
+            width,
+        };
+        // Literal codes (not `e.code()`), so the app's error-copy inventory
+        // finds them (`kernelErrors.test.ts` scrapes this file).
+        let out = image_import::import(image, Some(fmt), &name, &placement).map_err(|e| {
+            let why = e.to_string();
+            match e {
+                image_import::ImageError::Unreadable(_) => ApiError::new("ImageUnreadable", &why),
+                image_import::ImageError::TooLarge { .. } => ApiError::new("ImageTooLarge", &why),
+                image_import::ImageError::BadPlacement(_) => {
+                    ApiError::new("BadImagePlacement", &why)
+                }
+                image_import::ImageError::TooSmall { .. }
+                | image_import::ImageError::Unbuildable(_) => ApiError::new("ImageTooSmall", &why),
+                image_import::ImageError::TooBig { .. } => ApiError::new("ImageTooBig", &why),
+            }
+        })?;
+        let (width, height) = (out.width, out.height);
+        let (definition, instance) = self.ingest_picture(out.scene)?;
+        recording::record_import("place_image", image, |bytes| {
+            recording::RecordedCall::PlaceImage {
+                image: bytes,
+                format,
+                name,
+                origin: o,
+                u: uu,
+                v: vv,
+                width,
+            }
+        });
+        Ok(PlacedImage {
+            definition: definition.data().as_ffi(),
+            instance: instance.data().as_ffi(),
+            width,
+            height,
+        })
+    }
+
+    /// Ingests a placed picture's recipe ([`image_import::import`]) and
+    /// names what it placed: the definition and its one instance.
+    ///
+    /// The recipe is checked first ([`image_import::check`]: its face built
+    /// through the kernel's own import path, no document touched), so a
+    /// picture the kernel would not build is refused `ImageTooSmall` with
+    /// the kernel's reason and changes nothing: not the document, not its
+    /// undo or redo history, not its palette. Past the check, the ingest
+    /// placing nothing would be a kernel bug; that is still refused typed,
+    /// and the refusal says the document may hold part of the import
+    /// rather than pretend nothing happened.
+    fn ingest_picture(
+        &mut self,
+        scene: kernel::ImportScene,
+    ) -> Result<(kernel::ComponentId, kernel::InstanceId), ApiError> {
+        image_import::check(&scene).map_err(|e| ApiError::new("ImageTooSmall", &e.to_string()))?;
+        let (report, change) = self.doc.ingest(scene, Vec::new()).map_err(doc_err)?;
+        self.reconcile(&change);
+        let Some((definition, instance)) = image_import::placed(&report) else {
+            let why = report
+                .skipped
+                .first()
+                .map_or("nothing was placed", |s| s.reason.as_str());
+            return Err(ApiError::new(
+                "ImageTooSmall",
+                &format!(
+                    "the picture was not placed whole ({why}); the document may hold part of the import"
+                ),
+            ));
+        };
+        self.last_import_objects = change.objects_touched.clone();
+        Ok((definition, instance))
+    }
+
     // --------------------------------------------------------- persistence
 
     /// Serialise the entire document to a `.hew` zip container (HEW_FILE_FORMAT.md).
@@ -10368,6 +10541,17 @@ impl Scene {
                         name,
                     } => {
                         self.import_stl_core(&bytes, unit_scale, name)?;
+                    }
+                    PlaceImage {
+                        image,
+                        format,
+                        name,
+                        origin,
+                        u,
+                        v,
+                        width,
+                    } => {
+                        self.place_image_core(&image, format, name, &origin, &u, &v, width)?;
                     }
                     SetAxes { origin, x, y } => {
                         self.set_axes(
@@ -18002,6 +18186,73 @@ mod tests {
         assert_eq!(ids, scene.object_ids());
     }
 
+    /// `hew.doc.import` of a `.png` over the live API places the picture
+    /// as Place Image does — at the given frame and width, named after the
+    /// file — and records itself as that placement, so a recording of the
+    /// session replays to the same document.
+    #[test]
+    fn a_picture_imported_over_the_api_is_placed_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "hew.doc.import",
+            "params": {
+                "path": "Site plan.png",
+                "bytes_base64": api::commands::doc::encode_base64(&png_stub(200, 100)),
+                "origin": [1.0, 0.0, 0.0], "u": [0.0, 1.0, 0.0], "v": [0.0, 0.0, 1.0], "width": 3.0,
+            },
+        })
+        .to_string();
+        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        assert!(reply.contains("\"picture\""), "import succeeds: {reply}");
+        let [inst] = scene.doc.instance_ids()[..] else {
+            panic!("one picture placed");
+        };
+        let def = scene.doc.instance_def(inst).unwrap();
+        assert_eq!(scene.doc.component_name(def), Some("Site plan"));
+        let a = scene.doc.instance_pose(inst).unwrap().to_affine();
+        assert_eq!((a[3], a[7], a[11]), (1.0, 0.0, 0.0));
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"place_image\""), "{json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+    }
+
+    /// A picture too small to place, imported over the live API, is
+    /// refused: an error reply, nothing placed, no undo step, and nothing
+    /// recorded (a recording replays only what was placed).
+    #[test]
+    fn a_picture_too_small_to_place_is_refused_over_the_api() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 3, "method": "hew.doc.import",
+            "params": {
+                "path": "speck.png",
+                "bytes_base64": api::commands::doc::encode_base64(&png_stub(300, 100)),
+                "width": 1.1e-6,
+            },
+        })
+        .to_string();
+        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert!(v.get("error").is_some(), "refused: {reply}");
+        assert!(reply.contains("at least"), "names the minimum: {reply}");
+        assert!(scene.doc.instance_ids().is_empty(), "nothing placed");
+        assert!(!scene.can_scene_undo(), "no undo step");
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(!json.contains("place_image"), "nothing recorded: {json}");
+    }
+
     #[test]
     fn api_dispatch_malformed_json_answers_a_parse_error_with_null_id() {
         let mut scene = Scene::new();
@@ -18124,6 +18375,350 @@ mod tests {
         );
         scene.set_tag_hidden("Rig".to_string(), false);
         assert_eq!(scene.guide_ids(), ids);
+    }
+
+    /// One placed picture's shape, in world space, for comparing a placed
+    /// picture with an imported `.skp` image: the definition's name and
+    /// member count, the one face's world corners each with the texture
+    /// coordinate it shows, the material's colour/format/bytes, whether
+    /// its tile is exactly the face's size (one picture stretched over the
+    /// face), and the object's base paint.
+    #[allow(clippy::type_complexity)]
+    fn placed_picture_shape(
+        scene: &Scene,
+        instance: kernel::InstanceId,
+    ) -> (
+        Option<String>,
+        usize,
+        Vec<([f64; 3], [f64; 2])>,
+        Rgba8,
+        ImageFormat,
+        Vec<u8>,
+        bool,
+        bool,
+    ) {
+        let doc = &scene.doc;
+        let def = doc.instance_def(instance).unwrap();
+        let pose = doc.instance_pose(instance).unwrap();
+        let members = doc.def_member_nodes(def).unwrap();
+        let [NodeId::Object(o)] = members.as_slice() else {
+            panic!("a picture definition holds one object: {members:?}");
+        };
+        let obj = doc.object(*o).unwrap();
+        assert_eq!(obj.faces().len(), 1, "one face");
+        let (fid, face) = obj.faces().iter().next().unwrap();
+        let frame = face.uv_frame.expect("the face is placed by a UV frame");
+        let mut corners: Vec<([f64; 3], [f64; 2])> = obj
+            .loop_positions(face.outer_loop)
+            .map(|p| {
+                let w = pose.apply_point(p);
+                let uv = frame.apply(p);
+                ([w.x, w.y, w.z], [uv[0].round(), uv[1].round()])
+            })
+            .collect();
+        corners.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        // Each corner shows a corner of the picture, exactly.
+        for (p, uv) in obj
+            .loop_positions(face.outer_loop)
+            .map(|p| (p, frame.apply(p)))
+        {
+            assert!(
+                (uv[0] - uv[0].round()).abs() < 1e-9 && (uv[1] - uv[1].round()).abs() < 1e-9,
+                "corner {p:?} shows {uv:?}"
+            );
+        }
+        let mat = doc.material(doc.face_material(*o, fid).unwrap()).unwrap();
+        let tex = mat.texture.as_ref().unwrap();
+        let xs = obj.loop_positions(face.outer_loop).map(|p| p.x);
+        let ys = obj.loop_positions(face.outer_loop).map(|p| p.y);
+        let span = |it: &mut dyn Iterator<Item = f64>| {
+            let v: Vec<f64> = it.collect();
+            v.iter().cloned().fold(f64::MIN, f64::max) - v.iter().cloned().fold(f64::MAX, f64::min)
+        };
+        let (fw, fh) = (span(&mut xs.into_iter()), span(&mut ys.into_iter()));
+        let tile_is_face =
+            (tex.world_size[0] - fw).abs() < 1e-9 && (tex.world_size[1] - fh).abs() < 1e-9;
+        (
+            doc.component_name(def).map(str::to_string),
+            members.len(),
+            corners,
+            mat.color,
+            tex.format,
+            tex.image.clone(),
+            tile_is_face,
+            obj.default_material().is_none(),
+        )
+    }
+
+    /// Place Image builds what a `.skp` file's image arrives as: placing the
+    /// picture of `feature-pack.skp`'s image, by the frame and width that
+    /// image shows it at, gives the same definition shape, the same world
+    /// corners each showing the same corner of the picture, and the same
+    /// material — the bytes verbatim, its tile the face's size.
+    #[test]
+    fn a_placed_picture_is_built_like_an_imported_skp_image() {
+        let skp: &[u8] = include_bytes!("../../skp-import/tests/fixtures/2026/feature-pack.skp");
+        let mut imported = Scene::new();
+        imported.import_skp_core(skp).unwrap();
+        let image = imported
+            .doc
+            .instance_ids()
+            .into_iter()
+            .find(|&i| {
+                let def = imported.doc.instance_def(i).unwrap();
+                imported
+                    .doc
+                    .component_name(def)
+                    .is_some_and(|n| n.starts_with("Image"))
+            })
+            .expect("feature-pack places an image");
+        let want = placed_picture_shape(&imported, image);
+        let corner = |uv: [f64; 2]| {
+            want.2
+                .iter()
+                .find(|c| c.1 == uv)
+                .map(|c| Vec3::new(c.0[0], c.0[1], c.0[2]))
+                .unwrap()
+        };
+        let (o, right, top) = (corner([0.0, 0.0]), corner([1.0, 0.0]), corner([0.0, 1.0]));
+        let format = if want.4 == ImageFormat::Jpeg { 1 } else { 0 };
+
+        let mut placed = Scene::new();
+        let out = placed
+            .place_image_core(
+                &want.5,
+                format,
+                "Image".to_string(),
+                &[o.x, o.y, o.z],
+                &[right.x - o.x, right.y - o.y, right.z - o.z],
+                &[top.x - o.x, top.y - o.y, top.z - o.z],
+                (right - o).length(),
+            )
+            .unwrap();
+        assert!(
+            ((top - o).length() - out.height).abs() < 1e-6,
+            "the picture's own proportions give the imported image's height"
+        );
+        let got = placed_picture_shape(&placed, instance_id(out.instance));
+        assert_eq!(got.0, want.0, "definition name");
+        assert_eq!(got.1, want.1, "one member");
+        for (g, w) in got.2.iter().zip(&want.2) {
+            assert_eq!(g.1, w.1, "corner order");
+            for k in 0..3 {
+                assert!((g.0[k] - w.0[k]).abs() < 1e-6, "corner {g:?} vs {w:?}");
+            }
+        }
+        assert_eq!(got.3, want.3, "white, opaque");
+        assert_eq!(got.4, want.4, "format");
+        assert_eq!(got.5, want.5, "bytes verbatim");
+        assert!(got.6 && want.6, "the tile is the face's size");
+        assert!(got.7 && want.7, "no base paint");
+        assert_eq!(
+            placed.doc.instance_def(instance_id(out.instance)),
+            Some(component_id(out.definition)),
+            "the handles name the definition and its instance"
+        );
+    }
+
+    /// The minimal valid PNG header a placement needs (only the size is
+    /// read; the palette keeps the bytes verbatim).
+    fn png_stub(w: u32, h: u32) -> Vec<u8> {
+        let mut b = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        b.extend_from_slice(&13u32.to_be_bytes());
+        b.extend_from_slice(b"IHDR");
+        b.extend_from_slice(&w.to_be_bytes());
+        b.extend_from_slice(&h.to_be_bytes());
+        b.extend_from_slice(&[8, 6, 0, 0, 0]);
+        b
+    }
+
+    /// One placement is one undo step: undo removes the instance (and its
+    /// definition's member) and redo brings it back.
+    #[test]
+    fn placing_a_picture_is_one_undo_step() {
+        let mut scene = Scene::new();
+        let png = png_stub(300, 100);
+        let out = scene
+            .place_image_core(
+                &png,
+                0,
+                "plan".into(),
+                &[1.0, 2.0, 0.0],
+                &[1.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                3.0,
+            )
+            .unwrap();
+        assert_eq!((out.width, out.height), (3.0, 1.0));
+        assert_eq!(scene.doc.instance_ids(), vec![instance_id(out.instance)]);
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.doc.instance_ids().is_empty(),
+            "undo takes the picture away"
+        );
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.doc.instance_ids().len(), 1, "redo puts it back");
+    }
+
+    /// The refusals carry their own codes, and leave the document as it was.
+    #[test]
+    fn a_picture_that_cannot_be_placed_is_refused_with_its_code() {
+        let mut scene = Scene::new();
+        let code = |r: Result<PlacedImage, ApiError>| {
+            r.unwrap_err().0.split(':').next().unwrap().to_string()
+        };
+        let png = png_stub(10, 10);
+        let (o, u, v) = ([0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+        assert_eq!(
+            code(scene.place_image_core(b"GIF89a", 0, "x".into(), &o, &u, &v, 1.0)),
+            "ImageUnreadable"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 1, "x".into(), &o, &u, &v, 1.0)),
+            "ImageUnreadable",
+            "PNG bytes said to be a JPEG"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png_stub(9000, 9000), 0, "x".into(), &o, &u, &v, 1.0)),
+            "ImageTooLarge"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 0, "x".into(), &o, &u, &u, 1.0)),
+            "BadImagePlacement"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 0, "x".into(), &o, &u, &v, 0.0)),
+            "BadImagePlacement"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 0, "x".into(), &o, &u, &v, 1e9)),
+            "ImageTooBig"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 7, "x".into(), &o, &u, &v, 1.0)),
+            "BadFormat"
+        );
+        assert_eq!(
+            code(scene.place_image_core(&png, 0, "x".into(), &o[..2], &u, &v, 1.0)),
+            "BadVector"
+        );
+        assert!(scene.doc.instance_ids().is_empty());
+    }
+
+    /// A picture too small for the kernel to build its face (3:1, just
+    /// past a micrometer wide: the UI's old size floor let it through) is
+    /// refused `ImageTooSmall`, a typed error the module survives, and the
+    /// document is exactly as it was: no undo step, the same bytes.
+    #[test]
+    fn a_picture_too_small_for_its_face_is_refused_and_changes_nothing() {
+        let mut scene = Scene::new();
+        let before = scene.save();
+        let err = scene
+            .place_image_core(
+                &png_stub(300, 100),
+                0,
+                "speck".into(),
+                &[0.0; 3],
+                &[1.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                1.1e-6,
+            )
+            .unwrap_err();
+        assert!(err.0.starts_with("ImageTooSmall: "), "{}", err.0);
+        assert!(!scene.can_scene_undo(), "no undo step");
+        assert!(scene.doc.instance_ids().is_empty());
+        assert_eq!(scene.save(), before, "the document is unchanged");
+    }
+
+    /// A picture recipe the kernel would not build (shrunk past
+    /// `image_import`'s own floor) is refused `ImageTooSmall` before the
+    /// document is touched: the saved bytes, the undo depth, the redo
+    /// history (an earlier undone placement still redoes) and the palette
+    /// are all exactly as they were. Taking an ingest back with undo would
+    /// have wiped that redo and left the picture's material behind.
+    #[test]
+    fn a_picture_the_kernel_would_not_build_is_refused_before_anything_changes() {
+        let mut scene = Scene::new();
+        let place = |scene: &mut Scene, name: &str| {
+            scene
+                .place_image_core(
+                    &png_stub(300, 100),
+                    0,
+                    name.into(),
+                    &[0.0; 3],
+                    &[1.0, 0.0, 0.0],
+                    &[0.0, 1.0, 0.0],
+                    1.0,
+                )
+                .unwrap();
+        };
+        place(&mut scene, "kept");
+        place(&mut scene, "undone");
+        scene.scene_undo().unwrap();
+        assert!(scene.can_scene_redo());
+        let before = scene.save();
+        let (undo, redo) = (scene.doc.undo_depth(), scene.doc.redo_depth());
+        let materials = scene.doc.material_ids().len();
+
+        let mut out = image_import::import(
+            &png_stub(300, 100),
+            None,
+            "speck",
+            &image_import::Placement::ground(1.0),
+        )
+        .unwrap();
+        // Shrink the face past what the kernel can find a plane for.
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+        }
+        let err = scene.ingest_picture(out.scene).unwrap_err();
+        assert!(err.0.starts_with("ImageTooSmall: "), "{}", err.0);
+        assert!(err.0.contains("can't be built"), "{}", err.0);
+        assert_eq!(scene.save(), before, "the document is unchanged");
+        assert_eq!(
+            (scene.doc.undo_depth(), scene.doc.redo_depth()),
+            (undo, redo),
+            "the history is unchanged"
+        );
+        assert_eq!(
+            scene.doc.material_ids().len(),
+            materials,
+            "no material left"
+        );
+        // The earlier undone placement is still the one redo brings back.
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.doc.instance_ids().len(), 2);
+    }
+
+    /// `RecordedCall::PlaceImage` replays: the bytes, name, frame and width
+    /// all reach the replayed placement (left visible, so a dropped field
+    /// changes the saved document).
+    #[test]
+    fn record_then_replay_covers_place_image() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        scene
+            .place_image_core(
+                &png_stub(400, 200),
+                0,
+                "Wall".into(),
+                &[1.0, 0.0, 0.0],
+                &[0.0, 1.0, 0.0],
+                &[0.0, 0.0, 1.0],
+                2.0,
+            )
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"place_image\""));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 }
 

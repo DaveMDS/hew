@@ -533,3 +533,33 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
     expect(committed, 'run `pnpm --dir app i18n:menus`').toBe(menuFileFor(rows, 'en'))
   })
 })
+
+/**
+ * File ▸ Import Image… (Place Image): a GATED native item (disabled while a
+ * component is open, pushed by sync_menu_state like Import…) right after
+ * Import…, mirrored by the web MenuBar's item, the command palette, and
+ * App's menu-action switch.
+ */
+describe('Import Image menu item parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
+
+  it('file-import-image is a gated native item, attached right after Import…, dispatching to import-image', () => {
+    const binding = /let\s+(\w+)\s*=\s*gated_item\(\s*handle,\s*&mut \w+,\s*"file-import-image",\s*lbl!\("file-import-image"\)/.exec(source)
+    expect(binding, 'no gated_item binding found for file-import-image').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      new RegExp(`\\.item\\(&file_import\\)\\s*\\.item\\(&${variable}\\)`).test(source),
+      'file-import-image is not attached right after Import…',
+    ).toBe(true)
+    expect(/"file-import-image"\s*=>\s*"import-image"/.test(source)).toBe(true)
+  })
+
+  it('is offered from the web MenuBar and the palette, and handled and gated by the app', () => {
+    expect(menuBarSource.includes('label={t`Import Image…`}')).toBe(true)
+    expect(paletteEntries().map((e) => e.id)).toContain('import-image')
+    expect(appSource.includes("case 'import-image'")).toBe(true)
+    expect(appSource.includes("'file-import-image': !componentFrameOpen")).toBe(true)
+  })
+})

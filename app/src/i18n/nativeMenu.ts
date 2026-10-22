@@ -60,6 +60,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
   'file-open': msg`Open…`,
   'recent-clear': msg`Clear Recent`,
   'file-import': msg`Import…`,
+  'file-import-image': msg`Import Image…`,
   'file-export': msg`Export…`,
   'file-print': msg`Print…`,
   'file-open-on-phone': msg`Open on Phone…`,

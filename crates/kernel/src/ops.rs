@@ -551,6 +551,45 @@ fn map_surface(
     }
 }
 
+/// A face's UV frame under `transform`: the frame that gives every moved
+/// point the texture coordinate it had before the move, so a texture placed
+/// on a face rides with the face (moved, turned, or scaled with it) instead
+/// of staying where it was in space. With `transform` as `p -> L p + t`, the
+/// mapped frame is `s' = L^-T s`, `u0' = u0 - s'·t` (likewise `t`, `v0`):
+/// then `s'·(L p + t) + u0' = s·p + u0`. Exact for every invertible affine
+/// map; a singular one (which `transformed_planes` refuses before any
+/// caller gets here) leaves the frame as it was. An extreme stretch can
+/// map a valid frame to one [`crate::material::UvFrame::is_valid`]
+/// rejects; `transformed_planes` refuses that too
+/// ([`TransformError::DegenerateTextureFrame`]), so no caller stores one.
+fn map_uv_frame(
+    frame: Option<crate::material::UvFrame>,
+    transform: &Transform,
+) -> Option<crate::material::UvFrame> {
+    let f = frame?;
+    let Ok(inv) = transform.inverse() else {
+        return Some(f);
+    };
+    let m = inv.to_affine();
+    // `L^-T g`: column j of `L^-1` dotted with `g`.
+    let back = |g: Vec3| {
+        Vec3::new(
+            m[0] * g.x + m[4] * g.y + m[8] * g.z,
+            m[1] * g.x + m[5] * g.y + m[9] * g.z,
+            m[2] * g.x + m[6] * g.y + m[10] * g.z,
+        )
+    };
+    let a = transform.to_affine();
+    let t = Vec3::new(a[3], a[7], a[11]);
+    let (s, tt) = (back(f.s), back(f.t));
+    Some(crate::material::UvFrame::new(
+        s,
+        tt,
+        f.u0 - s.dot(t),
+        f.v0 - tt.dot(t),
+    ))
+}
+
 /// A per-edge circle claim under `transform` (map-or-drop): the center maps
 /// as a point and the radius scales under a similarity; dropped otherwise.
 fn map_curve(
@@ -797,8 +836,11 @@ impl Object {
     /// plane (twice its area under 1e-12 m²) is singular at this geometry's
     /// scale and refused [`TransformError::Singular`] the same way, as is an
     /// invertible but extremely anisotropic map that squashes some face's
-    /// plane to no direction. [`Object::check_transform`] answers the same
-    /// question without moving anything.
+    /// plane to no direction. A map that would leave a face's texture frame
+    /// degenerate (an extreme stretch) is
+    /// [`TransformError::DegenerateTextureFrame`], refused the same way.
+    /// [`Object::check_transform`] answers the same question without
+    /// moving anything.
     pub fn apply_transform(&mut self, transform: &Transform) -> Result<(), TransformError> {
         let planes = self.transformed_planes(transform)?;
         for v in self.vertices.values_mut() {
@@ -811,6 +853,7 @@ impl Object {
         for (f, plane) in self.faces.values_mut().zip(planes) {
             f.plane = plane;
             f.surface = map_surface(f.surface, transform, scale);
+            f.uv_frame = map_uv_frame(f.uv_frame, transform);
         }
         // Per-edge analytic circle claims follow the same map-or-drop rule:
         // a similarity maps the center as a point and scales the radius; any
@@ -834,9 +877,11 @@ impl Object {
     /// The validation half of [`Object::apply_transform`]: every face's
     /// plane under `transform`, in face order, or the refusal. A singular
     /// linear part, an orientation flip, a face ring too small afterwards
-    /// for a saved file to recompute its plane, or a plane the map squashes
-    /// to no direction (an invertible but extremely anisotropic scale) are
-    /// all refused here, before any vertex moves.
+    /// for a saved file to recompute its plane, a plane the map squashes
+    /// to no direction (an invertible but extremely anisotropic scale), or
+    /// a texture frame it squashes (checked with the ring, so a session's
+    /// replay bake skips it as it skips the ring) are all refused here,
+    /// before any vertex moves.
     fn transformed_planes(&self, transform: &Transform) -> Result<Vec<Plane>, TransformError> {
         self.transformed_planes_impl(transform, true)
     }
@@ -861,6 +906,16 @@ impl Object {
                     .collect();
                 if crate::serialize::outer_ring_plane(&ring).is_err() {
                     return Err(TransformError::Singular);
+                }
+                // A valid texture frame must stay valid: the map is
+                // refused rather than smearing the face's picture. (A
+                // frame already invalid on arrival is not this map's
+                // doing and rides along as it is.)
+                if let Some(f) = face.uv_frame
+                    && f.is_valid()
+                    && !map_uv_frame(Some(f), transform).is_some_and(|m| m.is_valid())
+                {
+                    return Err(TransformError::DegenerateTextureFrame);
                 }
             }
             planes.push(transform.apply_plane(&face.plane)?);
@@ -892,6 +947,7 @@ impl Object {
         for (f, plane) in self.faces.values_mut().zip(planes) {
             f.plane = plane;
             f.surface = map_surface(f.surface, pose, scale);
+            f.uv_frame = map_uv_frame(f.uv_frame, pose);
         }
         for e in self.edges.values_mut() {
             e.curve = map_curve(e.curve, pose, scale);
@@ -11112,5 +11168,53 @@ mod tests {
             cube.validate(),
             Err(crate::error::TopologyError::VertexNotFinite { vertex: vid })
         );
+    }
+
+    /// Each face's texture coordinate at each of its outer corners.
+    fn corner_uvs(obj: &Object) -> Vec<[f64; 2]> {
+        obj.faces
+            .values()
+            .flat_map(|f| {
+                let fr = f.uv_frame.expect("every face is framed");
+                obj.loop_positions(f.outer_loop)
+                    .map(move |p| fr.apply(p))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    /// A component session's pose bakes through `apply_session_pose`, not
+    /// `apply_transform`: it carries every face's texture frame too, so
+    /// each corner keeps its texture coordinate when a placed component
+    /// opens for editing.
+    #[test]
+    fn a_session_pose_carries_each_faces_texture_frame() {
+        let mut cube = unit_cube();
+        for f in cube.faces.values_mut() {
+            f.uv_frame = Some(crate::material::UvFrame::new(
+                Vec3::new(1.0, 0.2, 0.1),
+                Vec3::new(0.1, 1.0, 0.3),
+                0.25,
+                -0.5,
+            ));
+        }
+        let before = corner_uvs(&cube);
+        let pose = Transform::uniform_scale(2.5)
+            .then(&Transform::rotation(Vec3::new(1.0, -2.0, 0.5), 1.1).unwrap())
+            .then(&Transform::translation(Vec3::new(4.0, -3.0, 7.0)));
+        cube.apply_session_pose(&pose);
+        let after = corner_uvs(&cube);
+        assert_eq!(before.len(), after.len());
+        for (a, b) in before.iter().zip(&after) {
+            assert!(
+                (a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9,
+                "{a:?} became {b:?}"
+            );
+        }
+        // And back: the session's close bakes the inverse.
+        cube.apply_session_pose(&pose.inverse().unwrap());
+        for (a, b) in before.iter().zip(&corner_uvs(&cube)) {
+            assert!((a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9);
+        }
     }
 }

@@ -62,6 +62,40 @@ pub struct MeshRecipe {
     pub extra: MeshExtra,
 }
 
+impl MeshRecipe {
+    /// This recipe's Object, built the way [`crate::Document::ingest`]
+    /// builds it: the holes-aware import path at
+    /// [`crate::tol::IMPORT_PLANE_DIST`], each face given the material at
+    /// its index in `materials` (none past its end) and its UV frame from
+    /// `face_uv_frames` (none past its end).
+    pub(crate) fn build_object(
+        &self,
+        materials: &[crate::material::FaceMaterial],
+    ) -> Result<crate::topo::Object, crate::error::TopologyError> {
+        let frames: Vec<Option<UvFrame>> = (0..self.faces.len())
+            .map(|i| self.face_uv_frames.get(i).copied().flatten())
+            .collect();
+        crate::topo::Object::from_polygons_with_holes_import(
+            &self.positions,
+            &self.faces,
+            &self.face_holes,
+            materials,
+            &frames,
+        )
+    }
+
+    /// Whether [`crate::Document::ingest`] would build this mesh, answered
+    /// without a document: `Ok` when it would, else the typed error it
+    /// would skip the mesh with (an [`ImportReport::skipped`] entry's
+    /// reason is that error's text). The check builds the mesh through the
+    /// very path `ingest` takes; materials take no part in whether a mesh
+    /// builds, so none are resolved. A host that must place a recipe whole
+    /// or not at all checks it first, so a refusal changes nothing.
+    pub fn check_builds(&self) -> Result<(), crate::error::TopologyError> {
+        self.build_object(&[]).map(|_| ())
+    }
+}
+
 /// Source claims about a mesh's edges and faces, applied by `ingest` to the
 /// built Object wherever they hold — claims are metadata, never geometry,
 /// so one the built Object contradicts is dropped (the map-or-drop

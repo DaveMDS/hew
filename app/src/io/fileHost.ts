@@ -12,6 +12,23 @@
 import type { HealthCounts } from '../health/healthReport'
 
 /**
+ * A file the user picked whose bytes could not be read (its permission
+ * withdrawn, or the file moved or changed while it was read). Distinct
+ * from a cancel, which a picker answers with null, so the caller can say
+ * so instead of doing nothing.
+ */
+export class FileReadError extends Error {
+  readonly fileName: string
+  readonly reason: unknown
+  constructor(fileName: string, reason: unknown) {
+    super(`Couldn't read ${fileName}`)
+    this.name = 'FileReadError'
+    this.fileName = fileName
+    this.reason = reason
+  }
+}
+
+/**
  * The on-disk format a document is bound to. `hew` is the native format;
  * `skp2026` / `skp2017` are the two SketchUp containers a `.skp` document
  * is saved back in (the format of the file that was opened, or the one
@@ -151,6 +168,17 @@ export interface FileHost {
   openAny(): Promise<OpenPick | null>
 
   /**
+   * Prompt the user to choose a picture (PNG or JPEG) to place in the
+   * current document — File ▸ Import Image…. Returns the file's base name
+   * and bytes, or null if the user cancels. Unlike `openForImport`, nothing
+   * about the document is replaced: the caller arms Place Image with it.
+   * A picked file whose bytes can't be read rejects with `FileReadError`
+   * (never null: that would read as a cancel). Optional only so test
+   * doubles may leave it out; both shipped hosts implement it.
+   */
+  openImage?(): Promise<{ name: string; bytes: Uint8Array } | null>
+
+  /**
    * Write `bytes` to a path the native save panel (`io/savePanel.ts`)
    * already picked and approved — no dialog. A `.hew` goes through the
    * same writer `save` uses. Desktop only: the browser has no such panel,
@@ -216,6 +244,7 @@ export function makeFileHost(): FileHost {
       saveAs: (bytes, name, format) => hostPromise.then((h) => h.saveAs(bytes, name, format)),
       openForImport: () => hostPromise.then((h) => h.openForImport()),
       openAny: () => hostPromise.then((h) => h.openAny()),
+      openImage: () => hostPromise.then((h) => h.openImage()),
       exportBinary: (bytes, name, fileType) =>
         hostPromise.then((h) => h.exportBinary(bytes, name, fileType)),
       writeTo: (path, bytes, format) => hostPromise.then((h) => h.writeTo(path, bytes, format)),

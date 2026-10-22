@@ -266,6 +266,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "Reflection" => {
             "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
         }
+        "DegenerateTextureFrame" => {
+            "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
+        }
         "InvalidRescaleFactor" => {
             "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance."
         }
@@ -490,6 +493,21 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "BadFormat" => {
             "Hew's own request to the model kernel named an image format it doesn't recognize. If this keeps happening, use Report Bug."
+        }
+        "BadImagePlacement" => {
+            "Hew's own request to the model kernel placed a picture on a plane it can't hold. If this keeps happening, use Report Bug."
+        }
+        "ImageUnreadable" => {
+            "Hew can't read that picture. Save it as a PNG or JPEG and place it again."
+        }
+        "ImageTooLarge" => {
+            "That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead."
+        }
+        "ImageTooSmall" => {
+            "That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width."
+        }
+        "ImageTooBig" => {
+            "That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width."
         }
         "BadRenderMode" => {
             "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."

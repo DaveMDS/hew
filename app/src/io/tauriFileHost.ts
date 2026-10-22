@@ -17,6 +17,7 @@
 
 import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
+import { FileReadError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 
 /**
@@ -236,6 +237,26 @@ export class TauriFileHost implements FileHost {
 
     await writeFileBytes(path, bytes)
     return path
+  }
+
+  async openImage(): Promise<{ name: string; bytes: Uint8Array } | null> {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const filePath = await invoke<string | null>('pick_open_path', {
+      filters: [{ name: 'Pictures (PNG, JPEG)', extensions: ['png', 'jpg', 'jpeg'] }],
+      write: false,
+      approveDir: false,
+    })
+    if (filePath === null) return null
+    // A pick whose bytes can't be read is not a cancel: reject with
+    // FileReadError, as the FileHost contract says (and as the web host
+    // does), so the caller says so.
+    let fileBuf: ArrayBuffer
+    try {
+      fileBuf = await invoke<ArrayBuffer>('read_file', { path: filePath })
+    } catch (err) {
+      throw new FileReadError(basename(filePath), err)
+    }
+    return { name: basename(filePath), bytes: new Uint8Array(fileBuf) }
   }
 
   async openForImport(): Promise<ImportPick | null> {

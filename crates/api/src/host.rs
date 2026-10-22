@@ -419,6 +419,17 @@ pub struct ImportOptions {
     pub bytes: Option<Vec<u8>>,
     /// COLLADA texture images by the uri the file uses.
     pub images: std::collections::BTreeMap<String, ImportImage>,
+    /// Where a picture (`.png`/`.jpg`/`.jpeg`) goes: its lower-left
+    /// corner, world meters (default the origin).
+    pub origin: Option<[f64; 3]>,
+    /// A picture's width direction (default +X).
+    pub u: Option<[f64; 3]>,
+    /// Toward a picture's top (default +Y; need only not be parallel to
+    /// `u`).
+    pub v: Option<[f64; 3]>,
+    /// A picture's width in meters (default 1); its height follows from
+    /// its proportions.
+    pub width: Option<f64>,
 }
 
 /// One texture image of an [`ImportOptions`].

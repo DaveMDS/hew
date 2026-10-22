@@ -72,6 +72,7 @@ import { SectionPlaneTool } from '../tools/SectionPlaneTool'
 import { EditVertexTool } from '../tools/EditVertexTool'
 import { TextPlaceTool, type TextPlacement } from '../tools/TextPlaceTool'
 import { LibraryPlaceTool, type LibraryPlacement } from '../tools/LibraryPlaceTool'
+import { PlaceImageTool, type ImagePlacement } from '../tools/PlaceImageTool'
 import { PositionCameraTool } from '../tools/PositionCameraTool'
 import { LookAroundTool, LOOK_AROUND_RAD_PER_PIXEL } from '../tools/LookAroundTool'
 import { WalkTool } from '../tools/WalkTool'
@@ -805,6 +806,20 @@ export interface ViewportApi {
    */
   armLibraryPlacement: (
     placement: LibraryPlacement,
+    onDone?: (placed: boolean) => void,
+  ) => void
+  /**
+   * Arms Place Image (`PlaceImageTool`): the picture's ghost rides the
+   * cursor on the hovered face or the ground; a click fixes one corner, a
+   * second click (or a typed width + Enter) commits ONE `place_image` (one
+   * undo step) and the tool retires to Select with the new instance
+   * selected. `at` (client pixels — a drop point) shows the ghost there
+   * straight away. `texture` in `placement` may be null: the Viewport
+   * loads the picture for the ghost itself. `onDone` fires exactly once.
+   */
+  armImagePlacement: (
+    placement: Omit<ImagePlacement, 'texture'>,
+    at?: { clientX: number; clientY: number },
     onDone?: (placed: boolean) => void,
   ) => void
   /**
@@ -6575,6 +6590,54 @@ export default function Viewport({
         scheduleRender()
       }
 
+      function armImagePlacement(
+        placement: Omit<ImagePlacement, 'texture'>,
+        at?: { clientX: number; clientY: number },
+        onDone?: (placed: boolean) => void,
+      ): void {
+        // The ghost's picture: decoded by the browser (EXIF orientation
+        // applied, as `imageInfo.ts` and the kernel measure it), sRGB like
+        // the renderer's own textures.
+        const url = URL.createObjectURL(
+          new Blob([new Uint8Array(placement.bytes)], { type: placement.format === 1 ? 'image/jpeg' : 'image/png' }),
+        )
+        const texture = new THREE.TextureLoader().load(
+          url,
+          () => { URL.revokeObjectURL(url); scheduleRender() },
+          undefined,
+          () => URL.revokeObjectURL(url),
+        )
+        texture.colorSpace = THREE.SRGBColorSpace
+        const tool = new PlaceImageTool(
+          wasmScene,
+          previewGroup,
+          { ...placement, texture },
+          (result) => {
+            handleSceneRefresh()
+            onSelectRef.current?.({ kind: 'instance', id: result.instance }, 'replace')
+          },
+          (placed, byUser) => {
+            // As armLibraryPlacement: a takeover means another tool is
+            // already arriving, so only a user finish restores Select.
+            if (byUser) {
+              toolController.resetToSelect()
+              renderer.domElement.style.cursor = 'default'
+              onToolRevertedRef.current?.()
+            }
+            onDone?.(placed)
+          },
+          handleToast,
+          (text: string) => { onMeasurementRef.current?.(text) },
+        )
+        toolController.setTool(tool)
+        renderer.domElement.style.cursor = cursorFor('Rectangle')
+        if (at !== undefined) {
+          const [ndcX, ndcY] = pointerToNDC({ clientX: at.clientX, clientY: at.clientY } as MouseEvent, renderer.domElement)
+          tool.onPointerMove(null, makeWorldRay(ndcX, ndcY, camera))
+        }
+        scheduleRender()
+      }
+
       function armTextPlacement(placement: TextPlacement): void {
         const tool = new TextPlaceTool(
           wasmScene,
@@ -6598,7 +6661,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories

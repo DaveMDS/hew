@@ -528,10 +528,11 @@ the session had already been closed, without interrupting the edit.
 | `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |
 | `crates/skp-export` | Document → SketchUp `.skp` (2026 container or 2017 format) on OpenSKP's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `openskp` |
 | `crates/stl-import` | STL (binary + ASCII, hand-written parser) → Objects | `kernel`, `mesh-heal` |
+| `crates/image-import` | PNG/JPEG → a placed picture: one face painted with it in a component, placed once (the `.skp` image shape); reads only the pixel size from the header | `kernel` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
-| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import` |
+| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
 | `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/`, `library` |
@@ -628,6 +629,17 @@ teaching the kernel about any external format:
   already satisfy the kernel's directed-edge precondition), then runs the
   same shared healing pipeline per shell. STL carries no units, so the UI
   prompts once per import for a unit scale (millimeters default).
+- **`image-import`** places a PNG or JPEG as a reference picture (Place
+  Image, and `hew.doc.import` of a `.png`/`.jpg`): a component definition
+  named after the file holding one rectangular face painted with the
+  picture, placed by one instance whose pose is the placement frame — the
+  shape `skp-import` gives a SketchUp image. The face's material keeps the
+  bytes verbatim with a tile the size of the face, and its UV frame
+  stretches that tile over the face once; a face's UV frame rides with
+  the face through every transform (`Object::apply_transform`), so a
+  picture stays stretched over its face when it is moved, opened or
+  resized. Only the pixel size is read (PNG `IHDR`, JPEG frame header and
+  EXIF orientation); pictures over 64 megapixels are refused.
 - STEP/IGES interoperability (planned — see `docs/agents/ROADMAP.md`) is designed
   as a standalone converter wrapping OpenCASCADE, invoked as an external
   process rather than linked into the kernel — keeping a large C++

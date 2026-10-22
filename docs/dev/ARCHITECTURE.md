@@ -59,6 +59,7 @@ modes:
 | `mesh-heal` | Shared foreign-mesh healing (weld, stitch, orient) for every importer |
 | `mesh-export` | STL / 3MF / glTF / USDZ writers |
 | `dae-import`, `gltf-import`, `skp-import`, `stl-import` | One converter per foreign format, all feeding `mesh-heal` |
+| `image-import` | A PNG/JPEG placed as a picture: one painted face in a component (the `.skp` image shape) |
 | `softrender` | Headless software rasterizer (`hew.view.snapshot`) |
 | `hlr` | Hidden-line removal + SVG, for vector printing and export |
 | `pdfwrite` | Minimal PDF writer for Save PDF and headless printing |

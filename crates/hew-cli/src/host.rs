@@ -830,6 +830,37 @@ pub(crate) fn read_import_inputs(
     Ok((bytes, images))
 }
 
+/// Ingests a picture's recipe, checked first ([`image_import::check`]), so
+/// a recipe the kernel would not build is refused before anything changes:
+/// the document, its undo and redo history and its palette stay as they
+/// were. Past the check, a face the kernel skipped would be a kernel bug;
+/// it is still refused, and the refusal says the document may hold part of
+/// the import. The live host in `crates/wasm-api` does the same.
+fn ingest_picture(
+    doc: &mut Document,
+    path: &str,
+    scene: kernel::ImportScene,
+) -> Result<kernel::ImportReport, Refusal> {
+    image_import::check(&scene)
+        .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+    let (report, _change) = doc
+        .ingest(scene, Vec::new())
+        .map_err(|e| api::Refusal::from_document_error(&e))?;
+    if image_import::placed(&report).is_none() {
+        let why = report
+            .skipped
+            .first()
+            .map_or("nothing was placed", |s| s.reason.as_str());
+        return Err(Refusal::api(
+            "load_failed",
+            &format!(
+                "{path}: the picture was not placed whole ({why}); the document may hold part of the import"
+            ),
+        ));
+    }
+    Ok(report)
+}
+
 /// Merges a file into `doc` by extension, honest about the one thing the
 /// path alone cannot say: STL carries no units and refuses without them
 /// (`units_required`). The bytes (and COLLADA images) come from `options`
@@ -851,6 +882,24 @@ fn import_by_extension(
         .extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase);
+
+    if let Some("png" | "jpg" | "jpeg") = ext.as_deref() {
+        // A picture: placed the way the app's Place Image places one
+        // (`image_import`), at the request's frame and width.
+        let placement = image_import::Placement::from_parts(
+            options.origin,
+            options.u,
+            options.v,
+            options.width,
+        );
+        let out = image_import::import(&bytes, None, &image_import::picture_name(path), &placement)
+            .map_err(|e| Refusal::api("load_failed", &format!("{path}: {e}")))?;
+        let (width, height) = (out.width, out.height);
+        let report = ingest_picture(doc, path, out.scene)?;
+        let mut json = report_to_json(&report, &[]);
+        json["picture"] = serde_json::json!({ "width": width, "height": height });
+        return Ok(json);
+    }
 
     let (scene, textures_missing, warnings) = match ext.as_deref() {
         Some("stl") => {
@@ -905,7 +954,7 @@ fn import_by_extension(
             return Err(Refusal::api(
                 "unsupported_format",
                 &format!(
-                    "Unrecognized import extension for \"{path}\" — expected .stl, .gltf/.glb, .dae, or .skp."
+                    "Unrecognized import extension for \"{path}\" — expected .stl, .gltf/.glb, .dae, .skp, or a .png/.jpg picture."
                 ),
             ));
         }
@@ -979,6 +1028,131 @@ mod tests {
             report["warnings"].is_array(),
             "the report carries warnings: {report}"
         );
+    }
+
+    /// `hew.doc.import` of a picture places it, as Place Image does, at the
+    /// given frame and width (its height from its proportions).
+    #[test]
+    fn importing_a_picture_places_it_at_the_given_frame() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&200u32.to_be_bytes());
+        png.extend_from_slice(&100u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut doc = Document::new();
+        let options = api::ImportOptions {
+            bytes: Some(png),
+            origin: Some([1.0, 2.0, 0.0]),
+            u: Some([0.0, 1.0, 0.0]),
+            v: Some([0.0, 0.0, 1.0]),
+            width: Some(4.0),
+            ..Default::default()
+        };
+        let report = import_by_extension(&mut doc, "/pics/Front wall.PNG", &options).unwrap();
+        assert_eq!(report["picture"]["width"], 4.0);
+        assert_eq!(report["picture"]["height"], 2.0);
+        let [inst] = doc.instance_ids()[..] else {
+            panic!("one instance");
+        };
+        let def = doc.instance_def(inst).unwrap();
+        assert_eq!(doc.component_name(def), Some("Front wall"));
+        let a = doc.instance_pose(inst).unwrap().to_affine();
+        assert_eq!((a[3], a[7], a[11]), (1.0, 2.0, 0.0));
+        // Not a picture: the usual refusal names the picture formats.
+        let err = import_by_extension(&mut doc, "/pics/a.gif", &options).unwrap_err();
+        assert_eq!(err.name, "unsupported_format");
+    }
+
+    /// A picture too small for its face to build is refused, naming the
+    /// minimum, and the document is left as it was.
+    #[test]
+    fn importing_a_picture_too_small_to_place_is_refused() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&300u32.to_be_bytes());
+        png.extend_from_slice(&100u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let mut doc = Document::new();
+        let options = api::ImportOptions {
+            bytes: Some(png),
+            width: Some(1.1e-6),
+            ..Default::default()
+        };
+        let err = import_by_extension(&mut doc, "/pics/speck.png", &options).unwrap_err();
+        assert_eq!(err.name, "load_failed");
+        assert!(err.explanation.contains("at least"), "{}", err.explanation);
+        assert!(doc.instance_ids().is_empty());
+        assert!(!doc.can_undo());
+    }
+
+    /// A picture the kernel would not build is refused before the document
+    /// is touched: the saved bytes, the undo depth, the redo history (an
+    /// earlier undone picture still redoes) and the palette all stay as
+    /// they were. Reached two ways: a width so large the face's area
+    /// overflows, through the ordinary import, and a recipe shrunk past
+    /// what the kernel can find a plane for, through `ingest_picture`.
+    #[test]
+    fn a_picture_the_kernel_would_not_build_is_refused_before_anything_changes() {
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        png.extend_from_slice(&13u32.to_be_bytes());
+        png.extend_from_slice(b"IHDR");
+        png.extend_from_slice(&300u32.to_be_bytes());
+        png.extend_from_slice(&100u32.to_be_bytes());
+        png.extend_from_slice(&[8, 6, 0, 0, 0]);
+        let at = |width: f64| api::ImportOptions {
+            bytes: Some(png.clone()),
+            width: Some(width),
+            ..Default::default()
+        };
+        let mut doc = Document::new();
+        import_by_extension(&mut doc, "/pics/kept.png", &at(1.0)).unwrap();
+        import_by_extension(&mut doc, "/pics/undone.png", &at(1.0)).unwrap();
+        doc.undo().unwrap();
+        let before = doc.save();
+        let (undo, redo) = (doc.undo_depth(), doc.redo_depth());
+        let materials = doc.material_ids().len();
+        assert_eq!(redo, 1);
+        let unchanged = |doc: &Document| {
+            assert_eq!(doc.save(), before, "the document is unchanged");
+            assert_eq!((doc.undo_depth(), doc.redo_depth()), (undo, redo));
+            assert_eq!(doc.material_ids().len(), materials, "no material left");
+        };
+
+        // A vast width is refused as too big before the kernel is asked to
+        // build it (`image_import::MAX_SIDE`), with its own reason.
+        let err = import_by_extension(&mut doc, "/pics/vast.png", &at(1e200)).unwrap_err();
+        assert_eq!(err.name, "load_failed");
+        assert!(
+            err.explanation.contains("each side must be at most"),
+            "{}",
+            err.explanation
+        );
+        unchanged(&doc);
+
+        let mut out =
+            image_import::import(&png, None, "speck", &image_import::Placement::ground(1.0))
+                .unwrap();
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
+        }
+        let Err(err) = ingest_picture(&mut doc, "/pics/speck.png", out.scene) else {
+            panic!("a face the kernel would skip is refused");
+        };
+        assert_eq!(err.name, "load_failed");
+        assert!(
+            err.explanation.contains("can't be built"),
+            "{}",
+            err.explanation
+        );
+        unchanged(&doc);
+
+        doc.redo().unwrap();
+        assert_eq!(doc.instance_ids().len(), 2, "the undone picture redoes");
     }
 
     #[test]

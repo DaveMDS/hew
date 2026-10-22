@@ -23,6 +23,7 @@ hlr = { workspace = true }
 pdfwrite = { workspace = true }
 mesh-export = { workspace = true }
 stl-import = { workspace = true }
+image-import = { workspace = true }
 gltf-import = { workspace = true }
 dae-import = { workspace = true }
 skp-import = { workspace = true }

@@ -209,6 +209,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'new', label: t`New`, description: t`Start a new, blank document.`, group: 'Actions' },
     { id: 'open', label: t`Open…`, description: t`Open a .hew file from disk.`, group: 'Actions' },
     { id: 'import', label: t`Import…`, description: t`Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.`, group: 'Actions', gate: 'canImport' },
+    { id: 'import-image', label: t`Import Image…`, description: t`Place a PNG or JPEG picture on a face or the ground.`, group: 'Actions', gate: 'canImport', synonyms: [t`picture`, t`photo`, t`image`, t`reference`, t`place image`, t`png`, t`jpeg`, t`jpg`] },
     { id: 'export', label: t`Export…`, description: t`Export the model as glTF, STL, 3MF, USDZ, or an SVG line drawing — format chosen in the dialog.`, group: 'Actions', synonyms: [t`stl`, t`glb`, t`gltf`, t`3mf`, t`usdz`, t`usd`, t`ar`, t`quick look`, t`3d print`, t`slicer`, t`svg`, t`line drawing`, t`laser`, t`cnc`] },
     { id: 'print', label: t`Print…`, description: t`Print the current view to paper or PDF — standard, or to an exact scale across pages.`, group: 'Actions', synonyms: [t`pdf`, t`paper`, t`plot`, t`scale`, t`template`, t`to scale`, t`page`] },
     { id: 'draw-3d-text', label: t`3D Text…`, description: t`Place extruded, watertight text on a face or the ground.`, group: 'Actions', synonyms: [t`text`, t`font`, t`letters`, t`lettering`, t`engrave`, t`extrude text`], gate: 'canDrawText' },

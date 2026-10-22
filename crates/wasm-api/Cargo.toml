@@ -29,6 +29,7 @@ gltf-import.workspace = true
 skp-import.workspace = true
 skp-export.workspace = true
 stl-import.workspace = true
+image-import.workspace = true
 slotmap.workspace = true
 wasm-bindgen.workspace = true
 js-sys.workspace = true

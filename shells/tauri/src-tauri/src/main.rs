@@ -3117,6 +3117,16 @@ fn main() {
                 None,
                 None,
             )?;
+            // Place Image: gated like Import (a picture is placed as an
+            // instance, which an open component refuses).
+            let file_import_image = gated_item(
+                handle,
+                &mut gated,
+                "file-import-image",
+                lbl!("file-import-image"),
+                None,
+                None,
+            )?;
             // Export… opens the unified Export dialog (format — glTF/GLB or
             // STL — chosen there); there used to be a second "Export STL…"
             // item here, but the design calls for format choice handled in-dialog like
@@ -3197,6 +3207,7 @@ fn main() {
                 .item(&file_purge_unused)
                 .separator()
                 .item(&file_import)
+                .item(&file_import_image)
                 .item(&file_export)
                 .separator()
                 .item(&file_open_on_phone)
@@ -4535,6 +4546,7 @@ fn main() {
                 "file-new" => "new",
                 "file-open" => "open",
                 "file-import" => "import",
+                "file-import-image" => "import-image",
                 "file-export" => "export",
                 "file-print" => "print",
                 "file-open-on-phone" => "open-on-phone",

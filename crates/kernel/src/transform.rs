@@ -26,6 +26,12 @@ pub enum TransformError {
     /// outward normal, so it is refused rather than silently producing an
     /// inside-out object.
     Reflection,
+    /// The map would leave some face's texture frame (its
+    /// [`crate::material::UvFrame`]) degenerate: an extreme stretch or
+    /// squash that shrinks a gradient past what the frame can hold, or
+    /// turns its two axes (near-)parallel. Refused rather than storing a
+    /// frame that would smear the face's picture to a line.
+    DegenerateTextureFrame,
 }
 
 impl std::fmt::Display for TransformError {
@@ -37,6 +43,9 @@ impl std::fmt::Display for TransformError {
             }
             TransformError::Reflection => {
                 write!(f, "transform flips orientation (negative determinant)")
+            }
+            TransformError::DegenerateTextureFrame => {
+                write!(f, "transform would squash a face's texture frame")
             }
         }
     }

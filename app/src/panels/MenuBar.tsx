@@ -53,6 +53,9 @@ export interface MenuBarProps {
   revertToSavedDisabled?: boolean
   /** Import a model file (COLLADA / SketchUp / glTF — chosen in the file dialog). */
   onImport: () => void
+  /** Place a picture (PNG/JPEG) in the current document — Place Image.
+   *  Optional so hosts without it (Shop Mode) leave the item out. */
+  onImportImage?: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
   onExport: () => void
   /** File ▸ Print… — the Print dialog (paper or PDF, standard or to scale;
@@ -705,6 +708,7 @@ export function MenuBar({
   onRevertToSaved,
   revertToSavedDisabled = false,
   onImport,
+  onImportImage,
   onExport,
   onPrint,
   onSaveToLibrary,
@@ -916,6 +920,13 @@ export function MenuBar({
               disabled={editGates?.canImport === false}
               onClick={withClose(onImport)}
             />
+            {onImportImage !== undefined && (
+              <MenuItem
+                label={t`Import Image…`}
+                disabled={editGates?.canImport === false}
+                onClick={withClose(onImportImage)}
+              />
+            )}
             <MenuItem label={t`Export…`} onClick={withClose(onExport)} />
             {onOpenOnPhone !== undefined && (
               <>

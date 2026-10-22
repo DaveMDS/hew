@@ -14,6 +14,7 @@ order: 19
 | 3MF (`.3mf`) | — | ✓ |
 | USDZ (`.usdz`) | — | ✓ |
 | SVG line drawing (`.svg`) | — | ✓ |
+| Pictures (`.png`, `.jpg`) | ✓ (placed as an image) | — |
 
 ## Importing
 
@@ -44,6 +45,14 @@ Because STL carries no unit information at all, Hew asks once per import: millim
 A single-part file becomes one Object. A multi-part plate — several disconnected shapes saved into one `.stl`, common for a print batch — comes back as one Object per part, each independently assessed for watertightness. Objects are named from the file: `bunny.stl` gives you "bunny", or "bunny", "bunny (2)", "bunny (3)" for a multi-part file. A part with a gap in it imports anyway as an open shape, exactly like a COLLADA or glTF mesh with a gap: never refused, never patched shut behind your back.
 
 A hollow model — one whose outer wall encloses a separate inner wall (vase-mode or explicit wall-thickness prints) — reconstructs into one watertight Object with the inner wall as a cavity, a real void in the material, exactly how a hollow is meant to be. A solid piece floating inside that cavity comes in as its own separate Object.
+
+### Pictures (`.png`, `.jpg`)
+
+To trace over a floor plan, a photo of a wall, or a sketch, place it in the model as a picture: **File ▸ Import Image…**, or drop a PNG or JPEG onto the view. Unlike File ▸ Import…, this adds to the model you have open.
+
+The picture follows the cursor, 1 m wide, on the face under it or on the ground. Click where one corner goes, then move to size it: it keeps its proportions, and it grows toward whichever side of that corner you move to. Click again to place it, or type the width: the picture takes that width at once, and Enter or a click places it. Esc after the first click starts over; Esc before it cancels. To place a picture on a plane of its own, press an arrow key before the first click, the same way you lock a plane for the drawing tools: right for red, left for green, up for blue. With a plane locked, the first Esc unlocks it and leaves the picture ready to place; the next Esc cancels.
+
+A placed picture is a component named after the file, holding one face painted with the picture, the way a SketchUp image arrives. It stands upright on a wall and faces you. Placing it is one undo step, and it is selected afterward. To size it to a known length, double-click it to open it, measure an edge whose real length you know with the Tape Measure, type that length, and choose to resize: the picture stays stretched over the face. Hew keeps the picture file exactly as it is, so a large photo makes a large model file; pictures over 64 megapixels are refused, so save a smaller copy first. A picture can also be placed too small or too big: each side has to be at least 0.001 mm and at most 1,000,000 m, and Hew tells you which when you drag or type a size outside that.
 
 ## Making imported shapes solid
 

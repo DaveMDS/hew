@@ -320,7 +320,7 @@ impl Registry {
             S,
             Host,
             Std,
-            "Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline. Additive: existing geometry is untouched.",
+            "Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline, or place a PNG/JPEG picture (a component holding one face painted with it, at origin/u/v, width meters wide). Additive: existing geometry is untouched.",
         );
         add(
             "hew.doc.purge_unused",
@@ -1506,6 +1506,22 @@ impl Registry {
                         "type": "object",
                         "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
                         "additionalProperties": { "type": "object" }
+                    },
+                    "origin": {
+                        "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                        "description": "a picture's (.png/.jpg/.jpeg) lower-left corner, meters; default [0,0,0]"
+                    },
+                    "u": {
+                        "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                        "description": "a picture's width direction; default [1,0,0]"
+                    },
+                    "v": {
+                        "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                        "description": "toward a picture's top (not parallel to u); default [0,1,0]"
+                    },
+                    "width": {
+                        "type": "number", "exclusiveMinimum": 0,
+                        "description": "a picture's width in meters (its height follows from its proportions); default 1"
                     }
                 },
                 "required": ["path"],

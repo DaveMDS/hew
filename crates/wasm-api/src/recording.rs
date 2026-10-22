@@ -736,6 +736,22 @@ pub enum RecordedCall {
         unit_scale: f64,
         name: Option<String>,
     },
+    /// `place_image(image, format, name, origin, u, v, width)` — Place
+    /// Image's commit (and `hew.doc.import` of a picture), embedding the
+    /// picture's bytes under the same size cap as the other imports
+    /// (`ImportOmitted` past it). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings replay
+    /// unchanged; one that places a picture fails to parse on older builds —
+    /// loudly, never silently divergent.
+    PlaceImage {
+        image: Vec<u8>,
+        format: u8,
+        name: String,
+        origin: [f64; 3],
+        u: [f64; 3],
+        v: [f64; 3],
+        width: f64,
+    },
     /// `set_axes(origin, x, y)` — the Axes tool's commit, or Reset Axes
     /// passing world identity's own components (tool-parity design §4).
     /// `z` is not recorded — it is always `x × y`, re-derived on replay
