@@ -28,7 +28,8 @@ Draws a chain of straight edges.
 2. Each further click commits one segment and continues the chain, with a rubber-band preview to the cursor.
 3. Closing a loop (clicking back on your starting point, or completing any closed circuit) automatically forms a face and ends the chain.
 
-To finish a chain *without* closing it: double-click, press `Enter` with nothing typed, or press `Esc` once. Pressing `Esc` again cancels the tool's gesture entirely.
+To finish a chain *without* closing it: click the last point again (or double-click it), press `Enter` with nothing typed, or press `Esc` once. Pressing `Esc` again cancels the tool's gesture entirely.
+
 
 **Exact lengths:** once a chain is started, type a length (e.g. `750mm`) and press `Enter` — the next segment commits at exactly that length along the direction you're pointing.
 
@@ -108,7 +109,7 @@ A solid's own edges are not part of the drawing. You can snap to them and draw u
 
 At the top level, any plain object's face is drawable directly. Faces inside a **group or component** are the exception: double-click in first, and drawing is then scoped to what you entered. Starting a line on an edge or corner two faces share is fine; the face the line runs across is settled by where you put its second point (or by an arrow-key lock), so a line from the midpoint of a box's top edge to the midpoint of the opposite one cuts the top, not the side.
 
-A line chain on a face may run from edge to edge, cross shapes you've drawn there, or wander across the middle; an arc arched over a rectangle splits it. The whole chain is one step, so one `Ctrl+Z` takes it all back. A circle or arc you drew stays one **Circle** or **Arc** when other shapes cut it apart, so you can select it whole and delete it in one step.
+A line chain on a face may run from edge to edge, cross shapes you've drawn there, or wander across the middle; an arc arched over a rectangle splits it. Each segment is its own step, so `Ctrl+Z` takes the chain back one segment at a time. A circle or arc you drew stays one **Circle** or **Arc** when other shapes cut it apart, so you can select it whole and delete it in one step.
 
 ![A box with a circular boss pulled out and a circular recess pushed in, both drawn directly on its front face](/docs/drawing-on-face.webp)
 

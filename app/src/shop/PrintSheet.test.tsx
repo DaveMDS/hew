@@ -13,6 +13,7 @@ import type { ViewportApi } from '../viewport/Viewport'
 import type { PrintHost } from '../print/printHost'
 import { getPrintPrefs, setPrintPrefs, DEFAULT_PRINT_PREFS } from '../settings/print'
 import { buildPrintPdf } from '../print/pdf'
+import type { AnnotationDrawing } from '../viewport/SceneRenderer'
 
 vi.mock('../print/pdf', () => ({
   buildPrintPdf: vi.fn().mockResolvedValue(new Uint8Array([0x25, 0x50, 0x44, 0x46])),
@@ -43,10 +44,7 @@ function createFakeApi() {
     getSelectedIds: vi.fn(() => ({ objects: [] as bigint[], instances: [] as bigint[] })),
     getHiddenIds: vi.fn(() => ({ objects: [] as bigint[], instances: [] as bigint[] })),
     getSectionState: vi.fn(() => null as { origin: [number, number, number]; normal: [number, number, number]; active: boolean } | null),
-    collectAnnotationDrawing: vi.fn(() => ({
-      segments: [] as number[],
-      labels: [] as { position: [number, number, number]; text: string; detached: boolean }[],
-    })),
+    collectAnnotationDrawing: vi.fn((): AnnotationDrawing => ({ segments: [], labels: [], arrows: [] })),
     renderPrintPages: vi.fn(async (pages: { widthPx: number; heightPx: number }[], opts: { format: string }) =>
       pages.map(() => new Blob([new Uint8Array(4)], { type: opts.format })),
     ),

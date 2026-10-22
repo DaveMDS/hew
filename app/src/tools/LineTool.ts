@@ -50,9 +50,10 @@
  *      case is instead caught and surfaced honestly via a toast rather than
  *      silently accepted as an open (but visually closed-looking) chain.
  *   5. Finishing without closing: Enter on an empty buffer, a double-click,
- *      or Escape ends the chain but KEEPS the committed sketch geometry —
- *      just resets the tool to idle. A second Escape (already idle) is a
- *      full cancel().
+ *      a click back on the last placed point (at any pace — see
+ *      `_isReclick`), or Escape ends the chain but KEEPS the committed
+ *      sketch geometry — just resets the tool to idle. A second Escape
+ *      (already idle) is a full cancel().
  *
  * Face mode (an eligible Object face is under the cursor):
  *   1. Idle: snapConstraint picks the hovered eligible face and returns its
@@ -65,11 +66,11 @@
  *      mode: the engine lowers it into face topology where it separates
  *      regions, the object's owned sketch where it is a loose line, or a
  *      free sketch over no face. No chain has to reach a face edge. A click
- *      back on the chain's start ends it; Enter / double-click / Escape end
- *      it too (nothing is pending). `onFaceImprint(object)` / `onCommit`
- *      refresh the viewport per what the draft's report says changed. A
- *      typed kernel error is surfaced via the toast callback; no geometry
- *      fix-up is attempted.
+ *      back on the chain's start ends it; a click back on its last point,
+ *      Enter, double-click, or Escape end it too (nothing is pending).
+ *      `onFaceImprint(object)` / `onCommit` refresh the viewport per what
+ *      the draft's report says changed. A typed kernel error is surfaced via
+ *      the toast callback; no geometry fix-up is attempted.
  *
  * VCB length entry (both modes): capturingInput() is true once at least one
  * point is placed. Typing digits/./- (and imperial tokens) feeds
@@ -101,6 +102,7 @@ import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, isPointOnD
 import { getDrawingAxes } from './drawingAxes'
 import { ineligibleFacePlane, FacePickCache, defaultFaceEligible, worldFaceNormal, worldFacePlane, snapOnObjectBoundary, type FaceEligible, type FaceThroughPick } from './faceDraw'
 import { PlanePin } from './planePin'
+import { isCoarsePointer } from '../platform'
 
 export type OnLineCommit = (sketchHandle: bigint) => void
 export type OnFaceImprint = (objectId: bigint) => void
@@ -155,6 +157,20 @@ const CHAIN_VERTEX_MERGE_EPS = 1e-9
  *  one-value band — agreeing on the magnitude but not on the boundary is not
  *  agreeing. */
 const DEGENERATE_SEGMENT_EPS = 1e-9
+
+/** Toast for a click that resolved onto the chain's last point while the
+ *  cursor was somewhere else (a snap that collapsed back onto it). A click
+ *  ON the last point finishes the chain instead (`_isReclick`). On a touch
+ *  screen (`isCoarsePointer`) there is no cursor to move and no Enter key,
+ *  so it speaks of taps, and of tapping the point again, which finishes. */
+export function samePointMessage(): string {
+  return isCoarsePointer()
+    ? t`That tap landed on the last point. Tap somewhere else to continue, or tap it again to finish.`
+    : t`That click landed on the last point. Move the cursor off it and click again, or press Enter to finish.`
+}
+
+/** Toast for a typed length of zero (`_commitTyped`, `_retypeLast`). */
+const zeroLengthMessage = (): string => t`A line needs a length. Type a length other than 0.`
 
 /**
  * Screen-pixel radius within which the FROM-POINT closing inference (module
@@ -900,6 +916,22 @@ export class LineTool implements Tool {
    *  Cleared by the next pointer move or press. */
   private _closedByClick = false
 
+  /** Set when a click back on the last placed point finished the chain
+   *  (`_finishOnReclick`), so the `dblclick` a quick double-click there
+   *  still delivers is consumed by `onDoubleClick` rather than handed to the
+   *  Viewport's enter-context gesture. That happens when the second press
+   *  of a double-click reaches the tool: the Viewport's own click count
+   *  (multiClick.ts) is deliberately stricter than the browser's, so a
+   *  double-click with a long gap gets both presses routed AND a `dblclick`.
+   *
+   *  Unlike `_closedByClick`, a pointer move does not clear it: a hand
+   *  resting on the mouse jitters between the press and the `dblclick`. It
+   *  cannot go stale either: every press this tool receives clears it, and
+   *  a later double-click's first press is one it receives — unless that
+   *  press pairs with the finishing one, in which case the `dblclick` is
+   *  this same gesture's. */
+  private _finishedByReclick = false
+
   onPointerMove(snap: Snap | null, ray: Ray): void {
     this._lastViewDir = ray.direction
     this._lastRayDir = ray.direction
@@ -1112,12 +1144,15 @@ export class LineTool implements Tool {
   onPointerDown(snap: Snap | null, ray: Ray): void {
     this._lastRayDir = ray.direction
     this._closedByClick = false
+    this._finishedByReclick = false
     // A new press ends the window; the segment it places re-arms it.
     this.retype.close()
     // The phantom second pointerdown of a double-click (used to finish a
     // chain) is suppressed upstream in the Viewport by `ev.detail >= 2`, so a
     // genuine double-click places exactly one point then `onDoubleClick` ends
-    // the chain. Every distinct click reaches here, regardless of cadence.
+    // the chain. Every distinct click reaches here, regardless of cadence —
+    // so a SLOW click back on the last point (which never produces a
+    // `dblclick`) finishes the chain here instead (`_isReclick`).
     this._lastViewDir = ray.direction
     if (this._currentMode(ray, snap) === 'face') {
       this._onPointerDownFace(snap, ray)
@@ -1341,6 +1376,12 @@ export class LineTool implements Tool {
       this._closedByClick = false
       return true
     }
+    // Likewise the dblclick of a double-click whose second press already
+    // finished the chain by landing on its last point (`_finishOnReclick`).
+    if (this._finishedByReclick) {
+      this._finishedByReclick = false
+      return true
+    }
     if (!this.capturingInput()) return false
     this._endChain()
     return true
@@ -1387,8 +1428,45 @@ export class LineTool implements Tool {
     this.wasmScene.clear_transient_segments()
   }
 
+  /**
+   * Whether a click that resolved to `point` is a click back ON `last`, the
+   * chain's last placed point: the point is `last` (within the kernel's own
+   * coincidence line, `DEGENERATE_SEGMENT_EPS`) AND the pick ray actually
+   * passes over it (within the same pixel radius the from-point inference
+   * acquires at, `_fromPointTolerance`). Such a click finishes the chain
+   * (`_finishOnReclick`), as a double-click does, at any pace.
+   *
+   * The ray test keeps the honest refusal for the other way a click can
+   * land on `last`: a snap that collapses back onto it while the cursor is
+   * visibly elsewhere (tool-parity playtest-2 defect — an inference
+   * candidate for an axis the cursor never moved along). Finishing the chain
+   * there would swallow a click the user meant to place; it toasts instead.
+   */
+  private _isReclick(point: V3, last: V3, ray: Ray): boolean {
+    if (segmentLength(point, last) > DEGENERATE_SEGMENT_EPS) return false
+    const d = ray.direction
+    const dLen = Math.hypot(d[0], d[1], d[2])
+    if (!(dLen > 0)) return false
+    const w: V3 = [last[0] - ray.origin[0], last[1] - ray.origin[1], last[2] - ray.origin[2]]
+    const t = dotV3(w, d) / dLen
+    if (t < 0) return false // behind the eye
+    const off = Math.sqrt(Math.max(0, dotV3(w, w) - t * t))
+    return off <= this._fromPointTolerance(last)
+  }
+
+  /** A click back on the last placed point (`_isReclick`): end the chain,
+   *  keeping everything committed, with no toast — the same finish as Enter
+   *  on an empty buffer or a double-click. A chain with only its first
+   *  point placed just ends. */
+  private _finishOnReclick(): void {
+    this._endChain()
+    this._finishedByReclick = true
+  }
+
   cancel(): void {
     this.retype.close()
+    this._closedByClick = false
+    this._finishedByReclick = false
     this._snapProjected = false
     this.planeStage = { kind: 'idle' }
     this.faceStage = { kind: 'idle' }
@@ -1471,6 +1549,14 @@ export class LineTool implements Tool {
    * direction is available at all.
    */
   private _commitTyped(distance: number): void {
+    // A typed zero would place the last point again: say so in terms of
+    // what was typed, not as a click on the same point.
+    if (Math.abs(distance) <= DEGENERATE_SEGMENT_EPS) {
+      this.onToast(zeroLengthMessage())
+      this.typed = ''
+      this.onMeasurementCb('')
+      return
+    }
     if (this.planeStage.kind === 'anchored') {
       const { plane, target, anchor } = this.planeStage
       const cursor = this._lastPlaneCursor ?? anchor
@@ -1515,7 +1601,12 @@ export class LineTool implements Tool {
       // promised — never the raw, un-inferred point underneath it.
       const resolved = this._resolvePlaneCursor(snap, ray, plane)
       if (resolved === null) return
-      this._commitPlaneSegment(plane, target, anchor, this._displayedEnd(anchor, resolved.point, resolved.snap, this._chainVertices.map((v) => v.point)))
+      const end = this._displayedEnd(anchor, resolved.point, resolved.snap, this._chainVertices.map((v) => v.point))
+      if (this._isReclick(end, anchor, ray)) {
+        this._finishOnReclick()
+        return
+      }
+      this._commitPlaneSegment(plane, target, anchor, end)
     }
   }
 
@@ -1572,11 +1663,12 @@ export class LineTool implements Tool {
     // discard the click with no toast, no error, and no visible feedback at
     // all, the worst failure mode for a drawing tool). `onToast` here is a
     // defensive backstop independent of WHY the click collapsed — an honest
-    // "nothing to commit" beats silence whether the cause is an ordinary
-    // same-point re-click or a genuine snap-resolution defect, and mirrors
-    // `OffsetTool._commit`'s identical guard/toast for the same reason.
+    // "nothing to commit" beats silence — and mirrors `OffsetTool._commit`'s
+    // identical guard/toast for the same reason. A click ON the last point
+    // never gets here: it finishes the chain (`_isReclick`); a typed zero is
+    // caught by `_commitTyped`.
     if (segmentLength(anchor, cursor) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
+      this.onToast(samePointMessage())
       return false
     }
 
@@ -1730,7 +1822,13 @@ export class LineTool implements Tool {
     } else {
       const cursor = this._faceCursor(snap, ray)
       if (cursor === null) return
-      this._appendFacePoint(this._displayedEnd(this.faceStage.points[this.faceStage.points.length - 1], cursor, snap, this.faceStage.points))
+      const last = this.faceStage.points[this.faceStage.points.length - 1]
+      const end = this._displayedEnd(last, cursor, snap, this.faceStage.points)
+      if (this._isReclick(end, last, ray)) {
+        this._finishOnReclick()
+        return
+      }
+      this._appendFacePoint(end)
     }
   }
 
@@ -1743,16 +1841,15 @@ export class LineTool implements Tool {
    * finding 2: this face-mode guard had the same collapse-to-the-last-point
    * failure mode as the plane-mode one but, unlike it, discarded the click
    * with no toast at all. `onToast` here is the same defensive backstop for
-   * the same reason — an honest "nothing to commit" beats silence whether
-   * the cause is an ordinary same-point re-click or a genuine
-   * snap-resolution defect.
+   * the same reason — an honest "nothing to commit" beats silence. A click
+   * ON the last point never gets here: it finishes the chain (`_isReclick`).
    */
   private _appendFacePoint(point: V3): boolean {
     if (this.faceStage.kind !== 'anchored') return false
     const { points, object, face } = this.faceStage
     const last = points[points.length - 1]
     if (segmentLength(last, point) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
+      this.onToast(samePointMessage())
       return false
     }
 
@@ -1842,7 +1939,7 @@ export class LineTool implements Tool {
     // near-zero length is refused — and never silently (this file's rule:
     // an honest "nothing to commit" beats silence, see `_commitPlaneSegment`).
     if (Math.abs(distance) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
+      this.onToast(zeroLengthMessage())
       this.typed = ''
       this.onMeasurementCb('')
       return

@@ -397,6 +397,10 @@ describe('texture reallocation across a canvas-resizing rasterization (WebGL2 te
     // otherwise this test would vacuously pass without exercising the bug.
     expect(wFar).not.toBe(wNear)
     expect(hFar).not.toBe(hNear)
+    // Both the first texture and the reallocated one hold sRGB pixels: read
+    // as linear, the light theme's near-black label ink renders mid gray.
+    expect(textureNear.colorSpace).toBe(THREE.SRGBColorSpace)
+    expect(textureFar.colorSpace).toBe(THREE.SRGBColorSpace)
 
     // The actual regression assertion.
     expect(textureFar).not.toBe(textureNear)

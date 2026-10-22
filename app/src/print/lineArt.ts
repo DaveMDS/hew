@@ -8,6 +8,7 @@
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { PrintCameraSpec } from '../viewport/printPass'
 import type { PrintLayout, TileSpec } from './layout'
+import type { AnnotationDrawing } from '../viewport/SceneRenderer'
 
 export type LineKind = 0 | 1 | 2 | 3 | 4 // hard, silhouette, soft, section, hidden
 
@@ -23,7 +24,19 @@ export interface LineDrawingData {
 export interface AnnotationOverlay {
   /** [ax, ay, bx, by, …] */
   segments: number[]
-  labels: { x: number; y: number; text: string; detached: boolean }[]
+  labels: {
+    x: number
+    y: number
+    text: string
+    detached: boolean
+    /** Radial labels: unit direction in the view plane to push the label
+     * along, past its anchor, so it clears its leader (see `labelAnchor`). */
+    push?: { dx: number; dy: number }
+  }[]
+  /** Arrowheads in the view plane: tip, unit direction back along the line,
+   * and the longest the head may be (model metres, after foreshortening).
+   * Sized at emit time from the paper label size. */
+  arrows: { x: number; y: number; dx: number; dy: number; maxLen: number }[]
 }
 
 export interface LineArtRequest {
@@ -85,6 +98,53 @@ export function requestLineDrawing(req: LineArtRequest): LineArtResult {
 export const LINE_ART_WEIGHTS_MM = { hard: 0.35, silhouette: 0.35, section: 0.5, soft: 0.18, hidden: 0.25, annotation: 0.25 } as const
 
 const LABEL_MM = 3.0
+/** Arrowhead length on paper: 0.9 of the label height, as on screen. */
+const ARROW_MM = 0.9 * LABEL_MM
+const ARROW_WIDTH_FRAC = 0.35
+
+/** The two wing segments (model units) of each arrowhead at `lenPerMm` model
+ * units per paper millimeter, as `M..L..` path text through `fmt`. */
+export function arrowheadPath(
+  arrows: NonNullable<AnnotationOverlay['arrows']>,
+  lenPerMm: number,
+  fmt: (x: number, y: number) => string,
+): string {
+  let d = ''
+  for (const a of arrows) {
+    const len = Math.min(ARROW_MM * lenPerMm, a.maxLen)
+    if (!(len > 0)) continue
+    const w = len * ARROW_WIDTH_FRAC
+    const bx = a.x + a.dx * len
+    const by = a.y + a.dy * len
+    d += `M${fmt(a.x, a.y)}L${fmt(bx - a.dy * w, by + a.dx * w)}M${fmt(a.x, a.y)}L${fmt(bx + a.dy * w, by - a.dx * w)}`
+  }
+  return d
+}
+
+/** Rough paper width of a label: an average glyph is about 0.55 of the
+ * font size wide. The page has no text metrics, so this stands in. */
+function labelWidthMm(text: string): number {
+  return text.length * 0.55 * LABEL_MM
+}
+
+/**
+ * Where a label is drawn, in view-plane model units. A pushed (radial) label
+ * moves past its anchor along `push` until its upright paper box clears the
+ * anchor, plus the same 0.4-of-height padding the screen uses, so a printed
+ * radius reads beside its leader end rather than on top of it.
+ */
+export function labelAnchor(l: AnnotationOverlay['labels'][number], lenPerMm: number): { x: number; y: number } {
+  if (l.push === undefined) return { x: l.x, y: l.y }
+  const halfW = labelWidthMm(l.text) / 2
+  const halfH = LABEL_MM / 2
+  // Distance from the box centre to its edge along the push direction.
+  const toEdge = Math.min(
+    Math.abs(l.push.dx) > 1e-9 ? halfW / Math.abs(l.push.dx) : Infinity,
+    Math.abs(l.push.dy) > 1e-9 ? halfH / Math.abs(l.push.dy) : Infinity,
+  )
+  const mmPush = toEdge + 0.4 * LABEL_MM
+  return { x: l.x + l.push.dx * mmPush * lenPerMm, y: l.y + l.push.dy * mmPush * lenPerMm }
+}
 
 function num(v: number): string {
   // Six decimals: a micron when the unit is metres (tile SVGs), a nanometre
@@ -160,10 +220,15 @@ export function lineArtSvgForTile(
       }
       parts.push(`<path class="annotation" stroke-width="${num(mm(LINE_ART_WEIGHTS_MM.annotation))}" d="${d}"/>`)
     }
+    if (a.arrows !== undefined && a.arrows.length > 0) {
+      const d = arrowheadPath(a.arrows, mm(1), (x, y) => `${num(x)} ${num(y)}`)
+      if (d !== '') parts.push(`<path class="annotation-arrow" stroke-width="${num(mm(LINE_ART_WEIGHTS_MM.annotation))}" d="${d}"/>`)
+    }
     for (const l of a.labels) {
       // Labels are drawn upright in paper space: undo the y flip locally.
+      const at = labelAnchor(l, mm(1))
       parts.push(
-        `<text class="annotation-label" transform="translate(${num(l.x)} ${num(l.y)}) scale(1,-1)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(mm(LABEL_MM))}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="${num(mm(0.6))}" paint-order="stroke" stroke-linejoin="round">${esc(l.text)}</text>`,
+        `<text class="annotation-label" transform="translate(${num(at.x)} ${num(at.y)}) scale(1,-1)" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(mm(LABEL_MM))}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="${num(mm(0.6))}" paint-order="stroke" stroke-linejoin="round">${esc(l.text)}</text>`,
       )
     }
   }
@@ -173,7 +238,7 @@ export function lineArtSvgForTile(
 
 /** Project world annotation drawing into the view-plane frame of an ortho print camera. */
 export function projectAnnotationOverlay(
-  world: { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] },
+  world: AnnotationDrawing,
   camera: Extract<PrintCameraSpec, { kind: 'ortho' }>,
 ): AnnotationOverlay {
   const dir = norm(camera.dir)
@@ -201,9 +266,28 @@ export function projectAnnotationOverlay(
   }
   const labels = world.labels.map((l) => {
     const p = proj(l.position)
-    return { x: p[0], y: p[1], text: l.text, detached: l.detached }
+    const out: AnnotationOverlay['labels'][number] = { x: p[0], y: p[1], text: l.text, detached: l.detached }
+    if (l.pushDir !== undefined) {
+      const q = proj([l.position[0] + l.pushDir[0], l.position[1] + l.pushDir[1], l.position[2] + l.pushDir[2]])
+      const vx = q[0] - p[0]
+      const vy = q[1] - p[1]
+      const n = Math.hypot(vx, vy)
+      // Seen end-on there is no screen direction to push along.
+      if (n > 1e-9) out.push = { dx: vx / n, dy: vy / n }
+    }
+    return out
   })
-  return { segments, labels }
+  const arrows: NonNullable<AnnotationOverlay['arrows']> = []
+  for (const a of world.arrows) {
+    const t = proj(a.tip)
+    const e = proj([a.tip[0] + a.dir[0] * a.maxLen, a.tip[1] + a.dir[1] * a.maxLen, a.tip[2] + a.dir[2] * a.maxLen])
+    const vx = e[0] - t[0]
+    const vy = e[1] - t[1]
+    const l = Math.hypot(vx, vy)
+    if (l < 1e-9) continue // seen end-on: no readable head
+    arrows.push({ x: t[0], y: t[1], dx: vx / l, dy: vy / l, maxLen: l })
+  }
+  return { segments, labels, arrows }
 }
 
 function cross(a: [number, number, number], b: [number, number, number]): [number, number, number] {
@@ -264,8 +348,14 @@ export function lineArtSvgDocument(drawing: LineDrawingData, ratio: number, opts
       for (let i = 0; i + 3 < a.segments.length; i += 4) d += `M${num(a.segments[i] * k)} ${num(-a.segments[i + 1] * k)}L${num(a.segments[i + 2] * k)} ${num(-a.segments[i + 3] * k)}`
       parts.push(`<path class="annotation" stroke-width="${num(LINE_ART_WEIGHTS_MM.annotation)}" d="${d}"/>`)
     }
+    if (a.arrows !== undefined && a.arrows.length > 0) {
+      // Document units are paper millimeters; model metres scale by k.
+      const d = arrowheadPath(a.arrows.map((r) => ({ ...r, x: r.x * k, y: -r.y * k, dy: -r.dy, maxLen: r.maxLen * k })), 1, (x, y) => `${num(x)} ${num(y)}`)
+      if (d !== '') parts.push(`<path class="annotation-arrow" stroke-width="${num(LINE_ART_WEIGHTS_MM.annotation)}" d="${d}"/>`)
+    }
     for (const l of a.labels) {
-      parts.push(`<text class="annotation-label" x="${num(l.x * k)}" y="${num(-l.y * k)}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(LABEL_MM)}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="0.6" paint-order="stroke">${esc(l.text)}</text>`)
+      const at = labelAnchor(l, 1 / k)
+      parts.push(`<text class="annotation-label" x="${num(at.x * k)}" y="${num(-at.y * k)}" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif" font-size="${num(LABEL_MM)}" text-anchor="middle" dominant-baseline="middle" fill="${l.detached ? '#b3261e' : '#000'}" stroke="#fff" stroke-width="0.6" paint-order="stroke">${esc(l.text)}</text>`)
     }
   }
   parts.push('</g></svg>')

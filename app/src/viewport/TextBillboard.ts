@@ -427,9 +427,7 @@ export class TextBillboard {
     this.ctx = this.canvas.getContext('2d')
     this.canvas.width = 2
     this.canvas.height = 2
-    this.texture = new THREE.CanvasTexture(this.canvas)
-    this.texture.minFilter = THREE.LinearFilter
-    this.texture.magFilter = THREE.LinearFilter
+    this.texture = makeLabelTexture(this.canvas)
     const geo = new THREE.PlaneGeometry(1, 1)
     const mat = new THREE.MeshBasicMaterial({
       map: this.texture,
@@ -523,9 +521,7 @@ export class TextBillboard {
     ctx.fillText(label, cx, cy)
     if (dimsChanged) {
       this.texture.dispose()
-      this.texture = new THREE.CanvasTexture(this.canvas)
-      this.texture.minFilter = THREE.LinearFilter
-      this.texture.magFilter = THREE.LinearFilter
+      this.texture = makeLabelTexture(this.canvas)
       this.mesh.material.map = this.texture
       this.mesh.material.needsUpdate = true
     } else {
@@ -601,6 +597,20 @@ export class TextBillboard {
     this.mesh.geometry.dispose()
     this.mesh.material.dispose()
   }
+}
+
+/** The label canvas as a texture. The canvas holds sRGB pixels (the fill is
+ * an sRGB hex like every other color in the renderer), so the texture must
+ * say so: without `SRGBColorSpace` three reads the pixels as linear and the
+ * output conversion lightens them, which turned the light theme's near-black
+ * `0x23272e` text into a washed-out mid gray inside its white halo while the
+ * dark theme's near-white text barely changed. */
+export function makeLabelTexture(canvas: HTMLCanvasElement): THREE.CanvasTexture {
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.colorSpace = THREE.SRGBColorSpace
+  texture.minFilter = THREE.LinearFilter
+  texture.magFilter = THREE.LinearFilter
+  return texture
 }
 
 /** Matches `--font-family-ui` (theme/tokens.css) — canvas text has no

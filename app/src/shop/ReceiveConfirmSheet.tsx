@@ -73,6 +73,7 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
       />
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={t`Open shared model?`}
         style={
           isLandscape

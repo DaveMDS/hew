@@ -679,3 +679,44 @@ export function pushCenterTick(positions: number[], center: V3, planeNormal: V3,
     center[0] + v[0] * half, center[1] + v[1] * half, center[2] + v[2] * half,
   )
 }
+
+// ---------------------------------------------------------------- arrowheads
+
+/** Arrowhead length as a fraction of the label's on-screen glyph height. */
+export const ARROW_LEN_TEXT_FRAC = 0.9
+/** The heads of one dimension together cover at most this share of the line. */
+export const ARROW_MAX_LINE_COVER = 0.6
+
+/**
+ * Largest world-space length one arrowhead may have: `heads` heads on a line
+ * of `lineLen` cover at most `ARROW_MAX_LINE_COVER` of it between them.
+ */
+export function arrowMaxLength(lineLen: number, heads: number): number {
+  return (ARROW_MAX_LINE_COVER * lineLen) / Math.max(1, heads)
+}
+
+/**
+ * World-space arrowhead length: `pxLen` screen pixels at `worldPerPixel`,
+ * never longer than `maxLen`. Zero for a degenerate scale.
+ */
+export function arrowWorldLength(pxLen: number, worldPerPixel: number, maxLen: number): number {
+  if (!(worldPerPixel > 0)) return 0
+  return Math.min(pxLen * worldPerPixel, maxLen)
+}
+
+/**
+ * World size of one screen pixel at `point` for `camera`: depth-dependent for
+ * a perspective camera (evaluated at the point's distance), depth-independent
+ * for an orthographic one. Same math as `CameraRig.worldPerPixel`.
+ */
+export function cameraWorldPerPixelAt(camera: THREE.Camera, point: V3, viewportHeightPx: number): number {
+  if (viewportHeightPx <= 0) return 0
+  if ((camera as THREE.OrthographicCamera).isOrthographicCamera === true) {
+    const o = camera as THREE.OrthographicCamera
+    if (o.zoom <= 0) return 0
+    return (o.top - o.bottom) / o.zoom / viewportHeightPx
+  }
+  const p = camera as THREE.PerspectiveCamera
+  const dist = Math.hypot(point[0] - camera.position.x, point[1] - camera.position.y, point[2] - camera.position.z)
+  return (2 * dist * Math.tan((p.fov * Math.PI) / 360)) / viewportHeightPx
+}

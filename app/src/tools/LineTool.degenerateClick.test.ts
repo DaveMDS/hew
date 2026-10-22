@@ -19,6 +19,8 @@ import type { Ray } from '../viewport/math'
 import { draftMock } from './draftMock'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
+/** A ray well away from the face chain's anchor (0, 0, 1): the cursor moved. */
+const RAY_ELSEWHERE: Ray = { origin: [0.4, 0.3, 5], direction: [0, 0, -1] }
 
 function makeSnap(p: readonly [number, number, number], kind: string = 'ground'): Snap {
   return { x: p[0], y: p[1], z: p[2], kind }
@@ -122,8 +124,10 @@ describe('LineTool — a click that resolves back onto the anchor is refused AUD
 
     // Second click resolves to the SAME point as the anchor — the face-mode
     // counterpart of the plane-mode repro above (e.g. a snap candidate that
-    // collapses back onto the last placed point).
-    tool.onPointerDown(makeSnap([0, 0, 1], 'face'), RAY)
+    // collapses back onto the last placed point) — with the cursor visibly
+    // elsewhere. (With the cursor ON the anchor, the click finishes the
+    // chain instead — #36, LineTool.finishOnReclick.test.ts.)
+    tool.onPointerDown(makeSnap([0, 0, 1], 'face'), RAY_ELSEWHERE)
 
     // Refused, but AUDIBLY: no cut committed, but the user is told why.
     expect(splitFace).not.toHaveBeenCalled()

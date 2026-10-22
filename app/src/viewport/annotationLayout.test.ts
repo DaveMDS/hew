@@ -34,6 +34,11 @@ import {
   directionsParallel,
   collinearOffset,
   findAlignmentSnap,
+  arrowMaxLength,
+  arrowWorldLength,
+  cameraWorldPerPixelAt,
+  ARROW_MAX_LINE_COVER,
+  ARROW_LEN_TEXT_FRAC,
   type DimensionLineCandidate,
 } from './annotationLayout'
 
@@ -536,5 +541,78 @@ describe('findAlignmentSnap', () => {
 
   it('no candidates -> null', () => {
     expect(findAlignmentSnap([0, 0, 0], [1, 0, 0], [2, 1.02, 0], FLAT_NORMAL, [], 0.15)).toBeNull()
+  })
+})
+
+describe('arrowMaxLength', () => {
+  it('splits the covered share of the line between the heads', () => {
+    expect(arrowMaxLength(10, 1)).toBeCloseTo(ARROW_MAX_LINE_COVER * 10, 12)
+    expect(arrowMaxLength(10, 2)).toBeCloseTo(ARROW_MAX_LINE_COVER * 5, 12)
+  })
+  it('treats zero or negative head counts as one (no divide by zero)', () => {
+    expect(arrowMaxLength(10, 0)).toBeCloseTo(arrowMaxLength(10, 1), 12)
+    expect(arrowMaxLength(10, -3)).toBeCloseTo(arrowMaxLength(10, 1), 12)
+  })
+  it('is zero for a zero-length line', () => {
+    expect(arrowMaxLength(0, 2)).toBe(0)
+  })
+  it('ties the head length to the label glyph height', () => {
+    expect(ARROW_LEN_TEXT_FRAC).toBeGreaterThan(0)
+    expect(ARROW_LEN_TEXT_FRAC).toBeLessThanOrEqual(1)
+  })
+})
+
+describe('arrowWorldLength', () => {
+  it('is pixels times world-per-pixel when under the cap', () => {
+    expect(arrowWorldLength(12, 0.01, 1)).toBeCloseTo(0.12, 12)
+  })
+  it('is clamped to the cap when the pixel size is longer', () => {
+    expect(arrowWorldLength(12, 0.01, 0.05)).toBe(0.05)
+  })
+  it('is zero for a zero, negative, or NaN scale', () => {
+    expect(arrowWorldLength(12, 0, 1)).toBe(0)
+    expect(arrowWorldLength(12, -1, 1)).toBe(0)
+    expect(arrowWorldLength(12, NaN, 1)).toBe(0)
+  })
+})
+
+describe('cameraWorldPerPixelAt', () => {
+  it('perspective: depends on the distance to the point', () => {
+    const cam = perspCamera([0, 0, 10], [0, 0, 0], 60)
+    const near = cameraWorldPerPixelAt(cam, [0, 0, 5], 600)
+    const far = cameraWorldPerPixelAt(cam, [0, 0, -10], 600)
+    // 5 and 20 units away: 2 d tan(30deg) / 600.
+    expect(near).toBeCloseTo((2 * 5 * Math.tan(Math.PI / 6)) / 600, 12)
+    expect(far).toBeCloseTo((2 * 20 * Math.tan(Math.PI / 6)) / 600, 12)
+  })
+  it('perspective: uses true distance, not depth along the view axis', () => {
+    const cam = perspCamera([0, 0, 10], [0, 0, 0], 60)
+    const off = cameraWorldPerPixelAt(cam, [3, 4, 10], 600)
+    expect(off).toBeCloseTo((2 * 5 * Math.tan(Math.PI / 6)) / 600, 12)
+  })
+  it('orthographic: the frustum height over the viewport, independent of depth', () => {
+    const cam = new THREE.OrthographicCamera(-4, 4, 3, -3, 0.1, 100)
+    cam.position.set(0, 0, 10)
+    expect(cameraWorldPerPixelAt(cam, [0, 0, 0], 600)).toBeCloseTo(6 / 600, 12)
+    expect(cameraWorldPerPixelAt(cam, [0, 0, -50], 600)).toBeCloseTo(6 / 600, 12)
+  })
+  it('orthographic: zoom divides the pixel size', () => {
+    const cam = new THREE.OrthographicCamera(-4, 4, 3, -3, 0.1, 100)
+    cam.zoom = 2
+    expect(cameraWorldPerPixelAt(cam, [0, 0, 0], 600)).toBeCloseTo(3 / 600, 12)
+  })
+  it('orthographic: a non-positive zoom is zero', () => {
+    const cam = new THREE.OrthographicCamera(-4, 4, 3, -3, 0.1, 100)
+    cam.zoom = 0
+    expect(cameraWorldPerPixelAt(cam, [0, 0, 0], 600)).toBe(0)
+    cam.zoom = -1
+    expect(cameraWorldPerPixelAt(cam, [0, 0, 0], 600)).toBe(0)
+  })
+  it('a non-positive viewport height is zero for either camera kind', () => {
+    const p = perspCamera([0, 0, 10], [0, 0, 0])
+    const o = new THREE.OrthographicCamera(-4, 4, 3, -3, 0.1, 100)
+    expect(cameraWorldPerPixelAt(p, [0, 0, 0], 0)).toBe(0)
+    expect(cameraWorldPerPixelAt(p, [0, 0, 0], -5)).toBe(0)
+    expect(cameraWorldPerPixelAt(o, [0, 0, 0], 0)).toBe(0)
   })
 })

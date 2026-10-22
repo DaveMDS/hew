@@ -45,6 +45,7 @@ import type { HealthOverlay } from '../health/healthReport'
 import type { IsolationFade } from './isolation'
 import { srgbColorsToLinear } from './colorSpace'
 import { expandByVisibleObject } from './visibleBounds'
+import { ARROW_LEN_TEXT_FRAC, arrowMaxLength, arrowWorldLength, cameraWorldPerPixelAt } from './annotationLayout'
 import { facePlaneBasis, crossV3, normalizeV3, clamp, pushArrowChevron, type V3 } from './geoHelpers'
 import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
@@ -69,6 +70,7 @@ import { axisDashGapWorldFromWorldPerPixel } from './math'
 import { formatLength } from '../settings/units'
 import {
   computeLineLabelLayout,
+  LINE_BREAK_PADDING_FRAC,
   pickOutsideEnd,
   buildRadialGeometry,
   pushCenterTick,
@@ -205,6 +207,31 @@ interface FadeTween {
   hideOnComplete: boolean
 }
 
+interface AnnotationArrow {
+  tip: V3
+  dir: V3
+  perp: V3
+  maxLen: number
+}
+
+/** Small marks sized on screen each frame, like the arrowheads: the extension
+ * line overshoot (`from` along `dir`) and the radial centre cross. */
+interface AnnotationScreenMarks {
+  overshoots: { from: V3; dir: V3; maxLen: number }[]
+  ticks: { center: V3; normal: V3; maxHalf: number }[]
+}
+
+/** Annotation line work in world space for the vector print path. */
+export interface AnnotationDrawing {
+  segments: number[]
+  /** `pushDir` (radial labels only): the unit direction the label is pushed
+   * along, past its anchor, so it clears the leader end. */
+  labels: { position: [number, number, number]; text: string; detached: boolean; pushDir?: [number, number, number] }[]
+  /** Arrowheads, left unsized: the vector page sizes them in paper
+   * millimeters from its own label size (`maxLen` is the world-space cap). */
+  arrows: { tip: [number, number, number]; dir: [number, number, number]; maxLen: number }[]
+}
+
 /**
  * Per-annotation CAMERA-INDEPENDENT render data (`SceneRenderer.annotationBase`,
  * populated by `refreshAnnotations()`): everything about how one live
@@ -224,6 +251,11 @@ interface AnnotationRenderInfo {
    * (linear), the measured run + centre tick + leader (radial), or the
    * plain leader (leader-text) — flat `[ax,ay,az,bx,by,bz, ...]` pairs. */
   fixed: number[]
+  /** Arrowheads, sized on screen every frame (`updateAnnotationBillboards`):
+   * tip, unit direction from the tip back along the line, in-plane unit
+   * perpendicular, and the longest the head may be in world units. */
+  arrows: AnnotationArrow[]
+  marks: AnnotationScreenMarks
   /** Only for a LINEAR dimension: its raw (unbroken) dimension-line
    * endpoints, laid out fresh every frame around the current label size
    * (dimensions-playtest2.md §2 — the "break the line around its label"
@@ -267,12 +299,17 @@ const ANNOTATION_TEXT_SCREEN_PX = 14
 /** Extension lines run slightly past the dimension line (a fraction of the
  * offset's own length) — the small CAD-drafting overshoot convention. */
 const ANNOTATION_EXTENSION_OVERSHOOT_FRAC = 0.12
-/** Dimension-line arrowhead half-length, clamped to [MIN, MAX] meters and
- * otherwise a fraction of the dimension's own length — small dimensions get
- * proportionally small arrows, large ones don't grow arrows without bound. */
-const ANNOTATION_ARROW_LEN_FRAC = 0.06
-const ANNOTATION_ARROW_LEN_MIN = 0.02
-const ANNOTATION_ARROW_LEN_MAX = 0.12
+/** On screen, the overshoot is a few pixels (capped by the fraction above)
+ * and the radial centre cross is this many pixels from its middle to a tip
+ * (capped to a fraction of the radius so it never outgrows a small circle). */
+const ANNOTATION_OVERSHOOT_PX = 6
+const ANNOTATION_CENTER_TICK_PX = 6
+const ANNOTATION_CENTER_TICK_RADIUS_FRAC = 0.4
+/** Dimension-line arrowhead length in screen pixels, tied to the label text
+ * (0.9 of its glyph height, about 12.6 px) so heads and text scale as one.
+ * The per-frame pass caps it so a dimension's heads never cover more than
+ * 60 percent of the line (`arrowMaxLength`). */
+const ANNOTATION_ARROW_LEN_PX = ARROW_LEN_TEXT_FRAC * ANNOTATION_TEXT_SCREEN_PX
 /** Arrowhead half-width as a fraction of its length (a narrow, readable V). */
 const ANNOTATION_ARROW_WIDTH_FRAC = 0.35
 /**
@@ -2913,11 +2950,16 @@ export class SceneRenderer {
       // the dimension line (the small CAD-drafting convention). These never
       // move with the camera, so they're part of `fixed`, not `dimLine`.
       const fixed: number[] = []
-      const over = 1 + ANNOTATION_EXTENSION_OVERSHOOT_FRAC
-      const aExt: V3 = [a[0] + offset[0] * over, a[1] + offset[1] * over, a[2] + offset[2] * over]
-      const bExt: V3 = [b[0] + offset[0] * over, b[1] + offset[1] * over, b[2] + offset[2] * over]
-      fixed.push(a[0], a[1], a[2], aExt[0], aExt[1], aExt[2])
-      fixed.push(b[0], b[1], b[2], bExt[0], bExt[1], bExt[2])
+      const arrows: AnnotationArrow[] = []
+      fixed.push(a[0], a[1], a[2], a1[0], a1[1], a1[2])
+      fixed.push(b[0], b[1], b[2], b1[0], b1[1], b1[2])
+      const marks: AnnotationScreenMarks = { overshoots: [], ticks: [] }
+      const offsetLen = Math.hypot(offset[0], offset[1], offset[2])
+      if (offsetLen > 1e-9) {
+        const od: V3 = [offset[0] / offsetLen, offset[1] / offsetLen, offset[2] / offsetLen]
+        const maxLen = offsetLen * ANNOTATION_EXTENSION_OVERSHOOT_FRAC
+        marks.overshoots.push({ from: a1, dir: od, maxLen }, { from: b1, dir: od, maxLen })
+      }
 
       // Arrowheads: a small in-plane V at each end, tip at the endpoint,
       // wings spread perpendicular to the a1-b1 line within `plane`. These
@@ -2935,11 +2977,10 @@ export class SceneRenderer {
         const dir: V3 = [dx / len, dy / len, dz / len]
         alignDir = dir
         const perp = normalizeV3(crossV3(planeNormal, dir))
-        const arrowLen = clamp(len * ANNOTATION_ARROW_LEN_FRAC, ANNOTATION_ARROW_LEN_MIN, ANNOTATION_ARROW_LEN_MAX)
-        const arrowW = arrowLen * ANNOTATION_ARROW_WIDTH_FRAC
         if (perp !== null) {
-          pushArrowChevron(fixed, a1, dir, perp, arrowLen, arrowW)
-          pushArrowChevron(fixed, b1, [-dir[0], -dir[1], -dir[2]], perp, arrowLen, arrowW)
+          const maxLen = arrowMaxLength(len, 2)
+          arrows.push({ tip: a1, dir, perp, maxLen })
+          arrows.push({ tip: b1, dir: [-dir[0], -dir[1], -dir[2]], perp, maxLen })
         }
       }
 
@@ -2948,7 +2989,7 @@ export class SceneRenderer {
       const label = override ?? formatLength(dist)
       const textAnchor: V3 = [(a1[0] + b1[0]) / 2, (a1[1] + b1[1]) / 2, (a1[2] + b1[2]) / 2]
       const orient = alignDir !== null ? { alignDir, planeNormal } : null
-      return { detached, label, orient, fixed, dimLine: { a: a1, b: b1 }, textAnchor }
+      return { detached, label, orient, fixed, arrows, marks, dimLine: { a: a1, b: b1 }, textAnchor }
     }
 
     if (kind === 'radial') {
@@ -2971,6 +3012,8 @@ export class SceneRenderer {
       // centre for a diameter — not just `anchor -> leaderDir` (the old
       // bug: a plain leader stub that never touched the centre at all).
       const fixed: number[] = []
+      const arrows: AnnotationArrow[] = []
+      const marks: AnnotationScreenMarks = { overshoots: [], ticks: [] }
       const geo = buildRadialGeometry(center, anchorV, kindWord)
       fixed.push(
         geo.measured[0][0], geo.measured[0][1], geo.measured[0][2],
@@ -2985,8 +3028,6 @@ export class SceneRenderer {
         geo.measured[1][2] - geo.measured[0][2],
       )
       if (measuredLen > 1e-9) {
-        const arrowLen = clamp(measuredLen * ANNOTATION_ARROW_LEN_FRAC, ANNOTATION_ARROW_LEN_MIN, ANNOTATION_ARROW_LEN_MAX)
-        const arrowW = arrowLen * ANNOTATION_ARROW_WIDTH_FRAC
         const towardFar: V3 = [
           (geo.farEnd[0] - anchorV[0]) / measuredLen,
           (geo.farEnd[1] - anchorV[1]) / measuredLen,
@@ -2996,10 +3037,11 @@ export class SceneRenderer {
         if (perp !== null) {
           // Arrowhead at the rim end (both kinds: "Arrowhead at the rim
           // end" for Radius, one of "arrowheads at both ends" for Diameter).
-          pushArrowChevron(fixed, anchorV, towardFar, perp, arrowLen, arrowW)
+          const maxLen = arrowMaxLength(measuredLen, kindWord === 'diameter' ? 2 : 1)
+          arrows.push({ tip: anchorV, dir: towardFar, perp, maxLen })
           if (kindWord === 'diameter') {
             // The far end is ALSO a rim point for a diameter.
-            pushArrowChevron(fixed, geo.farEnd, [-towardFar[0], -towardFar[1], -towardFar[2]], perp, arrowLen, arrowW)
+            arrows.push({ tip: geo.farEnd, dir: [-towardFar[0], -towardFar[1], -towardFar[2]], perp, maxLen })
           }
         }
       }
@@ -3007,7 +3049,7 @@ export class SceneRenderer {
         // "A small centre cross/tick" — Diameter has no single centre
         // endpoint to mark (the measured run passes THROUGH the centre
         // rather than terminating there).
-        pushCenterTick(fixed, center, planeNormal, CENTER_TICK_HALF)
+        marks.ticks.push({ center, normal: planeNormal, maxHalf: Math.min(CENTER_TICK_HALF, radius * ANNOTATION_CENTER_TICK_RADIUS_FRAC) })
       }
 
       const value = kindWord === 'diameter' ? radius * 2 : radius
@@ -3027,7 +3069,7 @@ export class SceneRenderer {
       // leader (like SketchUp's own radial dimensions), not centered on top
       // of a line — there is no "runs through the label" defect to fix here
       // (see `AnnotationRenderInfo.dimLine`'s doc comment).
-      return { detached, label, orient, fixed, dimLine: null, textAnchor: end }
+      return { detached, label, orient, fixed, arrows, marks, dimLine: null, textAnchor: end }
     }
 
     // 'leader' — stays billboarded (docs/design/dimensions-text.md), so no
@@ -3039,7 +3081,7 @@ export class SceneRenderer {
     const end: V3 = [anchor[0] + offset[0], anchor[1] + offset[1], anchor[2] + offset[2]]
     const fixed = [anchor[0], anchor[1], anchor[2], end[0], end[1], end[2]]
     const label = this.wasmScene.annotation_text(id) ?? ''
-    return { detached, label, orient: null, fixed, dimLine: null, textAnchor: end }
+    return { detached, label, orient: null, fixed, arrows: [], marks: { overshoots: [], ticks: [] }, dimLine: null, textAnchor: end }
   }
 
   /** (Re)build one of the three merged annotation fat-line batches (`which`)
@@ -3216,6 +3258,16 @@ export class SceneRenderer {
       billboard.setContent(info.label, color, dpr, provisionalDist)
 
       let finalTextAnchor: V3 = info.textAnchor
+      if (info.orient !== null && info.dimLine === null) {
+        // Radial label: the quad sits just past the leader's end, not
+        // centered on it (which ran the leader through the text).
+        const size = billboard.worldSize(camera, viewportHeight)
+        if (size !== null) {
+          const push = size.width / 2 + LINE_BREAK_PADDING_FRAC * size.height
+          const d = info.orient.alignDir
+          finalTextAnchor = [info.textAnchor[0] + d[0] * push, info.textAnchor[1] + d[1] * push, info.textAnchor[2] + d[2] * push]
+        }
+      }
       const dimSegments: number[] = []
       if (info.dimLine !== null) {
         const { a, b } = info.dimLine
@@ -3245,7 +3297,11 @@ export class SceneRenderer {
               a[0] + unit[0] * layout.labelCenterT, a[1] + unit[1] * layout.labelCenterT, a[2] + unit[2] * layout.labelCenterT,
             ]
             const endPt = layout.end === 1 ? b : a
-            dimSegments.push(endPt[0], endPt[1], endPt[2], labelPt[0], labelPt[1], labelPt[2])
+            // The tail stops at the label's near edge, never runs through
+            // the text itself.
+            const edgeT = layout.end === 1 ? layout.labelCenterT - size.width / 2 : layout.labelCenterT + size.width / 2
+            const tailPt: V3 = [a[0] + unit[0] * edgeT, a[1] + unit[1] * edgeT, a[2] + unit[2] * edgeT]
+            dimSegments.push(endPt[0], endPt[1], endPt[2], tailPt[0], tailPt[1], tailPt[2])
             finalTextAnchor = labelPt
           }
         } else {
@@ -3255,9 +3311,28 @@ export class SceneRenderer {
         }
       }
 
+      // Arrowheads at a constant screen size (tied to the label text),
+      // capped to the line; evaluated at each tip's own depth.
+      const arrowSegments: number[] = []
+      for (const arrow of info.arrows) {
+        const wpp = cameraWorldPerPixelAt(camera, arrow.tip, viewportHeight)
+        const arrowLen = arrowWorldLength(ANNOTATION_ARROW_LEN_PX, wpp, arrow.maxLen)
+        if (arrowLen > 0) pushArrowChevron(arrowSegments, arrow.tip, arrow.dir, arrow.perp, arrowLen, arrowLen * ANNOTATION_ARROW_WIDTH_FRAC)
+      }
+
+      for (const o of info.marks.overshoots) {
+        const len = arrowWorldLength(ANNOTATION_OVERSHOOT_PX, cameraWorldPerPixelAt(camera, o.from, viewportHeight), o.maxLen)
+        if (len > 0) arrowSegments.push(o.from[0], o.from[1], o.from[2], o.from[0] + o.dir[0] * len, o.from[1] + o.dir[1] * len, o.from[2] + o.dir[2] * len)
+      }
+      for (const t of info.marks.ticks) {
+        const half = arrowWorldLength(ANNOTATION_CENTER_TICK_PX, cameraWorldPerPixelAt(camera, t.center, viewportHeight), t.maxHalf)
+        if (half > 0) pushCenterTick(arrowSegments, t.center, t.normal, half)
+      }
+
       const bucket = info.detached ? detachedPositions : normalPositions
       bucket.push(...info.fixed)
       bucket.push(...dimSegments)
+      bucket.push(...arrowSegments)
 
       billboard.mesh.position.set(finalTextAnchor[0], finalTextAnchor[1], finalTextAnchor[2])
 
@@ -3281,7 +3356,7 @@ export class SceneRenderer {
       billboard.update(camera, viewportHeight, faceQuaternion)
 
       if (id === this.selectedAnnotationId) {
-        highlightPositions = [...info.fixed, ...dimSegments]
+        highlightPositions = [...info.fixed, ...dimSegments, ...arrowSegments]
       }
     }
 
@@ -4038,20 +4113,34 @@ export class SceneRenderer {
    * label at the base text anchor. Camera-independent by design (no gap
    * layout — the vector page draws labels with a paper halo instead).
    */
-  collectAnnotationDrawing(): { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] } {
+  collectAnnotationDrawing(): AnnotationDrawing {
     const segments: number[] = []
-    const labels: { position: [number, number, number]; text: string; detached: boolean }[] = []
-    if (!this.annotationsGroup.visible) return { segments, labels }
+    const arrows: AnnotationDrawing['arrows'] = []
+    const labels: AnnotationDrawing['labels'] = []
+    if (!this.annotationsGroup.visible) return { segments, labels, arrows }
     for (const info of this.annotationBase.values()) {
       segments.push(...info.fixed)
       if (info.dimLine !== null) {
         segments.push(...info.dimLine.a, ...info.dimLine.b)
       }
+      for (const o of info.marks.overshoots) {
+        segments.push(...o.from, o.from[0] + o.dir[0] * o.maxLen, o.from[1] + o.dir[1] * o.maxLen, o.from[2] + o.dir[2] * o.maxLen)
+      }
+      for (const t of info.marks.ticks) pushCenterTick(segments, t.center, t.normal, t.maxHalf)
+      for (const a of info.arrows) arrows.push({ tip: [...a.tip], dir: [...a.dir], maxLen: a.maxLen })
       if (info.label.trim() !== '') {
-        labels.push({ position: [info.textAnchor[0], info.textAnchor[1], info.textAnchor[2]], text: info.label, detached: info.detached })
+        const label: AnnotationDrawing['labels'][number] = {
+          position: [info.textAnchor[0], info.textAnchor[1], info.textAnchor[2]],
+          text: info.label,
+          detached: info.detached,
+        }
+        // A radial label sits past its leader end on screen; the page does
+        // the same in paper space, along this direction.
+        if (info.orient !== null && info.dimLine === null) label.pushDir = [...info.orient.alignDir]
+        labels.push(label)
       }
     }
-    return { segments, labels }
+    return { segments, labels, arrows }
   }
 
   /** The renderer's current hidden leaf ids (the app's union of eye-hidden

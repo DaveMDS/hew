@@ -272,6 +272,7 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
       />
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={t`Scan from desktop`}
         style={
           isLandscape

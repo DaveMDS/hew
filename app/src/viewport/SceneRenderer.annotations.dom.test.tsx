@@ -253,3 +253,226 @@ describe('SceneRenderer — radial dimension geometry shows the measurement (dim
     expect(renderer.annotationLabelText(1n)).toContain('Ø')
   })
 })
+
+describe('SceneRenderer — dimension arrowheads are sized on screen (#36)', () => {
+  /** World size of one pixel at distance `dist` for the test camera. */
+  const wppAt = (dist: number) => (2 * dist * Math.tan((FOV_DEG * Math.PI) / 360)) / VIEWPORT
+  /** Head length (along the dimension axis, x here) of every wing at a tip. */
+  function headLengths(renderer: SceneRenderer, tip: THREE.Vector3): number[] {
+    return allSegments(renderer)
+      .filter(([a, b]) => a.distanceTo(tip) < 1e-4 || b.distanceTo(tip) < 1e-4)
+      // Wings are the slanted ones; the dimension, extension and leader
+      // lines through the same tip are axis-aligned here.
+      .filter(([a, b]) => Math.abs(a.x - b.x) > 1e-9 && Math.abs(a.y - b.y) > 1e-9)
+      .map(([a, b]) => Math.abs(a.x - b.x))
+  }
+  const dimOf = (len: number) =>
+    makeAnnotationScene({
+      linear: { '1': { a: [0, 0, 0], b: [len, 0, 0], offset: [0, len, 0], plane: [0, 0, 0, 0, 0, 1] } },
+    })
+  const radialOf = (kind: 'radius' | 'diameter') =>
+    makeAnnotationScene({
+      radial: {
+        '1': { anchor: [0.025, 0, 0], kind, curve: [0, 0, 0, 0.025, 0, 0, 0, 0, 0, 1], leaderDir: [0.01, 0, 0] },
+      },
+    })
+  const orthoCamera = (halfHeight: number, z: number, zoom = 1): THREE.OrthographicCamera => {
+    const cam = new THREE.OrthographicCamera(-halfHeight, halfHeight, halfHeight, -halfHeight, 0.1, 10000)
+    cam.zoom = zoom
+    cam.position.set(0, 0, z)
+    cam.lookAt(0, 0, 0)
+    cam.updateMatrixWorld(true)
+    cam.updateProjectionMatrix()
+    return cam
+  }
+
+  it('a 2 cm dimension: the two heads are capped at 30 percent of the line each', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(0.02))
+    renderer.refreshAnnotations()
+    // dist 1: the 12.6 px head (~0.0147 m) is longer than the 0.006 cap.
+    renderer.updateAnnotationBillboards(topDownCamera(0.01, 0.02, 1), VIEWPORT, VIEWPORT, 'dark')
+    expect(12.6 * wppAt(1)).toBeGreaterThan(0.006)
+    for (const tip of [new THREE.Vector3(0, 0.02, 0), new THREE.Vector3(0.02, 0.02, 0)]) {
+      const heads = headLengths(renderer, tip)
+      expect(heads).toHaveLength(2)
+      for (const h of heads) expect(h).toBeCloseTo(0.3 * 0.02, 6)
+    }
+  })
+
+  it('below the cap the head is the pixel size (the cap does not bind near)', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(0.02))
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(topDownCamera(0.01, 0.02, 0.2), VIEWPORT, VIEWPORT, 'dark')
+    for (const h of headLengths(renderer, new THREE.Vector3(0, 0.02, 0))) expect(h).toBeCloseTo(12.6 * wppAt(Math.hypot(0.01, 0.2)), 6)
+  })
+
+  it('head length is constant on screen: it grows with camera distance for a long dimension', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(100))
+    renderer.refreshAnnotations()
+    const tip = new THREE.Vector3(0, 100, 0)
+    renderer.updateAnnotationBillboards(topDownCamera(0, 100, 20), VIEWPORT, VIEWPORT, 'dark')
+    const near = Math.max(...headLengths(renderer, tip))
+    renderer.updateAnnotationBillboards(topDownCamera(0, 100, 40), VIEWPORT, VIEWPORT, 'dark')
+    const far = Math.max(...headLengths(renderer, tip))
+    expect(far / near).toBeGreaterThan(1.8)
+    expect(far / near).toBeLessThan(2.2)
+    expect(far).toBeCloseTo(12.6 * wppAt(40), 2)
+  })
+
+  it('a radius dimension caps its one head at 60 percent of the measured run', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), radialOf('radius'))
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(topDownCamera(0, 0, 2), VIEWPORT, VIEWPORT, 'dark')
+    expect(12.6 * wppAt(2)).toBeGreaterThan(0.015)
+    const heads = headLengths(renderer, new THREE.Vector3(0.025, 0, 0))
+    expect(heads).toHaveLength(2)
+    for (const h of heads) expect(h).toBeCloseTo(0.6 * 0.025, 6)
+  })
+
+  it('a diameter dimension puts a head at each rim end, each capped at 30 percent of the run', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), radialOf('diameter'))
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(topDownCamera(0, 0, 2), VIEWPORT, VIEWPORT, 'dark')
+    // Measured run is the whole 0.05 diameter; two heads share 60 percent.
+    for (const tip of [new THREE.Vector3(0.025, 0, 0), new THREE.Vector3(-0.025, 0, 0)]) {
+      const heads = headLengths(renderer, tip)
+      expect(heads).toHaveLength(2)
+      for (const h of heads) expect(h).toBeCloseTo(0.3 * 0.05, 6)
+    }
+  })
+
+  it('an orthographic camera sizes the head by the frustum, not by distance', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(1))
+    renderer.refreshAnnotations()
+    // Frustum 2 units tall over 800 px: 0.0025 per pixel at any depth.
+    const tip = new THREE.Vector3(0, 1, 0)
+    for (const z of [5, 500]) {
+      renderer.updateAnnotationBillboards(orthoCamera(1, z), VIEWPORT, VIEWPORT, 'dark')
+      for (const h of headLengths(renderer, tip)) expect(h).toBeCloseTo(12.6 * 0.0025, 6)
+    }
+    // Zooming in halves the pixel size, so the head halves with it.
+    renderer.updateAnnotationBillboards(orthoCamera(1, 5, 2), VIEWPORT, VIEWPORT, 'dark')
+    for (const h of headLengths(renderer, tip)) expect(h).toBeCloseTo(12.6 * 0.00125, 6)
+  })
+
+  it('an orthographic camera still honours the cap on a short dimension', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(0.02))
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(orthoCamera(1, 5), VIEWPORT, VIEWPORT, 'dark')
+    for (const h of headLengths(renderer, new THREE.Vector3(0, 0.02, 0))) expect(h).toBeCloseTo(0.006, 6)
+  })
+
+  it('the vector print path reports arrows for the page to size', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), dimOf(1))
+    renderer.refreshAnnotations()
+    const drawing = renderer.collectAnnotationDrawing()
+    expect(drawing.arrows).toHaveLength(2)
+    expect(drawing.arrows[0].maxLen).toBeCloseTo(0.3, 9)
+  })
+
+  it('the vector print path tells the page to push a radial label, and only that', () => {
+    const radial = new SceneRenderer(new THREE.Scene(), radialOf('radius'))
+    radial.refreshAnnotations()
+    expect(radial.collectAnnotationDrawing().labels[0].pushDir).toEqual([1, 0, 0])
+    const linear = new SceneRenderer(new THREE.Scene(), dimOf(1))
+    linear.refreshAnnotations()
+    expect(linear.collectAnnotationDrawing().labels[0].pushDir).toBeUndefined()
+  })
+
+  it('a radial label sits past the leader end, not centered on it', () => {
+    const scene = makeAnnotationScene({
+      radial: {
+        '1': { anchor: [5, 0, 0], kind: 'radius', curve: [0, 0, 0, 5, 0, 0, 0, 0, 0, 1], leaderDir: [2, 0, 0] },
+      },
+    })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(topDownCamera(5, 0, 50), VIEWPORT, VIEWPORT, 'dark')
+    // Leader ends at x = 7; the quad's near edge must clear it.
+    expect(renderer.annotationTextWorldPosition(1n)![0]).toBeGreaterThan(7.5)
+  })
+
+  it('the centre cross of a small circle is capped at 40 percent of the radius per arm', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), radialOf('radius'))
+    renderer.refreshAnnotations()
+    // dist 3: 6 px (~0.021 m) is longer than the 0.01 cap.
+    renderer.updateAnnotationBillboards(topDownCamera(0, 0, 3), VIEWPORT, VIEWPORT, 'dark')
+    expect(6 * wppAt(3)).toBeGreaterThan(0.01)
+    const vertical = allSegments(renderer).filter(([a, b]) => Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) > 1e-9)
+    expect(vertical).toHaveLength(1)
+    expect(vertical[0][0].distanceTo(vertical[0][1])).toBeCloseTo(2 * 0.4 * 0.025, 6)
+  })
+
+  it('the centre cross is 6 px per arm when the circle is large enough', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), radialOf('radius'))
+    renderer.refreshAnnotations()
+    renderer.updateAnnotationBillboards(topDownCamera(0, 0, 0.2), VIEWPORT, VIEWPORT, 'dark')
+    const vertical = allSegments(renderer).filter(([a, b]) => Math.abs(a.x - b.x) < 1e-9 && Math.abs(a.y - b.y) > 1e-9)
+    expect(vertical).toHaveLength(1)
+    expect(vertical[0][0].distanceTo(vertical[0][1])).toBeCloseTo(2 * 6 * wppAt(0.2), 6)
+  })
+
+  describe('extension-line overshoot', () => {
+    // a=(0,0,0) b=(10,0,0), offset 1 up: the extension line at x=0 runs from
+    // y=0 to the dimension line at y=1; the overshoot continues past y=1.
+    const scene = makeAnnotationScene({
+      linear: { '1': { a: [0, 0, 0], b: [10, 0, 0], offset: [0, 1, 0], plane: [0, 0, 0, 0, 0, 1] } },
+    })
+    const overshoot = (renderer: SceneRenderer): number[] =>
+      allSegments(renderer)
+        .filter(([a, b]) => Math.abs(a.x) < 1e-6 && Math.abs(b.x) < 1e-6 && Math.min(a.y, b.y) > 1 - 1e-6)
+        .map(([a, b]) => a.distanceTo(b))
+
+    it('is a few pixels when the offset allows', () => {
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refreshAnnotations()
+      renderer.updateAnnotationBillboards(topDownCamera(5, 0.5, 5), VIEWPORT, VIEWPORT, 'dark')
+      // The overshoot starts at (0, 1, 0), seen from (5, 0.5, 5).
+      const wpp = wppAt(Math.hypot(5, 0.5, 5))
+      expect(6 * wpp).toBeLessThan(0.12)
+      const o = overshoot(renderer)
+      expect(o).toHaveLength(1)
+      expect(o[0]).toBeCloseTo(6 * wpp, 5)
+    })
+
+    it('is capped at 12 percent of the offset when far away', () => {
+      const renderer = new SceneRenderer(new THREE.Scene(), scene)
+      renderer.refreshAnnotations()
+      renderer.updateAnnotationBillboards(topDownCamera(5, 0.5, 30), VIEWPORT, VIEWPORT, 'dark')
+      expect(6 * wppAt(30)).toBeGreaterThan(0.12)
+      const o = overshoot(renderer)
+      expect(o).toHaveLength(1)
+      expect(o[0]).toBeCloseTo(0.12, 5)
+    })
+  })
+
+  describe('an outside label (line shorter than the label plus padding)', () => {
+    // 4 mm line seen from 20 cm is ~17 px; the 14 px label plus padding is
+    // ~25 px, so the whole line is kept and the label moves past one end.
+    it('keeps the whole line and the tail stops at the label near edge', () => {
+      const len = 0.004
+      const renderer = new SceneRenderer(new THREE.Scene(), dimOf(len))
+      renderer.refreshAnnotations()
+      renderer.updateAnnotationBillboards(topDownCamera(len / 2, len, 0.2), VIEWPORT, VIEWPORT, 'dark')
+      const labelX = renderer.annotationTextWorldPosition(1n)![0]
+      const halfW = (14 * wppAt(0.2)) / 2
+      // Genuinely outside: the label centre is past one end.
+      expect(labelX > len || labelX < 0).toBe(true)
+      const horizontal = allSegments(renderer).filter(
+        ([a, b]) => Math.abs(a.y - len) < 1e-6 && Math.abs(b.y - len) < 1e-6 && Math.abs(a.x - b.x) > 1e-9,
+      )
+      const xs = horizontal.flatMap(([a, b]) => [a.x, b.x])
+      // The whole 0..len run is still drawn.
+      expect(Math.min(...xs)).toBeLessThanOrEqual(1e-6)
+      expect(Math.max(...xs)).toBeGreaterThanOrEqual(len - 1e-6)
+      if (labelX > len) {
+        // The tail ends exactly at the label's near edge, not at its centre.
+        expect(Math.max(...xs)).toBeCloseTo(labelX - halfW, 5)
+        expect(Math.max(...xs)).toBeLessThan(labelX - halfW / 2)
+      } else {
+        expect(Math.min(...xs)).toBeCloseTo(labelX + halfW, 5)
+        expect(Math.min(...xs)).toBeGreaterThan(labelX + halfW / 2)
+      }
+    })
+  })
+})

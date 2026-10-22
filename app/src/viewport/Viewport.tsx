@@ -44,7 +44,7 @@ import { CueLayer } from './CueLayer'
 import { DrawPlaneCueLayer } from './DrawPlaneCueLayer'
 import type { DrawPlane } from '../tools/drawPlane'
 import { SnapService } from './snapService'
-import { SceneRenderer, type RefreshTouched } from './SceneRenderer'
+import { SceneRenderer, type AnnotationDrawing, type RefreshTouched } from './SceneRenderer'
 import { expandByVisibleObject } from './visibleBounds'
 import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
@@ -1005,7 +1005,7 @@ export interface ViewportApi {
   /** The live isolation targets, or null when nothing is isolated. */
   getIsolation: () => IsolationTarget[] | null
   /** Annotation line work + labels in world space (vector prints). */
-  collectAnnotationDrawing: () => { segments: number[]; labels: { position: [number, number, number]; text: string; detached: boolean }[] }
+  collectAnnotationDrawing: () => AnnotationDrawing
 
   /**
    * Project a world point to canvas-relative CSS pixels (origin top-left) at
@@ -1803,6 +1803,24 @@ function resolvePickToSelectableUnscoped(
   }
   // G is not an ancestor of this object → click outside context
   return null
+}
+
+/**
+ * True when the keyboard belongs to a text field or a dialog rather than to
+ * the viewport: the key landed on an input, textarea, or contenteditable
+ * element, or a `role="dialog"` is open (so a key that arrives on the page
+ * body while a dialog is up still stays out of the drawing tools). A dialog
+ * owns the keyboard unless it says `aria-modal="false"`, which the
+ * non-blocking floating windows set on purpose. The viewport's typed-measurement capture and its
+ * bare-key shortcuts must not run then, or the digits of a name typed in
+ * Save to Library would retype the last rectangle.
+ */
+export function keyboardBelongsToFieldOrDialog(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (el !== null && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable === true)) {
+    return true
+  }
+  return document.querySelector('[role="dialog"]:not([aria-modal="false"])') !== null
 }
 
 /**
@@ -5102,6 +5120,8 @@ export default function Viewport({
       return true
     }
 
+    /** The group's position among its siblings, as the Outliner numbers
+     *  unnamed groups ("Group 2" is the second child of its parent). */
     /** Open a GROUP session on `groupId` — captures its display label BEFORE
      *  the kernel hides the group, since `group_name` isn't readable once it
      *  does (scope itself now comes from the kernel's own live
@@ -9719,7 +9739,8 @@ export default function Viewport({
       // A tool with per-key capture (Tool.capturesKey) narrows this to the
       // keys its buffer actually needs — Move's armed ×N / /N window must
       // never eat Space (always reset-to-Select) or the letter shortcuts.
-      if (!isMod && ev.key !== 'Escape') {
+      const fieldOrDialogOwnsKeys = keyboardBelongsToFieldOrDialog(ev.target)
+      if (!isMod && ev.key !== 'Escape' && !fieldOrDialogOwnsKeys) {
         const activeTool = toolController.activeTool
         const captures = 'capturesKey' in activeTool
           ? (activeTool as { capturesKey(key: string): boolean }).capturesKey(ev.key)
@@ -9755,7 +9776,7 @@ export default function Viewport({
       // Space = Select, 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
       const target = ev.target as HTMLElement
       const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (!isMod && !ev.altKey && !isTyping) {
+      if (!isMod && !ev.altKey && !isTyping && !fieldOrDialogOwnsKeys) {
         // Same letter resolution as App.tsx's window handler (produced ASCII
         // letter first, physical key as the fallback) so the two listeners
         // on `window` never disagree about which tool a keydown names.
@@ -9820,7 +9841,7 @@ export default function Viewport({
       // idle plane lock they would otherwise silently re-aim the next draw
       // gesture from inside an unrelated text box.
       if (isTyping && ev.key.startsWith('Arrow')) return
-      if (!isMod) {
+      if (!isMod && (ev.key === 'Escape' || !fieldOrDialogOwnsKeys)) {
         const activeTool = toolController.activeTool
         activeTool.onKey(ev)
         // The idle arrow-key plane lock (design §5.2/§6) toggles here — the

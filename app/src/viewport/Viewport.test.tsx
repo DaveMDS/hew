@@ -10,13 +10,15 @@
  * comment documents.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { fireEvent } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { SaveToLibraryPopover } from '../panels/SaveToLibraryPopover'
 import {
   computeEditContext,
   computeLitInstances,
   applyEditContext,
   isToolSwitchAllowedUnderReadOnly,
   mapUndoRedoError,
+  keyboardBelongsToFieldOrDialog,
   cursorFor,
 } from './Viewport'
 import { setShowToolPointer } from '../settings/view'
@@ -301,6 +303,68 @@ describe('mapUndoRedoError', () => {
     expect(mapUndoRedoError('boom')).toBeNull()
   })
 })
+
+// #36 follow-up: digits typed into Save to Library's name field reached the
+// last rectangle's typed-measurement buffer. The viewport's key handler now
+// asks this predicate before it routes anything to a tool.
+describe('keyboardBelongsToFieldOrDialog', () => {
+  it('is true for text fields and contenteditable, false for the page body', () => {
+    const input = document.createElement('input')
+    const area = document.createElement('textarea')
+    const editable = document.createElement('div')
+    Object.defineProperty(editable, 'isContentEditable', { value: true })
+    expect(keyboardBelongsToFieldOrDialog(input)).toBe(true)
+    expect(keyboardBelongsToFieldOrDialog(area)).toBe(true)
+    expect(keyboardBelongsToFieldOrDialog(editable)).toBe(true)
+    expect(keyboardBelongsToFieldOrDialog(document.body)).toBe(false)
+    expect(keyboardBelongsToFieldOrDialog(null)).toBe(false)
+  })
+
+  it('a role=dialog without aria-modal owns the keyboard; aria-modal=false is exempt', () => {
+    const sheet = document.createElement('div')
+    sheet.setAttribute('role', 'dialog')
+    document.body.appendChild(sheet)
+    try {
+      expect(keyboardBelongsToFieldOrDialog(document.body)).toBe(true)
+      sheet.setAttribute('aria-modal', 'true')
+      expect(keyboardBelongsToFieldOrDialog(document.body)).toBe(true)
+      sheet.setAttribute('aria-modal', 'false')
+      expect(keyboardBelongsToFieldOrDialog(document.body)).toBe(false)
+    } finally {
+      sheet.remove()
+    }
+  })
+
+  it('typing "box 2" in the Save to Library name field never reaches the viewport capture', () => {
+    const routedToTool: string[] = []
+    // Stand-in for the viewport's window keydown handler: it routes a key to
+    // the tool only when the predicate says the viewport owns the keyboard.
+    const onWindowKeyDown = (ev: KeyboardEvent): void => {
+      if (!keyboardBelongsToFieldOrDialog(ev.target)) routedToTool.push(ev.key)
+    }
+    window.addEventListener('keydown', onWindowKeyDown)
+    try {
+      render(<SaveToLibraryPopover defaultName="" onSave={vi.fn()} onClose={vi.fn()} />)
+      const input = screen.getByLabelText('Item name')
+      expect(input).toHaveFocus()
+      let value = ''
+      for (const key of 'box 2') {
+        fireEvent.keyDown(input, { key })
+        value += key
+        fireEvent.change(input, { target: { value } })
+      }
+      expect(input).toHaveValue('box 2')
+      expect(routedToTool).toEqual([])
+      // Focus lost to the body while the modal is still up: still not the tool's.
+      ;(document.activeElement as HTMLElement).blur()
+      fireEvent.keyDown(document.body, { key: '2' })
+      expect(routedToTool).toEqual([])
+    } finally {
+      window.removeEventListener('keydown', onWindowKeyDown)
+    }
+  })
+})
+
 describe('cursorFor honors Settings ▸ View ▸ Show tool pointer', () => {
   it('gives the tool-shaped cursor by default and the plain arrow when off', () => {
     expect(cursorFor('Move')).toContain('data:image/svg+xml')

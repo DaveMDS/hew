@@ -32,6 +32,7 @@ export function RecentsSheet({ open, orientation, entries, onClose, onOpen }: Re
       />
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={t`Recent models`}
         style={
           isLandscape

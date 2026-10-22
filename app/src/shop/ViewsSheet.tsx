@@ -103,6 +103,7 @@ export function ViewsSheet({
       />
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={t`Views`}
         style={
           isLandscape

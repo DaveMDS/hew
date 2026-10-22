@@ -66,6 +66,7 @@ export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
       />
       <div
         role="dialog"
+        aria-modal="true"
         aria-label={t`Units`}
         style={
           isLandscape

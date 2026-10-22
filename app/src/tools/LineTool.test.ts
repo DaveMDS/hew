@@ -565,14 +565,14 @@ describe('LineTool — retype the segment just placed', () => {
     expect(segs(scene)[1]).toEqual([0, 0, -2, 0])
   })
 
-  it('a zero typed length is refused with the same toast as a degenerate click, and the buffer clears', () => {
+  it('a zero typed length is refused with a toast that asks for a nonzero length, and the buffer clears', () => {
     const scene = makeRetypeScene()
     const { tool, onToast, onMeasurement } = makeTool(scene)
     clickAt(tool, 0, 0, 100, 100)
     clickAt(tool, 1, 0, 200, 100)
     typeIn(tool, '0')
     expect(scene.scene_undo).not.toHaveBeenCalled()
-    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('same as the last one'))
+    expect(onToast).toHaveBeenCalledWith('A line needs a length. Type a length other than 0.')
     expect(onMeasurement).toHaveBeenLastCalledWith('')
     expect(segs(scene)).toEqual([[0, 0, 1, 0]])
   })

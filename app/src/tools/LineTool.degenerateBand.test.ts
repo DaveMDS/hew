@@ -57,6 +57,10 @@ function makeKeyEvent(key: string): KeyboardEvent {
   return { key, repeat: false, preventDefault: () => { /* no-op */ } } as unknown as KeyboardEvent
 }
 
+/** Where the cursor is when a probe's snap collapses onto the third
+ *  segment's anchor (0, 1, 1): a visible distance along the X lock. */
+const OFF_ANCHOR: [number, number, number] = [0.3, 1, 1]
+
 type SegmentCall = { a: [number, number, number]; b: [number, number, number] }
 
 /**
@@ -163,12 +167,15 @@ describe('LineTool — the degenerate-segment gate sits exactly on the kernel PO
     const at: [number, number, number] = [1e-9, 1, 1]
     expect(segmentLength([0, 1, 1], at)).toBe(1e-9) // bit-exact, not near
     const snap = makeSnap(at, 'on-axis', { direction: [1, 0, 0] })
-    tool.onPointerMove(snap, rayAt(at))
-    tool.onPointerDown(snap, rayAt(at))
+    // The cursor is elsewhere (the snap collapsed onto the anchor): a click
+    // with the cursor ON the anchor finishes the chain instead (#36,
+    // LineTool.finishOnReclick.test.ts), so the gate is probed off it.
+    tool.onPointerMove(snap, rayAt(OFF_ANCHOR))
+    tool.onPointerDown(snap, rayAt(OFF_ANCHOR))
 
     expect(segmentCalls).toHaveLength(2)
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/same as the last/i)
+    expect(onToast.mock.calls[0][0]).toMatch(/landed on the last point/i)
   })
 
   it('below POINT_MERGE the honest refusal stands — the toast marks a segment the kernel itself would refuse', () => {
@@ -177,12 +184,12 @@ describe('LineTool — the degenerate-segment gate sits exactly on the kernel PO
     driveToLockedThirdSegment(tool)
 
     const snap = makeSnap([5e-10, 1, 1], 'on-axis', { direction: [1, 0, 0] })
-    tool.onPointerMove(snap, rayAt([5e-10, 1, 1]))
-    tool.onPointerDown(snap, rayAt([5e-10, 1, 1]))
+    tool.onPointerMove(snap, rayAt(OFF_ANCHOR))
+    tool.onPointerDown(snap, rayAt(OFF_ANCHOR))
 
     expect(segmentCalls).toHaveLength(2)
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/same as the last/i)
+    expect(onToast.mock.calls[0][0]).toMatch(/landed on the last point/i)
   })
 
   it('ground plane: the gate is the Euclidean kernel predicate, not the legacy per-axis one', () => {
@@ -237,9 +244,11 @@ describe('LineTool — face mode shares the same kernel-line gate', () => {
     const { tool, onToast } = makeTool(scene)
 
     tool.onPointerDown(makeSnap([0, 0, 1], 'face'), rayAt([0, 0, 1]))
-    tool.onPointerDown(makeSnap([5e-10, 0, 1], 'face'), rayAt([5e-10, 0, 1]))
+    // Cursor elsewhere on the face; ON the point, the click finishes the
+    // chain instead (#36, LineTool.finishOnReclick.test.ts).
+    tool.onPointerDown(makeSnap([5e-10, 0, 1], 'face'), rayAt([0.3, 0, 1]))
 
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast.mock.calls[0][0]).toMatch(/same as the last/i)
+    expect(onToast.mock.calls[0][0]).toMatch(/landed on the last point/i)
   })
 })
