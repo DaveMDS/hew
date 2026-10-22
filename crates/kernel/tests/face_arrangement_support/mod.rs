@@ -8,7 +8,6 @@
 
 use std::f64::consts::TAU;
 
-use kernel::topo::LoopKind;
 use kernel::{
     ComponentId, CurveGeom, DocChange, Document, DocumentError, DraftReport, DraftUnit, EdgeId,
     FaceId, FaceSplitReport, KernelOp, KernelOpError, KernelOpReport, Object, ObjectId, Plane,
@@ -234,13 +233,64 @@ pub fn group_faces(obj: &Object, plane: &Plane) -> Vec<FaceId> {
         .collect()
 }
 
+/// `V − E + F − H`, the Euler–Poincaré count for faces with holes. A hole
+/// that touches the face's outer loop (or a chain of holes touching it) at
+/// shared vertices does not make the face an annulus: its loops are one
+/// boundary, so `H` counts, per face, the groups of loops joined through
+/// shared vertices, less the group holding the outer loop.
 pub fn euler(obj: &Object) -> i64 {
-    let holes = obj
-        .loops()
-        .values()
-        .filter(|l| l.kind == LoopKind::Inner)
-        .count();
-    obj.vertices().len() as i64 - obj.edges().len() as i64 + obj.faces().len() as i64 - holes as i64
+    let mut holes = 0i64;
+    for face in obj.faces().values() {
+        let loops: Vec<kernel::LoopId> = std::iter::once(face.outer_loop)
+            .chain(face.inner_loops.iter().copied())
+            .collect();
+        let verts: Vec<Vec<kernel::VertexId>> = loops
+            .iter()
+            .map(|&l| {
+                obj.loop_half_edges(l)
+                    .map(|h| obj.half_edges()[h].origin)
+                    .collect()
+            })
+            .collect();
+        let mut root: Vec<usize> = (0..loops.len()).collect();
+        fn find(root: &mut [usize], mut i: usize) -> usize {
+            while root[i] != i {
+                i = root[i];
+            }
+            i
+        }
+        for i in 0..loops.len() {
+            for j in i + 1..loops.len() {
+                if verts[i].iter().any(|v| verts[j].contains(v)) {
+                    let (a, b) = (find(&mut root, i), find(&mut root, j));
+                    root[a] = b;
+                }
+            }
+        }
+        let groups = (0..loops.len())
+            .filter(|&i| find(&mut root, i) == i)
+            .count();
+        holes += groups as i64 - 1;
+    }
+    obj.vertices().len() as i64 - obj.edges().len() as i64 + obj.faces().len() as i64 - holes
+}
+
+/// Whether some group face has two loops sharing a vertex (a hole touching
+/// the outer loop or another hole at a point).
+pub fn has_touching_loops(obj: &Object, plane: &Plane) -> bool {
+    group_faces(obj, plane).into_iter().any(|f| {
+        let face = &obj.faces()[f];
+        let loops: Vec<Vec<kernel::VertexId>> = std::iter::once(face.outer_loop)
+            .chain(face.inner_loops.iter().copied())
+            .map(|l| {
+                obj.loop_half_edges(l)
+                    .map(|h| obj.half_edges()[h].origin)
+                    .collect()
+            })
+            .collect();
+        (0..loops.len())
+            .any(|i| (i + 1..loops.len()).any(|j| loops[i].iter().any(|v| loops[j].contains(v))))
+    })
 }
 
 pub fn signed_area(ring: &[Point3], n: Vec3) -> f64 {

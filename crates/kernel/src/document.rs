@@ -3393,7 +3393,7 @@ pub struct Document {
     /// The OBJECT owner of every object-owned sketch (unified-drafting §3):
     /// sketch id → the Object whose faces the sketch's edges lie over. An
     /// owned sketch holds exactly the drawing over the owner's faces that
-    /// cannot be face topology (loose chains, pinched or sliver regions) and
+    /// cannot be face topology (loose chains, sliver regions) and
     /// rides with the owner: it moves with it, and it is LIVE exactly while
     /// the owner is — derived, never tracked ([`Document::sketch_tombstoned`]),
     /// so every path that hides or restores an object (delete, boolean,

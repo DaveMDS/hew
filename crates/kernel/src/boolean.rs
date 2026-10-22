@@ -36,7 +36,12 @@
 //!   inside a larger one — does weld, resolved by the coplanar-boundary imprint.)
 //!
 //! This surfaces as a clean refusal (a non-watertight weld caught at assembly)
-//! rather than a silently wrong result.
+//! rather than a silently wrong result. One line contact IS resolved: a
+//! partner edge lying in a face's plane whose two faces both lie on one side
+//! of it (a cylinder tangent to a side face along a generatrix — a circle
+//! tangent to a face's edge at one point, pushed through) imprints nothing,
+//! so the face stays whole and the result touches itself along that line,
+//! every edge still between exactly two faces.
 //!
 //! Why the result is watertight: a seam is the real intersection of two faces,
 //! computed once and imprinted identically on both. Where the seam meets a face
@@ -210,6 +215,26 @@ fn collect_faces(
         Side::A => (a_polys, b_polys),
         Side::B => (b_polys, a_polys),
     };
+    // Points where a face of this operand holds two rings through one
+    // vertex (a hole touching its outer ring, or another hole).
+    let touch_points: Vec<Point3> = these
+        .iter()
+        .flat_map(|f| {
+            let rings: Vec<&Vec<Point3>> =
+                std::iter::once(&f.outer).chain(f.holes.iter()).collect();
+            let mut found = Vec::new();
+            for i in 0..rings.len() {
+                for j in i + 1..rings.len() {
+                    for &p in rings[i] {
+                        if rings[j].contains(&p) {
+                            found.push(p);
+                        }
+                    }
+                }
+            }
+            found
+        })
+        .collect();
     for fp in these {
         let na = fp.plane.normal();
 
@@ -246,6 +271,20 @@ fn collect_faces(
         // is then classified by a test point on the wrong side and the weld
         // leaks (a bogus DegenerateContact). The edge itself is the vertex-exact
         // authoritative seam, exactly as a coplanar rim is.
+        //
+        // Unless the partner only TOUCHES the plane along that edge, from a
+        // touch point: when every partner face on the edge lies strictly on
+        // one side of `fp`'s plane away from it, `fp`'s points on either side
+        // of the line are in the same place relative to the partner, and
+        // there is no transition to imprint. A cylinder whose wall is tangent
+        // to this face along one generatrix — a circle tangent to an edge at
+        // one point, pushed through — touches it so, starting where a face of
+        // `fp`'s solid holds two loops through one vertex; imprinting the
+        // line would split the face there and leave four faces on one edge.
+        // Its transversal copies are dropped too. (A line contact from no
+        // touch point — a ridge pressed into a face — stays imprinted and
+        // refuses at the weld, as before.)
+        let mut tangent_only: Vec<(Point3, Point3)> = Vec::new();
         for ofp in others {
             if coplanar_planes(fp, ofp) {
                 continue; // its edges are already collected above
@@ -257,7 +296,18 @@ fn collect_faces(
             for (p, q) in loop_edges(&ofp.outer).chain(ofp.holes.iter().flat_map(|h| loop_edges(h)))
             {
                 if in_plane(p, q) {
-                    authoritative_edges.push((p, q));
+                    if (touch_points
+                        .iter()
+                        .any(|t| t.approx_eq(p, tol::POINT_MERGE))
+                        || touch_points
+                            .iter()
+                            .any(|t| t.approx_eq(q, tol::POINT_MERGE)))
+                        && partner_only_touches_along(fp, others, p, q)
+                    {
+                        tangent_only.push((p, q));
+                    } else {
+                        authoritative_edges.push((p, q));
+                    }
                 }
             }
         }
@@ -275,7 +325,9 @@ fn collect_faces(
                 // breaking the coincident-patch dedup and the final weld. Drop the
                 // transversal copy in favour of the vertex-exact coplanar or
                 // in-plane partner edge.
-                if segment_lies_along_any(seg, &authoritative_edges) {
+                if segment_lies_along_any(seg, &authoritative_edges)
+                    || segment_lies_along_any(seg, &tangent_only)
+                {
                     continue;
                 }
                 push_unique_segment(&mut seams, seg, fp);
@@ -286,7 +338,12 @@ fn collect_faces(
         }
 
         for region in arrange_face(fp, &seams)? {
-            let c = interior_point(&region, na);
+            // Off any line the partner only touches: a point there sits on
+            // the partner's boundary, where its membership is undecidable.
+            // No such point (every candidate on such a line) is no decidable
+            // classification: refused, never guessed.
+            let c = interior_point(&region, na, &tangent_only)
+                .ok_or(BooleanError::DegenerateContact)?;
             // Coplanar partner boundaries can trace regions outside the original
             // face; keep only sub-faces actually inside it.
             if !region_contains(fp, c) {
@@ -372,6 +429,37 @@ fn cover_normal(coplanar: &[&FacePoly], c: Point3) -> Option<Vec3> {
         .iter()
         .find(|cp| region_contains(cp, c))
         .map(|cp| cp.plane.normal())
+}
+
+/// Whether every face of `others` holding the edge `p`–`q` (which lies in
+/// `fp`'s plane) lies strictly on one side of that plane away from the edge:
+/// every other vertex farther than [`tol::PLANE_DIST`], all on one side. The
+/// partner then touches `fp`'s plane along the edge without crossing it.
+fn partner_only_touches_along(fp: &FacePoly, others: &[FacePoly], p: Point3, q: Point3) -> bool {
+    let mut side = 0.0f64;
+    let mut faces = 0;
+    for o in others {
+        let holds = std::iter::once(&o.outer)
+            .chain(o.holes.iter())
+            .any(|r| loop_edges(r).any(|(a, b)| seg_eq(a, b, p, q)));
+        if !holds {
+            continue;
+        }
+        faces += 1;
+        for r in std::iter::once(&o.outer).chain(o.holes.iter()) {
+            for &x in r {
+                if x.approx_eq(p, tol::POINT_MERGE) || x.approx_eq(q, tol::POINT_MERGE) {
+                    continue;
+                }
+                let d = fp.plane.signed_distance(x);
+                if d.abs() <= tol::PLANE_DIST || (side != 0.0 && d.signum() != side) {
+                    return false;
+                }
+                side = d.signum();
+            }
+        }
+    }
+    faces == 2 && side != 0.0
 }
 
 /// True if the two faces lie in the same (parallel and coincident) plane.
@@ -652,8 +740,11 @@ fn add_loop(sketch: &mut Sketch, loop_pts: &[Point3]) -> Result<(), BooleanError
 /// From each outer-edge midpoint we march inward (toward the region interior)
 /// until the nearest boundary — outer or hole — and take the half-distance
 /// point, which is guaranteed strictly interior because the ray is inside the
-/// region from the midpoint until that first crossing.
-fn interior_point(region: &Region, normal: Vec3) -> Point3 {
+/// region from the midpoint until that first crossing. A point within
+/// [`tol::POINT_MERGE`] of an `avoid` segment is passed over: other edges'
+/// rays, then other depths along them, then the centroid (when it is inside
+/// and clear) are tried, and `None` when every one lies on such a segment.
+fn interior_point(region: &Region, normal: Vec3, avoid: &[(Point3, Point3)]) -> Option<Point3> {
     let mut boundary: Vec<(Point3, Point3)> = Vec::new();
     let mut push_loop = |pts: &[Point3]| {
         for i in 0..pts.len() {
@@ -664,32 +755,55 @@ fn interior_point(region: &Region, normal: Vec3) -> Point3 {
     for h in &region.holes {
         push_loop(h);
     }
+    let clear = |c: Point3| {
+        !avoid
+            .iter()
+            .any(|&(p, q)| point_segment_distance(c, p, q) <= tol::POINT_MERGE)
+    };
 
     let o = &region.outer;
-    for i in 0..o.len() {
-        let (a, b) = (o[i], o[(i + 1) % o.len()]);
-        let Ok(edge) = (b - a).normalized() else {
-            continue;
-        };
-        // Interior is to the left of a CCW outer edge: normal × edge.
-        let Ok(inward) = normal.cross(edge).normalized() else {
-            continue;
-        };
-        let mid = Point3::ORIGIN + (a.to_vec() + b.to_vec()) * 0.5;
-        let mut nearest = f64::INFINITY;
-        for &(c, d) in &boundary {
-            if let Some(t) = line_segment_param(mid, inward, c, d, normal)
-                && t > tol::POINT_MERGE
-                && t < nearest
-            {
-                nearest = t;
+    let mut any_ray = false;
+    // The half-way point first (the only one tried with nothing to avoid,
+    // so the common case is unchanged), then other depths along each ray.
+    for frac in [0.5, 0.25, 0.75, 0.125, 0.875] {
+        for i in 0..o.len() {
+            let (a, b) = (o[i], o[(i + 1) % o.len()]);
+            let Ok(edge) = (b - a).normalized() else {
+                continue;
+            };
+            // Interior is to the left of a CCW outer edge: normal × edge.
+            let Ok(inward) = normal.cross(edge).normalized() else {
+                continue;
+            };
+            let mid = Point3::ORIGIN + (a.to_vec() + b.to_vec()) * 0.5;
+            let mut nearest = f64::INFINITY;
+            for &(c, d) in &boundary {
+                if let Some(t) = line_segment_param(mid, inward, c, d, normal)
+                    && t > tol::POINT_MERGE
+                    && t < nearest
+                {
+                    nearest = t;
+                }
+            }
+            if nearest.is_finite() {
+                any_ray = true;
+                let c = mid + inward * (frac * nearest);
+                if clear(c) {
+                    return Some(c);
+                }
             }
         }
-        if nearest.is_finite() {
-            return mid + inward * (0.5 * nearest);
-        }
     }
-    centroid(o)
+    let c = centroid(o);
+    let inside = point_inside_polygon(c, o, normal)
+        && !region
+            .holes
+            .iter()
+            .any(|h| point_inside_polygon(c, h, normal));
+    if !any_ray || (inside && clear(c)) {
+        return Some(c);
+    }
+    None
 }
 
 fn centroid(pts: &[Point3]) -> Point3 {
@@ -979,6 +1093,49 @@ fn intern(p: Point3, positions: &mut Vec<Point3>) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn unit_square() -> Region {
+        Region {
+            outer: vec![
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+            ],
+            holes: Vec::new(),
+        }
+    }
+
+    /// A tangent chord through the square's middle, x = 0.5, carries every
+    /// edge's half-way point from the bottom and top edges and the centre:
+    /// the point found is off it.
+    #[test]
+    fn an_interior_point_steps_off_a_line_the_partner_only_touches() {
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let chord = (Point3::new(0.5, 0.0, 0.0), Point3::new(0.5, 1.0, 0.0));
+        let c = interior_point(&unit_square(), up, &[chord]).expect("a point");
+        assert!(point_segment_distance(c, chord.0, chord.1) > tol::POINT_MERGE);
+        assert!(c.x > 0.0 && c.x < 1.0 && c.y > 0.0 && c.y < 1.0);
+    }
+
+    /// With the two mid-lines both to avoid, every candidate (each edge's
+    /// ray at every depth, and the centre) lies on one: no decidable point,
+    /// `None`, which the classifier turns into a typed refusal.
+    #[test]
+    fn no_interior_point_off_every_avoided_line_is_none() {
+        let up = Vec3::new(0.0, 0.0, 1.0);
+        let lines = [
+            (Point3::new(0.5, 0.0, 0.0), Point3::new(0.5, 1.0, 0.0)),
+            (Point3::new(0.0, 0.5, 0.0), Point3::new(1.0, 0.5, 0.0)),
+        ];
+        assert_eq!(interior_point(&unit_square(), up, &lines), None);
+        // With nothing to avoid it is the bottom edge's half-way point, as
+        // before.
+        assert_eq!(
+            interior_point(&unit_square(), up, &[]),
+            Some(Point3::new(0.5, 0.5, 0.0))
+        );
+    }
 
     fn cube(min: Point3, max: Point3) -> Object {
         let (a, b) = (min, max);

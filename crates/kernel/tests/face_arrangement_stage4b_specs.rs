@@ -9,8 +9,8 @@
 //! and an erase of every run of the circle (one draft, ONE undo entry)
 //! gives the ground's result with the curve's edges removed — erasing a
 //! circle drawn across a rectangle gives the rectangle back. An erase that
-//! would leave a pinch is not refused: the face keeps what it can hold and
-//! the leftover drawing stays as the object's owned sketch. Erasing a
+//! leaves two shapes meeting at a single point leaves the face around them
+//! holding them as holes sharing that vertex, as on the ground. Erasing a
 //! solid's own edge is refused `DraftBoundaryEdgeTouched`, nothing changed.
 //!
 //! **Open paths.** An open line chain drawn on a face is cut at every point
@@ -23,7 +23,7 @@
 //!
 //! Every accepting spec checks the stage invariants (see
 //! `face_arrangement_specs.rs`): I1 valid and watertight, I2 Euler–Poincaré
-//! unchanged, I3 group area conserved, I4 no pinch, I5 exact undo/redo with
+//! unchanged, I3 group area conserved, I4 loops simple, I5 exact undo/redo with
 //! byte-identical saves, I6 the face group equals the ground's regions for
 //! the same lines, I7 the saved document reopens.
 
@@ -560,13 +560,12 @@ fn deleting_the_circle_on_the_ground_gives_the_rectangle_back_too() {
 }
 
 #[test]
-fn deleting_a_circle_that_would_leave_a_pinch_keeps_the_leftover_drawing() {
-    // A triangle touching the rectangle's right side at one point, which
-    // the circle drawn across that side made acceptable (it crosses the
-    // circle twice). Without the circle the triangle and the rectangle
-    // would meet at that single point: the wall around them pinched, as
-    // the ground's region is. The face keeps what it can hold; the rest
-    // stays as owned drawing.
+fn deleting_a_circle_leaving_two_shapes_touching_at_a_point_keeps_both_faces() {
+    // A triangle touching the rectangle's right side at one point, drawn
+    // inside a circle across that side (it crosses the circle twice).
+    // Without the circle the triangle and the rectangle meet at that single
+    // point: the wall holds them as two holes sharing it, as the ground's
+    // region does, and both stay faces.
     let (mut w, s) = wall_with_rect();
     let side_x = RX + RW;
     let (cy, r) = (RY + RH / 2.0, MM);
@@ -585,26 +584,30 @@ fn deleting_a_circle_that_would_leave_a_pinch_keeps_the_leftover_drawing() {
         .expect("the triangle touching the side inside the circle");
     let segs = circle_segments(&w, g, 24);
     let ground = ground_without(&w, w.obj(), &segs);
-    assert!(ground_has_pinch(&ground), "the ground pinches here too");
+    assert!(!ground_has_pinch(&ground), "the ground's rings are simple");
     let before = w.obj().clone();
     let bytes0 = w.doc.save();
     let depth0 = w.doc.undo_depth();
-    let (report, _) = delete_circle(&mut w, g, 24).expect("a pinch is kept, never refused");
-    assert!(
-        !report.kept_as_sketch.is_empty(),
-        "reported as kept drawing"
-    );
+    let (report, _) = delete_circle(&mut w, g, 24).expect("the circle erases");
+    assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
     assert_eq!(group_faces(&before, &w.plane).len(), 7);
     assert_eq!(
         group_faces(w.obj(), &w.plane).len(),
-        1,
-        "the rectangle and the triangle leave the face: only the wall remains"
+        3,
+        "the wall, the rectangle, and the triangle"
     );
-    // Both shapes whole, as owned drawing: the rectangle's sides with the
-    // circle's two crossings and the triangle's tip on them, the
-    // triangle's sides with the circle's two crossings.
-    assert_eq!(owned_edge_count(&w), 12);
-    assert_undoable(&mut w, &before, &bytes0, depth0);
+    assert!(
+        has_touching_loops(w.obj(), &w.plane),
+        "holes sharing the tip"
+    );
+    assert_eq!(owned_edge_count(&w), 0);
+    let n = w.plane.normal();
+    assert!(multiset_match(
+        &straightened(&group_rings(w.obj(), &w), n),
+        &straightened(&ground_regions(&ground), n),
+        true
+    ));
+    assert_invariants(&mut w, &before, &bytes0, depth0);
 }
 
 #[test]
@@ -785,9 +788,12 @@ fn a_line_along_existing_edges_only_changes_nothing() {
 }
 
 #[test]
-fn a_self_crossing_line_stays_owned_drawing() {
-    // The path crosses itself once, closing a loop that hangs off the path
-    // at the crossing point (a pinch, on the ground too).
+fn a_self_crossing_line_splits_the_wall_and_its_loop_is_a_face() {
+    // The path runs from the wall's bottom edge to its top edge and crosses
+    // itself once, closing a loop that hangs off the path at the crossing
+    // point: the wall splits along the path, the loop is a face, and the
+    // piece beside it holds it as a hole touching its outer loop at the
+    // crossing, as on the ground.
     let mut w = front_wall();
     let wall = w.face;
     let path = vec![
@@ -799,23 +805,33 @@ fn a_self_crossing_line_stays_owned_drawing() {
     ];
     let before = w.obj().clone();
     let sk = ground_edit(w.plane, &before, &path, &[]);
-    assert!(
-        ground_has_pinch(&sk),
-        "the ground's loop hangs off the path by a point"
-    );
+    assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
+    let bytes0 = w.doc.save();
+    let depth0 = w.doc.undo_depth();
+    let owned0 = owned_edge_count(&w);
+    let (report, _) = draw_path(&mut w.doc, None, w.id, wall, &path, &[]).expect("the line draws");
+    assert!(report.kept_as_sketch.is_empty(), "nothing the face refuses");
+    assert_group_matches_ground(&w, &sk);
     assert_eq!(ground_regions(&sk).len(), 3);
-    // The whole connected drawing (the path and its loop) is one island the
-    // face cannot hold: it stays as owned drawing, the solid untouched.
-    let report = assert_path_owned(&mut w, wall, &path, 6);
-    assert!(!report.kept_as_sketch.is_empty());
+    assert_eq!(
+        group_faces(w.obj(), &w.plane).len(),
+        3,
+        "two halves and the loop"
+    );
+    assert!(
+        has_touching_loops(w.obj(), &w.plane),
+        "the loop's touching hole"
+    );
+    assert_eq!(owned_edge_count(&w), owned0, "no loose drawing");
+    assert_invariants(&mut w, &before, &bytes0, depth0);
 }
 
 #[test]
-fn a_line_meeting_one_point_of_an_imprint_is_kept_as_owned_drawing() {
+fn a_line_meeting_one_point_of_an_imprint_cuts_the_wall_around_it() {
     // From the wall's left edge to the rectangle's corner and on to the
-    // wall's top edge, outside the rectangle: the rectangle would hang off
-    // the cut by one point (a pinch on the ground too). The wall keeps its
-    // faces; the line stays as owned drawing.
+    // wall's top edge, outside the rectangle: the cut splits the wall, and
+    // the corner piece holds the rectangle as a hole touching its outer
+    // loop at the corner, as on the ground.
     let (mut w, _) = wall_with_rect();
     let wall = w.face;
     let path = vec![
@@ -825,9 +841,15 @@ fn a_line_meeting_one_point_of_an_imprint_is_kept_as_owned_drawing() {
     ];
     let before = w.obj().clone();
     let sk = ground_edit(w.plane, &before, &path, &[]);
-    assert!(ground_has_pinch(&sk), "the ground pinches");
-    let report = assert_path_owned(&mut w, wall, &path, 2);
-    assert!(!report.kept_as_sketch.is_empty());
+    assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
+    let bytes0 = w.doc.save();
+    let depth0 = w.doc.undo_depth();
+    let (report, _) = draw_path(&mut w.doc, None, w.id, wall, &path, &[]).expect("the line draws");
+    assert!(report.kept_as_sketch.is_empty());
+    assert_group_matches_ground(&w, &sk);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 3);
+    assert!(has_touching_loops(w.obj(), &w.plane), "the touching hole");
+    assert_invariants(&mut w, &before, &bytes0, depth0);
 }
 
 proptest! {
@@ -835,9 +857,10 @@ proptest! {
 
     /// Ground parity for line chains: a random rectangle imprint on a
     /// 0.5 mm lattice and a random chain from the wall's left edge to its
-    /// right edge through one or two lattice points. Accepted, the face
-    /// group equals the ground's regions with I1–I7; kept as owned drawing
-    /// (the solid untouched) exactly when the ground's regions hold a pinch.
+    /// right edge through one or two lattice points. The face group equals
+    /// the ground's regions with I1–I7; nothing is kept as owned drawing
+    /// (a chain through one corner of the imprint included: the ground's
+    /// rings are simple, a hole sharing that corner).
     #[test]
     fn line_chains_match_the_ground(
         rx in 2u32..20, ry in 2u32..12, rw in 2u32..12, rh in 2u32..8,
@@ -864,15 +887,10 @@ proptest! {
         let sk = ground_edit(w.plane, &before, &path, &[]);
         let (report, _) = draw_path(&mut w.doc, None, w.id, seed, &path, &[])
             .expect("the chain draws");
-        let kept = !report.kept_as_sketch.is_empty();
-        prop_assert_eq!(kept, ground_has_pinch(&sk), "kept iff the ground pinches");
-        if kept {
-            prop_assert!(objects_equivalent(w.obj(), &before));
-            assert_undoable(&mut w, &before, &bytes0, depth0);
-        } else {
-            assert_group_matches_ground(&w, &sk);
-            assert_invariants(&mut w, &before, &bytes0, depth0);
-        }
+        prop_assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
+        prop_assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
+        assert_group_matches_ground(&w, &sk);
+        assert_invariants(&mut w, &before, &bytes0, depth0);
     }
 }
 

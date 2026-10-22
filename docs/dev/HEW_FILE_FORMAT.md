@@ -450,6 +450,19 @@ Each face's outer loop and each of its hole loops is a closed polygon: the
 last index does not repeat the first (the loop is implicitly closed by
 wrapping back to index 0 of that loop).
 
+Every loop is **simple**: no vertex index appears twice in one loop. The
+loops of one face may **share vertices at isolated points** — a hole
+touching the face's outer loop at one vertex (a circle drawn tangent to the
+face's edge), or two holes touching at one vertex — but never an edge: no
+two loops of one face traverse the same pair of vertices, in either
+direction. A shared vertex is one vertex-table entry referenced from each
+loop through it. This needed no version bump: every earlier reader rebuilt
+such a face from its index loops and its validator accepted it (a hole was
+checked only for lying inside the outer loop and not crossing it, and
+touching at a vertex is not a crossing), and no earlier writer emitted a
+loop repeating a vertex or an edge shared between loops of one face, so the
+stricter checks below reject nothing a conforming writer produced.
+
 **Canonical order.** A conforming writer derives the emission order from the
 geometry itself (see "Determinism"), as follows. Positions are compared
 lexicographically by coordinate — `x`, then `y`, then `z` — using a total
@@ -474,9 +487,12 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
   geometry alone, so every emitted payload — ring, holes, material, UV
   frame, surface, and edge-curve claims — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
-  order (each face's outer loop, then its holes); a vertex referenced by no
+  order (each face's outer loop, then its holes); a vertex several loops
+  share (a touching hole) takes the number of its first appearance and is
+  referenced by that number from every later loop; a vertex referenced by no
   loop — which valid topology does not produce — is appended at the end in
-  position order.
+  position order. Loops being simple, each loop's rotation start is unique,
+  so the order is well defined with shared vertices too.
 
 A reader MUST NOT depend on this order (any vertex/face order decodes to
 the same object); it exists so that semantically identical documents
@@ -569,8 +585,9 @@ contents do not describe valid geometry.
   what the reader's own topology reconstruction computes — a mismatch is a
   fatal error (cheap tamper detection), never silently corrected.
 - **Full topology validation.** The normal topology validator (manifold
-  edges, closed face loops, no orphan geometry) must pass before a decode
-  counts as successful.
+  edges, closed face loops, no orphan geometry, every loop simple, no edge
+  with both sides on one face) must pass before a decode counts as
+  successful.
 
 There is no repair path: any failed check above rejects the whole buffer
 outright with a typed reason — never a partially-loaded document.
@@ -753,7 +770,12 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   polygon-with-holes. `outer` is a vertex-id cycle, counter-clockwise from
   the plane normal's side; each `holes` entry is clockwise (same
   convention as). This winding is a writer guarantee, not something the
-  loader re-validates. `faceless` (v21+, optional, omitted when false)
+  loader re-validates. Each ring is simple; a hole may share vertices with
+  the outer ring or another hole, as a solid face's loops may (§3.1). A file
+  written before rings were split at touch points may hold a ring that
+  visits one vertex twice (a circle tangent to a rectangle's side, traced
+  as one walk); a reader loads it as written, and the sketch's next edit
+  re-traces it into simple rings. `faceless` (v21+, optional, omitted when false)
   marks a loop of edges with no face: what SketchUp has where a face was
   erased from its edges or where edges alone were drawn (a wire frame, a
   light rig). Such a region is not filled, not picked as a face and not

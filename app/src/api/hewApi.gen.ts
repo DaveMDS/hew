@@ -1410,7 +1410,7 @@ export interface SolidDeleteImprintResult {
 /**
  * `hew.solid.extrude` (v1) — Extrude a region into a new Object, consuming the profile.
  * Tier: Required · Class: model-mutating · Served: kernel
- * Refusals: distance_too_small, degenerate_geometry, unknown_region, region_has_no_face, unknown_entity, unknown_unit, region_not_pushable
+ * Refusals: distance_too_small, degenerate_geometry, unknown_region, region_has_no_face, unknown_entity, unknown_unit, region_not_pushable, region_touches_hole
  */
 export interface SolidExtrudeParams {
   distance: number

@@ -120,8 +120,8 @@ face it is real topology (a coplanar sub-face twinned with a hole in its
 parent, or a run of edges between two coplanar faces), never a separate
 overlay entity: that is what lets every operation (move, push/pull of the
 parent, slice, booleans) carry it along with no special code. Drawing that
-is not topology (a loose chain, a dangling end, a pinch or sliver the face
-cannot hold) lives in the object's OWNED sketch (2.6), because a solid's
+is not topology (a loose chain, a dangling end, a sliver the face cannot
+hold) lives in the object's OWNED sketch (2.6), because a solid's
 face loops hold no loose edges. Nothing about the drawing is an object of
 its own: the app selects and edits it as **plane units** (below), derived
 on demand from the lifted plane and keyed by geometry, never stored. The
@@ -133,11 +133,16 @@ or a cut with both ends on the same hole loop), `merge_faces` (its exact
 inverse, across one run or, through the re-trace, several), and
 `retrace_face`, which inserts several paths at once and rebuilds the
 face's loops by rotational order at each vertex, the half-edge form of the
-ground's region tracer. Bridges between boundary loops are intermediate
-only: a re-trace whose result would hold a loop visiting a vertex twice, or
-two loops of one face sharing a vertex, is refused, so committed state
-never holds a pinch or a bridge and the file format carries no extra
-topology. `merge_faces` also dissolves a run between a face's outer loop
+ground's region tracer. Every loop is simple (no vertex twice in one
+loop), and loops of one face may share vertices at isolated points; two
+loops never share an edge. A closed walk the re-trace takes that visits a
+vertex twice is split there into simple loops, so a circle tangent to a
+face's edge at one point is a disc face plus a hole in the face around it
+sharing that one vertex with the outer loop, and a figure-8 hole is two
+holes sharing a vertex. Bridges between boundary loops are intermediate
+only: a walk running out along an edge and back along its twin is
+refused, so committed state never holds a bridge. The validator enforces
+the rule, and the ground's region tracer splits its rings the same way. `merge_faces` also dissolves a run between a face's outer loop
 and a **hole loop** of the face around it: the hole owner keeps its
 handle, outer loop, plane, and paint, and the hole is rerouted around what
 was dissolved. Each op records the other as its undo, so the split/merge
@@ -168,9 +173,9 @@ events) edits the whole drawing on one plane as one undo step:
   minimal delta (only removed edges are removed, only new ones inserted)
   through `retrace_face` rehearsed on a copy. A loose edge over a face goes
   to that object's OWNED sketch. An edge over no face goes to a FREE
-  sketch. Stores whose content did not change are not rewritten. A pinch
-  that would leave a face unpushable is kept as owned drawing instead of
-  refused.
+  sketch. Stores whose content did not change are not rewritten. A region
+  the face cannot hold (a sliver too small for a saved file to reopen) is
+  kept as owned drawing instead of refused.
 - **Materialization.** A free region may be closed partly by a solid's
   edge (a crescent closed by a face's edge). Before any operation moves or
   removes solid edges (transform, delete, boolean, slice, push/pull) the
@@ -241,8 +246,7 @@ A Sketch has one of three owners: the world (a **free** sketch, drawn over
 no face), a component definition (in definition-local coordinates, reaching
 the scene through its instances), or an **Object** (an *owned* sketch, kept
 in `object_sketches`). An owned sketch holds exactly the drawing over the
-owner's faces that cannot be face topology (loose chains, pinched or sliver
-regions); it is expressed in the owner's frame and is in exactly one of the
+owner's faces that cannot be face topology (loose chains, sliver regions); it is expressed in the owner's frame and is in exactly one of the
 three states, never two. Its liveness is derived from the owner, so every
 hide, delete, and undo path carries it with no code of its own
 (`Document::sketch_tombstoned`). It rides with its owner: transforms

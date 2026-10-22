@@ -152,7 +152,7 @@ pub(super) fn unknown_unit(key: &str) -> CmdError {
 pub(super) fn region_not_pushable() -> CmdError {
     CmdError::Refusal(Refusal::api(
         "region_not_pushable",
-        "The face cannot hold that shape (it is pinched or too thin to be a face of the solid), \
+        "The face cannot hold that shape (it is too thin to be a face of the solid), \
          so it is kept as drawing only. Move or reshape the lines, then try again.",
     ))
 }

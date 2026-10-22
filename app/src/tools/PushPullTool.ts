@@ -414,9 +414,9 @@ export class PushPullTool implements Tool {
    * through the plane's listing (unified drafting §4.6): the region under the
    * cursor names the face it lies over (`over.face`), so a region drawn on
    * the face pushes as its own sub-face whichever face the ray struck. A
-   * region over the object with NO face (`over.face` null: a pinch or
-   * sliver the solid cannot hold) answers `{ refuse: <code> }`: RegionPinched,
-   * RegionSliver, or RegionNotPushable by the listing's `over.why`. Free regions never
+   * region over the object with NO face (`over.face` null: a sliver the
+   * solid cannot hold) answers `{ refuse: <code> }`: RegionSliver, or
+   * RegionNotPushable by the listing's `over.why`. Free regions never
    * reach here — they resolve through Path B (`extrude_region`). Anything
    * the listing cannot say (no listing, no region under the ray, a stale
    * handle) leaves the struck face as it was.
@@ -426,7 +426,7 @@ export class PushPullTool implements Tool {
     face: bigint,
     instance: bigint | undefined,
     ray: Ray,
-  ): bigint | { refuse: 'RegionPinched' | 'RegionSliver' | 'RegionNotPushable' } {
+  ): bigint | { refuse: 'RegionSliver' | 'RegionNotPushable' } {
     let hit: ReturnType<typeof regionUnderRay> = null
     try {
       const ctx = ctxOfFace(this.wasmScene, object, face, instance ?? null)
@@ -437,8 +437,7 @@ export class PushPullTool implements Tool {
     const over = hit?.region.over ?? null
     if (over === null || over.object !== object) return face
     if (over.face !== null) return over.face
-    // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel refusal codes, not copy
-    return { refuse: over.why === 'pinch' ? 'RegionPinched' : over.why === 'sliver' ? 'RegionSliver' : 'RegionNotPushable' }
+    return { refuse: over.why === 'sliver' ? 'RegionSliver' : 'RegionNotPushable' }
   }
 
   /**

@@ -406,6 +406,12 @@ pub enum SketchError {
     /// kernel bug in region tracing, surfaced as a typed error rather than a
     /// panic so it cannot brick the caller).
     MalformedRegion,
+    /// The region's outer ring touches one of its holes (or two holes touch)
+    /// at a single point: a circle drawn inside a rectangle with its rim on
+    /// one side. The region is a face, but it cannot be extruded as one
+    /// piece: the swept walls would meet four to an edge at that point.
+    /// The region inside the hole extrudes on its own.
+    RegionTouchesHole,
     /// A [`CurveGeom`] is degenerate: its radius is not finite or not larger
     /// than [`tol::POINT_MERGE`](crate::tol::POINT_MERGE).
     DegenerateCurve,
@@ -473,6 +479,12 @@ impl std::fmt::Display for SketchError {
             }
             SketchError::MalformedRegion => {
                 write!(f, "region boundary does not form a valid profile")
+            }
+            SketchError::RegionTouchesHole => {
+                write!(
+                    f,
+                    "region touches one of its holes at a point and cannot be extruded as one piece"
+                )
             }
             SketchError::DegenerateCurve => {
                 write!(f, "curve radius is degenerate")
@@ -2360,9 +2372,15 @@ impl Sketch {
         //     same vertex ids and now read the moved geometry automatically.
         //     Belt-and-suspenders: every region must still be a valid profile
         //     (a reflex drag could in principle pinch a boundary). Surfaced as
-        //     a typed error rather than silently accepted.
+        //     a typed error rather than silently accepted. A region whose
+        //     rings touch at a shared vertex is a region the tracer makes on
+        //     purpose (it is not extrudable as one piece, but the drag did not
+        //     make it so: topology is unchanged), so it is no refusal here.
         for region in s.regions.keys().collect::<Vec<_>>() {
-            s.profile(region)?;
+            match s.profile(region) {
+                Ok(_) | Err(SketchError::RegionTouchesHole) => {}
+                Err(e) => return Err(e),
+            }
         }
 
         // Dragging a vertex of a curve chain deforms the chain away from its
@@ -2757,7 +2775,11 @@ impl Sketch {
     ///
     /// # Errors
     /// [`SketchError::UnknownRegion`] if the handle is stale (regions die
-    /// whenever a mutation reshapes them — always re-query after mutating).
+    /// whenever a mutation reshapes them — always re-query after mutating);
+    /// [`SketchError::RegionHasNoFace`] for a loop with no face;
+    /// [`SketchError::RegionTouchesHole`] if two of its rings share a vertex
+    /// (a hole touching the outer ring or another hole at a point);
+    /// [`SketchError::MalformedRegion`] if the rings form no valid profile.
     pub fn profile(&self, region: SketchRegionId) -> Result<Profile, SketchError> {
         let r = self.regions.get(region).ok_or(SketchError::UnknownRegion)?;
         if r.faceless {
@@ -2777,6 +2799,17 @@ impl Sketch {
             .iter()
             .map(|h| h.iter().map(|&vid| self.vertices[vid].position).collect())
             .collect();
+
+        // Rings sharing a vertex (a hole touching the outer ring or another
+        // hole at a point) make a face but no single extrudable profile:
+        // refused for what it is, not as a tracing failure.
+        let rings: Vec<&Vec<SketchVertexId>> =
+            std::iter::once(&r.outer).chain(r.holes.iter()).collect();
+        if (0..rings.len())
+            .any(|i| (i + 1..rings.len()).any(|j| rings[i].iter().any(|v| rings[j].contains(v))))
+        {
+            return Err(SketchError::RegionTouchesHole);
+        }
 
         // A region produced by the pipeline should always yield a valid
         // Profile; if it does not, that is a kernel bug — but surface it as a
@@ -3698,8 +3731,15 @@ impl Sketch {
                 }
             }
 
-            if cycle.len() >= 3 {
-                cycles.push(cycle);
+            // A walk visiting a vertex twice (a loop touching another, or
+            // itself, at one point) is split there into simple rings, as a
+            // solid's face loops are: a circle tangent to a rectangle's side
+            // is a hole sharing that vertex with the rectangle's ring, and
+            // two circles touching are two holes sharing one vertex.
+            for ring in split_ring_at_repeats(cycle) {
+                if ring.len() >= 3 {
+                    cycles.push(ring);
+                }
             }
         }
 
@@ -3738,8 +3778,11 @@ impl Sketch {
             .iter()
             .enumerate()
             .filter(|&(_, a)| *a < 0.0 && (a.abs() - max_abs_area).abs() < tol::POINT_MERGE * 1e6)
-            .map(|(i, _)| i)
-            .next();
+            // The most negative of them: a cycle split off a pinched walk
+            // (a hole touching the outer ring) may come first and lie
+            // within that window of the true outside.
+            .min_by(|x, y| x.1.total_cmp(y.1))
+            .map(|(i, _)| i);
 
         // Separate CCW outer candidates from CW hole candidates (excluding the
         // unbounded outer face).
@@ -3853,6 +3896,29 @@ impl Sketch {
 
         regions
     }
+}
+
+/// Splits a closed vertex walk into simple rings at every vertex it visits
+/// more than once: each stretch between two visits of one vertex closes on
+/// its own, in the walk's order. A simple walk comes back whole.
+fn split_ring_at_repeats(walk: Vec<SketchVertexId>) -> Vec<Vec<SketchVertexId>> {
+    let mut rings: Vec<Vec<SketchVertexId>> = Vec::new();
+    let mut stack: Vec<SketchVertexId> = Vec::with_capacity(walk.len());
+    let mut at: std::collections::BTreeMap<SketchVertexId, usize> =
+        std::collections::BTreeMap::new();
+    for v in walk {
+        if let Some(&i) = at.get(&v) {
+            let ring = stack.split_off(i);
+            for x in &ring {
+                at.remove(x);
+            }
+            rings.push(ring);
+        }
+        at.insert(v, stack.len());
+        stack.push(v);
+    }
+    rings.push(stack);
+    rings
 }
 
 // ═════════════════════════════════════════════ structural reconstruction

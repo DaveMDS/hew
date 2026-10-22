@@ -149,7 +149,7 @@ pub(super) fn extrude(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> 
 /// region is one of the drafting plane's units (`hew.sketch.units`). A
 /// region over the void extrudes as a new Object; a region that IS a face
 /// of a solid push/pulls that face; a region over a face that cannot hold
-/// it (a pinch or sliver kept as drawing) refuses `region_not_pushable`.
+/// it (a sliver kept as drawing) refuses `region_not_pushable`.
 fn extrude_plane_region(
     ctx: &mut Ctx,
     plane_spec: &Value,

@@ -955,7 +955,7 @@ impl Scene {
     /// (a curve run is the piece of one circle, arc, or polygon a click
     /// selects: its facets reachable through points nothing else uses),
     /// "regions":[{"key","outer":[[x,y,z]..],"holes":[[[..]..]..],
-    /// "over":{"object":id,"face":id|null,"why":"pinch"|"sliver"|"other"|null}|null,
+    /// "over":{"object":id,"face":id|null,"why":"sliver"|"other"|null}|null,
     /// "extrude":{"sketch":id,"region":id}|null}]}` (`why` says why a region
     /// over a solid has no face).
     /// `ctx_json` is `{"plane":[px,py,pz,nx,ny,nz]}`, `{"face":{"object":id,"face":id}}`
@@ -1193,7 +1193,6 @@ impl Scene {
                         "object": o.data().as_ffi(),
                         "face": f.map(|f| f.data().as_ffi()),
                         "why": r.why.map(|w| match w {
-                            kernel::DraftRegionWhy::Pinch => "pinch",
                             kernel::DraftRegionWhy::Sliver => "sliver",
                             kernel::DraftRegionWhy::Other => "other",
                         }),

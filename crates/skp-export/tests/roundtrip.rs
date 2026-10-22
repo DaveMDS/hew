@@ -263,3 +263,105 @@ fn a_production_models_whole_export_reads_back_as_written() {
         round_trip("theater", &doc, target).unwrap();
     }
 }
+
+/// A box whose top holds a circle tangent to its front edge at one point:
+/// the disc is a face and the top holds it as a hole sharing that vertex
+/// with its outer loop (loops of a face may share isolated vertices). Hew
+/// writes it as a face with a touching inner loop, which SketchUp holds
+/// natively, and reads it back as topology on both containers — the same
+/// faces, the touching hole kept, nothing dropped to sketch drawing.
+fn tangent_circle_box() -> Document {
+    use kernel::{CurveGeom, Plane, Point3};
+    let mut doc = Document::new();
+    let ground = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let s = doc.add_sketch(ground);
+    let c = [
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(2.0, 0.0, 0.0),
+        Point3::new(2.0, 2.0, 0.0),
+        Point3::new(0.0, 2.0, 0.0),
+    ];
+    for i in 0..4 {
+        doc.sketch_mut(s)
+            .unwrap()
+            .add_segment(c[i], c[(i + 1) % 4])
+            .unwrap();
+    }
+    let r = doc.extrudable_regions(s).unwrap()[0];
+    let (id, _) = doc.extrude_region(s, r, 1.0).unwrap();
+    let top = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ])
+    .unwrap();
+    // 72 facets about (1, 0.5), vertex 0 exactly on the front edge at (1, 0).
+    let ring: Vec<Point3> = (0..72)
+        .map(|i| {
+            let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 72.0;
+            Point3::new(1.0 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin(), 1.0)
+        })
+        .collect();
+    let mut ring = ring;
+    ring[0] = Point3::new(1.0, 0.0, 1.0);
+    doc.draft(top, None, &[id], "Circle", |sk| {
+        sk.begin_curve_with(CurveGeom {
+            center: Point3::new(1.0, 0.5, 1.0),
+            radius: 0.5,
+        })?;
+        for i in 0..ring.len() {
+            sk.add_segment(ring[i], ring[(i + 1) % ring.len()])?;
+        }
+        sk.end_curve();
+        Ok(())
+    })
+    .unwrap();
+    doc
+}
+
+/// Whether some face of some visible object holds two loops sharing a vertex.
+fn has_touching_hole(doc: &Document) -> bool {
+    doc.visible_object_ids().into_iter().any(|id| {
+        let obj = doc.object(id).unwrap();
+        obj.faces().values().any(|face| {
+            let loops: Vec<Vec<kernel::VertexId>> = std::iter::once(face.outer_loop)
+                .chain(face.inner_loops.iter().copied())
+                .map(|l| {
+                    obj.loop_half_edges(l)
+                        .map(|h| obj.half_edges()[h].origin)
+                        .collect()
+                })
+                .collect();
+            (0..loops.len()).any(|i| {
+                (i + 1..loops.len()).any(|j| loops[i].iter().any(|v| loops[j].contains(v)))
+            })
+        })
+    })
+}
+
+#[test]
+fn a_hole_touching_its_faces_outer_loop_survives_hew_to_skp_to_hew() {
+    let source = tangent_circle_box();
+    assert!(has_touching_hole(&source));
+    for target in [Target::Skp2026, Target::Skp2017] {
+        round_trip("tangent circle", &source, target).unwrap_or_else(|e| panic!("{e}"));
+        let written = export(&source, target, WriteEnv::system()).expect("writes");
+        let back = import(&written.bytes);
+        assert!(
+            has_touching_hole(&back),
+            "{target:?}: the touching hole is topology"
+        );
+        for id in back.visible_object_ids() {
+            back.object(id).unwrap().validate().expect("valid");
+            assert!(
+                back.object_owned_sketches(id).is_empty(),
+                "{target:?}: nothing dropped to sketch drawing"
+            );
+        }
+    }
+}

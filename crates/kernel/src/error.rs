@@ -102,6 +102,20 @@ pub enum TopologyError {
         /// The offending face.
         face: FaceId,
     },
+    /// A loop visits one vertex more than once. Every loop is simple; two
+    /// loops of one face may share a vertex (a hole touching the outer loop
+    /// or another hole at one point), never an edge.
+    LoopNotSimple {
+        /// The offending loop.
+        loop_id: LoopId,
+    },
+    /// Both sides of one edge lie on the same face: two of its loops share
+    /// the edge, or one loop runs out along it and back (a bridge or an
+    /// antenna), which no face describes.
+    EdgeWithinOneFace {
+        /// The offending edge.
+        edge: EdgeId,
+    },
     /// A face's inner (hole) loop lies entirely outside the face's outer
     /// boundary: the hole belongs to some other region of the plane, so the
     /// face's ring structure does not describe its geometry.
@@ -203,6 +217,12 @@ impl std::fmt::Display for TopologyError {
                     f,
                     "face {face:?} encloses too little area to recompute its plane on load"
                 )
+            }
+            LoopNotSimple { loop_id } => {
+                write!(f, "loop {loop_id:?} visits a vertex more than once")
+            }
+            EdgeWithinOneFace { edge } => {
+                write!(f, "both sides of edge {edge:?} lie on one face")
             }
             HoleOutsideFace { face, loop_id } => {
                 write!(

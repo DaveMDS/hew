@@ -3954,6 +3954,7 @@ impl Registry {
                 "unknown_entity",
                 "unknown_unit",
                 "region_not_pushable",
+                "region_touches_hole",
             ];
 
             let cmd = commands

@@ -92,9 +92,15 @@ below.
   loops rebuilt by rotational order at each vertex, its own inverse with
   the arguments swapped), so the boundaries it joins become one, as on
   the ground; bridges exist only inside the re-trace, never in a
-  committed face, so the file format is unchanged. A loop touching at a
-  single point is kept as drawing owned by the object (a pinched face
-  cannot be pushed, and Push/Pull says so)
+  committed face, so the file format is unchanged. A circle crossing
+  the face's own edge or corner splits the face the same way: the lens
+  is a face that keeps its circle on every whole facet, and the part past
+  the edge is a free sketch closed by that edge. A loop touching at a
+  single point, including a circle tangent to the face's own edge, is a
+  face too: the face around it holds it as a hole sharing that one vertex
+  with its outer loop (loops of a face may share isolated vertices, never
+  an edge), and the disc and the face around it push and pull, through to
+  the far side included
 - Deleting lines on a face merges the regions on both sides, as on the
   ground, including a region and the face it was drawn in: selecting a
   corner leftover's rectangle edges (between a rectangle imprint and a
@@ -113,7 +119,9 @@ below.
   click selects a drawn line within 8 screen pixels whatever the model's
   scale, even where a guide lies along it. Cuts that close on one point,
   cross themselves, or repeat a point, and merges that would pinch a
-  loop, refuse typed; undo and redo restore paint exactly
+  loop, refuse typed (the drafting engine instead re-traces, splitting a
+  pinched walk into loops that share the vertex); undo and redo restore
+  paint exactly
 - A drawn circle or arc stays one shape after other shapes cut it apart
   on a face: its runs (chord runs whose edges are all facets of one
   circle; now the engine's curve units, keyed by geometry in
@@ -121,8 +129,8 @@ below.
   "Arc"), a double-click on any run (or the ground's triple-click)
   selects the whole curve, and Delete merges every run's faces in one
   undo entry (a draft delete of the curve's edge keys) — a circle drawn across a
-  rectangle deletes back to the rectangle — refusing whole when the
-  delete would leave two shapes touching at a point. Clicking one line
+  rectangle deletes back to the rectangle, and a delete that leaves two
+  shapes touching at a point leaves them as two holes sharing it. Clicking one line
   whose two faces meet along several runs highlights every run Delete
   will remove. The Line tool on a face hands its whole chain to the
   kernel (now one `Document::draft` gesture, ARCHITECTURE.md 2.4):
@@ -130,9 +138,7 @@ below.
   from the face's edge across them, as one undo entry, and a dangling
   end (refused at the time) is now kept as a loose owned edge. This completes the face-arrangement
   program: shapes and lines drawn on a face split, merge, and delete as
-  the same lines do on the ground. Known limits: a shape touching an
-  edge or another shape at a single point is kept as drawing owned by the
-  object, and Push/Pull explains why it cannot be pushed; a
+  the same lines do on the ground. Known limits: a
   facet a crossing cuts mid-way keeps no circle claim in the solid (the
   drafting engine still lists it with its circle), so pushing that
   region leaves one flat wall among the cylinder's; and a sliver under
@@ -206,7 +212,7 @@ below.
   every edit each edge is stored where it can be: over a face and part of
   a region the solid can hold, as that face's topology (an imprint, as
   before); over a face but loose (a free end) or part of a region the
-  solid cannot hold (a pinch, a sliver), in a sketch OWNED by that object
+  solid cannot hold (a sliver), in a sketch OWNED by that object
   on that plane; over the void, in the plane's shared world sketch. A
   loose line on a face is kept; a shape straddling a face edge splits into
   a face part (Push/Pull grows or carves the solid) and a free part

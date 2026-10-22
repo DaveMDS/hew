@@ -6,16 +6,16 @@
 //! (boundary-to-boundary cuts) in one undo entry. The result matches the
 //! regions the ground gives for the same shapes in one sketch.
 //!
-//! A loop touching the group at exactly one point (a pinch — the ground's
-//! region there cannot be extruded either) cannot be held by a face: the
-//! draft keeps it as the object's owned sketch drawing and leaves the
-//! faces untouched.
+//! A loop touching the group at exactly one point is face topology too: the
+//! face around it holds it as a hole sharing that one vertex with the
+//! face's outer loop (or with another hole), as the ground's region does.
 //!
 //! Every accepting spec checks the stage invariants:
 //! - I1 `validate()` passes and watertightness is unchanged;
-//! - I2 `V − E + F − H` over the object is unchanged;
+//! - I2 `V − E + F − H` over the object is unchanged (a hole touching the
+//!   outer loop at a vertex is one boundary with it, not an annulus);
 //! - I3 the summed area of the face group is unchanged;
-//! - I4 no loop of a group face repeats a vertex (no pinch committed);
+//! - I4 no loop of a group face repeats a vertex (every loop is simple);
 //! - I5 undo restores the prior object, redo the result, and saves after
 //!   several undo/redo cycles are byte-identical;
 //! - I6 the group's faces equal the ground's regions for the same edges;
@@ -120,37 +120,67 @@ fn polygon_vertices_on_three_edges_make_four_faces() {
 }
 
 #[test]
-fn single_point_tangent_stays_owned_drawing_and_the_faces_are_untouched() {
-    // A face cannot hold a loop touching the group at exactly one point (its
-    // ring would pinch); the draft keeps the circle as the object's owned
-    // sketch, the faces unchanged.
+fn single_point_tangent_makes_the_disc_a_face_in_a_touching_hole() {
+    // A loop touching the group at exactly one point is face topology: the
+    // disc is a face, and the rectangle holds it as a hole sharing that one
+    // vertex with the rectangle's outer loop, as the ground does.
     let mut w = front_wall();
     let s = imprint_rect(&mut w);
     // Radius 1 mm under the top side: tangent at vertex 6 only.
     let r = 1.0 * MM;
     let ring = w.ring(RX + 4.0 * MM, RY + RH - r, r, 24, 0.0);
     let g = w.circle_geom(RX + 4.0 * MM, RY + RH - r, r);
-    draw_kept_as_sketch(&mut w, s, ring, Some(g));
-    assert_eq!(group_faces(w.obj(), &w.plane).len(), 2, "wall + rectangle");
+    draw_and_check(&mut w, s, ring, Some(g));
+    assert_eq!(
+        group_faces(w.obj(), &w.plane).len(),
+        3,
+        "wall + rectangle + disc"
+    );
+    assert!(has_touching_loops(w.obj(), &w.plane));
+    assert_eq!(claims_on(w.obj(), g), 24);
+    assert!(w.doc.object_owned_sketches(w.id).is_empty());
 }
 
 #[test]
-fn shared_corner_only_stays_owned_drawing_inside_and_outside_a_sub_face() {
+fn shared_corner_only_makes_faces_inside_and_outside_a_sub_face() {
     let mut w = front_wall();
     let s = imprint_rect(&mut w);
+    // Inside the rectangle, touching its corner: a hole in the rectangle
+    // sharing the corner with its outer loop.
     let inside = vec![
         w.at(RX, RY),
         w.at(RX + 2.0 * MM, RY + 1.0 * MM),
         w.at(RX + 1.0 * MM, RY + 2.0 * MM),
     ];
-    draw_kept_as_sketch(&mut w, s, inside, None);
+    draw_and_check(&mut w, s, inside, None);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 3);
+    // Outside it, touching the same corner: the wall holds the rectangle and
+    // the triangle as two holes sharing that corner.
     let outside = vec![
         w.at(RX, RY),
         w.at(RX - 1.0 * MM, RY - 2.0 * MM),
         w.at(RX - 2.0 * MM, RY - 1.0 * MM),
     ];
     let wall = w.face;
-    draw_kept_as_sketch(&mut w, wall, outside, None);
+    draw_and_check(&mut w, wall, outside, None);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 4);
+    let obj = w.obj();
+    let wall_face = group_faces(obj, &w.plane)
+        .into_iter()
+        .find(|&f| obj.faces()[f].inner_loops.len() == 2)
+        .expect("the wall holds two holes");
+    let holes: Vec<Vec<Point3>> = obj.faces()[wall_face]
+        .inner_loops
+        .iter()
+        .map(|&l| ring_of(obj, l))
+        .collect();
+    let corner = w.at(RX, RY);
+    assert!(
+        holes
+            .iter()
+            .all(|h| h.iter().any(|p| p.approx_eq(corner, tol::POINT_MERGE))),
+        "both holes hold the shared corner"
+    );
 }
 
 #[test]
@@ -317,9 +347,9 @@ proptest! {
     /// Random rectangle imprint + random 24-gon on a 0.1 mm lattice, biased
     /// toward tangency: accepted with I1–I7 (inside the rectangle, touching
     /// it at two or more points or none; crossing it, from stage 3; or
-    /// wholly around it), or refused with the object untouched — and the
-    /// refusal is the one the ground predicts (the circle touches the
-    /// rectangle at exactly one point, which the ground leaves pinched).
+    /// wholly around it). A circle touching the rectangle at exactly one
+    /// point is a disc in a hole of the rectangle sharing that point, as on
+    /// the ground.
     #[test]
     fn touching_circles_on_a_lattice_match_the_ground_or_refuse_as_predicted(
         wq in 20u32..=94,
@@ -394,12 +424,6 @@ proptest! {
             prop_assert_eq!(group_faces(w.obj(), &w.plane).len(), 3);
             assert_ground_parity(&w, &before, &ring);
             assert_invariants(&mut w, &before, &bytes0, depth0);
-        } else if touches == 1 && !crosses {
-            // The circle touches the rectangle at exactly one point, which
-            // the ground leaves pinched: no face can hold it, so the draft
-            // keeps the circle as owned drawing and the faces untouched.
-            prop_assert!(ground_has_pinch(&ground_with(w.plane, &before, &ring)));
-            draw_kept_as_sketch(&mut w, s, ring.clone(), Some(g));
         } else if crosses {
             // The pieces outside the rectangle cut the wall from its hole
             // back to it. Facets the rectangle crosses mid-way lose their
@@ -409,8 +433,9 @@ proptest! {
             assert_invariants(&mut w, &before, &bytes0, depth0);
         } else {
             w.draw_loop(s, &ring, Some(g)).expect("predicted acceptance");
-            // Clear of the sides: one sub-face (3 faces); touching at
-            // `touches` >= 2 points: the circle plus its leftovers.
+            // Clear of the sides: one sub-face (3 faces); touching at one
+            // point: the disc in a touching hole (3 faces); at `touches`
+            // >= 2 points: the circle plus its leftovers.
             prop_assert_eq!(
                 group_faces(w.obj(), &w.plane).len(),
                 if touches == 0 { 3 } else { 2 + touches }
@@ -634,43 +659,58 @@ fn a_circle_tangent_twice_around_an_imprint_reports_the_drawn_region() {
 
 // -------------------------------- contacts closer than POINT_MERGE apart
 
+/// Draws a loop that meets the face at one point and pokes a hair past it:
+/// the part over the face is a face in a hole touching the face's edge at
+/// that point, the hair past the edge is a loose free-sketch edge, and the
+/// draw passes I1–I5 and I7.
+fn draw_touching_with_a_hair_past(w: &mut Wall, loop_path: Vec<Point3>) {
+    let before = w.obj().clone();
+    let bytes0 = w.doc.save();
+    let depth0 = w.doc.undo_depth();
+    let face = w.face;
+    let (report, _) = w.draw_loop(face, &loop_path, None).expect("never refused");
+    assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
+    assert_eq!(
+        group_faces(w.obj(), &w.plane).len(),
+        2,
+        "the face + the loop"
+    );
+    assert!(has_touching_loops(w.obj(), &w.plane), "a touching hole");
+    assert!(w.doc.object_owned_sketches(w.id).is_empty());
+    assert_eq!(report.sketches.len(), 1, "the free hair past the edge");
+    assert!(min_vertex_gap(w.obj()) >= tol::POINT_MERGE);
+    assert_invariants(w, &before, &bytes0, depth0);
+}
+
 #[test]
-fn a_loop_whose_two_contacts_resolve_to_one_corner_stays_drawing() {
+fn a_loop_whose_two_contacts_resolve_to_one_corner_touches_it_as_a_face() {
     // The apex sits 1.1 nm past the top-right corner along both axes
     // (1.56 nm off it): both sides pass within POINT_MERGE of the corner,
     // so the loop meets the face at that one corner only, and its apex
-    // lies off the face. The face keeps its shape; the drawing stays in the
-    // object's owned sketch (the part over the face) and a free sketch (the
-    // overhang).
+    // lies off the face. The part over the face is a face in a hole
+    // touching the corner; the overhang is a free sketch.
     let mut w = top_30x20();
     let tri = vec![
         w.at(0.015, 0.016),
         w.at(0.030_000_001_1, 0.020_000_001_1),
         w.at(0.006_000_000_3, 0.012),
     ];
-    let face = w.face;
-    let report = draw_kept_as_sketch(&mut w, face, tri, None);
-    assert_eq!(report.sketches.len(), 2, "owned part + free overhang");
-    assert_eq!(group_faces(w.obj(), &w.plane).len(), 1);
+    draw_touching_with_a_hair_past(&mut w, tri);
 }
 
 #[test]
-fn a_needle_whose_apex_grazes_an_edge_stays_drawing() {
+fn a_needle_whose_apex_grazes_an_edge_touches_it_as_a_face() {
     // The apex is 1.1 nm above the top edge, so both sides cross it, but
-    // only 22 pm apart: two vertices closer than POINT_MERGE if cut. The
-    // face is not cut; the needle stays drawing (owned over the face, a
-    // free sliver past the edge).
+    // only 22 pm apart: two vertices closer than POINT_MERGE if cut. They
+    // meet the edge as one point: the needle over the face is a face in a
+    // hole touching the edge there, the sliver past it a free sketch.
     let mut w = top_30x20();
     let needle = vec![
         w.at(0.0149, 0.010),
         w.at(0.0151, 0.010),
         w.at(0.015, 0.020_000_001_1),
     ];
-    let face = w.face;
-    let report = draw_kept_as_sketch(&mut w, face, needle, None);
-    assert_eq!(report.sketches.len(), 2, "owned part + free overhang");
-    assert_eq!(group_faces(w.obj(), &w.plane).len(), 1);
-    assert!(min_vertex_gap(w.obj()) >= tol::POINT_MERGE);
+    draw_touching_with_a_hair_past(&mut w, needle);
 }
 
 #[test]
@@ -902,12 +942,30 @@ fn merge_tolerance_fuzz(amp: f64) {
                     // Wholly on the face: the group equals the ground's
                     // regions for the loop as the engine snaps it.
                     on_topology += 1;
-                    let snapped = snapped_like_the_planner(&before, &w.plane, &loop_path);
+                    // A loop point the engine kept as a vertex of its own
+                    // (within a hair of an edge's end but not merged with it)
+                    // is where the engine put it.
+                    let snapped: Vec<Point3> =
+                        snapped_like_the_planner(&before, &w.plane, &loop_path)
+                            .into_iter()
+                            .zip(&loop_path)
+                            .map(|(q, &p)| {
+                                w.obj()
+                                    .vertices()
+                                    .values()
+                                    .map(|v| v.position)
+                                    .find(|v| {
+                                        v.approx_eq(p, 2.0 * tol::POINT_MERGE)
+                                            && !before.vertices().values().any(|b| b.position == *v)
+                                    })
+                                    .unwrap_or(q)
+                            })
+                            .collect();
                     assert_ground_parity(&w, &before, &snapped);
                 } else {
-                    // Part of the drawing lies off the face or pinches it:
-                    // it stays sketch drawing; the faces still hold only
-                    // what they can.
+                    // Part of the drawing lies off the face (a hair past an
+                    // edge): it stays sketch drawing; the faces hold the
+                    // rest.
                     with_sketch += 1;
                     let _ = &report;
                 }
@@ -929,8 +987,16 @@ fn merge_tolerance_fuzz(amp: f64) {
         "{accepted} accepted ({on_topology} on topology, {with_sketch} with sketch drawing, \
          {unchanged} unchanged), {refused} refused"
     );
+    // Exactly on the edges and corners, every loop lands as face topology
+    // (a one-point touch included); jittered, the loops a hair past an edge
+    // leave that hair as sketch drawing.
     assert!(
-        on_topology > 100 && with_sketch > 100,
+        on_topology > 100
+            && if amp == 0.0 {
+                with_sketch == 0
+            } else {
+                with_sketch > 100
+            },
         "{accepted} accepted ({on_topology} on topology, {with_sketch} with sketch drawing), {refused} refused"
     );
 }

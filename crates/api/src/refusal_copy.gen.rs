@@ -56,6 +56,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "MalformedRegion" => {
             "This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug."
         }
+        "RegionTouchesHole" => {
+            "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
+        }
         "RegionHasNoFace" => {
             "This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face."
         }
@@ -101,9 +104,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "RegionNotPushable" => {
             "That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead."
-        }
-        "RegionPinched" => {
-            "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
         }
         "RegionSliver" => {
             "That shape is too thin to push or pull — the face can't hold a sliver that small."

@@ -9,10 +9,13 @@
 //! as long as the paths inserted with it close a region, so that no bridge
 //! is left; and removing the edges two faces share along several separate
 //! runs merges them into one face with new holes, or splits a hole into
-//! several. Bridges are intermediate only: a re-trace whose result would
-//! hold a loop visiting a vertex twice, or two loops of one face sharing a
-//! vertex (a pinch or a bridge), is refused, so the committed state is
-//! always one the file format already describes.
+//! several. A traced walk that visits a vertex twice (a loop touching the
+//! boundary or another loop at one point) is split there into simple loops
+//! that share the vertex: every committed loop is simple, and loops of one
+//! face share at most isolated vertices, never an edge (ARCHITECTURE §2.4).
+//! Bridges are intermediate only: a re-trace whose result would hold a walk
+//! running out along an edge and back along its twin (a bridge, or a
+//! dangling end) is refused.
 //!
 //! Its inverse is itself with the arguments swapped: the report carries the
 //! inserted paths as resolved and the removed chains with their circle
@@ -109,8 +112,10 @@ impl Object {
     /// two or more paths — not only boundary-to-boundary cuts. Unlike
     /// [`Object::split_face`], its two ends may lie on DIFFERENT loops of
     /// the face (a bridge between the outer loop and a hole, or between two
-    /// holes) provided the result holds none: every result face's loops
-    /// visit each vertex once and share none with each other. New faces
+    /// holes) provided the result holds none: no result face has an edge on
+    /// both sides. A traced walk visiting a vertex twice is split there, so
+    /// every result loop visits each vertex once; loops of one face may
+    /// share vertices (a hole touching the outer loop at one point). New faces
     /// take the attributes of the face they came from; a face merged from
     /// several keeps the attributes of `face` if it is one of them (else
     /// the lowest key's), and its analytic surface only if all agreed
@@ -138,9 +143,10 @@ impl Object {
     /// - [`StickyError::PathNotSimple`] — paths crossing or touching each
     ///   other or the boundary away from their ends, a zero-length segment,
     ///   a path closing on one point, an end on a removed edge; or, when
-    ///   inserting, a result holding a pinch or a bridge.
+    ///   inserting, a result holding a bridge (an edge with one face on
+    ///   both sides).
     /// - [`StickyError::SharedChainDisconnected`] — a removal-only re-trace
-    ///   whose result would hold a pinch.
+    ///   whose result would hold a bridge.
     /// - [`StickyError::WouldCorrupt`] — anything the validator refuses.
     pub fn retrace_face(
         &mut self,
@@ -622,7 +628,7 @@ impl Object {
         }
 
         // 6. Trace the cycles; classify outer (counter-clockwise) and hole.
-        let pinch_err = if insert.is_empty() {
+        let bridge_err = if insert.is_empty() {
             StickyError::SharedChainDisconnected
         } else {
             StickyError::PathNotSimple
@@ -644,20 +650,33 @@ impl Object {
                 cycle.push(cur);
                 cur = next[&cur];
             }
-            let verts: Vec<VertexId> = cycle.iter().map(|&h| obj.half_edges[h].origin).collect();
-            let distinct: BTreeSet<VertexId> = verts.iter().copied().collect();
-            if distinct.len() != verts.len() {
-                return Err(pinch_err);
+            // A walk running out along an edge and back along its twin is a
+            // bridge (between two boundaries) or an antenna (a dangling
+            // end): no face holds it.
+            let members: BTreeSet<HalfEdgeId> = cycle.iter().copied().collect();
+            if cycle
+                .iter()
+                .any(|&h| obj.half_edges[h].twin.is_some_and(|t| members.contains(&t)))
+            {
+                return Err(bridge_err);
             }
-            let pts: Vec<Point3> = verts.iter().map(|&x| obj.vertices[x].position).collect();
-            let area = signed_area_on_plane(&pts, normal);
-            if area.abs() <= tol::POINT_MERGE * tol::POINT_MERGE {
-                return Err(StickyError::WouldCorrupt);
-            }
-            if area > 0.0 {
-                outers.push((cycle, area));
-            } else {
-                holes.push(cycle);
+            // A walk visiting a vertex twice is split there into simple
+            // loops: a hole touching the outer loop at one point, or two
+            // holes touching, share that vertex as separate loops.
+            for piece in split_at_repeated_vertices(&obj, cycle) {
+                let pts: Vec<Point3> = piece
+                    .iter()
+                    .map(|&h| obj.vertices[obj.half_edges[h].origin].position)
+                    .collect();
+                let area = signed_area_on_plane(&pts, normal);
+                if area.abs() <= tol::POINT_MERGE * tol::POINT_MERGE {
+                    return Err(StickyError::WouldCorrupt);
+                }
+                if area > 0.0 {
+                    outers.push((piece, area));
+                } else {
+                    holes.push(piece);
+                }
             }
         }
         if outers.is_empty() {
@@ -695,17 +714,19 @@ impl Object {
                 .ok_or(StickyError::WouldCorrupt)?;
             holes_of[owner].push(hi);
         }
-        // No two loops of one face may share a vertex (a pinch, or a bridge
-        // between the outer loop and a hole).
+        // Loops of one face may share isolated vertices, never an edge: no
+        // edge may have both sides on one result face.
         for (k, (cycle, _)) in outers.iter().enumerate() {
-            let mut vs: BTreeSet<VertexId> =
-                cycle.iter().map(|&h| obj.half_edges[h].origin).collect();
-            for &hi in &holes_of[k] {
-                for &h in &holes[hi] {
-                    if !vs.insert(obj.half_edges[h].origin) {
-                        return Err(pinch_err);
-                    }
-                }
+            let hs: BTreeSet<HalfEdgeId> = cycle
+                .iter()
+                .chain(holes_of[k].iter().flat_map(|&hi| holes[hi].iter()))
+                .copied()
+                .collect();
+            if hs
+                .iter()
+                .any(|&h| obj.half_edges[h].twin.is_some_and(|t| hs.contains(&t)))
+            {
+                return Err(bridge_err);
             }
         }
 
@@ -877,6 +898,36 @@ impl Object {
             }
         })
     }
+}
+
+/// Splits a traced closed walk (half-edges in `next` order) into simple
+/// loops at every vertex it visits more than once: each stretch between two
+/// visits of one vertex closes on its own. Each piece keeps the walk's
+/// order, so a piece is a closed `next` sequence; the pieces partition the
+/// walk. Deterministic (a function of the walk's order alone).
+pub(crate) fn split_at_repeated_vertices(
+    obj: &Object,
+    walk: Vec<HalfEdgeId>,
+) -> Vec<Vec<HalfEdgeId>> {
+    let mut pieces: Vec<Vec<HalfEdgeId>> = Vec::new();
+    let mut stack: Vec<HalfEdgeId> = Vec::with_capacity(walk.len());
+    // Where on the stack each origin vertex sits.
+    let mut at: BTreeMap<VertexId, usize> = BTreeMap::new();
+    for h in walk {
+        let v = obj.half_edges[h].origin;
+        if let Some(&i) = at.get(&v) {
+            // The stack from `i` runs v → … → v: one closed piece.
+            let piece: Vec<HalfEdgeId> = stack.split_off(i);
+            for &p in &piece {
+                at.remove(&obj.half_edges[p].origin);
+            }
+            pieces.push(piece);
+        }
+        at.insert(v, stack.len());
+        stack.push(h);
+    }
+    pieces.push(stack);
+    pieces
 }
 
 /// Whether `p` lies within [`tol::POINT_MERGE`] of the open interior of

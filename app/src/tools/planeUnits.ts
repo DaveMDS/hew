@@ -197,7 +197,7 @@ export interface PlaneRegion {
   key: string
   outer: V3[]
   holes: V3[][]
-  over: { object: bigint; face: bigint | null; why?: 'pinch' | 'sliver' | 'other' } | null
+  over: { object: bigint; face: bigint | null; why?: 'sliver' | 'other' } | null
   extrude: { sketch: bigint; region: bigint } | null
 }
 
@@ -301,7 +301,7 @@ export function parsePlaneUnits(ctx: string, json: string): PlaneUnits {
         ? {
           object: BigInt(over.object),
           face: over.face === null || over.face === undefined ? null : BigInt(over.face),
-          ...(over.why === 'pinch' || over.why === 'sliver' || over.why === 'other' ? { why: over.why } : {}),
+          ...(over.why === 'sliver' || over.why === 'other' ? { why: over.why } : {}),
         }
         : null,
       extrude: ex !== null && ex !== undefined

@@ -17,7 +17,9 @@ impl Object {
     /// inverse; twins are a proper involution agreeing with their edge and
     /// with vertex incidence; every half-edge lies in exactly one loop and
     /// every loop closes; edges and half-edges agree about each other; loops
-    /// and faces agree about each other; face boundaries lie on their stored
+    /// and faces agree about each other; every loop is simple (no vertex
+    /// twice), and loops of one face share at most isolated vertices, never
+    /// an edge (no edge has both sides on one face); face boundaries lie on their stored
     /// plane (within the object's `planarity_tol` — strict `PLANE_DIST` for
     /// native geometry, wider `IMPORT_PLANE_DIST` for imports); every hole
     /// loop lies geometrically inside its face's outer boundary (checked
@@ -131,6 +133,25 @@ impl Object {
             return Err(TopologyError::LoopMembership { half_edge: orphan });
         }
 
+        // Every loop is simple: no vertex twice in one loop. (Loops of one
+        // face may share a vertex at an isolated point — a hole touching the
+        // outer loop, or two holes touching — but never an edge, below.)
+        let mut visited_in: SecondaryMap<crate::ids::VertexId, crate::ids::LoopId> =
+            SecondaryMap::new();
+        for (l, lp) in &self.loops {
+            let mut current = lp.first_half_edge;
+            loop {
+                let he = &self.half_edges[current];
+                if visited_in.insert(he.origin, l) == Some(l) {
+                    return Err(TopologyError::LoopNotSimple { loop_id: l });
+                }
+                current = he.next;
+                if current == lp.first_half_edge {
+                    break;
+                }
+            }
+        }
+
         // Edges agree with their half-edges.
         for (e, edge) in &self.edges {
             let primary =
@@ -151,6 +172,19 @@ impl Object {
                     })?;
                 if twin.edge != e || twin.twin != Some(edge.half_edge) {
                     return Err(TopologyError::EdgeHalfEdgeMismatch { edge: e });
+                }
+            }
+            // The two sides of an edge lie on two different faces: loops of
+            // one face never share an edge.
+            if let Some(t) = edge.twin_half_edge {
+                let face_of = |h: crate::ids::HalfEdgeId| {
+                    self.half_edges
+                        .get(h)
+                        .and_then(|he| self.loops.get(he.loop_id))
+                        .map(|lp| lp.face)
+                };
+                if face_of(edge.half_edge).is_some() && face_of(edge.half_edge) == face_of(t) {
+                    return Err(TopologyError::EdgeWithinOneFace { edge: e });
                 }
             }
             // A SOFT mark (design §7b) claims the edge is an interior facet
@@ -240,30 +274,30 @@ impl Object {
                         )
                     })
                 };
-                let n_outer = outer_pts.len();
                 for &inner_id in &face.inner_loops {
                     let hole_pts: Vec<crate::math::Point3> =
                         self.loop_positions(inner_id).collect();
                     let any_inside = hole_pts.iter().any(|&p| {
                         crate::geom2d::point_inside_polygon(p, &outer_pts, normal) || on_ring(p)
                     });
-                    // A hole that grazes the ring at one vertex but runs
-                    // out through it elsewhere is not inside either: no
-                    // hole edge may properly cross an outer edge (touching
-                    // and shared edges are not crossings).
-                    let n_hole = hole_pts.len();
-                    let crosses = (0..n_hole).any(|i| {
-                        let (a, b) = (hole_pts[i], hole_pts[(i + 1) % n_hole]);
-                        (0..n_outer).any(|k| {
-                            crate::geom2d::segments_cross_properly(
-                                a,
-                                b,
-                                outer_pts[k],
-                                outer_pts[(k + 1) % n_outer],
-                            )
-                        })
-                    });
-                    if !any_inside || crosses {
+                    // No stretch of a hole edge leaves the face: no proper
+                    // crossing, and each piece of a hole edge between the
+                    // outer vertices on it lies inside the outer ring or on
+                    // it (within the object's planarity tolerance, so
+                    // imported rings that graze it still load). A native
+                    // object's hole never runs along an outer edge (two
+                    // loops never share an edge, and drafting makes such a
+                    // run one edge); an imported hole may (SketchUp draws
+                    // them).
+                    let imported = self.planarity_tol > crate::tol::PLANE_DIST;
+                    let leaves = crate::geom2d::hole_leaves_outer(
+                        &outer_pts,
+                        &hole_pts,
+                        normal,
+                        self.planarity_tol.max(crate::tol::POINT_MERGE),
+                        imported,
+                    );
+                    if !any_inside || leaves {
                         return Err(TopologyError::HoleOutsideFace {
                             face: f,
                             loop_id: inner_id,
@@ -403,7 +437,7 @@ impl Object {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::topo::Vertex;
     use crate::{HalfEdgeId, Point3};
@@ -608,6 +642,314 @@ mod tests {
         assert!(
             matches!(obj.validate(), Err(TopologyError::HoleOutsideFace { .. })),
             "a crossing hole is never accepted"
+        );
+    }
+
+    /// The L-shaped face (0,0) (4,0) (4,1) (1,1) (1,4) (0,4) with a hole
+    /// built inside it, then moved so its three vertices sit on three of the
+    /// L's corners, (0,0) (1,4) (4,1): no hole edge properly crosses the
+    /// ring and every hole vertex is on it, yet its edge from (1,4) to
+    /// (4,1) runs outside the face, past the reflex corner. Returns the
+    /// object.
+    pub(crate) fn l_with_a_hole_running_outside() -> Object {
+        let positions = [
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(4.0, 0.0, 0.0),
+            Point3::new(4.0, 1.0, 0.0),
+            Point3::new(1.0, 1.0, 0.0),
+            Point3::new(1.0, 4.0, 0.0),
+            Point3::new(0.0, 4.0, 0.0),
+            Point3::new(0.2, 0.2, 0.0),
+            Point3::new(0.5, 0.8, 0.0),
+            Point3::new(0.8, 0.5, 0.0),
+        ];
+        let faces = vec![vec![0, 1, 2, 3, 4, 5]];
+        let holes = vec![vec![vec![6, 7, 8]]];
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &[crate::material::FaceMaterial::default()],
+            &[None],
+        )
+        .expect("builds");
+        assert!(obj.validate().is_ok());
+        let hole = obj
+            .faces
+            .values()
+            .find_map(|f| f.inner_loops.first().copied())
+            .expect("the hole");
+        let vids: Vec<_> = obj
+            .loop_half_edges(hole)
+            .map(|h| obj.half_edges[h].origin)
+            .collect();
+        for (vid, p) in vids.into_iter().zip([
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1.0, 4.0, 0.0),
+            Point3::new(4.0, 1.0, 0.0),
+        ]) {
+            obj.vertices[vid].position = p;
+        }
+        obj
+    }
+
+    #[test]
+    fn a_hole_on_the_ring_running_outside_past_a_reflex_corner_is_refused() {
+        let obj = l_with_a_hole_running_outside();
+        assert!(
+            matches!(obj.validate(), Err(TopologyError::HoleOutsideFace { .. })),
+            "a hole edge outside the face is never accepted"
+        );
+    }
+
+    /// Builds a one-face object with `outer` and a hole made inside it as
+    /// a small copy of `hole` shrunk toward its centroid (so the builder
+    /// accepts it), then moves the hole's vertices onto `hole`. Imported
+    /// (the wider planarity tolerance) unless `native`.
+    pub(crate) fn face_with_moved_hole(
+        outer: &[(f64, f64)],
+        hole: &[(f64, f64)],
+        native: bool,
+    ) -> Object {
+        let p = |&(x, y): &(f64, f64)| Point3::new(x, y, 0.0);
+        let c = hole.iter().fold((0.0, 0.0), |a, h| (a.0 + h.0, a.1 + h.1));
+        let c = (c.0 / hole.len() as f64, c.1 / hole.len() as f64);
+        let small: Vec<(f64, f64)> = hole
+            .iter()
+            .map(|h| (c.0 + 0.05 * (h.0 - c.0), c.1 + 0.05 * (h.1 - c.1)))
+            .collect();
+        let positions: Vec<Point3> = outer.iter().chain(small.iter()).map(p).collect();
+        let faces = vec![(0..outer.len()).collect::<Vec<_>>()];
+        let holes = vec![vec![
+            (outer.len()..outer.len() + hole.len()).collect::<Vec<_>>(),
+        ]];
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &[crate::material::FaceMaterial::default()],
+            &[None],
+        )
+        .expect("builds");
+        if native {
+            obj.planarity_tol = crate::tol::PLANE_DIST;
+        }
+        assert!(obj.validate().is_ok(), "valid before the move");
+        let l = obj
+            .faces
+            .values()
+            .find_map(|f| f.inner_loops.first().copied())
+            .expect("the hole");
+        let vids: Vec<_> = obj
+            .loop_half_edges(l)
+            .map(|h| obj.half_edges[h].origin)
+            .collect();
+        // The hole loop starts at its first given vertex.
+        for (vid, h) in vids.into_iter().zip(hole) {
+            obj.vertices[vid].position = p(h);
+        }
+        obj
+    }
+
+    /// The notch case below, as an object.
+    pub(crate) fn bay_with_a_hole_through_it() -> Object {
+        let outer = [
+            (0.0, 0.0),
+            (20.0, 0.0),
+            (20.0, 20.0),
+            (6.0, 20.0),
+            (6.0, 7.0),
+            (6.0, 4.0),
+            (4.0, 4.0),
+            (4.0, 6.0),
+            (4.0, 20.0),
+            (0.0, 20.0),
+        ];
+        let hole = [(1.0, 4.5), (19.0, 13.5), (10.0, 1.0)];
+        face_with_moved_hole(&outer, &hole, false)
+    }
+
+    #[test]
+    fn a_hole_edge_leaving_through_a_notch_between_two_ring_vertices_is_refused() {
+        // A 20 x 20 square with an open-top bay at x in [4, 6], y in [4, 20]
+        // whose sides carry ring vertices T1 = (4, 6) and T2 = (6, 7). The
+        // hole's edge from P (1, 4.5) to Q (19, 13.5) runs through T1 and T2:
+        // its ends and its midpoint (10, 9) are in material, nothing crosses
+        // properly, but its stretch from T1 to T2 lies in the bay, outside
+        // the face.
+        let obj = bay_with_a_hole_through_it();
+        assert!(
+            matches!(obj.validate(), Err(TopologyError::HoleOutsideFace { .. })),
+            "{:?}",
+            obj.validate()
+        );
+    }
+
+    #[test]
+    fn an_imported_hole_grazing_its_ring_within_the_planarity_tolerance_loads() {
+        // The ring dents in by `dent` at (4, 2), between ring vertices
+        // (4, 1) and (4, 3); the hole's edge from (4, 1) to (4, 3) runs
+        // straight past the dent, outside the face by `dent` at its middle.
+        let ring = |dent: f64| {
+            vec![
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 1.0),
+                (4.0 - dent, 2.0),
+                (4.0, 3.0),
+                (4.0, 4.0),
+                (0.0, 4.0),
+            ]
+        };
+        let hole = [(4.0, 1.0), (2.0, 2.0), (4.0, 3.0)];
+        // A hair past POINT_MERGE, well within the import tolerance: loads.
+        let grazing = face_with_moved_hole(&ring(1e-6), &hole, false);
+        assert!(grazing.planarity_tol > 1e-6);
+        assert!(grazing.validate().is_ok(), "{:?}", grazing.validate());
+        // Past the import tolerance: the hole runs outside.
+        let outside = face_with_moved_hole(&ring(5e-3), &hole, false);
+        assert!(matches!(
+            outside.validate(),
+            Err(TopologyError::HoleOutsideFace { .. })
+        ));
+        // A native object holds the strict tolerance: the same hair is out.
+        let native = face_with_moved_hole(&ring(1e-6), &hole, true);
+        assert!(matches!(
+            native.validate(),
+            Err(TopologyError::HoleOutsideFace { .. })
+        ));
+    }
+
+    #[test]
+    fn an_imported_hole_clipping_its_ring_by_a_graze_loads_and_a_native_one_does_not() {
+        // A hole edge clipping the L's reflex corner about 7 um outside it
+        // (crossing both corner edges), and a hole vertex 1 um past a
+        // square's edge: within the import tolerance, a graze that loads;
+        // on a native object, the exact rule refuses both. A real crossing,
+        // 1 cm past the edge, is refused imported too.
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let clip = [(1.5, 0.50001), (0.5, 0.5), (0.50001, 1.5)];
+        let square = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+        let poke = |out: f64| [(2.0, 1.0), (2.0, 3.0), (4.0 + out, 2.0)];
+        for (outer, hole) in [(&l[..], clip.to_vec()), (&square[..], poke(1e-6).to_vec())] {
+            let imported = face_with_moved_hole(outer, &hole, false);
+            assert!(imported.validate().is_ok(), "{:?}", imported.validate());
+            let native = face_with_moved_hole(outer, &hole, true);
+            assert!(matches!(
+                native.validate(),
+                Err(TopologyError::HoleOutsideFace { .. })
+            ));
+        }
+        let far = face_with_moved_hole(&square, &poke(1e-2), false);
+        assert!(matches!(
+            far.validate(),
+            Err(TopologyError::HoleOutsideFace { .. })
+        ));
+    }
+
+    /// The imported face whose hole edge runs along its outer edge, as an
+    /// object (the validator accepts it; the sweep checks do not).
+    pub(crate) fn imported_hole_along_the_outer_edge() -> Object {
+        let outer = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+        let hole = [(4.0, 1.0), (2.0, 2.0), (4.0, 3.0)];
+        face_with_moved_hole(&outer, &hole, false)
+    }
+
+    #[test]
+    fn a_hole_edge_running_along_an_outer_edge_is_imported_only() {
+        // A hole whose edge (4, 1)-(4, 3) lies along the outer edge x = 4
+        // (distinct vertices, no shared edge). SketchUp draws such faces, so
+        // an imported one loads (the all-vertices-on-the-ring spec above);
+        // a native face never holds one (drafting makes that run one edge,
+        // and two loops never share an edge: `EdgeWithinOneFace` when they
+        // do topologically), so a native object with it is HoleOutsideFace.
+        let outer = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+        let hole = [(4.0, 1.0), (2.0, 2.0), (4.0, 3.0)];
+        let imported = face_with_moved_hole(&outer, &hole, false);
+        assert!(imported.validate().is_ok(), "{:?}", imported.validate());
+        let native = face_with_moved_hole(&outer, &hole, true);
+        assert!(matches!(
+            native.validate(),
+            Err(TopologyError::HoleOutsideFace { .. })
+        ));
+    }
+
+    #[test]
+    fn a_hole_edge_through_a_reflex_corner_is_a_point_contact_and_validates() {
+        // The L (0,0) (2,0) (2,1) (1,1) (1,2) (0,2) with the hole triangle
+        // (0.5, 1.5) (1.5, 0.5) (0.4, 0.4): the hole edge's midpoint is
+        // exactly the reflex corner (1, 1). A point contact, not an escape.
+        let outer = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let hole = [(0.5, 1.5), (1.5, 0.5), (0.4, 0.4)];
+        for native in [false, true] {
+            let obj = face_with_moved_hole(&outer, &hole, native);
+            assert!(
+                obj.validate().is_ok(),
+                "native {native}: {:?}",
+                obj.validate()
+            );
+        }
+    }
+
+    #[test]
+    fn validator_catches_a_loop_visiting_a_vertex_twice() {
+        // An open triangle whose third half-edge is re-rooted at the first
+        // vertex: links and loop closure stay intact, the loop visits that
+        // vertex twice.
+        let mut tri = Object::triangle();
+        let l = tri.loops.keys().next().unwrap();
+        let hes: Vec<HalfEdgeId> = tri.loop_half_edges(l).collect();
+        let first = tri.half_edges[hes[0]].origin;
+        tri.half_edges[hes[2]].origin = first;
+        assert_eq!(
+            tri.validate(),
+            Err(TopologyError::LoopNotSimple { loop_id: l })
+        );
+    }
+
+    #[test]
+    fn validator_catches_an_edge_with_one_face_on_both_sides() {
+        // Two triangles sharing an edge, then the second's loop handed to
+        // the first as a hole: the shared edge has the first face on both
+        // sides.
+        let mut obj = Object::from_polygons(
+            &[
+                Point3::new(0.0, 0.0, 0.0),
+                Point3::new(1.0, 0.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(1.0, 1.0, 0.0),
+            ],
+            &[vec![0, 1, 2], vec![2, 1, 3]],
+        )
+        .unwrap();
+        let ids: Vec<crate::ids::FaceId> = obj.faces.keys().collect();
+        let (keep, gone) = (ids[0], ids[1]);
+        let l = obj.faces[gone].outer_loop;
+        obj.loops[l].face = keep;
+        obj.loops[l].kind = LoopKind::Inner;
+        obj.faces[keep].inner_loops.push(l);
+        obj.faces.remove(gone);
+        for shell in obj.shells.values_mut() {
+            shell.faces.retain(|&f| f != gone);
+        }
+        assert!(
+            matches!(obj.validate(), Err(TopologyError::EdgeWithinOneFace { .. })),
+            "{:?}",
+            obj.validate()
         );
     }
 

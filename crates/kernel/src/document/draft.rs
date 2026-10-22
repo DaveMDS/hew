@@ -20,8 +20,10 @@
 //! face is FREE. Every other edge keeps its store. Topology changes by
 //! minimal delta — only edges no longer drawn are removed, only new edges
 //! inserted — through [`Object::retrace_face`], rehearsed on a copy; an
-//! island the face cannot hold (a pinch, a sliver) is kept as owned-sketch
-//! drawing instead. Sketch stores are rewritten only when their content
+//! island the face cannot hold (a sliver too small for a saved file to
+//! reopen) is kept as owned-sketch drawing instead. A loop touching the
+//! face's boundary or another loop at one point is topology: the re-trace
+//! splits its walk there into loops sharing that vertex. Sketch stores are rewritten only when their content
 //! changed. The whole gesture is one labeled undo step.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -107,7 +109,7 @@ pub struct DraftReport {
     /// Sketches written (created, rewritten, or emptied).
     pub sketches: Vec<SketchId>,
     /// Islands kept as owned-sketch drawing because the face could not hold
-    /// them (a pinch, a sliver), as one edge's endpoints each.
+    /// them (a sliver), as one edge's endpoints each.
     pub kept_as_sketch: Vec<(Point3, Point3)>,
 }
 
@@ -346,16 +348,10 @@ fn heal_seams(work: &Sketch, fixed: &[(Point3, Point3)]) -> Option<Sketch> {
 }
 
 /// Why a region over a solid is not one of its faces: a [`DraftRegionWhy::
-/// Sliver`] by area; a [`DraftRegionWhy::Pinch`] when one of its rings meets
-/// itself, another ring, or a solid's edge at a single point (a vertex both
-/// share with no edge between them); else [`DraftRegionWhy::Other`].
-fn region_why(
-    outer: &[Point3],
-    holes: &[Vec<Point3>],
-    all_rings: &[Vec<Point3>],
-    fixed: &[(Point3, Point3)],
-    normal: Vec3,
-) -> DraftRegionWhy {
+/// Sliver`] by area, else [`DraftRegionWhy::Other`]. (A region touching
+/// itself, another shape, or the face's edge at a single point is a face:
+/// its face holds loops sharing that vertex.)
+fn region_why(outer: &[Point3], holes: &[Vec<Point3>], normal: Vec3) -> DraftRegionWhy {
     let area = signed_area_on_plane(outer, normal).abs()
         - holes
             .iter()
@@ -363,38 +359,6 @@ fn region_why(
             .sum::<f64>();
     if area < 1e-12 {
         return DraftRegionWhy::Sliver;
-    }
-    let m = tol::POINT_MERGE;
-    let same = |p: Point3, q: Point3| p.approx_eq(q, m);
-    let ring_has_edge = |ring: &[Point3], a: Point3, b: Point3| {
-        let n = ring.len();
-        (0..n).any(|i| {
-            let (c, d) = (ring[i], ring[(i + 1) % n]);
-            (same(a, c) && same(b, d)) || (same(a, d) && same(b, c))
-        })
-    };
-    for ring in std::iter::once(outer).chain(holes.iter().map(Vec::as_slice)) {
-        let n = ring.len();
-        for i in 0..n {
-            let v = ring[i];
-            // The ring passes through this point twice: it pinches itself.
-            if (0..n).any(|j| j != i && same(ring[j], v)) {
-                return DraftRegionWhy::Pinch;
-            }
-            let (prev, next) = (ring[(i + n - 1) % n], ring[(i + 1) % n]);
-            let touches = all_rings.iter().any(|other| {
-                other.iter().any(|&q| same(q, v))
-                    && !ring_has_edge(other, prev, v)
-                    && !ring_has_edge(other, v, next)
-            });
-            let on_solid_edge = fixed.iter().any(|&(a, b)| point_near_segment(v, a, b, m))
-                && !fixed
-                    .iter()
-                    .any(|&(a, b)| along(prev, v, a, b) || along(v, next, a, b));
-            if touches || on_solid_edge {
-                return DraftRegionWhy::Pinch;
-            }
-        }
     }
     DraftRegionWhy::Other
 }
@@ -1174,8 +1138,8 @@ impl Document {
                 Err(_) => {
                     // The face cannot hold all of it. Keep what it holds now
                     // and add the new islands it can; only when the existing
-                    // drawing itself no longer fits (a deletion left it
-                    // pinched) does an existing island leave the face.
+                    // drawing itself no longer fits (a deletion left a
+                    // sliver) does an existing island leave the face.
                     match greedy(
                         existing.clone(),
                         islands_of(&fresh),
@@ -1687,11 +1651,34 @@ fn plan_topology(
             polygons,
         }
     };
+    // A path closing on its own start is a loop touching the rest at that
+    // one point (a circle tangent to an edge, two circles touching): it is
+    // inserted as two paths meeting at a point midway round, so every path
+    // runs between two distinct points.
+    let push_path = |p: RetracePath, paths: &mut Vec<RetracePath>| {
+        let n = p.path.len();
+        if n >= 4 && bits(p.path[0]) == bits(p.path[n - 1]) {
+            let mid = n / 2;
+            paths.push(RetracePath {
+                path: p.path[..=mid].to_vec(),
+                curves: p.curves[..mid].to_vec(),
+                polygons: p.polygons[..mid].to_vec(),
+            });
+            paths.push(RetracePath {
+                path: p.path[mid..].to_vec(),
+                curves: p.curves[mid..].to_vec(),
+                polygons: p.polygons[mid..].to_vec(),
+            });
+        } else {
+            paths.push(p);
+        }
+    };
     let nodes: Vec<[u64; 3]> = adj.keys().copied().filter(|k| is_node(k)).collect();
     for n in &nodes {
         for &e in &adj[n].clone() {
             if !used[e] {
-                paths.push(walk(*n, e, &mut used));
+                let p = walk(*n, e, &mut used);
+                push_path(p, &mut paths);
             }
         }
     }
@@ -1871,9 +1858,6 @@ pub struct DraftCurveRun {
 /// or pull), for the message that says what to change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftRegionWhy {
-    /// It touches another shape, itself, or the face's edge at a single
-    /// point: the face would pinch there.
-    Pinch,
     /// Its area is too small for a face (under about a square micron).
     Sliver,
     /// Anything else the face cannot hold as drawn (part of its outline is
@@ -1889,8 +1873,8 @@ pub struct DraftRegion {
     pub outer: Vec<Point3>,
     pub holes: Vec<Vec<Point3>>,
     /// The object and face under it: a face region pushes and pulls as that
-    /// face (`face` is `None` when the face cannot hold it — a pinch or a
-    /// sliver kept as owned-sketch drawing, which does not push).
+    /// face (`face` is `None` when the face cannot hold it — a sliver kept
+    /// as owned-sketch drawing, which does not push).
     pub over: Option<(ObjectId, Option<FaceId>)>,
     /// With `over` naming no face: why the face cannot hold it.
     pub why: Option<DraftRegionWhy>,
@@ -2126,16 +2110,6 @@ impl Document {
             .collect();
         units.sort_by_key(|u| u.key);
 
-        // Every ring of the drawing, for telling a point contact (a pinch)
-        // from a shared edge.
-        let all_rings: Vec<Vec<Point3>> = w
-            .regions()
-            .values()
-            .flat_map(|r| {
-                std::iter::once(r.outer.iter().map(|&v| pos(v)).collect::<Vec<_>>())
-                    .chain(r.holes.iter().map(|h| h.iter().map(|&v| pos(v)).collect()))
-            })
-            .collect();
         let mut regions = Vec::new();
         for (_, r) in w.regions().iter() {
             let outer: Vec<Point3> = r.outer.iter().map(|&v| pos(v)).collect();
@@ -2188,8 +2162,8 @@ impl Document {
                     (None, found)
                 }
             };
-            let why = matches!(over, Some((_, None)))
-                .then(|| region_why(&outer, &holes, &all_rings, &lifted.fixed, plane.normal()));
+            let why =
+                matches!(over, Some((_, None))).then(|| region_why(&outer, &holes, plane.normal()));
             regions.push(DraftRegion {
                 key,
                 outer,

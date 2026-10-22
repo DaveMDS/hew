@@ -1080,12 +1080,13 @@ test('Select All then Delete of two instances of a drawn component is ONE undo s
   expect(await kinds()).toEqual(['draft-island', 'draft-island', 'instance', 'instance'])
 })
 
-// ---- push/pull refusal copy by reason --------------------------------------
+// ---- push/pull of a shape touching another at one point ------------------
 
-test('Push/Pull of a diamond touching the rectangle it is drawn in at one point refuses with the pinch copy', async ({ page }) => {
+test('Push/Pull of a diamond touching the rectangle it is drawn in at one point pulls it up', async ({ page }) => {
   const env = await boot(page, 'top')
   await rect(env, [0.6, 0.6], [2.4, 2.4])
-  // A diamond inside it whose left corner sits on the rectangle's left side.
+  // A diamond inside it whose left corner sits on the rectangle's left side:
+  // a face of its own, in a hole of the rectangle sharing that corner.
   await tool(env, 'Line')
   await click(env, 0.6, 1.5)
   await click(env, 1.2, 1.9)
@@ -1094,12 +1095,51 @@ test('Push/Pull of a diamond touching the rectangle it is drawn in at one point 
   await click(env, 0.6, 1.5)
   await env.page.keyboard.press('Escape')
   expect(await lastError(env)).toBeNull()
-  const before = await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id!), env.box)
   await tool(env, 'Push/Pull')
   await click(env, 1.2, 1.5)
-  await expect(page.getByText(/at a single point, so the face would pinch there/)).toBeVisible()
+  await typeEnter(env, '0.3')
+  expect(await lastError(env)).toBeNull()
   await expect(page.getByText(/part of it is drawn on the solid's face and part is loose/)).toHaveCount(0)
-  expect(await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id!), env.box)).toEqual(before)
+  const ids = await env.page.evaluate(() => window.__hew_test!.getObjectIds())
+  expect(ids).toHaveLength(1)
+  const b = await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id), ids[0])
+  expect(b[5]).toBeCloseTo(TOP_Z + 0.3, 4) // the diamond rose
+})
+
+test('A circle with its rim snapped on the box top edge is a face: it pushes into a pocket and pulls up (#43)', async ({ page }) => {
+  const env = await boot(page, 'top')
+  // Center 0.6 in from the front edge, rim on that edge's midpoint: the
+  // circle touches the edge at that one vertex.
+  await tool(env, 'Circle')
+  await click(env, 1.5, 0.6)
+  await click(env, 1.5, 0)
+  expect(await lastError(env)).toBeNull()
+  const before = await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id!), env.box)
+  await tool(env, 'Push/Pull')
+  await click(env, 1.5, 0.6)
+  await typeEnter(env, '-0.3')
+  expect(await lastError(env)).toBeNull()
+  await expect(page.getByText(/can't be pushed or pulled/)).toHaveCount(0)
+  let ids = await env.page.evaluate(() => window.__hew_test!.getObjectIds())
+  expect(ids).toHaveLength(1)
+  // A pocket: the box's outside is unchanged, and its floor is a face 0.3
+  // below the top.
+  expect(await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id), ids[0])).toEqual(before)
+  const floor = await env.page.evaluate((z) => {
+    const h = window.__hew_test!
+    return h.getPlaneUnits(h.ctxOfPlane([0, 0, z], [0, 0, 1])!).regions.length
+  }, TOP_Z - 0.3)
+  expect(floor).toBe(1)
+  const mod = await env.page.evaluate(() => (/Mac/.test(navigator.platform) ? 'Meta' : 'Control'))
+  await env.page.keyboard.press(`${mod}+z`)
+  await env.page.waitForTimeout(250)
+  await click(env, 1.5, 0.6)
+  await typeEnter(env, '0.3')
+  expect(await lastError(env)).toBeNull()
+  ids = await env.page.evaluate(() => window.__hew_test!.getObjectIds())
+  expect(ids).toHaveLength(1)
+  const b = await env.page.evaluate((id) => window.__hew_test!.getObjectBounds(id), ids[0])
+  expect(b[5]).toBeCloseTo(TOP_Z + 0.3, 4) // the disc rose
 })
 
 // ---- drawing on a group's or component's face from outside ----------------

@@ -8,8 +8,9 @@
 //! tracer. Its inverse is itself with the arguments swapped, recorded in
 //! the history as one [`KernelOp::RetraceFace`] with an exact undo. A path
 //! may join two different boundary loops of the face (a BRIDGE) as long as
-//! the paths inserted together leave no bridge and no pinch behind: every
-//! committed face stays simple, so the file format does not change.
+//! the paths inserted together leave no bridge behind: every committed loop
+//! stays simple, and loops of one face share at most isolated vertices,
+//! never an edge.
 //!
 //! With it:
 //! - a loop whose pieces connect two different boundary loops of one face
@@ -22,13 +23,13 @@
 //!   them across every run: two faces side by side gain a hole, a face in a
 //!   hole splits that hole into several. Each such run is a chord feature.
 //!
-//! A loop touching another boundary at a single point (F1) would pinch the
-//! face around it: drafting accepts it, keeping the loop as drawing instead
-//! of face topology.
+//! A loop touching another boundary at a single point (F1) is face topology
+//! too: the walk the re-trace takes through that point is split there, so
+//! the face around the loop holds it as a hole sharing the vertex.
 //!
 //! Every accepting spec checks the stage invariants (see
 //! `face_arrangement_specs.rs`): I1 valid and watertight, I2 Euler–Poincaré
-//! unchanged, I3 group area conserved, I4 no pinch, I5 exact undo/redo with
+//! unchanged, I3 group area conserved, I4 loops simple, I5 exact undo/redo with
 //! byte-identical saves, I6 the face group equals the ground's regions for
 //! the same lines, I7 the saved document reopens.
 //!
@@ -75,28 +76,43 @@ fn strip_bridges(w: &Wall) -> Vec<RetracePath> {
     ]
 }
 
-/// A group face's loops visit no vertex twice and share none with each
-/// other — no pinch and no bridge, inside one loop or between two.
-fn group_faces_simple(obj: &Object, plane: &Plane) -> bool {
+/// Every group face follows the loop rule (ARCHITECTURE §2.4): each loop
+/// visits no vertex twice (no pinch), and no edge has the face on both
+/// sides (no bridge, inside one loop or between two). Loops of one face may
+/// share isolated vertices.
+fn group_faces_follow_the_loop_rule(obj: &Object, plane: &Plane) -> bool {
     group_faces(obj, plane).into_iter().all(|f| {
         let face = &obj.faces()[f];
-        let vs: Vec<_> = std::iter::once(face.outer_loop)
+        let loops: Vec<kernel::LoopId> = std::iter::once(face.outer_loop)
             .chain(face.inner_loops.iter().copied())
-            .flat_map(|l| {
-                obj.loop_half_edges(l)
-                    .map(|h| obj.half_edges()[h].origin)
-                    .collect::<Vec<_>>()
-            })
             .collect();
-        (0..vs.len()).all(|i| !vs[i + 1..].contains(&vs[i]))
+        let simple = loops.iter().all(|&l| {
+            let vs: Vec<_> = obj
+                .loop_half_edges(l)
+                .map(|h| obj.half_edges()[h].origin)
+                .collect();
+            (0..vs.len()).all(|i| !vs[i + 1..].contains(&vs[i]))
+        });
+        let no_shared_edge = loops.iter().all(|&l| {
+            obj.loop_half_edges(l).all(|h| {
+                obj.half_edges()[h]
+                    .twin
+                    .is_none_or(|t| obj.loops()[obj.half_edges()[t].loop_id].face != f)
+            })
+        });
+        simple && no_shared_edge
     })
 }
 
 /// Draws `loop_path` from `seed` with I1–I7, I6 against the ground, and
-/// every group face simple; the whole loop lands as face topology.
+/// every group face following the loop rule; the whole loop lands as face
+/// topology.
 fn bridge_and_check(w: &mut Wall, seed: FaceId, loop_path: Vec<Point3>) {
     draw_and_check(w, seed, loop_path, None);
-    assert!(group_faces_simple(w.obj(), &w.plane), "no pinch or bridge");
+    assert!(
+        group_faces_follow_the_loop_rule(w.obj(), &w.plane),
+        "no pinch or bridge"
+    );
 }
 
 /// Every face of the group, pushed out and in, then undone: the identity
@@ -165,7 +181,7 @@ fn merge_runs_and_check(w: &mut Wall, edge: EdgeId) -> kernel::FaceMergeReport {
         multiset_match(&straightened(&faces, n), &ground, true),
         "the face group differs from the ground"
     );
-    assert!(group_faces_simple(obj, &w.plane));
+    assert!(group_faces_follow_the_loop_rule(obj, &w.plane));
     match report {
         KernelOpReport::FaceMerge(r) => r,
         other => panic!("expected a merge report, got {other:?}"),
@@ -185,7 +201,7 @@ fn retracing_two_bridges_cuts_the_strip_between_two_imprints() {
         .expect("two bridges between the holes retrace");
     o.validate().expect("valid");
     assert_eq!(euler(&o), euler(&original), "V - E + F - H unchanged");
-    assert!(group_faces_simple(&o, &w.plane));
+    assert!(group_faces_follow_the_loop_rule(&o, &w.plane));
     assert_eq!(group_faces(&o, &w.plane).len(), 4, "wall, strip, a, b");
     assert_eq!(r.new_edges.len(), 2, "one edge list per inserted path");
     assert!(r.new_edges.iter().all(|e| e.len() == 2));
@@ -340,7 +356,7 @@ proptest! {
         let r = o.retrace_face(p, &insert, &[]).expect("bridges retrace");
         o.validate().expect("valid");
         prop_assert_eq!(euler(&o), euler(&original));
-        prop_assert!(group_faces_simple(&o, &w.plane));
+        prop_assert!(group_faces_follow_the_loop_rule(&o, &w.plane));
         let a0 = group_area(&original, &w.plane);
         prop_assert!((group_area(&o, &w.plane) - a0).abs() <= 1e-12 * a0);
         let removed: Vec<Vec<Point3>> = r.inserted.iter().map(|p| p.path.clone()).collect();
@@ -476,63 +492,21 @@ fn a_bridged_circle_keeps_its_claims_on_every_whole_facet() {
     assert_eq!(claims_on(w.obj(), g), 20);
 }
 
-/// Draws `ring` on `seed`'s plane where a single-point touch would pinch the
-/// face around it: the draft accepts (the loop cannot be face topology, so it
-/// stays drawing), and the solid keeps its group area, stays valid and
-/// unpinched, in one undo step with an exact undo and redo. Returns the
-/// drafted report, the group size afterwards, and the object's owned
-/// drawing's edge count.
-fn draw_pinch_and_check(
-    w: &mut Wall,
-    seed: FaceId,
-    ring: &[Point3],
-    curve: Option<kernel::CurveGeom>,
-) -> (kernel::DraftReport, usize, usize) {
-    let before = w.obj().clone();
-    let bytes0 = w.doc.save();
-    let depth0 = w.doc.undo_depth();
-    let (report, _) = w.draw_loop(seed, ring, curve).expect("the draft accepts");
-    let after = w.obj().clone();
-    after.validate().expect("valid");
-    assert_eq!(after.watertight(), before.watertight());
-    assert!(no_pinch(&after, &w.plane), "no pinched loop committed");
-    assert!(group_faces_simple(&after, &w.plane));
-    let (a0, a1) = (group_area(&before, &w.plane), group_area(&after, &w.plane));
-    assert!((a0 - a1).abs() <= 1e-12 * a0.abs());
-    assert_eq!(w.doc.undo_depth(), depth0 + 1, "one undo step");
-    let groups = group_faces(&after, &w.plane).len();
-    let owned: usize = w
-        .doc
-        .object_owned_sketches(w.id)
-        .iter()
-        .map(|&s| w.doc.sketch(s).unwrap().edges().len())
-        .sum();
-    let bytes1 = w.doc.save();
-    assert_reopens(&bytes1);
-    for _ in 0..2 {
-        w.doc.undo().expect("undo");
-        assert!(objects_equivalent(w.obj(), &before));
-        assert_eq!(w.doc.save(), bytes0);
-        w.doc.redo().expect("redo");
-        assert!(objects_equivalent(w.obj(), &after));
-        assert_eq!(w.doc.save(), bytes1);
-    }
-    (report, groups, owned)
-}
-
 #[test]
-fn single_point_touches_are_accepted_as_drawing() {
+fn single_point_touches_land_as_touching_holes() {
     // A circle tangent once to the wall's bottom edge and once to the
-    // imprint's bottom side: the leftover would be pinched at a point, on
-    // the ground too (F1). Drafting accepts it.
+    // imprint's bottom side: the disc is a face, and the wall holds it as a
+    // hole sharing one point with the wall's outer loop and one with the
+    // imprint's hole, as on the ground (F1).
     for pick in [false, true] {
         let mut w = front_wall();
         let s = imprint_rect(&mut w);
         let ring = w.ring(8.0 * MM, 1.0 * MM, 1.0 * MM, 24, 0.0);
         let seed = if pick { s } else { w.face };
-        let r = draw_pinch_and_check(&mut w, seed, &ring, None);
-        assert!(!r.0.kept_as_sketch.is_empty(), "something stays drawing");
-        assert_eq!((r.1, r.2), (2, 24), "group faces, owned drawing edges");
+        draw_and_check(&mut w, seed, ring, None);
+        assert_eq!(group_faces(w.obj(), &w.plane).len(), 3);
+        assert!(has_touching_loops(w.obj(), &w.plane));
+        assert!(w.doc.object_owned_sketches(w.id).is_empty());
     }
     // A circle crossing an imprint and tangent to the wall's top edge.
     for pick in [false, true] {
@@ -541,17 +515,20 @@ fn single_point_touches_are_accepted_as_drawing() {
         let s = imprint_mm(&mut w, wall, 3.0, 6.0, 9.0, 2.0);
         let ring = w.ring(8.0 * MM, 8.5 * MM, 1.5 * MM, 24, 0.0);
         let seed = if pick { s } else { w.face };
-        let r = draw_pinch_and_check(&mut w, seed, &ring, None);
-        assert!(!r.0.kept_as_sketch.is_empty(), "something stays drawing");
-        assert_eq!((r.1, r.2), (2, 26), "group faces, owned drawing edges");
+        draw_and_check(&mut w, seed, ring, None);
+        assert_eq!(group_faces(w.obj(), &w.plane).len(), 4);
+        assert!(has_touching_loops(w.obj(), &w.plane));
+        assert!(w.doc.object_owned_sketches(w.id).is_empty());
     }
-    // Two imprints sharing only a corner with the drawn rectangle's sides.
+    // Two imprints sharing only a corner with the drawn rectangle's sides:
+    // three holes of the wall meeting at two points.
     let (mut w, _, _) = wall_with_two();
     let wall = w.face;
     let rect = w.rect(7.0 * MM, 5.0 * MM, 2.0 * MM, 1.0 * MM);
-    let r = draw_pinch_and_check(&mut w, wall, &rect, None);
-    assert!(!r.0.kept_as_sketch.is_empty(), "something stays drawing");
-    assert_eq!((r.1, r.2), (3, 4), "group faces, owned drawing edges");
+    draw_and_check(&mut w, wall, rect, None);
+    assert_eq!(group_faces(w.obj(), &w.plane).len(), 4);
+    assert!(has_touching_loops(w.obj(), &w.plane));
+    assert!(w.doc.object_owned_sketches(w.id).is_empty());
 }
 
 // --------------------------------------------- merges along several runs
@@ -583,7 +560,7 @@ fn deleting_a_band_meeting_the_hole_along_two_runs_splits_the_hole() {
     let obj = w.obj();
     assert_eq!(obj.faces()[p].inner_loops.len(), 2, "the hole split in two");
     assert_eq!(group_faces(obj, &w.plane).len(), 3);
-    assert!(group_faces_simple(obj, &w.plane));
+    assert!(group_faces_follow_the_loop_rule(obj, &w.plane));
     // Each half of the square is an imprint of its own again.
     let subs = group_faces(obj, &w.plane)
         .into_iter()
@@ -680,38 +657,23 @@ fn ring_dist(p: Point3, ring: &[Point3]) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
-/// Whether some ground region is pinched: a ring repeating a vertex, or two
-/// rings of one region sharing one.
-fn ground_pinched(sk: &Sketch) -> bool {
-    sk.regions().values().any(|r| {
-        let vs: Vec<_> = std::iter::once(&r.outer)
-            .chain(r.holes.iter())
-            .flat_map(|ring| ring.iter().copied())
-            .collect();
-        (0..vs.len()).any(|i| vs[i + 1..].contains(&vs[i]))
-    })
-}
-
 /// Two random rectangle imprints and a random 24-gon on a 0.1 mm lattice
 /// (turned 0° for exact tangencies at extreme vertices, or 7.5° / 4.5° for
 /// crossings), biased toward circles that reach both imprints or an
 /// imprint and the wall's edge, drawn from the wall or either imprint.
-/// The ground sketch of the same lines is the oracle:
-/// - a pinched ground region, or a loop meeting the group at a single
-///   site (F1) → the draft accepts it, but the loop cannot be face
-///   topology: something stays drawing, the solid stays valid, unpinched,
-///   area-conserving, one undo step, undo and redo exact;
-/// - otherwise accepted wholly as topology, with I1–I7, ground parity, and
-///   every face simple.
+/// The ground sketch of the same lines is the oracle: every draw is
+/// accepted wholly as topology, with I1–I7 and ground parity — a loop
+/// meeting the group at single sites (F1) included, its face holding holes
+/// that share those vertices exactly as the ground's regions do.
 ///
 /// Draws with contacts in the band between the merge tolerance and 0.1 µm
 /// (where the ground's parameter tolerance and the face's metric one may
 /// disagree) are skipped.
 #[test]
-fn circles_over_two_imprints_on_a_lattice_match_the_ground_or_keep_pinches_as_drawing() {
+fn circles_over_two_imprints_on_a_lattice_match_the_ground() {
     let mut rng = Rng(0x2bd1_e5c4_09a7_7f13);
     let q = 0.1 * MM;
-    let (mut accepted, mut bridged, mut pinches) = (0, 0, 0);
+    let (mut accepted, mut bridged, mut touching) = (0, 0, 0);
     let mut draws = 0;
     while draws < 400 {
         let (ax, ay) = (rng.range(5, 60), rng.range(5, 50));
@@ -771,7 +733,7 @@ fn circles_over_two_imprints_on_a_lattice_match_the_ground_or_keep_pinches_as_dr
                 .count()
         };
         let (sa, sb, so) = (sites_on(&ra), sites_on(&rb), sites_on(&outer));
-        let pinch = sa + sb + so == 1 || ground_pinched(&sk);
+        assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
         let joins = [sa > 0, sb > 0, so > 0].iter().filter(|&&x| x).count() >= 2;
 
         let seed = [wall, a, b][pick as usize];
@@ -782,48 +744,28 @@ fn circles_over_two_imprints_on_a_lattice_match_the_ground_or_keep_pinches_as_dr
              phase {phase}: sites a {sa} b {sb} wall {so}"
         );
         match w.draw_loop(seed, &ring, Some(g)) {
-            Ok((report, _)) if !pinch => {
+            Ok((report, _)) => {
                 assert!(
                     report.kept_as_sketch.is_empty(),
-                    "a clean loop lands wholly as topology: {what}"
+                    "the loop lands wholly as topology: {what}"
                 );
                 accepted += 1;
                 if joins {
                     bridged += 1;
                 }
+                if has_touching_loops(w.obj(), &w.plane) {
+                    touching += 1;
+                }
                 assert_ground_parity(&w, &before, &ring);
-                assert!(group_faces_simple(w.obj(), &w.plane), "{what}");
                 assert_invariants(&mut w, &before, &bytes0, depth0);
-            }
-            Ok((report, _)) => {
-                pinches += 1;
-                let after = w.obj().clone();
-                after.validate().expect("valid");
-                assert!(no_pinch(&after, &w.plane), "{what}");
-                assert!(group_faces_simple(&after, &w.plane), "{what}");
-                let (a0, a1) = (group_area(&before, &w.plane), group_area(&after, &w.plane));
-                assert!((a0 - a1).abs() <= 1e-12 * a0.abs(), "{what}");
-                assert!(
-                    !report.kept_as_sketch.is_empty()
-                        || !w.doc.object_owned_sketches(w.id).is_empty(),
-                    "a pinching loop stays drawing: {what}"
-                );
-                assert_eq!(w.doc.undo_depth(), depth0 + 1, "{what}");
-                let bytes1 = w.doc.save();
-                assert_reopens(&bytes1);
-                w.doc.undo().expect("undo");
-                assert!(objects_equivalent(w.obj(), &before), "{what}");
-                assert_eq!(w.doc.save(), bytes0, "{what}");
-                w.doc.redo().expect("redo");
-                assert!(objects_equivalent(w.obj(), &after), "{what}");
-                assert_eq!(w.doc.save(), bytes1, "{what}");
             }
             Err(e) => panic!("the draft refused ({e:?}): {what}"),
         }
     }
     assert!(
-        accepted > 150 && bridged > 40 && pinches > 5,
-        "coverage: {accepted} accepted ({bridged} joining two boundaries), {pinches} pinches"
+        accepted > 150 && bridged > 40 && touching > 5,
+        "coverage: {accepted} accepted ({bridged} joining two boundaries), \
+         {touching} with touching holes"
     );
 }
 

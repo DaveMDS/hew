@@ -7036,6 +7036,7 @@ Extrude a region into a new Object, consuming the profile.
 - `unknown_entity`
 - `unknown_unit`
 - `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
+- `region_touches_hole` — This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart.
 
 ### `hew.solid.follow_me`
 

@@ -40,8 +40,9 @@
 //! it closes). This keeps every committed state a valid solid.
 
 use crate::geom2d::{
-    boundaries_contact, interior_point_of_loops, point_inside_polygon, point_near_segment,
-    polygon_is_simple, segments_intersect, signed_area_on_plane,
+    boundaries_contact, boundaries_contact_away_from_shared, hole_leaves_outer,
+    interior_point_of_loops, point_inside_polygon, point_near_segment, polygon_is_simple,
+    segments_intersect, signed_area_on_plane,
 };
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, MaterialId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
@@ -2834,6 +2835,44 @@ impl Object {
                 }
             }
             if distance.abs() >= neighbor_limit - tol::POINT_MERGE {
+                return Err(PushPullError::NonManifoldResult);
+            }
+        }
+
+        // Vertices this sweep translates IN PLACE (every vertex on the fast
+        // path; on the wall-building path, those whose every corner in the
+        // moved face's loops runs between two transverse edges) drag every
+        // face holding them. A face holding one but sharing no edge with the
+        // moved face is no neighbor the push refits, and the translation
+        // would bend it off its plane: refused typed before any mutation
+        // (the app routes such a sweep to the boolean, which grows or cuts
+        // the prism instead).
+        if !is_collapse {
+            let in_place: std::collections::BTreeSet<VertexId> = if has_wall {
+                let mut plain: std::collections::BTreeSet<VertexId> =
+                    std::collections::BTreeSet::new();
+                let mut walled: std::collections::BTreeSet<VertexId> =
+                    std::collections::BTreeSet::new();
+                for &loop_id in &boundary_loops {
+                    let hes: Vec<HalfEdgeId> = self.loop_half_edges(loop_id).collect();
+                    let n = hes.len();
+                    for k in 0..n {
+                        let (h, h_prev) = (hes[k], hes[(k + n - 1) % n]);
+                        let v = self.half_edges[h].origin;
+                        let wall =
+                            |x: &HalfEdgeId| !matches!(edge_kinds[x], BoundaryEdgeKind::Transverse);
+                        if wall(&h) || wall(&h_prev) {
+                            walled.insert(v);
+                        } else {
+                            plain.insert(v);
+                        }
+                    }
+                }
+                plain.difference(&walled).copied().collect()
+            } else {
+                moved_vertices.clone()
+            };
+            if self.moving_vertices_pin_a_face(face, &in_place) {
                 return Err(PushPullError::NonManifoldResult);
             }
         }
@@ -5984,6 +6023,28 @@ impl Object {
     /// CONTAINS the sweep direction (the side walls around `face`) reshape
     /// in-plane under a translation and do not count.
     fn moved_ring_is_pinned(&self, face: FaceId) -> bool {
+        let Some(f) = self.faces.get(face) else {
+            return false;
+        };
+        let ring: std::collections::BTreeSet<VertexId> = std::iter::once(f.outer_loop)
+            .chain(f.inner_loops.iter().copied())
+            .flat_map(|l| self.loop_half_edges(l).map(|h| self.half_edges[h].origin))
+            .collect();
+        self.moving_vertices_pin_a_face(face, &ring)
+    }
+
+    /// Whether translating the vertices `moving` of `face` along its normal
+    /// would bend a face that shares one of them with `face` but no edge
+    /// (so is no neighbor the push refits), and whose plane the sweep
+    /// leaves. A hole touching its face's outer loop at one point, pushed
+    /// into a pocket, makes one: the pocket wall's facets at the touch
+    /// vertex share only that vertex with the side face the wall is tangent
+    /// to.
+    fn moving_vertices_pin_a_face(
+        &self,
+        face: FaceId,
+        moving: &std::collections::BTreeSet<VertexId>,
+    ) -> bool {
         if self.watertight != WatertightState::Watertight {
             return false;
         }
@@ -5991,18 +6052,16 @@ impl Object {
             return false;
         };
         let normal = f.plane.normal();
-        let mut moved: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
         let mut neighbors: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
         for loop_id in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
             for h in self.loop_half_edges(loop_id) {
-                moved.insert(self.half_edges[h].origin);
                 if let Some(twin) = self.half_edges[h].twin {
                     neighbors.insert(self.loops[self.half_edges[twin].loop_id].face);
                 }
             }
         }
         self.half_edges.values().any(|he| {
-            if !moved.contains(&he.origin) {
+            if !moving.contains(&he.origin) {
                 return false;
             }
             let other = self.loops[he.loop_id].face;
@@ -6914,27 +6973,76 @@ fn push_pull_build_walls(
     // put for whoever doesn't move) iff at least one of its two incident
     // boundary half-edges in the moved face's loop is Coplanar. A vertex with
     // both edges Transverse translates in place, exactly as pre-.
-    let mut raised: std::collections::BTreeMap<VertexId, VertexId> =
-        std::collections::BTreeMap::new();
+    //
+    // A vertex the moved face's loops share (a hole touching the outer loop
+    // or another hole at one point) is visited once per loop through it, and
+    // the visits may disagree: a pure transverse corner of the outer loop
+    // and a wall corner of the hole. Such a MIXED vertex is raised too; the
+    // transverse neighbors at its pure corner follow the raised copy (they
+    // stretch, exactly as at an unshared transverse corner), while the faces
+    // on the hole's side keep the original.
+    let mut raise_at: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
+    let mut plain_at: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
     for walk in &walks {
         let n = walk.hes.len();
         for k in 0..n {
             let h = walk.hes[k];
             let h_prev = walk.hes[(k + n - 1) % n];
-            let needs_raise = is_wall_edge(&h) || is_wall_edge(&h_prev);
-            let v = walk.verts[k];
-            if needs_raise {
-                raised.entry(v).or_insert_with(|| {
-                    let p = obj.vertices[v].position + sweep;
-                    obj.vertices.insert(Vertex {
-                        position: p,
-                        outgoing: HalfEdgeId::default(),
-                    })
-                });
+            if is_wall_edge(&h) || is_wall_edge(&h_prev) {
+                raise_at.insert(walk.verts[k]);
             } else {
-                // Pure transverse corner: translate in place (shared with the
-                // transverse neighbor wall, which extends to follow it).
-                obj.vertices[v].position = obj.vertices[v].position + sweep;
+                plain_at.insert(walk.verts[k]);
+            }
+        }
+    }
+    let mut raised: std::collections::BTreeMap<VertexId, VertexId> =
+        std::collections::BTreeMap::new();
+    // Copies minted in walk order, as before shared vertices existed.
+    for walk in &walks {
+        for &v in &walk.verts {
+            if raise_at.contains(&v) && !raised.contains_key(&v) {
+                let p = obj.vertices[v].position + sweep;
+                let copy = obj.vertices.insert(Vertex {
+                    position: p,
+                    outgoing: HalfEdgeId::default(),
+                });
+                raised.insert(v, copy);
+            }
+        }
+    }
+    for &v in plain_at.difference(&raise_at) {
+        // Pure transverse corner: translate in place (shared with the
+        // transverse neighbor wall, which extends to follow it).
+        obj.vertices[v].position = obj.vertices[v].position + sweep;
+    }
+    let mixed: std::collections::BTreeSet<VertexId> =
+        plain_at.intersection(&raise_at).copied().collect();
+    // At each pure corner of a mixed vertex, the neighbor half-edges leaving
+    // it between the corner's two transverse edges, found by turning about
+    // the vertex (twin of prev) from the incoming edge's twin to the
+    // outgoing edge, before any origin is repointed.
+    let mut followers: Vec<(HalfEdgeId, VertexId)> = Vec::new();
+    for walk in &walks {
+        let n = walk.hes.len();
+        for k in 0..n {
+            let v = walk.verts[k];
+            let (h, h_prev) = (walk.hes[k], walk.hes[(k + n - 1) % n]);
+            if !mixed.contains(&v) || is_wall_edge(&h) || is_wall_edge(&h_prev) {
+                continue;
+            }
+            let mut g = obj.half_edges[h_prev]
+                .twin
+                .ok_or(PushPullError::NonManifoldResult)?;
+            let mut steps_taken = 0;
+            while g != h {
+                followers.push((g, raised[&v]));
+                g = obj.half_edges[obj.half_edges[g].prev]
+                    .twin
+                    .ok_or(PushPullError::NonManifoldResult)?;
+                steps_taken += 1;
+                if steps_taken > obj.half_edges.len() {
+                    return Err(PushPullError::NonManifoldResult);
+                }
             }
         }
     }
@@ -6961,6 +7069,27 @@ fn push_pull_build_walls(
                 obj.half_edges[h].origin = v_raised;
                 obj.vertices[v_raised].outgoing = h;
             }
+        }
+    }
+
+    // The transverse neighbors at a mixed vertex's pure corners follow the
+    // raised copy; every vertex the repointing touched gets a live outgoing.
+    for &(g, to) in &followers {
+        obj.half_edges[g].origin = to;
+    }
+    for &v in &mixed {
+        let copy = raised[&v];
+        let out_of = |obj: &Object, x: VertexId| {
+            obj.half_edges
+                .iter()
+                .find(|(_, he)| he.origin == x)
+                .map(|(id, _)| id)
+        };
+        if let Some(o) = out_of(obj, v) {
+            obj.vertices[v].outgoing = o;
+        }
+        if let Some(o) = out_of(obj, copy) {
+            obj.vertices[copy].outgoing = o;
         }
     }
 
@@ -6992,8 +7121,14 @@ fn push_pull_build_walls(
             // Junction at `h`'s origin (walk.verts[k]): `twin_h`'s
             // DESTINATION is this vertex (twin_h runs dest_of_h -> origin_of_h).
             // Splice a `down` step (raised -> original) right after `twin_h`.
+            // (Only where the loop turns from a wall edge onto this one: a
+            // mixed vertex's pure corner has no junction, its neighbors
+            // follow the raised copy.)
             let v = walk.verts[k];
+            let h_prev = walk.hes[(k + n - 1) % n];
+            let h_next = walk.hes[(k + 1) % n];
             if let Some(&v_raised) = raised.get(&v)
+                && is_wall_edge(&h_prev)
                 && steps.entry(v).or_default().down.is_none()
             {
                 let step = match collinear_step_down(obj, twin_h, v, v_raised, sweep) {
@@ -7007,6 +7142,7 @@ fn push_pull_build_walls(
             // right before `twin_h`, then repoint `twin_h`'s origin to raised.
             let v_dest = walk.verts[(k + 1) % n];
             if let Some(&v_raised) = raised.get(&v_dest)
+                && is_wall_edge(&h_next)
                 && steps.entry(v_dest).or_default().up.is_none()
             {
                 let step = match collinear_step_up(obj, twin_h, v_dest, v_raised, sweep) {
@@ -7129,16 +7265,20 @@ fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError>
     if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
         return Err(PushPullError::NonManifoldResult);
     }
-    // Inner loops must stay strictly inside the (possibly reshaped) outer
-    // boundary: a translation that swings a boundary edge across an imprinted
-    // ring leaves the ring poking outside its face — planar, twin-consistent,
-    // invisible to the validator, and fatal to the ring's own inverses.
+    // Inner loops must stay inside the (possibly reshaped) outer boundary: a
+    // translation that swings a boundary edge across an imprinted ring
+    // leaves the ring poking outside its face — planar and twin-consistent,
+    // and fatal to the ring's own inverses. The test is the validator's own
+    // containment rule (no crossing, no stretch of a hole edge outside;
+    // point contacts allowed: a vertex both rings hold, a vertex of one on
+    // an edge of the other), with no hole edge running along an outer edge.
+    let graze = obj.planarity_tol.max(tol::POINT_MERGE);
     for &il in &obj.faces[face].inner_loops {
         let hole: Vec<Point3> = obj.loop_positions(il).collect();
-        if boundaries_contact(&pts, &hole)
-            || hole
-                .iter()
-                .any(|&hp| !point_inside_polygon(hp, &pts, new_plane.normal()))
+        if hole_leaves_outer(&pts, &hole, new_plane.normal(), graze, false)
+            || hole.iter().any(|&hp| {
+                !point_inside_polygon(hp, &pts, new_plane.normal()) && !near_ring(hp, &pts, graze)
+            })
         {
             return Err(PushPullError::NonManifoldResult);
         }
@@ -7937,6 +8077,11 @@ fn boundary_pokes_face(
                 .iter()
                 .any(|&(s0, s1)| point_on_segment(p, s0, s1, tol::POINT_MERGE))
     };
+    // Contact along a line where the solid touches itself from one side
+    // ([`on_tangent_edge`]) is legitimate too; checked only once a contact
+    // is otherwise improper (it scans the object's edges).
+    let is_legit_contact =
+        |p: Point3| -> bool { is_shared_contact(p) || on_tangent_edge(obj, p, y) };
     for lid in
         std::iter::once(obj.faces[x].outer_loop).chain(obj.faces[x].inner_loops.iter().copied())
     {
@@ -7992,7 +8137,7 @@ fn boundary_pokes_face(
                             obj.vertices[obj.half_edges[obj.half_edges[yh].next].origin].position;
                         for c in coplanar_segment_contacts(p, q, r, s, y_normal, is_shared_contact)
                         {
-                            if !is_shared_contact(c) {
+                            if !is_legit_contact(c) {
                                 return true;
                             }
                             cuts.push((c - p).dot(dir).clamp(0.0, len));
@@ -8003,7 +8148,7 @@ fn boundary_pokes_face(
                 cuts.dedup_by(|a, b| (*a - *b).abs() <= tol::POINT_MERGE);
                 for pair in cuts.windows(2) {
                     let mid = p + dir * ((pair[0] + pair[1]) * 0.5);
-                    if in_y_interior(mid) && !is_shared_contact(mid) {
+                    if in_y_interior(mid) && !is_legit_contact(mid) {
                         return true;
                     }
                 }
@@ -8032,13 +8177,84 @@ fn boundary_pokes_face(
                 } else {
                     p + (q - p) * (sdp / (sdp - sdq))
                 };
-                if in_y_interior(c) && !is_shared_contact(c) {
+                if in_y_interior(c) && !is_legit_contact(c) {
                     return true;
                 }
             }
         }
     }
     false
+}
+
+/// Whether `c` lies on an edge of `obj` that touches face `y` along a
+/// line from one side, starting at a TOUCH vertex: the edge lies in `y`'s
+/// plane, one of its ends is a vertex of `y` that two loops of one face
+/// share (a hole touching its face's outer loop, or another hole, there),
+/// and every other vertex of the two faces on the edge lies strictly on one
+/// side of the plane (farther than [`tol::PLANE_DIST`]). A hole touching its
+/// face's outer loop at one point, pushed into a pocket or through, runs its
+/// wall's generatrix there along the side face: the solid touches itself
+/// along that line, which the loop rule makes legitimate. Any other
+/// line contact (a ridge pushed against a face, two walls meeting along a
+/// line in a face) is still improper. See [`boundary_pokes_face`].
+fn on_tangent_edge(obj: &Object, c: Point3, y: FaceId) -> bool {
+    let y_plane = obj.faces[y].plane;
+    let y_verts: Vec<Point3> = std::iter::once(obj.faces[y].outer_loop)
+        .chain(obj.faces[y].inner_loops.iter().copied())
+        .flat_map(|l| obj.loop_positions(l).collect::<Vec<_>>())
+        .collect();
+    obj.edges.values().any(|edge| {
+        let Some(t) = edge.twin_half_edge else {
+            return false;
+        };
+        let h = edge.half_edge;
+        let p = obj.vertices[obj.half_edges[h].origin].position;
+        let q = obj.vertices[obj.half_edges[t].origin].position;
+        if y_plane.signed_distance(p).abs() > tol::PLANE_DIST
+            || y_plane.signed_distance(q).abs() > tol::PLANE_DIST
+            || !point_on_segment(c, p, q, tol::POINT_MERGE)
+        {
+            return false;
+        }
+        let (vp, vq) = (obj.half_edges[h].origin, obj.half_edges[t].origin);
+        let starts_at_touch = |v: VertexId, at: Point3| {
+            y_verts.iter().any(|&x| same_bits(x, at)) && is_touch_vertex(obj, v)
+        };
+        if !starts_at_touch(vp, p) && !starts_at_touch(vq, q) {
+            return false;
+        }
+        let mut side = 0.0f64;
+        for he in [h, t] {
+            let face = &obj.faces[obj.loops[obj.half_edges[he].loop_id].face];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                for x in obj.loop_positions(l) {
+                    if same_bits(x, p) || same_bits(x, q) {
+                        continue;
+                    }
+                    let d = y_plane.signed_distance(x);
+                    if d.abs() <= tol::PLANE_DIST || (side != 0.0 && d.signum() != side) {
+                        return false;
+                    }
+                    side = d.signum();
+                }
+            }
+        }
+        side != 0.0
+    })
+}
+
+/// Whether two loops of one face of `obj` pass through vertex `v`.
+fn is_touch_vertex(obj: &Object, v: VertexId) -> bool {
+    obj.faces.values().any(|face| {
+        std::iter::once(face.outer_loop)
+            .chain(face.inner_loops.iter().copied())
+            .filter(|&l| {
+                obj.loop_half_edges(l)
+                    .any(|h| obj.half_edges[h].origin == v)
+            })
+            .count()
+            >= 2
+    })
 }
 
 /// Contact points between two segments `p→q` and `r→s` lying in a common
@@ -8122,6 +8338,18 @@ fn coplanar_segment_contacts(
     Vec::new()
 }
 
+/// Whether `p` lies within `tol` of ring `ring`'s boundary.
+fn near_ring(p: Point3, ring: &[Point3], tol: f64) -> bool {
+    (0..ring.len()).any(|i| point_near_segment(p, ring[i], ring[(i + 1) % ring.len()], tol))
+}
+
+/// Whether two points are the very same position (exact bits).
+fn same_bits(a: Point3, b: Point3) -> bool {
+    a.x.to_bits() == b.x.to_bits()
+        && a.y.to_bits() == b.y.to_bits()
+        && a.z.to_bits() == b.z.to_bits()
+}
+
 /// The validation half of [`refit_face_plane`], without storing the fitted
 /// plane: refuses a self-intersecting outer boundary, a winding whose Newell
 /// normal flipped against the face's stored orientation, and any hole-ring
@@ -8155,24 +8383,40 @@ fn check_face_boundary(obj: &Object, face: FaceId) -> Result<(), PushPullError> 
         if signed_area_on_plane(&hole, normal) >= 0.0 {
             return Err(PushPullError::NonManifoldResult);
         }
-        // ...strictly inside the outer boundary...
-        if boundaries_contact(&pts, &hole)
+        // ...inside the outer boundary: the validator's own containment
+        // rule (no crossing, no stretch of a hole edge outside, point
+        // contacts allowed), with no hole edge running along an outer edge.
+        let graze = obj.planarity_tol.max(tol::POINT_MERGE);
+        let on = |p: Point3, ring: &[Point3]| ring.iter().any(|&q| same_bits(p, q));
+        let mids = |ring: &[Point3]| -> Vec<Point3> {
+            (0..ring.len())
+                .map(|i| ring[i] + (ring[(i + 1) % ring.len()] - ring[i]) * 0.5)
+                .collect()
+        };
+        let hole_mids = mids(&hole);
+        if hole_leaves_outer(&pts, &hole, normal, graze, false)
             || hole
                 .iter()
-                .any(|&hp| !point_inside_polygon(hp, &pts, normal))
+                .any(|&hp| !point_inside_polygon(hp, &pts, normal) && !near_ring(hp, &pts, graze))
         {
             return Err(PushPullError::NonManifoldResult);
         }
         // ...and disjoint from every other hole (rings that slid into each
-        // other claim the same area twice).
+        // other claim the same area twice), but for shared vertices.
         for prev in &holes {
-            if boundaries_contact(prev, &hole)
+            if boundaries_contact_away_from_shared(prev, &hole)
                 || hole
                     .iter()
-                    .any(|&hp| point_inside_polygon(hp, prev, normal))
+                    .any(|&hp| !on(hp, prev) && point_inside_polygon(hp, prev, normal))
                 || prev
                     .iter()
-                    .any(|&pp| point_inside_polygon(pp, &hole, normal))
+                    .any(|&pp| !on(pp, &hole) && point_inside_polygon(pp, &hole, normal))
+                || hole_mids
+                    .iter()
+                    .any(|&m| point_inside_polygon(m, prev, normal))
+                || mids(prev)
+                    .iter()
+                    .any(|&m| point_inside_polygon(m, &hole, normal))
             {
                 return Err(PushPullError::NonManifoldResult);
             }
@@ -10041,6 +10285,216 @@ mod tests {
     use super::*;
     use crate::math::Vec3;
     use crate::topo::WatertightState;
+
+    /// The push/pull result checks hold a hole to the same containment the
+    /// validator does: a hole whose vertices all sit on the outer ring but
+    /// whose edge runs outside the face past a reflex corner is refused by
+    /// both the reshaped-face check and the plane refit.
+    #[test]
+    fn a_hole_running_outside_its_face_is_refused_by_the_sweep_checks() {
+        let mut obj = crate::validate::tests::l_with_a_hole_running_outside();
+        let f = obj.faces.keys().next().unwrap();
+        assert_eq!(
+            check_face_boundary(&obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+        assert_eq!(
+            refit_face_plane(&mut obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+    }
+
+    /// An L prism (the L (0,0) (2,0) (2,1) (1,1) (1,2) (0,2), 1 tall) with a
+    /// triangular tunnel through it whose top edge from (0.5, 1.5) to
+    /// (1.5, 0.5) passes exactly through the L's reflex corner (1, 1) at its
+    /// midpoint: a point contact the validator allows. The sweep checks
+    /// hold it to the same rule, so the top face's own checks accept it and
+    /// a push/pull of the top commits. Returns the solid and its top face.
+    fn l_prism_with_a_tunnel_touching_the_reflex_corner() -> (Object, FaceId) {
+        let l = [
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let tri = [(0.5, 1.5), (1.5, 0.5), (0.4, 0.4)];
+        let mut positions = Vec::new();
+        for z in [1.0, 0.0] {
+            for &(x, y) in l.iter().chain(tri.iter()) {
+                positions.push(Point3::new(x, y, z));
+            }
+        }
+        // Top: 0..6 the L, 6..9 the hole; bottom: +9.
+        let mut faces: Vec<Vec<usize>> = vec![(0..6).collect(), (9..15).rev().collect()];
+        let mut holes: Vec<Vec<Vec<usize>>> = vec![vec![vec![6, 7, 8]], vec![vec![17, 16, 15]]];
+        for i in 0..6 {
+            let (a, b) = (i, (i + 1) % 6);
+            faces.push(vec![a + 9, b + 9, b, a]);
+            holes.push(Vec::new());
+        }
+        for i in 0..3 {
+            let (a, b) = (6 + i, 6 + (i + 1) % 3);
+            faces.push(vec![b, a, a + 9, b + 9]);
+            holes.push(Vec::new());
+        }
+        let n = faces.len();
+        let obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &vec![crate::material::FaceMaterial::default(); n],
+            &vec![None; n],
+        )
+        .expect("the tunnelled L builds");
+        let top = obj
+            .faces
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        (obj, top)
+    }
+
+    /// An imported hole running along its face's outer edge loads (SketchUp
+    /// draws them), but a push/pull never produces one: the sweep checks
+    /// pass `allow_overlap = false` and refuse it.
+    #[test]
+    fn an_imported_overlap_hole_the_validator_accepts_is_refused_by_the_sweep_checks() {
+        let mut obj = crate::validate::tests::imported_hole_along_the_outer_edge();
+        obj.validate()
+            .expect("the validator accepts the imported overlap");
+        let f = obj.faces.keys().next().unwrap();
+        assert_eq!(
+            check_face_boundary(&obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+        assert_eq!(
+            refit_face_plane(&mut obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+    }
+
+    /// An imported 4 x 4 x 1 block with a triangular tunnel (2,1) (2,3)
+    /// (3.5,2), built valid, then the tunnel's apex moved to x = 4 + `out`,
+    /// past the block's side by `out`. Returns it and its top face.
+    fn imported_block_with_a_tunnel_poking_out(out: f64) -> (Object, FaceId) {
+        let sq = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+        let tri = [(2.0, 1.0), (2.0, 3.0), (3.5, 2.0)];
+        let mut positions = Vec::new();
+        for z in [1.0, 0.0] {
+            for &(x, y) in sq.iter().chain(tri.iter()) {
+                positions.push(Point3::new(x, y, z));
+            }
+        }
+        // Top: 0..4 the square, 4..7 the hole; bottom: +7.
+        let mut faces: Vec<Vec<usize>> = vec![(0..4).collect(), (7..11).rev().collect()];
+        let mut holes: Vec<Vec<Vec<usize>>> = vec![vec![vec![4, 5, 6]], vec![vec![13, 12, 11]]];
+        for i in 0..4 {
+            let (a, b) = (i, (i + 1) % 4);
+            faces.push(vec![a + 7, b + 7, b, a]);
+            holes.push(Vec::new());
+        }
+        for i in 0..3 {
+            let (a, b) = (4 + i, 4 + (i + 1) % 3);
+            faces.push(vec![b, a, a + 7, b + 7]);
+            holes.push(Vec::new());
+        }
+        let n = faces.len();
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &faces,
+            &holes,
+            &vec![crate::material::FaceMaterial::default(); n],
+            &vec![None; n],
+        )
+        .expect("the tunnelled block builds");
+        let apexes: Vec<VertexId> = obj
+            .vertices
+            .iter()
+            .filter(|(_, v)| (v.position.x - 3.5).abs() < 1e-12)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(apexes.len(), 2);
+        for v in apexes {
+            obj.vertices[v].position.x = 4.0 + out;
+        }
+        // The two tunnel walls through the apex turn with it.
+        let ids: Vec<FaceId> = obj.faces.keys().collect();
+        for f in ids {
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces[f].outer_loop).collect();
+            obj.faces[f].plane = Plane::from_polygon(&ring).expect("a plane");
+        }
+        let top = obj
+            .faces
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        (obj, top)
+    }
+
+    /// The sweep checks hold an imported object to the validator's graze:
+    /// a tunnel poking a micron past the block's side (a proper crossing of
+    /// the top's ring) is within the import tolerance, so pulling and
+    /// pushing the top commits and validates; poking a centimetre past, it
+    /// refuses `NonManifoldResult`, untouched. Guards both sides of the
+    /// tolerance for the push/pull checks.
+    #[test]
+    fn an_imported_hole_grazing_its_ring_pushes_and_one_past_the_graze_refuses() {
+        let (obj, top) = imported_block_with_a_tunnel_poking_out(1e-6);
+        obj.validate().expect("a graze loads");
+        for d in [0.3, -0.3] {
+            let mut o = obj.clone();
+            o.push_pull(top, d)
+                .unwrap_or_else(|e| panic!("push/pull {d}: {e:?}"));
+            o.validate().expect("valid after the push/pull");
+        }
+        let (obj, top) = imported_block_with_a_tunnel_poking_out(1e-2);
+        for d in [0.3, -0.3] {
+            let mut o = obj.clone();
+            assert_eq!(o.push_pull(top, d), Err(PushPullError::NonManifoldResult));
+            assert!(
+                o.vertices
+                    .values()
+                    .zip(obj.vertices.values())
+                    .all(|(x, y)| x.position == y.position),
+                "refused untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hole_edge_leaving_through_a_notch_is_refused_by_the_sweep_checks() {
+        let mut obj = crate::validate::tests::bay_with_a_hole_through_it();
+        let f = obj.faces.keys().next().unwrap();
+        assert_eq!(
+            check_face_boundary(&obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+        assert_eq!(
+            refit_face_plane(&mut obj, f),
+            Err(PushPullError::NonManifoldResult)
+        );
+    }
+
+    #[test]
+    fn a_hole_edge_through_a_reflex_corner_passes_the_sweep_checks_and_pushes() {
+        let (obj, top) = l_prism_with_a_tunnel_touching_the_reflex_corner();
+        obj.validate()
+            .expect("the validator allows the point contact");
+        assert_eq!(obj.watertight, WatertightState::Watertight);
+        assert_eq!(check_face_boundary(&obj, top), Ok(()));
+        let mut refit = obj.clone();
+        assert_eq!(refit_face_plane(&mut refit, top), Ok(()));
+        for d in [0.3, -0.3] {
+            let mut o = obj.clone();
+            o.push_pull(top, d)
+                .unwrap_or_else(|e| panic!("push/pull {d}: {e:?}"));
+            o.validate().expect("valid after the push/pull");
+        }
+    }
 
     // ---------------------------------------------------------------- helpers
 

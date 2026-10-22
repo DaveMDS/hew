@@ -8,16 +8,17 @@
 //! outside cuts the face around it from the imprint's hole loop back to the
 //! same hole loop. All the cuts land as one undo entry.
 //!
-//! What the face cannot hold is never refused: a loop meeting the group at
-//! a single point (a pinch), and a draw that would leave a face too small
-//! for a saved file to reopen (twice its area under 1e-12 m²), stay as the
+//! A loop meeting the group at a single point is topology too: the face
+//! around it holds it as a hole sharing that vertex. What the face cannot
+//! hold is never refused: a draw that would leave a face too small for a
+//! saved file to reopen (twice its area under 1e-12 m²) stays as the
 //! object's owned-sketch drawing (`DraftReport::kept_as_sketch`) with the
 //! solid untouched; the part of a loop beyond the face's edge is free
 //! drawing. Each is one undo entry with exact undo and redo.
 //!
 //! Every accepting spec checks the stage invariants (see
 //! `face_arrangement_specs.rs`): I1 valid and watertight, I2
-//! Euler–Poincaré unchanged, I3 group area conserved, I4 no pinch, I5 exact
+//! Euler–Poincaré unchanged, I3 group area conserved, I4 loops simple, I5 exact
 //! undo/redo with byte-identical saves, I6 the face group equals the
 //! ground's regions for the same lines, I7 the saved document reopens.
 
@@ -468,17 +469,17 @@ fn a_circle_crossing_one_imprint_and_enclosing_another_hands_it_to_the_lune() {
     );
 }
 
-// ------------------------------------- joined boundaries that pinch
+// ------------------------------------- joined boundaries at single points
 
 /// A circle overlapping two separate imprints, and a rectangle from the
 /// wall's edge across an imprint, need a bridge and land as topology
 /// (`face_arrangement_stage4_specs.rs`). These two join two boundaries at a
-/// single point each, a pinch: the circle stays as the object's owned
-/// sketch drawing and the solid is untouched.
+/// single point each: they land as topology too, the faces holding holes
+/// that share those points, as on the ground.
 #[test]
-fn configurations_that_pinch_stay_owned_drawing_the_solid_untouched() {
-    let expected_owned =
-        std::collections::BTreeMap::from([("tangent to both", 24), ("crossing and tangent", 26)]);
+fn configurations_touching_at_single_points_land_as_topology() {
+    let expected_faces =
+        std::collections::BTreeMap::from([("tangent to both", 3), ("crossing and tangent", 4)]);
     let mut cases: Vec<(&str, Wall, Vec<FaceId>, Vec<Point3>)> = Vec::new();
     {
         // A circle tangent to the wall's bottom edge and to the imprint's
@@ -499,8 +500,14 @@ fn configurations_that_pinch_stay_owned_drawing_the_solid_untouched() {
     for (what, mut w, seeds, ring) in cases {
         let before = w.obj().clone();
         for seed in seeds {
-            let owned = kept_and_check(&mut w, seed, &ring, None);
-            assert_eq!(owned, expected_owned[what], "{what}");
+            draw_and_check(&mut w, seed, ring.clone(), None);
+            assert_eq!(
+                group_faces(w.obj(), &w.plane).len(),
+                expected_faces[what],
+                "{what}"
+            );
+            assert!(has_touching_loops(w.obj(), &w.plane), "{what}");
+            assert_eq!(owned_edge_count(&w), 0, "{what}");
             w.doc.undo().expect("undo");
             assert!(objects_equivalent(w.obj(), &before), "{what}");
         }
@@ -698,21 +705,20 @@ fn ring_dist(p: Point3, ring: &[Point3]) -> f64 {
 /// touching its edge (biased toward tangency to the wall's bottom and to
 /// the imprint's sides), drawn from the wall or from the imprint. The oracle reads the
 /// contact sites off the GROUND sketch of the same lines (its vertices on
-/// both the loop and a group edge):
-/// - sites on the wall's outer edge AND on the imprint → the loop joins the
-///   two boundaries at single points (a pinch on the ground too): kept as
-///   the object's owned-sketch drawing, the solid untouched;
-/// - exactly one site → a pinch: kept the same way;
-/// - otherwise it lands as face topology, with I1–I7 and ground parity.
+/// both the loop and a group edge). Every draw lands as face topology,
+/// with I1–I7 and ground parity — including the loops that join the wall's
+/// outer edge and the imprint at single points, and those touching the
+/// group at exactly one site (a hole sharing that vertex, on the ground as
+/// on the face).
 ///
 /// Draws whose contacts fall in the band between the merge tolerance and
 /// 0.1 µm (where the ground's parameter tolerance and the face's metric
 /// one may disagree) are skipped.
 #[test]
-fn crossing_circles_on_a_lattice_match_the_ground_or_stay_drawing_as_predicted() {
+fn crossing_circles_on_a_lattice_match_the_ground() {
     let mut rng = Rng(0x51_7cc1_b727_220a);
     let q = 0.1 * MM;
-    let (mut accepted, mut crossing, mut bridges, mut pinches) = (0, 0, 0, 0);
+    let (mut accepted, mut crossing, mut joins, mut single) = (0, 0, 0, 0);
     let mut draws = 0;
     while draws < 500 {
         let (x0, y0) = (rng.range(10, 100), rng.range(10, 50));
@@ -767,8 +773,8 @@ fn crossing_circles_on_a_lattice_match_the_ground_or_stay_drawing_as_predicted()
             .iter()
             .filter(|&&p| on_loop(p) && ring_dist(p, &rect) <= tol::POINT_MERGE)
             .count();
-        let bridge = wall_sites > 0 && rect_sites > 0;
-        let pinch = wall_sites + rect_sites == 1;
+        let joins_both = wall_sites > 0 && rect_sites > 0;
+        let one_site = wall_sites + rect_sites == 1;
 
         let seed = if from_imprint { imprint } else { wall };
         let bytes0 = w.doc.save();
@@ -781,31 +787,30 @@ fn crossing_circles_on_a_lattice_match_the_ground_or_stay_drawing_as_predicted()
             .draw_loop(seed, &ring, Some(g))
             .expect("the circle draws")
             .0;
-        let kept = !report.kept_as_sketch.is_empty();
-        assert_eq!(kept, bridge || pinch, "{what}");
-        assert_eq!(kept, ground_has_pinch(&sk), "{what}");
-        if kept {
-            if bridge {
-                bridges += 1;
-            } else {
-                pinches += 1;
-            }
-            assert!(objects_equivalent(w.obj(), &before), "{what}");
-            assert!(owned_edge_count(&w) >= ring.len(), "{what}");
-            assert_eq!(free_edge_count(&w), 0, "{what}");
-            assert_undoable(&mut w, &before, &bytes0, depth0);
-        } else {
-            accepted += 1;
-            if rect_sites > 0 && phase != 0.0 {
-                crossing += 1;
-            }
-            assert_ground_parity(&w, &before, &ring);
-            assert_invariants(&mut w, &before, &bytes0, depth0);
+        assert!(report.kept_as_sketch.is_empty(), "{what}");
+        assert!(
+            !ground_has_pinch(&sk),
+            "the ground's rings are simple: {what}"
+        );
+        accepted += 1;
+        if rect_sites > 0 && phase != 0.0 {
+            crossing += 1;
         }
+        if joins_both {
+            joins += 1;
+        } else if one_site {
+            single += 1;
+        }
+        if joins_both || one_site {
+            assert!(has_touching_loops(w.obj(), &w.plane), "{what}");
+        }
+        assert_ground_parity(&w, &before, &ring);
+        assert_invariants(&mut w, &before, &bytes0, depth0);
     }
     assert!(
-        accepted > 150 && crossing > 50 && bridges > 5 && pinches > 5,
-        "coverage: {accepted} accepted ({crossing} crossing), {bridges} bridges, {pinches} pinches"
+        accepted > 150 && crossing > 50 && joins > 5 && single > 5,
+        "coverage: {accepted} accepted ({crossing} crossing), {joins} joining both, \
+         {single} touching once"
     );
 }
 

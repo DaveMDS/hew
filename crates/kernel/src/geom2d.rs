@@ -352,6 +352,232 @@ pub(crate) fn boundaries_contact(a: &[Point3], b: &[Point3]) -> bool {
     false
 }
 
+/// Whether two separate polygons share any point other than vertices both
+/// of them hold (the same exact position in each): a hole touching its
+/// face's outer loop, or another hole, at one shared vertex is a point
+/// contact the face is allowed (every loop simple, loops sharing isolated
+/// vertices, never an edge), while any other touch, a crossing, or two
+/// edges running along each other is contact.
+pub(crate) fn boundaries_contact_away_from_shared(a: &[Point3], b: &[Point3]) -> bool {
+    let bits = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let shared: Vec<[u64; 3]> = a
+        .iter()
+        .map(|&p| bits(p))
+        .filter(|k| b.iter().any(|&q| bits(q) == *k))
+        .collect();
+    let na = a.len();
+    let nb = b.len();
+    for i in 0..na {
+        let (p, q) = (a[i], a[(i + 1) % na]);
+        for j in 0..nb {
+            let (r, s) = (b[j], b[(j + 1) % nb]);
+            if !segments_intersect(p, q, r, s) {
+                continue;
+            }
+            // Two segments meeting at a vertex both rings share touch only
+            // there unless one runs along the other.
+            let common = [p, q]
+                .into_iter()
+                .find(|&x| shared.contains(&bits(x)) && (bits(x) == bits(r) || bits(x) == bits(s)));
+            match common {
+                Some(x) => {
+                    let far_a = if bits(p) == bits(x) { q } else { p };
+                    let far_b = if bits(r) == bits(x) { s } else { r };
+                    if point_near_segment(far_a, r, s, tol::POINT_MERGE)
+                        || point_near_segment(far_b, p, q, tol::POINT_MERGE)
+                    {
+                        return true;
+                    }
+                }
+                None => return true,
+            }
+        }
+    }
+    false
+}
+
+/// Whether hole ring `hole` leaves the region of outer ring `outer` (both
+/// on one plane with unit normal `normal`): some stretch of a hole edge
+/// lies outside the outer ring by more than `graze`.
+///
+/// Each hole edge is cut at every outer vertex lying on it (within
+/// [`tol::POINT_MERGE`]) and, when `graze` exceeds `POINT_MERGE`, at every
+/// point where it properly crosses an outer edge. Every piece's midpoint must
+/// be inside the outer ring, or on it: running along an outer edge (allowed
+/// only when `allow_overlap`: an imported hole lying on its face's
+/// boundary), or within `graze` of it. A piece outside is a GRAZE, not an
+/// escape, when no point of it lies farther than `graze` from the ring: an
+/// imported ring, flat only to its planarity tolerance, may clip a corner
+/// or an edge of its outer loop by that much. That is decided by geometry,
+/// not sampling: for each outer edge, the stretch of the piece within
+/// `graze` of it is one interval (a line meets the edge's capsule in a
+/// convex set), and the intervals together must cover the piece (exact up
+/// to the root-finding's conditioning; see [`capsule_interval`]). With `graze` at `POINT_MERGE`
+/// (native geometry) the rule is exact: any proper crossing leaves, and a
+/// piece is on the ring by [`point_near_segment`].
+///
+/// Points of the two rings may touch: a hole vertex shared with the outer
+/// ring, or on an outer edge, and an outer vertex on a hole edge, are point
+/// contacts, not escapes. Cutting at outer vertices is what catches a hole
+/// edge running out between two of them through a notch in the outer ring,
+/// with both its ends and its midpoint in material.
+pub(crate) fn hole_leaves_outer(
+    outer: &[Point3],
+    hole: &[Point3],
+    normal: Vec3,
+    graze: f64,
+    allow_overlap: bool,
+) -> bool {
+    let (no, nh) = (outer.len(), hole.len());
+    let on_ring = |p: Point3| {
+        (0..no).any(|k| point_near_segment(p, outer[k], outer[(k + 1) % no], tol::POINT_MERGE))
+    };
+    let grazing = graze > tol::POINT_MERGE;
+    for i in 0..nh {
+        let (a, b) = (hole[i], hole[(i + 1) % nh]);
+        let d = b - a;
+        let len2 = d.length_squared();
+        let mut cuts: Vec<f64> = vec![0.0, 1.0];
+        for k in 0..no {
+            let (c, e) = (outer[k], outer[(k + 1) % no]);
+            if !segments_cross_properly(a, b, c, e) {
+                continue;
+            }
+            if !grazing {
+                return true;
+            }
+            // The crossing's parameter along the hole edge.
+            let f = e - c;
+            let den = d.cross(f).dot(normal);
+            if den.abs() > 0.0 {
+                cuts.push(((c - a).cross(f).dot(normal) / den).clamp(0.0, 1.0));
+            }
+        }
+        if len2 <= tol::POINT_MERGE * tol::POINT_MERGE {
+            continue;
+        }
+        for &v in outer {
+            if point_near_segment(v, a, b, tol::POINT_MERGE) {
+                cuts.push(((v - a).dot(d) / len2).clamp(0.0, 1.0));
+            }
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup_by(|x, y| (*x - *y).abs() * len2.sqrt() <= tol::POINT_MERGE);
+        for w in cuts.windows(2) {
+            let m = a + d * (0.5 * (w[0] + w[1]));
+            if on_ring(m) {
+                // Running along an outer edge.
+                if !allow_overlap {
+                    return true;
+                }
+                continue;
+            }
+            if point_inside_polygon(m, outer, normal) {
+                continue;
+            }
+            // Outside: a graze only if every point of the piece is within
+            // `graze` of the ring.
+            if !grazing || !within_of_ring(a, d, w[0], w[1], outer, graze) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Whether every point `a + d·t`, `t` in `[t0, t1]`, lies within `g` of
+/// some edge of the closed ring `ring`. Exact: the points within `g` of one
+/// edge form a capsule (convex), so the line meets it in one interval of
+/// `t`; the union of those intervals must cover `[t0, t1]`, joins allowed a
+/// [`tol::POINT_MERGE`] gap along the line.
+fn within_of_ring(a: Point3, d: Vec3, t0: f64, t1: f64, ring: &[Point3], g: f64) -> bool {
+    let len = d.length();
+    if len == 0.0 {
+        return true;
+    }
+    let n = ring.len();
+    let mut spans: Vec<(f64, f64)> = (0..n)
+        .filter_map(|k| capsule_interval(a, d, ring[k], ring[(k + 1) % n], g))
+        .collect();
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let slop = tol::POINT_MERGE / len;
+    let mut reach = t0;
+    for (lo, hi) in spans {
+        if lo > reach + slop {
+            break;
+        }
+        reach = reach.max(hi);
+        if reach >= t1 - slop {
+            return true;
+        }
+    }
+    reach >= t1 - slop
+}
+
+/// The interval of `t` for which `a + d·t` lies within `g` of the segment
+/// `c`–`e` (its capsule), or `None`. The capsule is the union of the disks
+/// (balls) about the two ends and the slab between them; each meets the
+/// line in an interval, and the capsule being convex, their hull is the
+/// answer.
+///
+/// Conditioning: each interval is found about the line's closest approach
+/// to a ball centre or to the edge's line, from the closest-approach vector
+/// itself rather than a quadratic's discriminant, so its ends are good to
+/// rounding in the coordinates (about `f64::EPSILON` times the distances
+/// involved), not the `sqrt(f64::EPSILON)` times the line's length a
+/// discriminant would cost. Near tangency (the band's half-width under that
+/// rounding) the ends are only as good as the rounding allows. The only
+/// caller with `g` above `POINT_MERGE` is the import graze (`g` = 1 mm);
+/// native containment never reaches this.
+fn capsule_interval(a: Point3, d: Vec3, c: Point3, e: Point3, g: f64) -> Option<(f64, f64)> {
+    // The `t` for which `w0 + w1·t` has length at most `g`: about the
+    // closest approach, half-width sqrt((g² − closest²) / |w1|²). Taken
+    // from the closest-approach vector itself (not a quadratic's
+    // discriminant), so the ends carry no cancellation.
+    let band = |w0: Vec3, w1: Vec3| -> Option<(f64, f64)> {
+        let aa = w1.dot(w1);
+        if aa == 0.0 {
+            return (w0.dot(w0) <= g * g).then_some((f64::NEG_INFINITY, f64::INFINITY));
+        }
+        let t_star = -w0.dot(w1) / aa;
+        let closest = w0 + w1 * t_star;
+        let room = g * g - closest.dot(closest);
+        if room < 0.0 {
+            return None;
+        }
+        let half = (room / aa).sqrt();
+        Some((t_star - half, t_star + half))
+    };
+    let mut pieces: Vec<(f64, f64)> = Vec::new();
+    pieces.extend(band(a - c, d));
+    pieces.extend(band(a - e, d));
+    let f = e - c;
+    let ff = f.dot(f);
+    if ff > 0.0 {
+        // Projection parameter s(t) = ((a - c) + d t)·f / ff in [0, 1].
+        let (s0, s1) = ((a - c).dot(f) / ff, d.dot(f) / ff);
+        let range = if s1 == 0.0 {
+            (0.0..=1.0)
+                .contains(&s0)
+                .then_some((f64::NEG_INFINITY, f64::INFINITY))
+        } else {
+            let (r1, r2) = (-s0 / s1, (1.0 - s0) / s1);
+            Some((r1.min(r2), r1.max(r2)))
+        };
+        // Perpendicular part: (a - c) + d t minus its projection on f.
+        let near = band((a - c) - f * s0, d - f * s1);
+        if let (Some(r), Some(q)) = (range, near) {
+            let (lo, hi) = (r.0.max(q.0), r.1.min(q.1));
+            if lo <= hi {
+                pieces.push((lo, hi));
+            }
+        }
+    }
+    let lo = pieces.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+    let hi = pieces.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+    (lo <= hi).then_some((lo, hi))
+}
+
 /// Check that a polygon does not cross or touch itself.  Tests every pair of
 /// non-adjacent edges for intersection.
 pub(crate) fn polygon_is_simple(pts: &[Point3]) -> bool {
@@ -379,6 +605,442 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::f64::consts::PI;
+
+    fn xy(pts: &[(f64, f64)]) -> Vec<Point3> {
+        pts.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect()
+    }
+
+    const UP: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
+
+    /// A 6 x 6 square with two notches cut down from its top edge to
+    /// y = 2, at x in [1, 2] and [4, 5]; each notch side carries an extra
+    /// ring vertex at y = 3.
+    fn comb() -> Vec<Point3> {
+        xy(&[
+            (0.0, 0.0),
+            (6.0, 0.0),
+            (6.0, 6.0),
+            (5.0, 6.0),
+            (5.0, 3.0),
+            (5.0, 2.0),
+            (4.0, 2.0),
+            (4.0, 3.0),
+            (4.0, 6.0),
+            (2.0, 6.0),
+            (2.0, 3.0),
+            (2.0, 2.0),
+            (1.0, 2.0),
+            (1.0, 3.0),
+            (1.0, 6.0),
+            (0.0, 6.0),
+        ])
+    }
+
+    #[test]
+    fn a_hole_edge_along_several_collinear_outer_vertices_overlaps_only_where_allowed() {
+        // The hole edge y = 2 from x = 0.5 to 5.5 passes through the four
+        // notch-bottom corners: inside material, along notch A's bottom,
+        // inside, along notch B's bottom, inside. Running along an outer
+        // edge leaves only when overlap is not allowed.
+        let hole = xy(&[(0.5, 2.0), (3.0, 0.5), (5.5, 2.0)]);
+        assert!(!hole_leaves_outer(
+            &comb(),
+            &hole,
+            UP,
+            tol::POINT_MERGE,
+            true
+        ));
+        assert!(hole_leaves_outer(
+            &comb(),
+            &hole,
+            UP,
+            tol::POINT_MERGE,
+            false
+        ));
+    }
+
+    #[test]
+    fn a_hole_edge_through_several_outer_vertices_with_one_stretch_outside_leaves() {
+        // The hole edge y = 3 from x = 0.5 to 3 passes through notch A's
+        // side vertices (1, 3) and (2, 3); its ends and the stretches beside
+        // the notch are in material, the stretch between them is in the
+        // notch, outside the face, even with overlap allowed and a graze.
+        let hole = xy(&[(0.5, 3.0), (3.0, 3.0), (2.0, 0.5)]);
+        assert!(hole_leaves_outer(
+            &comb(),
+            &hole,
+            UP,
+            tol::POINT_MERGE,
+            true
+        ));
+        assert!(hole_leaves_outer(&comb(), &hole, UP, 1e-3, true));
+    }
+
+    /// The L (0,0) (2,0) (2,1) (1,1) (1,2) (0,2), and a hole whose edge
+    /// runs parallel to x + y = 2 at `beyond` past the reflex corner (1, 1)
+    /// (positive: clipping the corner, outside the face).
+    fn l_and_a_hole_clipping_its_corner(beyond: f64) -> (Vec<Point3>, Vec<Point3>) {
+        let l = xy(&[
+            (0.0, 0.0),
+            (2.0, 0.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ]);
+        let k = beyond * std::f64::consts::SQRT_2;
+        let hole = xy(&[(1.5 + k, 0.5 + 0.0), (0.4, 0.4), (0.5, 1.5 + k)]);
+        (l, hole)
+    }
+
+    #[test]
+    fn an_outer_vertex_within_the_merge_tolerance_of_a_hole_edge_is_on_it() {
+        // Half the merge tolerance past the corner: the corner is ON the
+        // edge, a point contact; twice it: a crossing, which a native
+        // (exact) ring refuses and an imported one grazes.
+        let (l, hole) = l_and_a_hole_clipping_its_corner(0.5 * tol::POINT_MERGE);
+        assert!(!hole_leaves_outer(&l, &hole, UP, tol::POINT_MERGE, false));
+        let (l, hole) = l_and_a_hole_clipping_its_corner(2.0 * tol::POINT_MERGE);
+        assert!(hole_leaves_outer(&l, &hole, UP, tol::POINT_MERGE, false));
+        assert!(!hole_leaves_outer(&l, &hole, UP, 1e-3, false));
+        // Just inside the corner: clear of it either way.
+        let (l, hole) = l_and_a_hole_clipping_its_corner(-2.0 * tol::POINT_MERGE);
+        assert!(!hole_leaves_outer(&l, &hole, UP, tol::POINT_MERGE, false));
+    }
+
+    #[test]
+    fn a_hole_edge_over_a_slot_far_wider_than_the_graze_leaves() {
+        // A 10 x 10 square with a slot 0.31 wide and 2 deep cut down from
+        // its top edge at x in [5, 5.31]; the hole edge y = 9 from x = 1 to
+        // x = 9 runs across the slot, 0.155 from its walls at the middle.
+        // Within the import tolerance of a wall near each crossing, not
+        // across the slot: it leaves, however the stretch is sampled.
+        let outer = xy(&[
+            (0.0, 0.0),
+            (10.0, 0.0),
+            (10.0, 10.0),
+            (5.31, 10.0),
+            (5.31, 8.0),
+            (5.0, 8.0),
+            (5.0, 10.0),
+            (0.0, 10.0),
+        ]);
+        let hole = xy(&[(1.0, 9.0), (5.0, 1.0), (9.0, 9.0)]);
+        assert!(hole_leaves_outer(&outer, &hole, UP, 1e-3, false));
+        // The same edge clear of the slot loads.
+        let low = xy(&[(1.0, 7.0), (5.0, 1.0), (9.0, 7.0)]);
+        assert!(!hole_leaves_outer(&outer, &low, UP, 1e-3, false));
+    }
+
+    #[test]
+    fn a_tent_just_past_the_graze_leaves_and_just_inside_it_grazes() {
+        // The ring dents in to a tent peak at (4 - peak, 2) between ring
+        // vertices (4, 1) and (4, 3); the hole edge from (4, 1) to (4, 3)
+        // runs straight past it, `peak` outside the face at its middle (to
+        // within the tent's slope).
+        let g = 1e-3;
+        let ring = |peak: f64| {
+            xy(&[
+                (0.0, 0.0),
+                (4.0, 0.0),
+                (4.0, 1.0),
+                (4.0 - peak, 2.0),
+                (4.0, 3.0),
+                (4.0, 4.0),
+                (0.0, 4.0),
+            ])
+        };
+        let hole = xy(&[(4.0, 1.0), (2.0, 2.0), (4.0, 3.0)]);
+        assert!(hole_leaves_outer(&ring(1.02 * g), &hole, UP, g, false));
+        assert!(!hole_leaves_outer(&ring(0.98 * g), &hole, UP, g, false));
+    }
+
+    #[test]
+    fn a_degenerate_outer_edge_does_not_disturb_the_on_ring_judgement() {
+        // The square's right edge split at (4, 2) and again a third of the
+        // merge tolerance above it: an outer edge shorter than the merge
+        // tolerance. The hole's edge along x = 4 runs on the ring through it:
+        // an overlap, allowed or not as asked, and a hole clear of the ring
+        // stays inside.
+        //
+        // What this does NOT test: a piece whose midpoint is decided by the
+        // short edge alone (within POINT_MERGE of it, farther from every
+        // other edge). Such a point exists, beside the short edge's middle,
+        // but no piece's midpoint can land there: any hole edge passing
+        // within POINT_MERGE of that point passes within POINT_MERGE of the
+        // short edge's two ends, which become cuts on it (merged into one,
+        // being closer than POINT_MERGE), so the piece midpoints fall
+        // elsewhere. The degenerate branch of `point_near_segment` (taking
+        // such an edge as its first vertex) is therefore never decisive
+        // here; the native on-ring test uses it only for parity with the
+        // predicate the containment check always used.
+        let outer = xy(&[
+            (0.0, 0.0),
+            (4.0, 0.0),
+            (4.0, 2.0),
+            (4.0, 2.0 + tol::POINT_MERGE / 3.0),
+            (4.0, 4.0),
+            (0.0, 4.0),
+        ]);
+        let hole = xy(&[(4.0, 1.0), (2.0, 2.0), (4.0, 3.0)]);
+        assert!(!hole_leaves_outer(
+            &outer,
+            &hole,
+            UP,
+            tol::POINT_MERGE,
+            true
+        ));
+        assert!(hole_leaves_outer(
+            &outer,
+            &hole,
+            UP,
+            tol::POINT_MERGE,
+            false
+        ));
+        // A hole clear of the ring is inside, the short edge notwithstanding.
+        let inner = xy(&[(3.0, 1.0), (2.0, 2.0), (3.0, 3.0)]);
+        assert!(!hole_leaves_outer(
+            &outer,
+            &inner,
+            UP,
+            tol::POINT_MERGE,
+            false
+        ));
+    }
+
+    /// The sampled graze test this replaced, kept here as a reference: the
+    /// piece is graze when 33 evenly spaced points and the feet of the
+    /// outer vertices on it are all within `g` of the ring.
+    fn sampled_reference(a: Point3, d: Vec3, ring: &[Point3], g: f64) -> bool {
+        let n = ring.len();
+        let dist = |p: Point3| {
+            (0..n)
+                .map(|k| {
+                    let (c, e) = (ring[k], ring[(k + 1) % n]);
+                    let f = e - c;
+                    let t = ((p - c).dot(f) / f.dot(f)).clamp(0.0, 1.0);
+                    (p - (c + f * t)).length()
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let len2 = d.dot(d);
+        let mut ts: Vec<f64> = (0..=32).map(|j| f64::from(j) / 32.0).collect();
+        for &v in ring {
+            let t = (v - a).dot(d) / len2;
+            if t > 0.0 && t < 1.0 {
+                ts.push(t);
+            }
+        }
+        ts.into_iter().all(|t| dist(a + d * t) <= g)
+    }
+
+    /// A ring whose bottom edge y = 0 runs from x = -1 to 11 but for a
+    /// feature between `x0` and `x1` (its vertices in `feature`), and a hole
+    /// whose bottom edge runs 10 m from (10, -g/4) to (0, -g/4), a quarter
+    /// of the graze below the ring: within the graze of it everywhere but
+    /// over the feature.
+    fn ring_with_a_feature(feature: &[(f64, f64)]) -> (Vec<Point3>, Vec<Point3>) {
+        let g = 1e-3;
+        let mut pts = vec![(-1.0, 0.0)];
+        pts.extend_from_slice(feature);
+        pts.extend_from_slice(&[(11.0, 0.0), (11.0, 4.0), (-1.0, 4.0)]);
+        let hole = xy(&[(0.0, -0.25 * g), (1.0, 3.0), (10.0, -0.25 * g)]);
+        (xy(&pts), hole)
+    }
+
+    #[test]
+    fn a_slot_narrower_than_the_old_sample_spacing_leaves() {
+        // A slot 0.2 m wide and 2 m deep at x in [3.15, 3.35]: off every
+        // multiple of the 10 m piece's 1/32 (3.125, 3.4375) and, its walls
+        // being within the graze of the piece at their feet, invisible to
+        // the old samples. The piece crosses its mouth 0.1 m from its walls:
+        // it leaves. The sampled reference would have grazed it.
+        let g = 1e-3;
+        let (outer, hole) =
+            ring_with_a_feature(&[(3.15, 0.0), (3.15, 2.0), (3.35, 2.0), (3.35, 0.0)]);
+        assert!(hole_leaves_outer(&outer, &hole, UP, g, false));
+        let (a, d) = (hole[2], hole[0] - hole[2]);
+        assert!(!within_of_ring(a, d, 0.0, 1.0, &outer, g));
+        assert!(
+            sampled_reference(a, d, &outer, g),
+            "the old sampled test misses this slot"
+        );
+    }
+
+    #[test]
+    fn a_narrow_off_centre_tent_spike_leaves_past_the_graze_and_grazes_inside_it() {
+        // A tent spike 0.1 m wide (narrower than the piece's 1/32) at x in
+        // [3.2, 3.3], its peak at 3.25, rising `rise` into the face: the
+        // piece passes under it `rise + g/4` from the ring. 1.5 x graze
+        // leaves; 0.5 x graze grazes. (The old samples happened to see a
+        // tent: its peak is a vertex, whose foot they sampled.)
+        let g = 1e-3;
+        for (excursion, leaves) in [(1.5 * g, true), (0.5 * g, false)] {
+            let rise = excursion - 0.25 * g;
+            let (outer, hole) = ring_with_a_feature(&[(3.2, 0.0), (3.25, rise), (3.3, 0.0)]);
+            assert_eq!(
+                hole_leaves_outer(&outer, &hole, UP, g, false),
+                leaves,
+                "excursion {excursion}"
+            );
+        }
+    }
+
+    // ---- capsule_interval and within_of_ring
+
+    fn p(x: f64, y: f64) -> Point3 {
+        Point3::new(x, y, 0.0)
+    }
+
+    fn v(x: f64, y: f64) -> Vec3 {
+        Vec3::new(x, y, 0.0)
+    }
+
+    #[test]
+    fn a_line_inside_an_edges_band_meets_its_capsule_over_the_edge_and_its_caps() {
+        // The edge (0,0)-(10,0), g = 1; the line y = 0.5 along +x from x = -5.
+        // Inside the band over the edge, plus the end caps' reach: x from
+        // -sqrt(0.75) to 10 + sqrt(0.75), so t (per metre from x = -5) from
+        // 5 - 0.866 to 15 + 0.866.
+        let (lo, hi) = capsule_interval(p(-5.0, 0.5), v(1.0, 0.0), p(0.0, 0.0), p(10.0, 0.0), 1.0)
+            .expect("meets");
+        let r = 0.75f64.sqrt();
+        assert!((lo - (5.0 - r)).abs() < 1e-12 && (hi - (15.0 + r)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_line_clipping_only_an_end_ball_meets_it_in_a_chord() {
+        // The edge (0,0)-(10,0), g = 1; the vertical line x = -0.6 misses the
+        // slab but cuts the ball about (0, 0): y in [-0.8, 0.8].
+        let (lo, hi) = capsule_interval(p(-0.6, -5.0), v(0.0, 1.0), p(0.0, 0.0), p(10.0, 0.0), 1.0)
+            .expect("meets the end ball");
+        assert!((lo - 4.2).abs() < 1e-12 && (hi - 5.8).abs() < 1e-12);
+        // Past the ball: nothing.
+        assert_eq!(
+            capsule_interval(p(-1.5, -5.0), v(0.0, 1.0), p(0.0, 0.0), p(10.0, 0.0), 1.0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_long_line_and_a_tiny_band_keep_their_ends() {
+        // A 100 m line passing half a micron from a ball of radius 1 um:
+        // half-width sqrt(1 - 0.25) um, at t = 0.5 +- 0.866e-8. Found from
+        // the closest approach, the ends hold to a thousandth of the band.
+        let g = 1e-6;
+        let (lo, hi) =
+            capsule_interval(p(-50.0, 0.5e-6), v(100.0, 0.0), p(0.0, 0.0), p(0.0, 0.0), g)
+                .expect("meets");
+        let half = 0.75f64.sqrt() * g / 100.0;
+        assert!(((hi - lo) / 2.0 - half).abs() < 1e-3 * half, "{lo} {hi}");
+        assert!(((lo + hi) / 2.0 - 0.5).abs() < 1e-3 * half);
+    }
+
+    #[test]
+    fn a_line_tangent_to_an_end_ball_meets_it_in_one_point() {
+        // x = -1 touches the ball about (0, 0) at (-1, 0): a zero
+        // discriminant, one point.
+        let (lo, hi) = capsule_interval(p(-1.0, -5.0), v(0.0, 1.0), p(0.0, 0.0), p(10.0, 0.0), 1.0)
+            .expect("tangent");
+        assert!((lo - 5.0).abs() < 1e-9 && (hi - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn within_of_ring_guards_a_zero_length_direction_and_covers_to_the_ends() {
+        let square = xy(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);
+        // A zero-length piece is trivially covered.
+        assert!(within_of_ring(
+            p(9.0, 9.0),
+            v(0.0, 0.0),
+            0.0,
+            1.0,
+            &square,
+            1e-3
+        ));
+        // The piece y = -g along the bottom edge, x from 0 to 4: covered
+        // exactly from t = 0 to t = 1 (the bottom edge's band, the corner
+        // balls at both ends).
+        let g = 1e-3;
+        assert!(within_of_ring(
+            p(0.0, -g),
+            v(4.0, 0.0),
+            0.0,
+            1.0,
+            &square,
+            g
+        ));
+        // Reaching a hair past the corner ball at either end is not.
+        assert!(!within_of_ring(
+            p(-0.01, -g),
+            v(4.02, 0.0),
+            0.0,
+            1.0,
+            &square,
+            g
+        ));
+    }
+
+    #[test]
+    fn a_gap_between_bands_is_bridged_only_within_the_merge_slop() {
+        // Two collinear outer edges along y = 0 with a gap between x = 1 and
+        // x = 1 + gap; the piece y = 0 from x = 0 to 2 (in both bands, but
+        // for the gap, where only the end balls of radius g = POINT_MERGE / 4
+        // reach). Coverage holds when the uncovered stretch is under the
+        // POINT_MERGE join slop and fails above it.
+        let g = tol::POINT_MERGE / 4.0;
+        let ring = |gap: f64| {
+            xy(&[
+                (0.0, 0.0),
+                (1.0, 0.0),
+                (1.0, -1.0),
+                (1.0 + gap, -1.0),
+                (1.0 + gap, 0.0),
+                (2.0, 0.0),
+                (2.0, 1.0),
+                (0.0, 1.0),
+            ])
+        };
+        // Uncovered stretch = gap - 2g.
+        let under = 2.0 * g + 0.9 * tol::POINT_MERGE;
+        let over = 2.0 * g + 1.1 * tol::POINT_MERGE;
+        assert!(within_of_ring(
+            p(0.0, 0.0),
+            v(2.0, 0.0),
+            0.0,
+            1.0,
+            &ring(under),
+            g
+        ));
+        assert!(!within_of_ring(
+            p(0.0, 0.0),
+            v(2.0, 0.0),
+            0.0,
+            1.0,
+            &ring(over),
+            g
+        ));
+    }
+
+    #[test]
+    fn a_crossing_within_graze_grazes_and_beyond_it_leaves() {
+        // The square [0, 4]^2 and a hole whose vertex pokes past its right
+        // edge by `out`.
+        let square = xy(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);
+        let hole = |out: f64| xy(&[(2.0, 1.0), (2.0, 3.0), (4.0 + out, 2.0)]);
+        assert!(!hole_leaves_outer(&square, &hole(1e-6), UP, 1e-3, false));
+        assert!(hole_leaves_outer(
+            &square,
+            &hole(1e-6),
+            UP,
+            tol::POINT_MERGE,
+            false
+        ));
+        assert!(hole_leaves_outer(&square, &hole(1e-2), UP, 1e-3, false));
+    }
 
     /// `a + b` as an exact two-term sum.
     fn two_sum(a: f64, b: f64) -> (f64, f64) {

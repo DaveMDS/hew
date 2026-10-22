@@ -410,32 +410,35 @@ fn circle_overhanging_splits_at_edge() {
 }
 
 #[test]
-fn pinch_kept_as_owned() {
+fn a_point_touch_is_a_face_in_a_touching_hole() {
     let (mut doc, o) = boxdoc();
     doc.draft(top(), None, &[o], "Rect", |w| rect(w, 2., 1., 6., 5.))
         .unwrap();
     // A square touching the rect's left side at a single point (2,3).
-    doc.draft(top(), None, &[o], "Diamond", |w| {
-        draw_ring(w, &[z3(2., 3.), z3(3., 2.), z3(4., 3.), z3(3., 4.)])
-    })
-    .unwrap();
-    assert_eq!(tops(&doc, o), 2, "the rectangle stays an imprint");
-    let owned = doc.object_owned_sketches(o);
-    assert_eq!(owned.len(), 1);
-    assert_eq!(
-        doc.sketch(owned[0]).unwrap().edges().len(),
-        4,
-        "only the diamond is sketch"
+    let diamond = vec![z3(2., 3.), z3(3., 2.), z3(4., 3.), z3(3., 4.)];
+    doc.draft(top(), None, &[o], "Diamond", |w| draw_ring(w, &diamond))
+        .unwrap();
+    // The diamond is a face; the rectangle holds it as a hole sharing the
+    // touch point with the rectangle's outer loop.
+    assert_faces(
+        &doc,
+        o,
+        &[
+            rg(diamond.clone(), vec![]),
+            rg(rect_ring(2., 1., 6., 5.), vec![diamond.clone()]),
+            top_with_hole(rect_ring(2., 1., 6., 5.)),
+        ],
     );
-    // The diamond's region says why it does not push: a pinch.
+    assert!(doc.object_owned_sketches(o).is_empty(), "nothing is sketch");
+    // The diamond's region pushes: it names its face.
     let pu = doc.plane_units(top(), None, &[o]).unwrap();
-    let diamond = pu
+    let region = pu
         .regions
         .iter()
         .find(|r| r.outer.len() == 4 && r.outer.iter().any(|q| q.approx_eq(z3(3., 4.), 1e-9)))
         .expect("the diamond's region");
-    assert_eq!(diamond.over.map(|(_, f)| f), Some(None));
-    assert_eq!(diamond.why, Some(kernel::DraftRegionWhy::Pinch));
+    assert!(matches!(region.over, Some((obj, Some(_))) if obj == o));
+    assert_eq!(region.why, None);
 }
 
 #[test]
@@ -831,33 +834,33 @@ fn scene_07_loose_line_is_owned() {
     assert_faces(&doc, o, &[rg(rect_ring(0., 0., 10., 6.), vec![])]);
 }
 
-/// Scene 8: a circle touching a shape at one point: only the new island goes
-/// to the owned sketch; the existing rectangle stays topology.
+/// Scene 8: a circle touching a shape at one point is a disc face in a hole
+/// of the shape that shares the touch point with the shape's outer loop;
+/// nothing stays sketch drawing.
 #[test]
-fn scene_08_pinch_keeps_only_the_new_island_in_the_owned_sketch() {
+fn scene_08_a_circle_touching_a_shape_at_one_point_is_a_face() {
     let (mut doc, o) = boxdoc();
     draft_top(&mut doc, o, "Shape", |w| rect(w, 2., 1., 6., 5.));
     let before = doc.save();
     let depth0 = doc.undo_depth();
     let (report, _) = doc
         .draft(top(), None, &[o], "Circle", |w| circle(w, 3.5, 3., 1.5, 48))
-        .expect("a pinch is kept, never refused");
+        .expect("never refused");
     assert_eq!(doc.undo_depth(), depth0 + 1);
-    assert!(
-        !report.kept_as_sketch.is_empty(),
-        "reported as kept drawing"
-    );
+    assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
+    let disc = circle_ring(3.5, 3., 1.5, 48);
     assert_faces(
         &doc,
         o,
         &[
-            rg(rect_ring(2., 1., 6., 5.), vec![]),
+            rg(disc.clone(), vec![]),
+            rg(rect_ring(2., 1., 6., 5.), vec![disc]),
             top_with_hole(rect_ring(2., 1., 6., 5.)),
         ],
     );
-    assert_eq!(owned_edges(&doc, o), 48, "the circle, whole");
+    assert_eq!(owned_edges(&doc, o), 0);
     assert_eq!(free_edges(&doc), 0);
-    assert_eq!(claimed_edges(&doc, o), 0, "no solid edge claims a circle");
+    assert_eq!(claimed_edges(&doc, o), 48, "every facet claims the circle");
     undo_redo_exact(&mut doc, &before);
 }
 

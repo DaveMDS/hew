@@ -80,6 +80,22 @@ enum DocOp {
         ts: [f64; 3],
         pull_in: bool,
     },
+    /// Draw a 24-gon on a face of a visible object with one vertex exactly
+    /// on a side of the face's outer loop (at parameter `t`) and the rest
+    /// inside, as the Circle tool does with its rim snapped onto an edge:
+    /// a one-point touch, which lands as a disc face in a hole sharing that
+    /// vertex with the outer loop (or a second circle `twin` touching the
+    /// first at its far point: two holes sharing a vertex). The radius is
+    /// `frac` of a size that fits a convex hole-free face; anywhere else a
+    /// typed refusal or kept drawing is a correct answer.
+    TangentCircle {
+        obj_sel: usize,
+        face_sel: usize,
+        side: usize,
+        t: f64,
+        frac: f64,
+        twin: bool,
+    },
     /// A cut around the outside of an imprint, from one of its hole edges
     /// back to the same edge (a hole-anchored `split_face`), on a face of a
     /// visible object; a hole-free rectangular face first gets a centered
@@ -736,6 +752,17 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         )
             .prop_map(|(obj_sel, face_sel, edges, ts, pull_in)| DocOp::ImprintTouchingLoop {
                 obj_sel, face_sel, edges, ts, pull_in,
+            }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            any::<usize>(),
+            0.2..0.8f64,
+            0.2..1.0f64,
+            proptest::bool::ANY,
+        )
+            .prop_map(|(obj_sel, face_sel, side, t, frac, twin)| DocOp::TangentCircle {
+                obj_sel, face_sel, side, t, frac, twin,
             }),
         2 => (
             any::<usize>(),
@@ -1512,22 +1539,49 @@ fn all_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
     ids
 }
 
-/// Every region of every live sketch yields a valid `Profile`, or is a pinch
-/// (a ring visiting a vertex twice — a region the arrangement may report but
-/// no solid can be built from).
+/// Every region of every live sketch has simple rings (no ring visits a
+/// vertex twice: a walk through a touch point is split there), and yields a
+/// valid `Profile` unless two of its rings share a vertex (a hole touching
+/// the outer ring or another hole at one point — a region the arrangement
+/// reports but no single manifold solid can be extruded from, refused
+/// typed as `RegionTouchesHole`).
 fn check_sketch_regions(doc: &Document, step: usize, what: &str) -> Result<(), TestCaseError> {
     for sid in all_sketch_ids(doc) {
         let Some(sk) = doc.sketch(sid) else { continue };
         for (rid, r) in sk.regions() {
-            let visits_twice = |ring: &[kernel::SketchVertexId]| {
+            let rings: Vec<&Vec<kernel::SketchVertexId>> =
+                std::iter::once(&r.outer).chain(r.holes.iter()).collect();
+            for ring in &rings {
                 let mut seen = std::collections::BTreeSet::new();
-                !ring.iter().all(|v| seen.insert(*v))
-            };
-            let pinch = visits_twice(&r.outer) || r.holes.iter().any(|h| visits_twice(h));
-            if !pinch && let Err(e) = sk.profile(rid) {
-                return Err(TestCaseError::fail(format!(
-                    "step {step} ({what}): sketch {sid:?} region {rid:?} has no profile: {e:?}"
-                )));
+                if !ring.iter().all(|v| seen.insert(*v)) {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step} ({what}): sketch {sid:?} region {rid:?} has a ring \
+                         visiting a vertex twice"
+                    )));
+                }
+            }
+            let touching = (0..rings.len()).any(|i| {
+                (i + 1..rings.len()).any(|j| rings[i].iter().any(|v| rings[j].contains(v)))
+            });
+            match sk.profile(rid) {
+                Err(e) if !touching => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step} ({what}): sketch {sid:?} region {rid:?} has no profile: {e:?}"
+                    )));
+                }
+                Ok(_) if touching => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step} ({what}): sketch {sid:?} region {rid:?} with touching \
+                         rings gave a profile"
+                    )));
+                }
+                Err(e) if touching && e != SketchError::RegionTouchesHole => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step} ({what}): sketch {sid:?} region {rid:?} with touching \
+                         rings refused as {e:?}, not RegionTouchesHole"
+                    )));
+                }
+                _ => {}
             }
         }
     }
@@ -2088,6 +2142,135 @@ fn apply_doc_op(
                     "step {step}: a touching triangle on a convex face must land as face \
                      topology, not sketch drawing: {report:?}"
                 );
+            }
+        }
+        DocOp::TangentCircle {
+            obj_sel,
+            face_sel,
+            side,
+            t,
+            frac,
+            twin,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            let Some(face) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
+                return Ok(true);
+            };
+            let boundary: Vec<Point3> = obj.loop_positions(obj.faces()[face].outer_loop).collect();
+            let sides = boundary.len();
+            if sides < 3 {
+                return Ok(true);
+            }
+            let normal = obj.faces()[face].plane.normal();
+            let i = side % sides;
+            let (a, b) = (boundary[i], boundary[(i + 1) % sides]);
+            let Ok(along) = (b - a).normalized() else {
+                return Ok(true);
+            };
+            let Ok(inward) = normal.cross(along).normalized() else {
+                return Ok(true);
+            };
+            let touch = a + (b - a) * *t;
+            // A radius that keeps the circle off every other side: a
+            // fraction of the touch point's clearance to the rest of the
+            // boundary along the inward direction, and of the side itself.
+            let clearance = (0..sides)
+                .filter(|&k| k != i)
+                .map(|k| {
+                    let (p, q) = (boundary[k], boundary[(k + 1) % sides]);
+                    let d = q - p;
+                    let len2 = d.length_squared();
+                    let u = ((touch - p).dot(d) / len2).clamp(0.0, 1.0);
+                    (touch - (p + d * u)).length()
+                })
+                .fold(f64::INFINITY, f64::min)
+                .min((b - a).length() * (*t).min(1.0 - *t));
+            let r = 0.4 * frac * clearance;
+            if r.is_nan() || r <= 1e-4 {
+                return Ok(true);
+            }
+            let center = touch + inward * r;
+            let circle = |c: Point3, rad: f64, start: Vec3| -> Vec<Point3> {
+                let side_dir = normal.cross(start);
+                (0..24)
+                    .map(|k| {
+                        let ang = std::f64::consts::TAU * k as f64 / 24.0;
+                        c + start * (rad * ang.cos()) + side_dir * (rad * ang.sin())
+                    })
+                    .collect()
+            };
+            // Vertex 0 at the touch point, exactly.
+            let mut ring = circle(center, r, inward * -1.0);
+            ring[0] = touch;
+            let g = kernel::CurveGeom { center, radius: r };
+            let must_accept = obj.faces()[face].inner_loops.is_empty()
+                && (0..sides).all(|k| {
+                    let (p, q, c) = (
+                        boundary[k],
+                        boundary[(k + 1) % sides],
+                        boundary[(k + 2) % sides],
+                    );
+                    let (e0, e1) = (q - p, c - q);
+                    e0.length() >= 1e-3
+                        && e0.cross(e1).dot(normal) > 1e-3 * e0.length() * e1.length()
+                });
+            let plane = face_plane(doc, oid, face);
+            let clean = doc.object_owned_sketches(oid).is_empty()
+                && doc
+                    .drawable_objects_on_plane(plane, None)
+                    .iter()
+                    .all(|&o| o == oid)
+                && !free_drawing_on(doc, plane);
+            let result = draw_loop(doc, None, oid, face, &ring, Some(g));
+            assert!(
+                !must_accept || result.is_ok(),
+                "step {step}: a tangent circle on a convex face was refused: {:?}",
+                result.as_ref().err()
+            );
+            if must_accept && clean {
+                let (report, _) = result.as_ref().expect("accepted");
+                assert!(
+                    report.kept_as_sketch.is_empty(),
+                    "step {step}: a tangent circle on a convex face must land as face \
+                     topology: {report:?}"
+                );
+                let obj = doc.object(oid).expect("live");
+                let fplane = obj.faces().values().find(|f| {
+                    (f.plane.normal() - normal).length() < 1e-9
+                        && f.plane.signed_distance(touch).abs() < 1e-9
+                });
+                assert!(fplane.is_some(), "step {step}: the face's plane survives");
+                if *twin {
+                    // A second circle touching the first at its far point,
+                    // outside it, when it fits.
+                    let far = ring[12];
+                    let r2 = 0.25 * r;
+                    let c2 = far + inward * r2;
+                    let inside =
+                        |p: Point3| obj.faces().keys().any(|f| obj.face_contains_point(f, p));
+                    let mut ring2 = circle(c2, r2, inward * -1.0);
+                    ring2[0] = far;
+                    if ring2.iter().skip(1).all(|&p| inside(p)) {
+                        let seed = obj
+                            .faces()
+                            .keys()
+                            .find(|&f| obj.face_contains_point(f, c2 + inward * (0.5 * r2)))
+                            .unwrap_or(face);
+                        let g2 = kernel::CurveGeom {
+                            center: c2,
+                            radius: r2,
+                        };
+                        let second = draw_loop(doc, None, oid, seed, &ring2, Some(g2));
+                        assert!(
+                            second.is_ok(),
+                            "step {step}: a circle touching a disc at one point was refused: {:?}",
+                            second.err()
+                        );
+                    }
+                }
             }
         }
         DocOp::HoleChord {

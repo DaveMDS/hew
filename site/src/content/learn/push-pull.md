@@ -58,7 +58,7 @@ Draw directly on a solid's face to split it into regions (see [Drawing](/learn/d
 
 A shape drawn half over a face and half past its edge splits at the edge, and each part pushes on its own terms. Push/Pull the part over the face and the solid grows (or is cut, if you push in); Push/Pull the part past the edge and you get a new, separate object. Do them in either order: the second part is still there, waiting, after the first.
 
-A shape the face can't hold — one that touches an edge or another shape at only a single point, or leaves a sliver too thin to keep — is still drawn, but can't be pushed. Push/Pull says so and says why, instead of doing nothing. Move the shape clear of the problem and try again.
+Shapes that touch an edge or another shape at a single point push and pull like any other: a circle drawn with its rim on a box's edge pushes into a pocket or through to the far side. A shape the face can't hold — one that leaves a sliver too thin to keep — is still drawn, but can't be pushed. Push/Pull says so and says why, instead of doing nothing. Move the shape clear of the problem and try again.
 
 ![A box with a circular hole punched clean through it, the opening visible at the back face](/docs/pushpull-throughcut.webp)
 

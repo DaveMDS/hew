@@ -63,6 +63,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Moving this point would make lines cross or merge. Move it somewhere clear, or delete and redraw the lines instead.`,
   MalformedRegion:
     msg`This profile's outline couldn't be traced. Redraw the shape; if it keeps failing, use Report Bug.`,
+  RegionTouchesHole:
+    msg`This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart.`,
   RegionHasNoFace:
     msg`This loop of lines has no face to push or pull. Draw over one of its lines with the Line tool to give it a face.`,
   DegenerateCurve: msg`That circle or arc is too small to keep. Drag a larger radius, or type an exact one.`,
@@ -89,8 +91,6 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.`,
   RegionNotPushable:
     msg`That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.`,
-  RegionPinched:
-    msg`That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all.`,
   RegionSliver: msg`That shape is too thin to push or pull — the face can't hold a sliver that small.`,
   SketchGestureNotOpen: msg`The drawing tools got out of step. Press Escape and try again.`,
   DegenerateGuide: msg`The guide needs a definite direction. Drag a little further before dropping it.`,

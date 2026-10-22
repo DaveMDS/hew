@@ -108,6 +108,14 @@ export type CircleCommitResult = {
 export type OnCircleCommit = (result: CircleCommitResult) => void
 export type OnFaceImprint = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
+
+/** The toast for a face circle the face could not hold whole: part of it
+ *  leaves a sliver too thin for a face, so that part stays as drawing. (A
+ *  circle touching the face's edge or another shape at one point is a face
+ *  and never reaches this.) */
+export const CIRCLE_KEPT_AS_DRAWING_MESSAGE =
+  'Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger.'
+
 export type OnMeasurement = (text: string) => void
 
 /** Plane stage: waiting for first click, or waiting for second click, on a
@@ -1034,6 +1042,11 @@ export class CircleTool implements Tool {
         onObject: (o) => this.onFaceImprint(o),
         onSketch: (sketchHandle) => this.onCommit({ sketchHandle, regionsCreated }),
       })
+      // An island the face could not hold (a sliver) stays as drawing; say
+      // so now rather than leave the circle silently loose.
+      if (target.kind === 'face' && report.keptAsSketch.length > 0) {
+        this.onToast(CIRCLE_KEPT_AS_DRAWING_MESSAGE)
+      }
       return true
     } catch (err) {
       const code = parseKernelErrorCode(err)

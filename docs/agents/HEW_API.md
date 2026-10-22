@@ -813,8 +813,11 @@ Semantics notes, normative:
   a new Object (result `{object_id}`, face tokens per §5.4); a region that
   is a face of a solid push/pulls that face exactly as `hew.solid.push_pull`
   does (result `{object_id}` or, for a through-cut, `{object_ids}`); a
-  region over a face that cannot hold it (a pinch or sliver kept as
-  drawing) refuses `region_not_pushable`.
+  region over a face that cannot hold it (a sliver kept as drawing)
+  refuses `region_not_pushable`; a region over no face whose outer ring
+  touches one of its holes at a point (a circle inside a rectangle with
+  its rim on a side) refuses `region_touches_hole` — the shape inside it
+  extrudes on its own.
 - `hew.sketch.draw_arc` takes a `close`: `"open"` (default, a bare arc),
   `"pie"` (closed wedge — two radii to the center), or `"segment"`
   (closed circular segment — the chord) — the API counterpart of the UI

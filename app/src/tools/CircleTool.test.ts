@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import * as THREE from 'three'
-import { CircleTool } from './CircleTool'
+import { CircleTool, CIRCLE_KEPT_AS_DRAWING_MESSAGE } from './CircleTool'
 import { draftMock } from './draftMock'
 import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
@@ -640,3 +640,83 @@ describe('CircleTool — a clicked radius is exactly the displayed radius', () =
     }
   })
 })
+// #43: a circle on a face that touches or crosses the face's own edge is not
+// the tool's to refuse. The tool hands the whole circle to ONE face draft and
+// the kernel arranges it (a lens and the rest when it crosses, kept drawing
+// when it only touches at one point), so the old `LoopNotStrictlyInside`
+// toast is unreachable from a circle on a face.
+describe('CircleTool — a circle touching or crossing the face edge (#43)', () => {
+  // A 10 x 10 face on z = 0 from (0, 0) to (10, 10), normal +Z.
+  function drawOnFace(center: [number, number], rim: Snap, keptAsDrawing = false) {
+    const pick = makePick(7n, 3n)
+    const scene = makeWasmScene({ pick, faceNormal: [0, 0, 1], facePlane: [0, 0, 0, 0, 0, 1] })
+    if (keptAsDrawing) {
+      // The kernel's answer for an island the face cannot hold (a sliver):
+      // the report lists it as kept drawing.
+      const end = scene.draft_end as unknown as (d: bigint) => string
+      const kept = vi.fn((d: bigint) => {
+        const raw = JSON.parse(end(d)) as Record<string, unknown>
+        raw.objects = []
+        raw.sketches = [11]
+        raw.kept_as_sketch = [[[5, 0, 0], [5.4, 0.04, 0]]]
+        return JSON.stringify(raw)
+      })
+      ;(scene as unknown as { draft_end: typeof kept }).draft_end = kept
+    }
+    const made = makeTool(scene)
+    made.tool.setEditContext({ kind: 'object', id: 7n })
+    made.tool.onPointerDown(makeSnap({ x: center[0], y: center[1], z: 0 }), {
+      origin: [center[0], center[1], 5],
+      direction: [0, 0, -1],
+    })
+    made.tool.onPointerDown(rim, { origin: [rim.x, rim.y, 5], direction: [0, 0, -1] })
+    return { scene, ...made }
+  }
+
+  it('a rim snapped onto the face edge (tangent) commits one face draft, no toast', () => {
+    // Center 3 above the bottom edge, rim at the foot of the perpendicular:
+    // the circle is tangent to the edge at its rim vertex.
+    const { scene, onFaceImprint, onToast } = drawOnFace(
+      [5, 3],
+      makeSnap({ x: 5, y: 0, z: 0, kind: 'on-edge', object: 7n, elementKind: 'edge' }),
+    )
+    // The face held it here (a mock report with no kept drawing): no toast.
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(segmentsPerTurn(3))
+    // Vertex 0 is the snapped edge point, exactly.
+    const first = (scene.draft_add_segment as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect([first[1], first[2], first[3]]).toEqual([5, 0, 0])
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a rim past the face edge (crossing it) commits one face draft, no toast', () => {
+    const { scene, onFaceImprint, onToast } = drawOnFace(
+      [5, 1],
+      makeSnap({ x: 5, y: -2, z: 0, kind: 'ground' }),
+    )
+    expect(scene.draft_begin_face).toHaveBeenCalledTimes(1)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
+    const curve = (scene.draft_begin_curve_with as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(curve[2]).toBeCloseTo(3, 9)
+    expect(onFaceImprint).toHaveBeenCalledWith(7n)
+    expect(onToast).not.toHaveBeenCalled()
+  })
+
+  it('a circle the kernel keeps as drawing (a sliver) toasts once at commit, saying why', () => {
+    const { scene, onFaceImprint, onCommit, onToast } = drawOnFace(
+      [5, 3],
+      makeSnap({ x: 5, y: 0, z: 0, kind: 'on-edge', object: 7n, elementKind: 'edge' }),
+      true,
+    )
+    expect(scene.draft_end).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith(CIRCLE_KEPT_AS_DRAWING_MESSAGE)
+    // Still a commit: the drawing landed in the object's owned sketch.
+    expect(onFaceImprint).not.toHaveBeenCalled()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+  })
+})
+

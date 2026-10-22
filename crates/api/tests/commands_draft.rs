@@ -858,7 +858,7 @@ fn unknown_and_malformed_unit_keys_refuse_unknown_unit() {
 
 #[test]
 fn extruding_an_unknown_plane_region_refuses_unknown_unit() {
-    // `region_not_pushable` (a pinch or sliver kept as drawing) needs a
+    // `region_not_pushable` (a sliver kept as drawing) needs a
     // shape the kernel keeps as owned drawing; the engine's own specs pin
     // that case. Here: a well-formed key naming no region refuses typed.
     let (mut conn, mut doc, object_id) = setup();
@@ -902,10 +902,11 @@ fn drawing_on_a_grouped_solids_face_imprints_it() {
     assert!(!has_unit(&first(&r)["units"], "edge", "free"));
 }
 
-/// A shape that touches a drawn shape at one point is kept as drawing (the
-/// face cannot hold a pinched loop); extruding its region by key refuses.
+/// A shape that touches a drawn shape at one point is a face (the
+/// rectangle holds it as a hole sharing that point); extruding its region
+/// by key pulls it, one undo step.
 #[test]
-fn extruding_a_pinched_region_refuses_region_not_pushable() {
+fn extruding_a_region_touching_a_shape_at_one_point_pushes_it() {
     let (mut conn, mut doc, object_id) = setup();
     call_ok(
         &mut conn,
@@ -929,29 +930,192 @@ fn extruding_a_pinched_region_refuses_region_not_pushable() {
         }),
     );
     let u = units(&mut conn, &mut doc, top_plane(&object_id));
-    let pinched = u["regions"]
-        .as_array()
-        .unwrap()
+    let regions = u["regions"].as_array().unwrap();
+    assert!(
+        regions
+            .iter()
+            .all(|r| !(r["object_id"].is_string() && r["face"].is_null())),
+        "every region over the solid is a face: {u}"
+    );
+    // The diamond: the region whose outer ring holds its far corner.
+    let diamond = regions
         .iter()
-        .find(|r| r["object_id"].is_string() && r["face"].is_null())
-        .unwrap_or_else(|| panic!("a region the face cannot hold: {u}"))
+        .find(|r| {
+            r["outer"].as_array().is_some_and(|o| {
+                o.len() == 4
+                    && o.iter().any(|p| {
+                        let p: Vec<f64> = p
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|c| c.as_f64().unwrap())
+                            .collect();
+                        (p[0] - 0.10).abs() < 1e-9 && (p[1] - 0.10).abs() < 1e-9
+                    })
+            })
+        })
+        .unwrap_or_else(|| panic!("the diamond's region: {u}"))
         .clone();
-    let before = doc.save();
-    let data = call_err(
+    let r = call_ok_one_undo(
         &mut conn,
         &mut doc,
         5,
         "hew.solid.extrude",
         json!({
             "plane": top_plane(&object_id),
-            "region": pinched["key"],
+            "region": diamond["key"],
             "distance": 0.05
         }),
     );
-    assert_eq!(data["refusal"], "region_not_pushable");
+    // The diamond shares its touch point with the face around the
+    // rectangle, which the pull leaves: the push/pull grows the solid as a
+    // union (a pinned ring's route), one solid either way.
+    let grown = &first(&r);
+    let ids: Vec<&str> = match grown["object_id"].as_str() {
+        Some(id) => vec![id],
+        None => grown["object_ids"]
+            .as_array()
+            .unwrap_or_else(|| panic!("a push/pull result: {r}"))
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect(),
+    };
+    assert_eq!(ids.len(), 1, "one solid: {r}");
+    assert_eq!(doc.visible_object_ids().len(), 1);
+    for id in doc.visible_object_ids() {
+        doc.object(id).unwrap().validate().expect("valid result");
+    }
+}
+
+/// The live queries read an object whose face holds a hole touching its
+/// outer loop (a diamond drawn touching a rectangle at one point): faces
+/// listing, entity details and the scene all answer, no refusal.
+#[test]
+fn queries_answer_on_a_face_with_a_touching_hole() {
+    let (mut conn, mut doc, object_id) = setup();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_rect",
+        rect_on(top_plane(&object_id), [0.04, 0.04, 0.2], [0.16, 0.16, 0.2]),
+    );
+    call_ok(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.sketch.draw_line",
+        json!({
+            "plane": top_plane(&object_id),
+            "points": [
+                [0.04, 0.10, 0.2], [0.07, 0.07, 0.2], [0.10, 0.10, 0.2],
+                [0.07, 0.13, 0.2], [0.04, 0.10, 0.2]
+            ]
+        }),
+    );
+    let faces = call_ok(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.query.faces",
+        json!({ "object": object_id }),
+    );
+    let list = faces["faces"].as_array().expect("faces");
+    assert_eq!(
+        list.len(),
+        8,
+        "the box's six, the diamond, and the rectangle around it"
+    );
+    call_ok(
+        &mut conn,
+        &mut doc,
+        6,
+        "hew.query.entity",
+        json!({ "id": object_id }),
+    );
+    call_ok(&mut conn, &mut doc, 7, "hew.query.scene", json!({}));
+}
+
+/// The ground's region around a circle drawn inside a rectangle with its
+/// rim touching one side: `hew.sketch.units` lists it with the circle as a
+/// hole sharing that point, and extruding it refuses `region_touches_hole`
+/// with the UI's copy (never the tracing-failure refusal), the document
+/// untouched. The disc extrudes.
+#[test]
+fn extruding_a_ground_region_with_a_touching_hole_refuses_region_touches_hole() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        2,
+        "hew.sketch.draw_rect",
+        rect_on(ground(), [0.0, 0.0, 0.0], [0.2, 0.2, 0.0]),
+    );
+    // A 24-gon about (0.1, 0.05), radius 0.05, its vertex 0 on the bottom
+    // side at (0.1, 0).
+    let mut pts: Vec<Value> = (0..24)
+        .map(|i| {
+            let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 24.0;
+            json!([0.1 + 0.05 * a.cos(), 0.05 + 0.05 * a.sin(), 0.0])
+        })
+        .collect();
+    pts[0] = json!([0.1, 0.0, 0.0]);
+    pts.push(json!([0.1, 0.0, 0.0]));
+    // Into the rectangle's own sketch, so the two shapes are one drawing.
+    let g = units(&mut conn, &mut doc, ground());
+    let sketch = all_edges(&g)[0]["sketch_id"].clone();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        3,
+        "hew.sketch.draw_line",
+        json!({ "plane": { "sketch": sketch }, "points": pts }),
+    );
+    let u = units(&mut conn, &mut doc, ground());
+    let regions = u["regions"].as_array().unwrap();
+    assert_eq!(
+        regions.len(),
+        2,
+        "the disc and the rectangle around it: {u}"
+    );
+    let around = regions
+        .iter()
+        .find(|r| r["holes"].as_array().is_some_and(|h| !h.is_empty()))
+        .unwrap_or_else(|| panic!("the region holding the circle: {u}"))
+        .clone();
+    let disc = regions
+        .iter()
+        .find(|r| r["holes"].as_array().is_none_or(|h| h.is_empty()))
+        .unwrap()
+        .clone();
+    let before = doc.save();
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        4,
+        "hew.solid.extrude",
+        json!({ "plane": ground(), "region": around["key"], "distance": 0.05 }),
+    );
+    assert_eq!(data["refusal"], "region_touches_hole", "{data}");
+    assert!(
+        data["explanation"]
+            .as_str()
+            .unwrap()
+            .contains("touches another shape at a point"),
+        "{data}"
+    );
     assert_eq!(
         doc.save(),
         before,
         "a refusal leaves the document untouched"
+    );
+    call_ok_one_undo(
+        &mut conn,
+        &mut doc,
+        5,
+        "hew.solid.extrude",
+        json!({ "plane": ground(), "region": disc["key"], "distance": 0.05 }),
     );
 }
