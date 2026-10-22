@@ -250,6 +250,20 @@ export function afterOpen(ref: FileRef | null, now: number): DocSessionState {
 }
 
 /**
+ * Whether File ▸ Revert to Saved has something to do: the document is bound
+ * to a file the host can read again (a desktop path, or a web file handle
+ * from the picker; the browser's download fallback leaves no handle) and has
+ * changes since the last save.
+ */
+export function canRevertToSaved(session: DocSessionState): boolean {
+  const handle = session.currentRef?.handle
+  const readable =
+    typeof handle === 'string' ||
+    (typeof handle === 'object' && handle !== null && 'getFile' in handle)
+  return session.dirty && readable
+}
+
+/**
  * Return the state after replacing the document with an imported foreign
  * file (.dae/.stl/.gltf/.skp/a Library item's Open-as-Document).
  *

@@ -14,6 +14,7 @@ import {
   afterOpen,
   afterImport,
   afterRecovery,
+  canRevertToSaved,
   type DocSessionState,
 } from './documentSession'
 import type { FileRef } from './fileHost'
@@ -409,5 +410,25 @@ describe('documentBaseName', () => {
 
   it('is Untitled for a blank document', () => {
     expect(documentBaseName(INITIAL_SESSION)).toBe('Untitled')
+  })
+})
+
+describe('canRevertToSaved', () => {
+  const dirty = (handle: unknown, over: Partial<DocSessionState> = {}): DocSessionState => ({
+    ...INITIAL_SESSION,
+    currentRef: { name: 'a.hew', format: 'hew', handle },
+    dirty: true,
+    ...over,
+  })
+
+  it('is true for a changed document bound to a desktop path or a web file handle', () => {
+    expect(canRevertToSaved(dirty('/tmp/a.hew'))).toBe(true)
+    expect(canRevertToSaved(dirty({ getFile: () => undefined }))).toBe(true)
+  })
+
+  it('is false when clean, with no file, or with no handle to read it back through', () => {
+    expect(canRevertToSaved(dirty('/tmp/a.hew', { dirty: false }))).toBe(false)
+    expect(canRevertToSaved({ ...INITIAL_SESSION, dirty: true })).toBe(false)
+    expect(canRevertToSaved(dirty(null))).toBe(false)
   })
 })

@@ -302,6 +302,13 @@ impl Registry {
         );
         add("hew.doc.save", S, Host, Req, "Save the attached document.");
         add(
+            "hew.doc.revert",
+            S,
+            Host,
+            Std,
+            "Throw away every change since the last save: re-read the saved file into the attached document.",
+        );
+        add(
             "hew.doc.export",
             S,
             Host,
@@ -1420,6 +1427,29 @@ impl Registry {
                 "host_capability_missing",
                 "path_required",
                 "save_failed",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.doc.revert").expect("declared above");
+            cmd.implemented = true;
+            cmd.mutates_document = true;
+            cmd.summary = "Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "document": { "type": "string" } },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "load_failed",
+                "nothing_to_revert",
+                "unknown_document",
+                "ambiguous_document",
             ];
         }
         {

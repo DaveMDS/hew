@@ -10,6 +10,7 @@
 
 use super::camera::{RawCamera, parse_camera_or_view};
 use super::{CmdError, Ctx, Handler};
+use crate::Refusal;
 use crate::host::{DocFormat, ImportImage, ImportOptions, SaveOutcome, SnapshotParams};
 use serde::Deserialize;
 use serde_json::Value;
@@ -22,6 +23,7 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.doc.close" => Some(close_doc),
         "hew.doc.focus" => Some(focus_doc),
         "hew.doc.save" => Some(save_doc),
+        "hew.doc.revert" => Some(revert_doc),
         "hew.doc.export" => Some(export_doc),
         "hew.doc.import" => Some(import_doc),
         "hew.view.snapshot" => Some(snapshot),
@@ -232,6 +234,40 @@ fn save_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         None => ctx.doc.mark_saved(),
     }
     Ok(out)
+}
+
+// ---------------------------------------------------------- hew.doc.revert
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // the desktop app routes by it before the command gets here
+struct RevertParams {
+    #[serde(default)]
+    document: Option<String>,
+}
+
+/// File > Revert to Saved: reload the working document from its file. The
+/// confirmation the app asks of a person is not repeated here; the caller
+/// asked for it by name. A fresh load starts with empty undo and redo
+/// stacks and reads clean.
+fn revert_doc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let RevertParams { .. } = parse(params)?;
+    let nothing = |why: &str| {
+        CmdError::Refusal(Refusal::api(
+            "nothing_to_revert",
+            &format!("There is nothing to revert: {why}."),
+        ))
+    };
+    let Some(path) = ctx.host.working_document_path().map(str::to_string) else {
+        return Err(nothing("the document has no saved file"));
+    };
+    if ctx.doc.at_saved_mark() {
+        return Err(nothing("the document has no changes since the last save"));
+    }
+    ctx.host
+        .open_document(ctx.doc, &path)
+        .map_err(CmdError::Refusal)?;
+    Ok(serde_json::json!({}))
 }
 
 // ----------------------------------------------------------- hew.doc.export

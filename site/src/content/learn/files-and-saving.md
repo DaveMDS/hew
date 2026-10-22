@@ -10,6 +10,7 @@ Hew's native format is `.hew`, an open, documented container (a zip holding a JS
 
 - **Save**: `⌘S` / `Ctrl+S`, or File ▸ Save. The first save is a Save As: it asks where and in which format. After that it writes in place, in the format the file is already in.
 - **Save As…** (`⇧⌘S` / `Ctrl+Shift+S`) shows the system save dialog with a **Format** list in it, the way every desktop app's does, and switches the document to the new file. In the browser, whose save dialog has no such list, Hew asks for the format first. See [SketchUp files](#sketchup-files) below.
+- **Revert to Saved** (File menu, right after Save As) throws away everything you changed since the last save and reads the file back in. It asks once first, and Cancel is the default. It is available only when the document has a file and unsaved changes, and it clears Undo and Redo, so it can't be undone. Your window, camera, and panels stay where they are.
 - **Open…**: `⌘O` / `Ctrl+O`. On desktop, this opens into the current window only if it's a brand-new, untouched "Untitled" document; otherwise it opens the picked file into a fresh window, leaving whatever you were doing untouched. Opening a file that's already open in another window brings that window forward — one file is never open in two windows at once. The web app, which can't open extra windows, offers to discard instead.
 - **New**: `⌘N` / `Ctrl+N`. Same rule as Open: a non-pristine document opens a fresh window on desktop; the web app offers to discard.
 - **Close** (`⌘W`, or File ▸ Close) closes the window (macOS desktop only).

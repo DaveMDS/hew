@@ -354,6 +354,17 @@ export interface DocPurgeUnusedResult {
 }
 
 /**
+ * `hew.doc.revert` (v1) — Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
+ * Tier: Standard · Class: solitary · Served: host
+ * Refusals: host_capability_missing, load_failed, nothing_to_revert, unknown_document, ambiguous_document
+ */
+export interface DocRevertParams {
+  document?: string
+}
+
+export interface DocRevertResult {}
+
+/**
  * `hew.doc.save` (v1) — Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
  * Tier: Required · Class: solitary · Served: host
  * Refusals: file_open_elsewhere, format_mismatch, host_capability_missing, path_required, save_failed
@@ -1862,6 +1873,7 @@ export class HewApiClient {
     new: (params: DocNewParams): Promise<DocNewResult> => this.call('hew.doc.new', params),
     open: (params: DocOpenParams): Promise<DocOpenResult> => this.call('hew.doc.open', params),
     purgeUnused: (params: DocPurgeUnusedParams): Promise<DocPurgeUnusedResult> => this.mutate('hew.doc.purge_unused', params),
+    revert: (params: DocRevertParams): Promise<DocRevertResult> => this.call('hew.doc.revert', params),
     save: (params: DocSaveParams): Promise<DocSaveResult> => this.call('hew.doc.save', params),
     transact: (params: DocTransactParams): Promise<DocTransactResult> => this.call('hew.doc.transact', params),
   }

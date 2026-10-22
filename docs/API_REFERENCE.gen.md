@@ -1313,6 +1313,47 @@ Delete every unused material and component definition, as one undo entry.
 
 **Refusals:** none.
 
+### `hew.doc.revert`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+
+Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "document": {
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `load_failed`
+- `nothing_to_revert`
+- `unknown_document`
+- `ambiguous_document`
+
 ### `hew.doc.save`
 
 - **Version:** 1

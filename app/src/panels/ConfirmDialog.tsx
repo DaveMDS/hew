@@ -22,6 +22,9 @@ interface ConfirmDialogProps {
   confirmLabel: string
   /** Confirm button reads as destructive (red) rather than the default accent. */
   danger?: boolean
+  /** Cancel, not the confirm button, takes the keyboard focus (and so
+   *  Enter) when the dialog opens: for an action that throws work away. */
+  cancelDefault?: boolean
   onConfirm: () => void
   onCancel: () => void
 }
@@ -95,7 +98,7 @@ const CONFIRM_BUTTON_DANGER_STYLE: React.CSSProperties = {
   background: 'var(--danger-base, #a33)',
 }
 
-export function ConfirmDialog({ heading, body, confirmLabel, danger = false, onConfirm, onCancel }: ConfirmDialogProps) {
+export function ConfirmDialog({ heading, body, confirmLabel, danger = false, cancelDefault = false, onConfirm, onCancel }: ConfirmDialogProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (isComposingKey(e)) return
@@ -125,13 +128,13 @@ export function ConfirmDialog({ heading, body, confirmLabel, danger = false, onC
         <div style={HEADING_STYLE}>{heading}</div>
         <div style={BODY_STYLE}>{body}</div>
         <div style={BUTTON_ROW_STYLE}>
-          <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
+          <button style={CANCEL_BUTTON_STYLE} onClick={onCancel} autoFocus={cancelDefault}>
             <Trans>Cancel</Trans>
           </button>
           <button
             style={danger ? CONFIRM_BUTTON_DANGER_STYLE : CONFIRM_BUTTON_STYLE}
             onClick={onConfirm}
-            autoFocus
+            autoFocus={!cancelDefault}
           >
             {confirmLabel}
           </button>

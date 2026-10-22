@@ -172,9 +172,40 @@ vi.mock('./viewport/Viewport', () => ({
 // FileHost stub whose openForImport() resolves without a real file dialog.
 // Every other test never triggers Open/Import, so the real WebFileHost is
 // harmless there.
+// `isTauri` reads through a switch so the Revert block can exercise the
+// desktop side effects (read_file, push_recent); it is off everywhere else.
+const tauriMode = vi.hoisted(() => ({ on: false }))
 vi.mock('./io/fileHost', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/fileHost')>()
-  return { ...actual, makeFileHost: vi.fn(actual.makeFileHost) }
+  return {
+    ...actual,
+    makeFileHost: vi.fn(actual.makeFileHost),
+    get isTauri() {
+      return tauriMode.on || actual.isTauri
+    },
+  }
+})
+
+// The Tauri core bridge: only the Revert block's desktop path calls it.
+const tauriCore = vi.hoisted(() => ({
+  invoke: vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined),
+}))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriCore.invoke }))
+
+// The live bridge is a no-op outside Tauri; the spy keeps the operation
+// runner App hands it, so a test can drive a live `revert` the way the shell does.
+const liveBridge = vi.hoisted(() => ({
+  runOp: null as null | ((op: string, args: Record<string, unknown>) => Promise<{ ok: boolean; refusal?: string; message?: string }>),
+}))
+vi.mock('./api/liveBridge', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./api/liveBridge')>()
+  return {
+    ...actual,
+    installLiveBridge: vi.fn((deps: { runOp?: typeof liveBridge.runOp }) => {
+      liveBridge.runOp = deps.runOp ?? null
+      return () => {}
+    }),
+  }
 })
 
 // io/savePanel — the desktop's native save panel. Off by default (every
@@ -2003,6 +2034,437 @@ describe('App — unified Open dialog', () => {
     fireEvent.click(within(discardDialog).getByRole('button', { name: /don.t save/i }))
     await waitFor(() => expect(mockScene.load).toHaveBeenCalledTimes(2))
     expect(await screen.findByText('other.hew')).toBeInTheDocument()
+  })
+
+  describe('File ▸ Revert to Saved', () => {
+    const savedBytes = new Uint8Array([4, 5, 6])
+    // A web file handle the way the picker hands one back.
+    const savedHandle = { getFile: vi.fn(async () => new File([savedBytes], 'my-house.hew')) }
+    const clickRevert = () => {
+      // A click on a disabled item leaves the menu open: open it only once.
+      if (menubar().queryByText('Revert to Saved') === null) {
+        fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+      }
+      fireEvent.mouseDown(menubar().getByText('Revert to Saved'))
+    }
+    const dirtyIt = () =>
+      act(() => {
+        ;(window as unknown as { __hew_test: { addNodeTag: (k: string, i: string, p: string[]) => void } })
+          .__hew_test.addNodeTag('object', '1', ['tag'])
+      })
+    const openSaved = async () => {
+      vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+        kind: 'hew',
+        name: 'my-house.hew',
+        bytes: new Uint8Array([7, 7, 7]),
+        handle: savedHandle,
+      })
+      await renderAndLoad()
+      triggerOpen()
+      expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+    }
+
+    it('does nothing while the document is clean, then asks once with Cancel as the default', async () => {
+      await openSaved()
+      clickRevert()
+      expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument()
+
+      dirtyIt()
+      clickRevert()
+      const dialog = await screen.findByRole('dialog', { name: /revert to saved/i })
+      expect(within(dialog).getByText('This throws away everything you changed since the last save.')).toBeInTheDocument()
+      expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus()
+
+      // Cancel changes nothing: no reload.
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument())
+      expect(mockScene.load).toHaveBeenCalledTimes(1)
+    })
+
+    it('does nothing for a document with no file to return to', async () => {
+      vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+        kind: 'hew',
+        name: 'my-house.hew',
+        bytes: new Uint8Array([7, 7, 7]),
+        handle: null, // the browser download fallback leaves no handle
+      })
+      await renderAndLoad()
+      triggerOpen()
+      expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+      dirtyIt()
+      clickRevert()
+      expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument()
+    })
+
+    it('Revert re-reads the saved file into the window, clears dirty and history, and says so', async () => {
+      const priorCanUndo = mockScene.can_scene_undo
+      let history = false
+      mockScene.can_scene_undo = () => history
+      // A load is a fresh document: the kernel's history is empty again.
+      mockScene.load = vi.fn(() => {
+        history = false
+      })
+      try {
+        await openSaved()
+        history = true
+        dirtyIt()
+        expect(mockScene.can_scene_undo()).toBe(true)
+        clickRevert()
+        const dialog = await screen.findByRole('dialog', { name: /revert to saved/i })
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Revert' }))
+
+        await waitFor(() => expect(mockScene.load).toHaveBeenLastCalledWith(savedBytes))
+        expect(savedHandle.getFile).toHaveBeenCalled()
+        expect(await screen.findByText('Reverted to the saved file.')).toBeInTheDocument()
+        // Same window, same file, no longer dirty: Revert is off again.
+        expect(screen.getByText('my-house.hew')).toBeInTheDocument()
+        clickRevert()
+        expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument()
+        // The history is gone: nothing left to undo.
+        expect(mockScene.can_scene_undo()).toBe(false)
+      } finally {
+        mockScene.can_scene_undo = priorCanUndo
+      }
+    })
+
+    // ---- review follow-ups -------------------------------------------------
+    const kept = { tag: 'camera-before-revert' }
+    // A viewport that has a camera to keep; every other call is a spy.
+    const cameraViewport = () => {
+      const api: Record<string, unknown> = {
+        getCameraState: vi.fn(() => kept),
+        applyCameraState: vi.fn(),
+        zoomExtents: vi.fn(),
+        setRenderMode: vi.fn(),
+        getEffectiveHiddenIds: () => ({ objects: [], instances: [] }),
+      }
+      const proxy = new Proxy(api, {
+        get: (t, k) => {
+          if (typeof k === 'string' && !(k in t)) t[k] = vi.fn()
+          return t[k as string]
+        },
+      })
+      vi.mocked(Viewport).mockImplementation(((props: { apiRef?: { current: unknown } }) => {
+        if (props.apiRef !== undefined) props.apiRef.current = proxy
+        return null
+      }) as never)
+      return api as { getCameraState: ReturnType<typeof vi.fn>; applyCameraState: ReturnType<typeof vi.fn>; zoomExtents: ReturnType<typeof vi.fn>; setRenderMode: ReturnType<typeof vi.fn> }
+    }
+    const confirmRevert = async () => {
+      clickRevert()
+      const dialog = await screen.findByRole('dialog', { name: /revert to saved/i })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Revert' }))
+    }
+    afterEach(() => {
+      vi.mocked(Viewport).mockImplementation((() => null) as never)
+      tauriMode.on = false
+      mockScene.at_saved_mark = () => false
+    })
+
+    it('keeps the camera the person was looking through (a reload would otherwise reframe)', async () => {
+      await openSaved()
+      dirtyIt()
+      // Installed after the edit: the harness's edit path only reaches the
+      // document through a real viewport, which this one is not.
+      const api = cameraViewport()
+      await confirmRevert()
+      expect(await screen.findByText('Reverted to the saved file.')).toBeInTheDocument()
+      await waitFor(() => expect(api.applyCameraState).toHaveBeenCalledWith(kept))
+    })
+
+    describe('a .skp document', () => {
+      const report = {
+        container: 'skp2026',
+        objects_created: 0,
+        lines_added: 0,
+        watertight: 0,
+        leaky: 0,
+        health: { objects: 0, solids: 0, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 0, seam_families: 0 },
+        skipped: [],
+        textures_missing: [],
+        warnings: [],
+      }
+      const scene = mockScene as unknown as Record<string, unknown>
+      beforeEach(() => {
+        scene.open_skp_begin = vi.fn(() => ({ phase: 'done', done: 0, total: 0, report }))
+        scene.open_skp_step = vi.fn(() => ({ phase: 'done', done: 0, total: 0, report }))
+      })
+      afterEach(() => {
+        delete scene.open_skp_begin
+        delete scene.open_skp_step
+      })
+
+      it('revert keeps the camera, does not zoom to fit, and does not reopen the import report', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'skp',
+          name: 'house.skp',
+          bytes: new Uint8Array([8, 8]),
+          handle: savedHandle,
+        })
+        await renderAndLoad()
+        triggerOpen()
+        // Opening shows the report once; the person dismisses it.
+        const opened = await screen.findByRole('dialog', { name: 'Open report' })
+        fireEvent.click(within(opened).getByRole('button', { name: /close|ok|done|continue/i }))
+        await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Open report' })).not.toBeInTheDocument())
+        dirtyIt()
+        const api = cameraViewport()
+
+        await confirmRevert()
+        expect(await screen.findByText('Reverted to the saved file.')).toBeInTheDocument()
+        await waitFor(() => expect(api.applyCameraState).toHaveBeenCalledWith(kept))
+        expect(api.zoomExtents).not.toHaveBeenCalled()
+        expect(screen.queryByRole('dialog', { name: 'Open report' })).not.toBeInTheDocument()
+      })
+
+      it('refuses with a toast while another .skp open is still stepping', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'skp',
+          name: 'house.skp',
+          bytes: new Uint8Array([8, 8]),
+          handle: savedHandle,
+        })
+        await renderAndLoad()
+        triggerOpen()
+        const opened = await screen.findByRole('dialog', { name: 'Open report' })
+        fireEvent.click(within(opened).getByRole('button', { name: /close|ok|done|continue/i }))
+        dirtyIt()
+        // The first revert's open keeps stepping until the test lets it end.
+        let finish = false
+        scene.open_skp_begin = vi.fn(() => ({ phase: 'read', done: 0, total: 1, report }))
+        scene.open_skp_step = vi.fn(() =>
+          finish ? { phase: 'done', done: 1, total: 1, report } : { phase: 'read', done: 0, total: 1 },
+        )
+        try {
+          await confirmRevert()
+          await waitFor(() => expect(scene.open_skp_begin).toHaveBeenCalled())
+          // A second revert while that open is still stepping is refused out loud.
+          await confirmRevert()
+          expect(await screen.findByText('Another file is still opening; try again in a moment.')).toBeInTheDocument()
+        } finally {
+          finish = true
+        }
+        await screen.findByText('Reverted to the saved file.')
+      })
+    })
+
+    it('a change to the document while the file is being read cancels the revert and says so', async () => {
+      await openSaved()
+      dirtyIt()
+      let finishRead: (f: File) => void = () => {}
+      savedHandle.getFile.mockImplementationOnce(() => new Promise<File>((r) => { finishRead = r }))
+      await confirmRevert()
+      await waitFor(() => expect(savedHandle.getFile).toHaveBeenCalledTimes(1))
+
+      // Meanwhile the person starts a New document, discarding the edits.
+      fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+      fireEvent.mouseDown(menubar().getByText('New'))
+      const discard = await screen.findByRole('dialog', { name: /unsaved changes/i })
+      fireEvent.click(within(discard).getByRole('button', { name: /don.t save/i }))
+      expect(await screen.findByText('Untitled')).toBeInTheDocument()
+      const loadsBefore = mockScene.load.mock.calls.length
+
+      finishRead(new File([savedBytes], 'my-house.hew'))
+      // A generous wait: under a loaded full-suite run the toast can take
+      // longer than the 1 s default to land, and it is not the thing under test.
+      expect(
+        await screen.findByText('Revert canceled: the document changed while the file was being read.', undefined, { timeout: 10000 }),
+      ).toBeInTheDocument()
+      expect(mockScene.load).toHaveBeenCalledTimes(loadsBefore)
+      expect(screen.queryByText('Reverted to the saved file.')).not.toBeInTheDocument()
+    })
+
+    it('a document that went clean while the file was being read is left alone, quietly', async () => {
+      await openSaved()
+      dirtyIt()
+      let finishRead: (f: File) => void = () => {}
+      savedHandle.getFile.mockImplementationOnce(() => new Promise<File>((r) => { finishRead = r }))
+      await confirmRevert()
+      await waitFor(() => expect(savedHandle.getFile).toHaveBeenCalledTimes(1))
+      // Undo back to the saved mark: the next change reports "at saved mark".
+      mockScene.at_saved_mark = () => true
+      dirtyIt()
+      await act(async () => {})
+      // The document reads clean again: Revert is off.
+      clickRevert()
+      expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument()
+      const loadsBefore = mockScene.load.mock.calls.length
+
+      finishRead(new File([savedBytes], 'my-house.hew'))
+      await act(async () => { await Promise.resolve() })
+      await new Promise((r) => setTimeout(r, 20))
+      expect(mockScene.load).toHaveBeenCalledTimes(loadsBefore)
+      expect(screen.queryByText('Reverted to the saved file.')).not.toBeInTheDocument()
+      expect(screen.queryByText(/revert canceled/i)).not.toBeInTheDocument()
+      // The refusal is spoken, once.
+      expect(screen.getAllByText('Nothing to revert: the document is already at its saved state.')).toHaveLength(1)
+    })
+
+    it('an edit made while the file is being read cancels the revert and keeps the edit', async () => {
+      await openSaved()
+      dirtyIt()
+      let depth = 3
+      const priorDepth = mockScene.undo_depth
+      mockScene.undo_depth = () => depth
+      try {
+        let finishRead: (f: File) => void = () => {}
+        savedHandle.getFile.mockImplementationOnce(() => new Promise<File>((r) => { finishRead = r }))
+        await confirmRevert()
+        await waitFor(() => expect(savedHandle.getFile).toHaveBeenCalledTimes(1))
+        // Same file, still dirty, but one more edit lands while the read is pending.
+        depth = 4
+        const loadsBefore = mockScene.load.mock.calls.length
+
+        finishRead(new File([savedBytes], 'my-house.hew'))
+        expect(
+          await screen.findByText('Revert canceled: the document changed while the file was being read.'),
+        ).toBeInTheDocument()
+        expect(mockScene.load).toHaveBeenCalledTimes(loadsBefore)
+        expect(screen.queryByText('Reverted to the saved file.')).not.toBeInTheDocument()
+      } finally {
+        mockScene.undo_depth = priorDepth
+      }
+    })
+
+    describe('View ▸ X-ray and Wireframe', () => {
+      const openView = () => {
+        if (menubar().queryByText('X-ray') === null) fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+      }
+      const toggle = (label: string) => {
+        openView()
+        fireEvent.mouseDown(menubar().getByText(label))
+      }
+      const checked = (label: string) => {
+        openView()
+        return (menubar().getByText(label).closest('div')?.textContent ?? '').includes('✓')
+      }
+
+      it('X-ray and Wireframe are one mode: choosing one turns the other off, choosing it again returns to Shaded', async () => {
+        const api = cameraViewport()
+        await renderAndLoad()
+        toggle('X-ray')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('xray'))
+        expect(checked('X-ray')).toBe(true)
+        expect(checked('Wireframe')).toBe(false)
+        toggle('Wireframe')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('wireframe'))
+        expect(checked('Wireframe')).toBe(true)
+        expect(checked('X-ray')).toBe(false)
+        toggle('X-ray')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('xray'))
+        expect(checked('Wireframe')).toBe(false)
+        toggle('X-ray')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('shaded'))
+        expect(checked('X-ray')).toBe(false)
+        expect(checked('Wireframe')).toBe(false)
+      })
+
+      it('File ▸ New resets the mode to Shaded', async () => {
+        const api = cameraViewport()
+        await renderAndLoad()
+        toggle('Wireframe')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('wireframe'))
+        fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+        fireEvent.mouseDown(menubar().getByText('New'))
+        const discard = screen.queryByRole('dialog', { name: /unsaved changes/i })
+        if (discard !== null) fireEvent.click(within(discard).getByRole('button', { name: /don.t save/i }))
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('shaded'))
+        expect(checked('X-ray')).toBe(false)
+        expect(checked('Wireframe')).toBe(false)
+      })
+
+      it('Revert to Saved keeps the render mode the window is in', async () => {
+        await openSaved()
+        dirtyIt()
+        const api = cameraViewport()
+        toggle('Wireframe')
+        await waitFor(() => expect(api.setRenderMode).toHaveBeenLastCalledWith('wireframe'))
+        await confirmRevert()
+        expect(await screen.findByText('Reverted to the saved file.')).toBeInTheDocument()
+        expect(api.setRenderMode).toHaveBeenLastCalledWith('wireframe')
+        expect(checked('Wireframe')).toBe(true)
+      })
+    })
+
+    describe('the live hew.doc.revert operation', () => {
+      it('says the document was never saved when it has changes but no file', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'hew',
+          name: 'my-house.hew',
+          bytes: new Uint8Array([7, 7, 7]),
+          handle: null,
+        })
+        await renderAndLoad()
+        triggerOpen()
+        expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+        dirtyIt()
+        await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+        expect(await liveBridge.runOp!('revert', {})).toEqual({
+          ok: false,
+          refusal: 'nothing_to_revert',
+          message: 'There is nothing to revert to: this document has not been saved to a file yet.',
+        })
+      })
+
+      it('says there are no changes when the document is clean', async () => {
+        await openSaved()
+        await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+        expect(await liveBridge.runOp!('revert', {})).toEqual({
+          ok: false,
+          refusal: 'nothing_to_revert',
+          message: 'There is nothing to revert: the document has no changes since the last save.',
+        })
+      })
+
+      it('reverts without asking, and the crash snapshot and recents entry follow (web)', async () => {
+        await openSaved()
+        dirtyIt()
+        recoveryState.clear.mockClear()
+        vi.mocked(recordRecent).mockClear()
+        await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+        expect(await liveBridge.runOp!('revert', {})).toEqual({ ok: true })
+        expect(screen.queryByRole('dialog', { name: /revert to saved/i })).not.toBeInTheDocument()
+        expect(recoveryState.clear).toHaveBeenCalled()
+        expect(vi.mocked(recordRecent)).toHaveBeenCalledWith(savedBytes, 'my-house.hew')
+      })
+
+      it('reads a desktop path with read_file and pushes it to the recents list', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'hew',
+          name: 'my-house.hew',
+          bytes: new Uint8Array([7, 7, 7]),
+          handle: '/tmp/my-house.hew',
+        })
+        await renderAndLoad()
+        triggerOpen()
+        expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+        dirtyIt()
+        tauriMode.on = true
+        tauriCore.invoke.mockClear()
+        tauriCore.invoke.mockImplementation(async (cmd: string) =>
+          cmd === 'read_file' ? savedBytes.buffer.slice(0) : undefined,
+        )
+        recoveryState.clear.mockClear()
+        await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+        expect(await liveBridge.runOp!('revert', {})).toEqual({ ok: true })
+        expect(tauriCore.invoke).toHaveBeenCalledWith('read_file', { path: '/tmp/my-house.hew' })
+        await waitFor(() =>
+          expect(tauriCore.invoke).toHaveBeenCalledWith('push_recent', { path: '/tmp/my-house.hew' }),
+        )
+        expect(recoveryState.clear).toHaveBeenCalled()
+      })
+    })
+
+    it('a saved file that cannot be read leaves the document as it was', async () => {
+      await openSaved()
+      dirtyIt()
+      savedHandle.getFile.mockRejectedValueOnce(new Error('gone'))
+      clickRevert()
+      const dialog = await screen.findByRole('dialog', { name: /revert to saved/i })
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Revert' }))
+      expect(await screen.findByText(/revert failed/i)).toBeInTheDocument()
+      expect(mockScene.load).toHaveBeenCalledTimes(1)
+    })
   })
 })
 

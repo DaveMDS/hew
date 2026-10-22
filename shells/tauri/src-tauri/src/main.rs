@@ -3143,6 +3143,20 @@ fn main() {
             let file_save_as = MenuItemBuilder::with_id("file-save-as", lbl!("file-save-as"))
                 .accelerator("Shift+CmdOrCtrl+S")
                 .build(handle)?;
+            // Throws away every change since the last save after one
+            // confirmation (App.tsx's "revert-to-saved"). A GATED item: the
+            // frontend's sync_menu_state push enables it only while the
+            // document has a file and unsaved changes, as the web MenuBar
+            // does. Starts disabled: nothing is open at launch.
+            let file_revert = gated_item(
+                handle,
+                &mut gated,
+                "file-revert",
+                "Revert to Saved",
+                None,
+                None,
+            )?;
+            let _ = file_revert.set_enabled(false);
             // Prompts for a name (SaveToLibraryPopover's centered "modal"
             // variant) then writes the whole document as a library item —
             // always enabled here (macOS has no equivalent of the web
@@ -3177,6 +3191,7 @@ fn main() {
                 .item(&file_close)
                 .item(&file_save)
                 .item(&file_save_as)
+                .item(&file_revert)
                 .item(&file_save_to_library)
                 .separator()
                 .item(&file_purge_unused)
@@ -4512,6 +4527,7 @@ fn main() {
                 "file-open-on-phone" => "open-on-phone",
                 "file-save" => "save",
                 "file-save-as" => "save-as",
+                "file-revert" => "revert-to-saved",
                 "file-save-to-library" => "save-to-library-doc",
                 "file-purge-unused" => "purge-unused",
                 "file-close" => "close",

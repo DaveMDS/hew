@@ -1196,3 +1196,149 @@ fn snapshot_with_path_refuses_host_capability_missing_when_the_host_cannot_write
     );
     assert_eq!(data["refusal"], "host_capability_missing");
 }
+
+// ------------------------------------------------------------ hew.doc.revert
+
+/// A host with a saved file whose `open_document` loads a clean, empty
+/// document — what `hew-cli`'s `CliHost` does with the file on disk.
+struct SavedFileHost {
+    path: Option<String>,
+    reloaded: bool,
+}
+
+impl Host for SavedFileHost {
+    fn working_document_path(&self) -> Option<&str> {
+        self.path.as_deref()
+    }
+    fn open_document(&mut self, doc: &mut Document, path: &str) -> Result<(), Refusal> {
+        assert_eq!(Some(path), self.path.as_deref(), "reloads the saved file");
+        *doc = Document::new();
+        self.reloaded = true;
+        Ok(())
+    }
+}
+
+#[test]
+fn revert_without_a_saved_file_refuses_nothing_to_revert() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    let mut host = SavedFileHost {
+        path: None,
+        reloaded: false,
+    };
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.revert",
+        json!({}),
+    );
+    assert_eq!(data["refusal"], "nothing_to_revert");
+    assert!(!host.reloaded);
+    assert!(!doc.at_saved_mark(), "a refusal leaves the document alone");
+}
+
+#[test]
+fn revert_of_an_unchanged_document_refuses_nothing_to_revert() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    doc.mark_saved();
+    let mut host = SavedFileHost {
+        path: Some("a.hew".into()),
+        reloaded: false,
+    };
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.revert",
+        json!({}),
+    );
+    assert_eq!(data["refusal"], "nothing_to_revert");
+    assert!(!host.reloaded, "a clean document is not re-read");
+}
+
+#[test]
+fn revert_of_a_changed_saved_document_reloads_it_clean_with_no_history() {
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    assert!(doc.can_undo());
+    let mut host = SavedFileHost {
+        path: Some("a.hew".into()),
+        reloaded: false,
+    };
+    hello_attach(&mut conn, &mut doc, &mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.revert",
+        json!({}),
+    );
+    assert!(host.reloaded);
+    assert!(doc.at_saved_mark());
+    assert!(!doc.can_undo() && !doc.can_redo());
+}
+
+#[test]
+fn revert_refuses_load_failed_and_leaves_the_document_unchanged() {
+    struct GoneFileHost;
+    impl Host for GoneFileHost {
+        fn working_document_path(&self) -> Option<&str> {
+            Some("a.hew")
+        }
+        fn open_document(&mut self, _doc: &mut Document, _path: &str) -> Result<(), Refusal> {
+            Err(Refusal::api("load_failed", "no such file"))
+        }
+    }
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    let depth = doc.undo_depth();
+    let mut host = GoneFileHost;
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.revert",
+        json!({}),
+    );
+    assert_eq!(data["refusal"], "load_failed");
+    assert!(!doc.at_saved_mark(), "the document is still changed");
+    assert_eq!(doc.undo_depth(), depth, "its history is untouched");
+    assert!(doc.can_undo());
+}
+
+#[test]
+fn revert_refuses_host_capability_missing_on_a_host_that_cannot_open() {
+    struct PathOnlyHost;
+    impl Host for PathOnlyHost {
+        fn working_document_path(&self) -> Option<&str> {
+            Some("a.hew")
+        }
+    }
+    let mut conn = Connection::new(Profile::Core, "test");
+    let mut doc = Document::new();
+    edit_the_document(&mut doc);
+    let mut host = PathOnlyHost;
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let data = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.doc.revert",
+        json!({}),
+    );
+    assert_eq!(data["refusal"], "host_capability_missing");
+}

@@ -169,6 +169,56 @@ describe('installLiveBridge', () => {
     setLengthUnit('m')
   })
 
+  describe('hew.doc.revert (the shell routes it to the window as a "revert" operation)', () => {
+    it('runs the window\'s revert and answers success over hew://api-op-reply', async () => {
+      const runOp = vi.fn(async () => ({ ok: true }))
+      installLiveBridge({ ...deps, runOp })
+      await vi.waitFor(() => {
+        if (listenMock.mock.calls.length < 4) throw new Error('listeners not yet registered')
+      })
+      fire('hew://api-op', { opId: 11, op: 'revert', args: {} })
+      await vi.waitFor(() => {
+        expect(emitMock).toHaveBeenCalledWith('hew://api-op-reply', { opId: 11, ok: true })
+      })
+      expect(runOp).toHaveBeenCalledWith('revert', {})
+    })
+
+    it('hands the window\'s typed refusal back to the shell', async () => {
+      const runOp = vi.fn(async () => ({
+        ok: false,
+        refusal: 'nothing_to_revert',
+        message: 'There is nothing to revert: the document has no changes since the last save.',
+      }))
+      installLiveBridge({ ...deps, runOp })
+      await vi.waitFor(() => {
+        if (listenMock.mock.calls.length < 4) throw new Error('listeners not yet registered')
+      })
+      fire('hew://api-op', { opId: 12, op: 'revert', args: {} })
+      await vi.waitFor(() => {
+        expect(emitMock).toHaveBeenCalledWith('hew://api-op-reply', {
+          opId: 12,
+          ok: false,
+          refusal: 'nothing_to_revert',
+          message: 'There is nothing to revert: the document has no changes since the last save.',
+        })
+      })
+    })
+
+    it('a window with no operation runner refuses host_capability_missing', async () => {
+      installLiveBridge(deps)
+      await vi.waitFor(() => {
+        if (listenMock.mock.calls.length < 4) throw new Error('listeners not yet registered')
+      })
+      fire('hew://api-op', { opId: 13, op: 'revert', args: {} })
+      await vi.waitFor(() => {
+        expect(emitMock).toHaveBeenCalledWith(
+          'hew://api-op-reply',
+          expect.objectContaining({ opId: 13, ok: false, refusal: 'host_capability_missing' }),
+        )
+      })
+    })
+  })
+
   it('forwards the reply back over hew://api-reply', async () => {
     installLiveBridge(deps)
     await flush()

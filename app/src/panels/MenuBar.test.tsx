@@ -734,4 +734,34 @@ describe('MenuBar', () => {
       expect(onSelectTool).toHaveBeenLastCalledWith(tool)
     }
   }, 20_000) // renders every menu; the 5 s default is tight under a loaded full-suite run
+
+  describe('File > Revert to Saved', () => {
+    const openFile = () => fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+
+    it('sits right after Save As and runs its handler when enabled', () => {
+      const onRevertToSaved = vi.fn()
+      render(<MenuBar {...defaultProps} onRevertToSaved={onRevertToSaved} />)
+      openFile()
+      const labels = screen
+        .getAllByText(/^(Save As…|Revert to Saved|Save to Library…|Save)$/)
+        .map((e) => e.textContent)
+      expect(labels.indexOf('Revert to Saved')).toBe(labels.indexOf('Save As…') + 1)
+      fireEvent.mouseDown(screen.getByText('Revert to Saved'))
+      expect(onRevertToSaved).toHaveBeenCalledTimes(1)
+    })
+
+    it('swallows the click while disabled', () => {
+      const onRevertToSaved = vi.fn()
+      render(<MenuBar {...defaultProps} onRevertToSaved={onRevertToSaved} revertToSavedDisabled />)
+      openFile()
+      fireEvent.mouseDown(screen.getByText('Revert to Saved'))
+      expect(onRevertToSaved).not.toHaveBeenCalled()
+    })
+
+    it('is absent when the host gives no handler', () => {
+      render(<MenuBar {...defaultProps} />)
+      openFile()
+      expect(screen.queryByText('Revert to Saved')).not.toBeInTheDocument()
+    })
+  })
 })

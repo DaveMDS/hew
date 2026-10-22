@@ -141,6 +141,7 @@ pub(crate) fn build_documents(
 /// The commands the shell answers itself rather than forwarding.
 const HOST_METHODS: &[&str] = &[
     "hew.doc.save",
+    "hew.doc.revert",
     "hew.meta.documents",
     "hew.doc.attach",
     "hew.doc.new",
@@ -217,7 +218,11 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
     let with_envelope = |method: &str, mut params: Value| -> Value {
         if matches!(
             method,
-            "hew.doc.attach" | "hew.doc.close" | "hew.doc.focus" | "hew.doc.save"
+            "hew.doc.attach"
+                | "hew.doc.close"
+                | "hew.doc.focus"
+                | "hew.doc.save"
+                | "hew.doc.revert"
         ) {
             if let (Some(doc), Some(object)) = (&envelope_document, params.as_object_mut()) {
                 object
@@ -1175,6 +1180,16 @@ fn save_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool {
     }
 }
 
+/// Whether the app should perform this `hew.doc.revert`: the target document
+/// has a file to re-read.
+fn revert_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool {
+    let named = params.get("document").and_then(Value::as_str);
+    match target_of(app, conn, named) {
+        Ok((label, _)) => crate::document_paths_snapshot(app).contains_key(&label),
+        Err(_) => false,
+    }
+}
+
 /// The display length formats `hew.doc.save`'s `units` names: keep in step
 /// with `crates/api`'s `LENGTH_FORMATS`, which this crate does not depend
 /// on (`app/src/settings/units.ts`'s `LengthFormat` is the third copy).
@@ -1300,6 +1315,38 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     Ok(json!({}))
 }
 
+/// `hew.doc.revert` in the desktop app: the window re-reads its own file
+/// through the open path the UI uses and clears its history, keeping its
+/// camera and panels. Only reached for a document that has a file; one
+/// without falls through to the dispatcher, which refuses
+/// `nothing_to_revert`. The window refuses the same way for a document
+/// with no changes, as only it knows.
+fn cmd_revert(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Value, Refused> {
+    if let Some(extra) = params
+        .as_object()
+        .and_then(|o| o.keys().find(|k| k.as_str() != "document"))
+    {
+        return Err(Refused::new(
+            "invalid_params",
+            format!("unknown field `{extra}`"),
+        ));
+    }
+    let named = params.get("document").and_then(Value::as_str);
+    let (label, entry) = target_of(app, conn, named)?;
+    if let Err(e) = run_op(app, &label, "revert", json!({})) {
+        return Err(Refused {
+            name: match e.refusal.as_str() {
+                "unknown_document" => "unknown_document",
+                "nothing_to_revert" => "nothing_to_revert",
+                _ => "load_failed",
+            },
+            explanation: e.message,
+            detail: json!({ "document": entry }),
+        });
+    }
+    Ok(json!({}))
+}
+
 fn cmd_focus(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Value, Refused> {
     let named = params.get("document").and_then(Value::as_str);
     let (label, _) = target_of(app, conn, named)?;
@@ -1321,6 +1368,7 @@ fn run_host_command(
         "hew.doc.close" => cmd_close(app, conn, params),
         "hew.doc.focus" => cmd_focus(app, conn, params),
         "hew.doc.save" => cmd_save(app, conn, params),
+        "hew.doc.revert" => cmd_revert(app, conn, params),
         _ => Err(Refused::new("unimplemented", method.to_string())),
     }
 }
@@ -1335,15 +1383,22 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
     // `hew.doc.save` is the shell's only when the app can do the save
     // itself (a path was given, or the document already has a file); an
     // unsaved document with no path falls through to the dispatcher, which
-    // hands the bytes back for the client to write.
+    // hands the bytes back for the client to write. `hew.doc.revert` is the
+    // shell's only for a document that has a file; one without falls
+    // through to the dispatcher, which refuses `nothing_to_revert`.
     if let Routed::Host {
-        method: "hew.doc.save",
+        method: method @ ("hew.doc.save" | "hew.doc.revert"),
         params,
         ..
     } = &routed
     {
-        if !save_is_app_side(app, conn, params) {
-            routed = classify_skipping(line, Some("hew.doc.save"));
+        let app_side = if *method == "hew.doc.save" {
+            save_is_app_side(app, conn, params)
+        } else {
+            revert_is_app_side(app, conn, params)
+        };
+        if !app_side {
+            routed = classify_skipping(line, Some(*method));
         }
     }
     match routed {
@@ -1641,6 +1696,24 @@ mod tests {
                 assert_eq!(document.as_deref(), Some("doc_2"));
                 assert!(!line.contains("\"document\""));
             }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn revert_is_a_shell_command_addressed_like_save() {
+        let line =
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.revert","params":{},"document":"doc_2"}"#;
+        match classify(line) {
+            Routed::Host { method, params, .. } => {
+                assert_eq!(method, "hew.doc.revert");
+                assert_eq!(params["document"], "doc_2");
+            }
+            other => panic!("{other:?}"),
+        }
+        // A document with no file falls through to the dispatcher.
+        match classify_skipping(line, Some("hew.doc.revert")) {
+            Routed::Forward { document, .. } => assert_eq!(document.as_deref(), Some("doc_2")),
             other => panic!("{other:?}"),
         }
     }

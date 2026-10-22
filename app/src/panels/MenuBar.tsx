@@ -45,6 +45,12 @@ export interface MenuBarProps {
   onOpen: () => void
   onSave: () => void
   onSaveAs: () => void
+  /** File ▸ Revert to Saved — after one confirmation, re-reads the saved
+   *  file and throws away every change since the last save. Omitted by a
+   *  host with no saved file to return to. */
+  onRevertToSaved?: () => void
+  /** Disables Revert to Saved: no saved file, or no changes since it. */
+  revertToSavedDisabled?: boolean
   /** Import a model file (COLLADA / SketchUp / glTF — chosen in the file dialog). */
   onImport: () => void
   /** Open the unified Export dialog (format — glTF/GLB or STL — chosen there). */
@@ -690,6 +696,8 @@ export function MenuBar({
   onOpen,
   onSave,
   onSaveAs,
+  onRevertToSaved,
+  revertToSavedDisabled = false,
   onImport,
   onExport,
   onPrint,
@@ -872,6 +880,13 @@ export function MenuBar({
             )}
             <MenuItem label={t`Save`} shortcut={scModS} onClick={withClose(onSave)} />
             <MenuItem label={t`Save As…`} shortcut={scModShiftS} onClick={withClose(onSaveAs)} />
+            {onRevertToSaved !== undefined && (
+              <MenuItem
+                label={t`Revert to Saved`}
+                disabled={revertToSavedDisabled}
+                onClick={withClose(onRevertToSaved)}
+              />
+            )}
             {onSaveToLibrary !== undefined && (
               <MenuItem
                 label={t`Save to Library…`}

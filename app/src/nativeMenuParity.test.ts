@@ -203,6 +203,34 @@ describe('native menu parity — non-tool commands', () => {
 })
 
 /**
+ * File ▸ Revert to Saved: a GATED native item (enabled only with a file and
+ * unsaved changes, pushed by sync_menu_state) beside Save As, mirrored by the
+ * web MenuBar's item and handled by App's menu-action switch.
+ */
+describe('Revert to Saved menu item parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
+
+  it('file-revert is a gated native item, attached right after Save As, dispatching to revert-to-saved', () => {
+    const binding = /let\s+(\w+)\s*=\s*gated_item\(\s*handle,\s*&mut \w+,\s*"file-revert",\s*"Revert to Saved"/.exec(source)
+    expect(binding, 'no gated_item binding found for file-revert').not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(
+      new RegExp(`\\.item\\(&file_save_as\\)\\s*\\.item\\(&${variable}\\)`).test(source),
+      'file-revert is not attached right after Save As',
+    ).toBe(true)
+    expect(/"file-revert"\s*=>\s*"revert-to-saved"/.test(source)).toBe(true)
+  })
+
+  it('is offered from the web MenuBar and handled by the app', () => {
+    expect(menuBarSource.includes('Revert to Saved')).toBe(true)
+    expect(appSource.includes("case 'revert-to-saved'")).toBe(true)
+    expect(appSource.includes("'file-revert'")).toBe(true)
+  })
+})
+
+/**
  * Library effort: Window ▸ Library (a CHECKABLE item — the dialog's open/
  * closed state, like the other panes on that menu) and File ▸ Save to
  * Library… (a plain item) — two different binding shapes, so this gets its

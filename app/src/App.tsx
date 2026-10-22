@@ -96,6 +96,7 @@ import {
   NON_UNDOABLE_REASON,
   afterSave, applyWriteThroughSave,
   afterOpen,
+  canRevertToSaved,
   afterImport,
   afterRecovery,
   type DocSessionState,
@@ -615,6 +616,8 @@ export default function App() {
   }
   /** Document session: currentRef + dirty flag. */
   const [docSession, setDocSession] = useState<DocSessionState>(INITIAL_SESSION)
+  // File ▸ Revert to Saved has a file to return to and changes to throw away.
+  const revertable = canRevertToSaved(docSession)
   /** Ticks purely to refresh the "Edited/Saved <relative time>" indicator —
    * nothing else reads this state. Scheduled on demand, at the exact next
    * moment the label's text would change (see the save-state-indicator-tick
@@ -766,6 +769,8 @@ export default function App() {
    *  call site (finding 5). */
   const pendingRescaleConfirmRef = useRef(pendingRescaleConfirm)
   pendingRescaleConfirmRef.current = pendingRescaleConfirm
+  /** File ▸ Revert to Saved is waiting for its one confirmation. */
+  const [revertPromptOpen, setRevertPromptOpen] = useState(false)
   /** A material delete pending confirmation (used on >0 faces/objects) —
    *  null once confirmed/cancelled, or when a delete of an UNUSED material
    *  never needed a modal at all (v1.1 assets lane). */
@@ -2560,9 +2565,12 @@ export default function App() {
 
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
-  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile): boolean => {
+  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean }): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
+    // Revert to Saved reloads the document under the person's feet: the view
+    // stays where it is, over the camera the file was saved with.
+    const keptCamera = opts?.keepCamera === true ? viewportApi.current?.getCameraState() : undefined
     if (file !== undefined) beginOpenAttempt({ name: file.name, label: file.label, bytes })
     const loaded = loadHewBytes(scene, bytes)
     if (!loaded.ok) {
@@ -2646,7 +2654,9 @@ export default function App() {
     // falls back to the pre-existing default framing (zoomExtents for a
     // non-empty model, or the mount-time home view for a blank one).
     const savedCamera = scene.camera_state()
-    if (savedCamera !== undefined) {
+    if (keptCamera !== undefined) {
+      savedCamera?.free()
+    } else if (savedCamera !== undefined) {
       try {
         const applyState = {
           projection: savedCamera.projection() as 'perspective' | 'parallel',
@@ -2672,6 +2682,7 @@ export default function App() {
     // (if it captures one) wins. Activation is view state: never dirties.
     requestAnimationFrame(() => {
       scenesRef.current.activateFirstOnLoad()
+      if (keptCamera !== undefined) viewportApi.current?.applyCameraState(keptCamera)
     })
     // Scene thumbnail cache (docs/design/scenes.md §5 "Add"): the derived
     // JPEGs live in IndexedDB, keyed by content hash + sid, never in the
@@ -3031,6 +3042,10 @@ export default function App() {
   const runOpenSkp = useCallback(async (
     scene: Scene,
     pick: { name: string; bytes: Uint8Array; handle: unknown },
+    // Revert to Saved reloads the document in place: `keepCamera` leaves the
+    // view where it is (no zoom-to-fit), `silentReport` skips the import
+    // report dialog (the person is returning to a file they already opened).
+    opts?: { keepCamera?: boolean; silentReport?: boolean },
   ): Promise<boolean> => {
     // The open yields to the event loop between steps, so a second open
     // (a drop, a recent, a path from the shell) could land while the
@@ -3038,6 +3053,7 @@ export default function App() {
     // the overlay and the guard.
     if (skpOpenStepsRef.current) return false
     skpOpenStepsRef.current = true
+    const keptCamera = opts?.keepCamera === true ? viewportApi.current?.getCameraState() : undefined
     const settle = () => {
       skpOpenStepsRef.current = false
       setIsImporting(false)
@@ -3079,7 +3095,7 @@ export default function App() {
     let report: ImportReport & { container: string }
     try {
       const discardsUnsaved = docSessionRef.current.dirty
-      if (!applyLoadedBytes(blank)) {
+      if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera })) {
         clearOpenAttempt()
         settle()
         return false
@@ -3130,14 +3146,15 @@ export default function App() {
 
     const format = normalizeDocFormat(report.container)
     setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
-    setImportReport(report)
+    if (opts?.silentReport !== true) setImportReport(report)
     const kernelMemory = kernelMemoryBytes()
     LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})${kernelMemory === null ? '' : `; kernel memory ${formatBytes(kernelMemory)}`}`)
     requestAnimationFrame(() => {
-      viewportApi.current?.zoomExtents()
+      if (keptCamera === undefined) viewportApi.current?.zoomExtents()
       // A document with Scenes opens on its first Scene — after the framing
       // above so the Scene's camera wins (view state; never dirties).
       scenesRef.current.activateFirstOnLoad()
+      if (keptCamera !== undefined) viewportApi.current?.applyCameraState(keptCamera)
     })
     if (isTauri && typeof pick.handle === 'string') {
       const path = pick.handle
@@ -3612,6 +3629,91 @@ export default function App() {
     await runImportPick(scene, pick)
     return true
   }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp])
+
+  // File ▸ Revert to Saved, after its confirmation (and the live API's
+  // `hew.doc.revert`, which asks none): read the saved file again, load it
+  // into THIS window through the same load an Open uses, and leave the
+  // window, camera and panels where they are. A load starts a document with
+  // no undo or redo history and no unsaved mark, so both stacks are empty and
+  // the document reads clean. The file is read BEFORE anything is replaced,
+  // so one that has gone missing leaves the document as it was.
+  //
+  // A refusal carries its message; `shown` marks one already toasted here (a
+  // failed read or load), so the menu path does not say it twice.
+  const revertToSaved = useCallback(async (): Promise<
+    { ok: true } | { ok: false; message: string; shown?: true }
+  > => {
+    const session = docSessionRef.current
+    const ref = session.currentRef
+    const scene = sceneRef.current
+    if (!canRevertToSaved(session) || ref === null || scene === null) {
+      return { ok: false, message: 'There is nothing to revert.' }
+    }
+    // The kernel's undo depth moves with every edit: an edit made while the
+    // read or a permission prompt is pending changes it, though neither the
+    // file nor the dirty flag does.
+    const depthAtStart = scene.undo_depth()
+    let bytes: Uint8Array
+    try {
+      if (typeof ref.handle === 'string') {
+        const { invoke } = await import('@tauri-apps/api/core')
+        bytes = new Uint8Array(await invoke<ArrayBuffer>('read_file', { path: ref.handle }))
+      } else {
+        // A web file handle: a person's click on Revert is the gesture a
+        // permission prompt needs.
+        const handle = ref.handle as {
+          getFile: () => Promise<File>
+          queryPermission?: (d: { mode: 'read' }) => Promise<PermissionState>
+          requestPermission?: (d: { mode: 'read' }) => Promise<PermissionState>
+        }
+        if (handle.queryPermission !== undefined && (await handle.queryPermission({ mode: 'read' })) !== 'granted') {
+          await handle.requestPermission?.({ mode: 'read' })
+        }
+        bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer())
+      }
+    } catch (err: unknown) {
+      const message = friendlyErrorText(err)
+      handleToast(`Revert failed: ${message}`)
+      return { ok: false, message, shown: true }
+    }
+    // The read (or a permission prompt) took time. If the person saved
+    // elsewhere, closed, or opened another file meanwhile, this revert is
+    // for a document that is gone; and if the document was saved or undone
+    // back to clean, there is nothing left to throw away.
+    if (docSessionRef.current.currentRef !== ref || sceneRef.current !== scene || scene.undo_depth() !== depthAtStart) {
+      const message = 'Revert canceled: the document changed while the file was being read.'
+      handleToast(message)
+      return { ok: false, message, shown: true }
+    }
+    if (!docSessionRef.current.dirty) {
+      const message = 'Nothing to revert: the document is already at its saved state.'
+      handleToast(message)
+      return { ok: false, message, shown: true }
+    }
+    let landed: boolean
+    if (isSkpFormat(ref.format)) {
+      if (skpOpenStepsRef.current) {
+        return { ok: false, message: 'Another file is still opening; try again in a moment.' }
+      }
+      landed = await runOpenSkp(scene, { name: ref.name, bytes, handle: ref.handle }, { keepCamera: true, silentReport: true })
+    } else {
+      landed = applyLoadedBytes(bytes, { name: ref.name, label: OPEN_FILE_LABELS.hew }, { keepCamera: true })
+      if (landed) setDocSession(afterOpen(ref, Date.now()))
+    }
+    if (!landed) return { ok: false, message: 'the saved file could not be loaded', shown: true }
+    // The unsaved work this replaced is gone: so is its crash snapshot.
+    void clearRecoverySnapshot()
+    if (isTauri && typeof ref.handle === 'string') {
+      const path = ref.handle
+      import('@tauri-apps/api/core')
+        .then(({ invoke }) => invoke('push_recent', { path }))
+        .catch(() => { /* ignore */ })
+    } else if (!isTauri && !isSkpFormat(ref.format)) {
+      void recordRecent(bytes, ref.name)
+    }
+    handleToast('Reverted to the saved file.')
+    return { ok: true }
+  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -4910,6 +5012,19 @@ export default function App() {
           }
         }
       }
+      if (op === 'revert') {
+        if (!canRevertToSaved(docSessionRef.current)) {
+          return {
+            ok: false,
+            refusal: 'nothing_to_revert',
+            message: docSessionRef.current.dirty
+              ? 'There is nothing to revert to: this document has not been saved to a file yet.'
+              : 'There is nothing to revert: the document has no changes since the last save.',
+          }
+        }
+        const reverted = await revertToSaved()
+        return reverted.ok ? { ok: true } : { ok: false, refusal: 'load_failed', message: reverted.message }
+      }
       if (op === 'close') {
         const refuse = (): LiveOpOutcome => ({
           ok: false,
@@ -4932,7 +5047,7 @@ export default function App() {
       }
       return { ok: false, refusal: 'host_capability_missing', message: `unknown operation ${op}` }
     }
-  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene])
+  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene, revertToSaved])
   /* oxlint-enable lingui/no-unlocalized-strings */
 
   // ---------------------------------------------------------------- native menu-action dispatch
@@ -5226,6 +5341,9 @@ export default function App() {
       case 'draw-3d-text': openTextDialog(); break
       case 'save':     saveDocumentRef.current(); break
       case 'save-as':  saveAsDocumentRef.current(); break
+      case 'revert-to-saved':
+        if (canRevertToSaved(docSessionRef.current)) setRevertPromptOpen(true)
+        break
       case 'undo':     handleUndoRef.current(); break
       case 'redo':     handleRedoRef.current(); break
       // On macOS the native Edit items carry key equivalents and are
@@ -6200,6 +6318,8 @@ export default function App() {
       // MenuBar/palette already are, so the kernel refusal stays a backstop
       // rather than a toast a user actually meets.
       'file-import': !componentFrameOpen,
+      // Revert to Saved: a file to return to and changes to throw away.
+      'file-revert': revertable,
       'draw-3d-text': !componentFrameOpen,
       // View ▸ Scenes ▸ Update/Next/Previous (docs/design/scenes.md §5).
       'scenes-update': scenes.activeSid !== null,
@@ -6243,6 +6363,7 @@ export default function App() {
     parallelProjection,
     fly.mode,
     componentFrameOpen,
+    revertable,
     canUndo,
     canRedo,
     undoLabel,
@@ -6828,6 +6949,8 @@ export default function App() {
         onOpen={openDocument}
         onSave={saveDocument}
         onSaveAs={saveAsDocument}
+        onRevertToSaved={() => setRevertPromptOpen(true)}
+        revertToSavedDisabled={!revertable}
         onImport={importDocument}
         onExport={() => void openExport()}
         onPrint={() => setPrintDialogOpen(true)}
@@ -7764,6 +7887,24 @@ export default function App() {
         />
       )}
 
+      {/* File ▸ Revert to Saved: one confirmation, Cancel the default. */}
+      {revertPromptOpen && (
+        <ConfirmDialog
+          heading="Revert to Saved?"
+          body="This throws away everything you changed since the last save."
+          confirmLabel="Revert"
+          danger
+          cancelDefault
+          onConfirm={() => {
+            setRevertPromptOpen(false)
+            void revertToSaved().then((r) => {
+              if (!r.ok && r.shown !== true) handleToast(r.message)
+            })
+          }}
+          onCancel={() => setRevertPromptOpen(false)}
+        />
+      )}
+
       {/* Material delete confirmation — only shown when the material is
           actually used somewhere (v1.1 assets lane); an unused one deletes
           immediately with no modal. */}
@@ -8070,6 +8211,7 @@ export default function App() {
           canBoolean: menuGates?.canBoolean ?? false,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
+          canRevertToSaved: revertable,
           canDrawText: !componentFrameOpen,
           sceneActive: scenes.activeSid !== null,
           scenesAny: scenes.entries.length > 0,

@@ -58,6 +58,8 @@ export type PaletteGate =
   /** One object, group, or instance selected, with a library backend. */
   | 'canSaveSelectionToLibrary'
   | 'canImport'
+  /** The document has a file to return to and unsaved changes. */
+  | 'canRevertToSaved'
   | 'canDrawText'
   /** A Scene is currently active (docs/design/scenes.md §5) — gates
    *  "Update Scene", which has nothing to re-capture with none active. */
@@ -212,6 +214,7 @@ function actionEntries(): PaletteEntry[] {
     { id: 'draw-3d-text', label: t`3D Text…`, description: t`Place extruded, watertight text on a face or the ground.`, group: 'Actions', synonyms: [t`text`, t`font`, t`letters`, t`lettering`, t`engrave`, t`extrude text`], gate: 'canDrawText' },
     { id: 'save', label: t`Save`, description: t`Save the current document.`, group: 'Actions' },
     { id: 'save-as', label: t`Save As…`, description: t`Save the current document under a new name.`, group: 'Actions' },
+    { id: 'revert-to-saved', label: t`Revert to Saved`, description: t`Throw away every change since the last save and read the file back in.`, group: 'Actions', gate: 'canRevertToSaved', synonyms: [t`discard changes`, t`reload`, t`revert`] },
     { id: 'undo', label: t`Undo`, description: t`Undo the last change.`, group: 'Actions' },
     { id: 'redo', label: t`Redo`, description: t`Redo the last undone change.`, group: 'Actions' },
     { id: 'edit-select-all', label: t`Select All`, description: t`Select every visible object, group, component, and sketch.`, group: 'Actions', synonyms: [t`select everything`] },

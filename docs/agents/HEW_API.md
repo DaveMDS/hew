@@ -865,6 +865,19 @@ Semantics notes, normative:
   bytes back (no `path`, nothing for the app to write) refuses a `.skp`
   format with `host_capability_missing`; `hew.doc.export` with `"skp"` /
   `"skp2017"` hands back a SketchUp file instead.
+- `hew.doc.revert {document?}` is File ▸ Revert to Saved: it re-reads the
+  document's saved file in place, discarding every change since the last
+  save. The undo and redo history is cleared and the document reads clean;
+  a live window keeps its camera and panels. There is no confirmation
+  step (the app's menu item asks a person; the API caller has already
+  decided). It refuses `nothing_to_revert` when the document has no saved
+  file or has no changes since the last save, and `load_failed` when the
+  file can no longer be read (the document is then left as it was).
+  "Changed" is judged differently on the two paths: headless revert asks
+  the undo history's saved mark (the kernel's `at_saved_mark`), so state
+  the history cannot see, such as scene edits, does not count; the live
+  app asks its dirty flag, which does count them. The desktop app routes
+  it to the window like `hew.doc.save`.
 - `hew.doc.export` also writes `"skp"` and `"skp2017"`, as `save` does
   but never changing the document's own file or source.
 - A SketchUp file carries display units (SketchUp's Model Info > Units).
@@ -1748,6 +1761,7 @@ at parity or a stated, reasoned difference:
 | `hew.meta.documents` | the one working document, `doc_1` | every open window (§4.2) |
 | `hew.doc.new` / `open` | replaces the working document | a NEW window; never replaces one |
 | `hew.doc.save` | writes the file, clears unsaved, binds the document to it | the same: the app saves through its own save path (title, recents, dirty mark), for a named `path` and for a document that already has a file |
+| `hew.doc.revert` | reloads the saved file; clears history and the unsaved mark; refuses `nothing_to_revert` with no file or no changes | the same: the window re-reads its file through its own open path, keeping camera and panels |
 | `hew.doc.save {copy}` | writes a copy; the document stays unbound and dirty | the same |
 | `hew.doc.save`, no path, never saved | refuses `path_required` | hands the bytes back (the app cannot ask where) |
 | `hew.doc.export` | writes the file | `hew-cli` writes it from the bytes the app returns |
