@@ -17,6 +17,10 @@ const LibraryWindow = React.lazy(() =>
 )
 import { isTauri } from './io/fileHost'
 import { initThemeSync } from './theme/applyTheme'
+import { i18n } from '@lingui/core'
+import { I18nProvider } from '@lingui/react'
+import { startI18n } from './i18n/activate'
+import { seedLocaleLengthUnit } from './shop/localeUnits'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
@@ -97,20 +101,34 @@ if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD &&
   }
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      {isSettingsWindow ? (
-        <SettingsWindow />
-      ) : isLibraryWindow ? (
-        <React.Suspense fallback={null}>
-          <LibraryWindow />
-        </React.Suspense>
-      ) : isShopWindow ? (
-        <ShopApp />
-      ) : (
-        <App />
-      )}
-    </ErrorBoundary>
-  </React.StrictMode>,
-)
+// The resolved locale's catalog is active before the first render so the
+// first paint is already in the user's language (docs/LOCALIZATION.md);
+// `startI18n` then keeps the runtime following the Language setting for the
+// life of this window. Every render root — main, Settings, Library, Shop —
+// sits under the one I18nProvider.
+// First boot of the editor: default the length format from the region
+// (Architectural in the US, Millimeters in Japan) before anything reads it.
+// Never overrides a persisted choice; satellite windows inherit the result.
+if (!isSettingsWindow && !isLibraryWindow && !isShopWindow) seedLocaleLengthUnit()
+
+void startI18n().then(() => {
+  ReactDOM.createRoot(document.getElementById('root')!).render(
+    <React.StrictMode>
+      <I18nProvider i18n={i18n}>
+        <ErrorBoundary>
+          {isSettingsWindow ? (
+            <SettingsWindow />
+          ) : isLibraryWindow ? (
+            <React.Suspense fallback={null}>
+              <LibraryWindow />
+            </React.Suspense>
+          ) : isShopWindow ? (
+            <ShopApp />
+          ) : (
+            <App />
+          )}
+        </ErrorBoundary>
+      </I18nProvider>
+    </React.StrictMode>,
+  )
+})

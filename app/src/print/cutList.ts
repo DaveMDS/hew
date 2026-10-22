@@ -9,6 +9,7 @@
  * item model as the title block, so it prints, previews, and lands in the
  * PDF identically.
  */
+import { plural, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { buildPartsSheetSections } from '../shop/partsSheetModel'
 import { formatLengthIn, type LengthFormat } from '../settings/units'
@@ -55,6 +56,7 @@ export function cutListRows(scene: WasmScene, format: LengthFormat): CutListRow[
         // rescaled on its own is a different part with its real size.
         const pose = scene.instance_pose(r.node.id)
         const scaleKey = pose === undefined ? '' : instancePoseScale(pose).map((v) => v.toFixed(4)).join('×')
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal grouping key, never shown
         fold = def === undefined ? `node ${key}` : `def ${def} @ ${scaleKey}`
       } else {
         const dims0 = extents === null ? ['—', '—', '—'] : [fmt(extents[0]), fmt(extents[1]), fmt(extents[2])]
@@ -126,13 +128,21 @@ export function cutListPageFurniture(
   const slice = rows.slice(pageIndex * per, (pageIndex + 1) * per)
   const items: FurnitureItem[] = []
   const cols = cutListColumns(d.w).map((x) => d.x + x)
+  const { pageNumber, totalPages } = ctx
+  const partCount = rows.length
   const pieces = rows.reduce((a, r) => a + r.qty, 0)
 
-  items.push(textItem(d.x, baseline(d.y + C.headingTopMm, C.headingMm), 'Cut list', C.headingMm, 'left', 'table-heading', INK.text, true))
+  items.push(textItem(d.x, baseline(d.y + C.headingTopMm, C.headingMm), t`Cut list`, C.headingMm, 'left', 'table-heading', INK.text, true))
   items.push(textItem(d.x, baseline(d.y + C.subheadingTopMm, C.subheadingMm), ctx.documentName, C.subheadingMm, 'left', 'table-subheading', INK.secondary))
   // Header row: text, then a 0.3 rule under it.
   const headerBase = baseline(d.y + C.tableTopMm, C.headerTextMm)
-  const headers = ['Part', 'Qty', 'L', 'W', 'H']
+  const headers = [
+    t({ comment: 'Cut list table column: the part name', context: 'cut list', message: 'Part' }),
+    t({ comment: 'Cut list table column: quantity, short for the column header', context: 'cut list', message: 'Qty' }),
+    t({ comment: 'Cut list table column: length, one-letter column header', context: 'cut list', message: 'L' }),
+    t({ comment: 'Cut list table column: width, one-letter column header', context: 'cut list', message: 'W' }),
+    t({ comment: 'Cut list table column: height, one-letter column header', context: 'cut list', message: 'H' }),
+  ]
   headers.forEach((h, i) => items.push(textItem(cols[i], headerBase, h, C.headerTextMm, 'left', 'table-header', INK.text, true)))
   const headerRuleY = d.y + C.tableTopMm + C.headerTextMm + C.headerPadMm + C.headerRuleMm / 2
   items.push({ kind: 'line', x1: d.x, y1: headerRuleY, x2: d.x + d.w, y2: headerRuleY, widthMm: C.headerRuleMm, gray: INK.rule, role: 'table-rule' })
@@ -151,12 +161,12 @@ export function cutListPageFurniture(
     items.push(
       ...titleBlockItems(layout, {
         documentName: ctx.documentName,
-        subtitle: 'Cut list',
-        centerMain: `${rows.length} part${rows.length === 1 ? '' : 's'} · ${pieces} piece${pieces === 1 ? '' : 's'}`,
+        subtitle: t`Cut list`,
+        centerMain: `${plural(partCount, { one: '# part', other: '# parts' })} · ${plural(pieces, { one: '# piece', other: '# pieces' })}`,
         centerSub: null,
         showScaleBar: false,
         tileId: null,
-        pageText: `Page ${ctx.pageNumber} of ${ctx.totalPages}`,
+        pageText: t`Page ${pageNumber} of ${totalPages}`,
         dateText: ctx.dateText,
       }),
     )

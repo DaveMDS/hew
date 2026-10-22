@@ -45,9 +45,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel } from './treeModel'
 import type { NodeRef } from './treeModel'
+import { isComposingKey } from '../input/keyboard'
 
 interface Props {
   scene: WasmScene
@@ -112,6 +114,7 @@ export function ComponentsPanel({
   onRenameComponent,
   onDeleteComponent,
 }: Props) {
+  const { t } = useLingui()
   // Suppress the docRev-triggers-re-render lint — intentionally re-queries
   // component_ids/definition_usage/component_name from the scene on every
   // document change, the same convention MaterialPalette follows.
@@ -239,7 +242,7 @@ export function ComponentsPanel({
   if (componentIds.length === 0) {
     return (
       <div style={{ color: 'var(--text-faint, #888)', fontSize: '10px', fontFamily: 'monospace' }}>
-        No component definitions in this document.
+        <Trans>No component definitions in this document.</Trans>
       </div>
     )
   }
@@ -275,8 +278,8 @@ export function ComponentsPanel({
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter components…"
-          aria-label="Filter components"
+          placeholder={t`Filter components…`}
+          aria-label={t`Filter components`}
           style={{
             flex: 1,
             fontSize: '11px',
@@ -299,7 +302,7 @@ export function ComponentsPanel({
               // would drop to <body> rather than staying in the filter flow.
               filterInputRef.current?.focus()
             }}
-            aria-label="Clear filter"
+            aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
               right: '4px',
@@ -333,11 +336,12 @@ export function ComponentsPanel({
               {isEditing ? (
                 <input
                   autoFocus
-                  aria-label={`Rename component ${name}`}
+                  aria-label={t`Rename component ${name}`}
                   value={editingText}
                   onChange={(e) => setEditingText(e.target.value)}
                   onFocus={(e) => e.currentTarget.select()}
                   onKeyDown={(e) => {
+                    if (isComposingKey(e)) return
                     if (e.key === 'Enter') {
                       e.preventDefault()
                       commitRename(id, name)
@@ -403,7 +407,7 @@ export function ComponentsPanel({
                 <button
                   type="button"
                   onClick={() => startRename(id, name)}
-                  aria-label={`Rename component ${name}`}
+                  aria-label={t`Rename component ${name}`}
                   style={{ ...ICON_BUTTON_STYLE, fontSize: '11px' }}
                 >
                   ✎
@@ -413,7 +417,7 @@ export function ComponentsPanel({
                 <button
                   type="button"
                   onClick={() => onDeleteComponent(id)}
-                  aria-label={`Delete component ${name}`}
+                  aria-label={t`Delete component ${name}`}
                   style={{ ...ICON_BUTTON_STYLE, fontSize: '12px' }}
                 >
                   ×
@@ -430,7 +434,7 @@ export function ComponentsPanel({
       })}
       {normalizedFilter !== '' && filteredRows.length === 0 && (
         <div style={{ color: 'var(--text-faint, #888)', fontSize: '10px', padding: '4px 0' }}>
-          No components match
+          <Trans>No components match</Trans>
         </div>
       )}
     </div>
@@ -445,12 +449,13 @@ const HOVER_BG = 'var(--surface-hover)'
  * consequential action (deletes palette content), so it earns a label
  * rather than a glyph a user might click by reflex. */
 export function PurgeUnusedButton({ onClick }: { onClick: () => void }) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   return (
     <button
       type="button"
-      aria-label="Purge Unused…"
-      title="Delete every unused material and component definition"
+      aria-label={t`Purge Unused…`}
+      title={t`Delete every unused material and component definition`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={(e) => {
@@ -469,7 +474,7 @@ export function PurgeUnusedButton({ onClick }: { onClick: () => void }) {
         lineHeight: 1.4,
       }}
     >
-      Purge Unused…
+      <Trans>Purge Unused…</Trans>
     </button>
   )
 }

@@ -19,6 +19,7 @@ import { hasPersistedLengthUnit, setLengthUnit } from '../settings/units'
 /** ISO 3166-1 alpha-2 regions that use imperial/US customary units for
  *  everyday measurement — the design's explicit "US/LR/MM" list (United
  *  States, Liberia, Myanmar; every other country is metric-first). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- ISO region codes
 const IMPERIAL_REGIONS = new Set(['US', 'LR', 'MM'])
 
 /**
@@ -58,19 +59,49 @@ export function regionFromLocale(locale: string | undefined | null): string | nu
   return null
 }
 
+/** True when this browser profile / app data dir already holds any Hew
+ *  setting or state (theme, recents, debug mode, …) — i.e. this is an
+ *  upgrade, not a first launch. Storage failures read as "existing" so a
+ *  seed never fires blind. */
+function hasOtherHewState(): boolean {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i)
+      if (key !== null && key.startsWith('hew')) return true
+    }
+    return false
+  } catch {
+    return true
+  }
+}
+
+/** Regions whose everyday building and making unit is the millimeter —
+ *  Japanese architecture and woodworking work in mm (docs/LOCALIZATION.md
+ *  "Numbers, units, and dates"). Other metric regions keep Meters. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- ISO region code
+const MILLIMETER_REGIONS = new Set(['JP'])
+
 /**
- * Seed the Architectural format once, at Shop Mode boot, if (a) this device
- * has never had a length format persisted, and (b) `locale` resolves to a
- * US/LR/MM region. A no-op in every other case — including every later
- * call, once the first seed (or any explicit user choice) has persisted
- * something. `locale` defaults to `navigator.language`; parameterized so
- * this stays a pure, unit-testable function rather than reading `navigator`
- * directly in the common case.
+ * Seed the length format once, on first boot, if (a) this device has never
+ * had a length format persisted, and (b) `locale` resolves to a region with
+ * a known everyday unit: Architectural for US/LR/MM, Millimeters for JP. A
+ * no-op in every other case — including every later call, once the first
+ * seed (or any explicit user choice) has persisted something. Called from
+ * Shop Mode's boot and from the editor's main-window entry (main.tsx).
+ * `locale` defaults to `navigator.language`; parameterized so this stays a
+ * pure, unit-testable function rather than reading `navigator` directly
+ * in the common case.
  */
 export function seedLocaleLengthUnit(locale: string | undefined = typeof navigator === 'undefined' ? undefined : navigator.language): void {
   if (hasPersistedLengthUnit()) return
+  // An existing install that simply never changed units has been living
+  // with Meters; only a profile with no Hew state at all is a first boot.
+  if (hasOtherHewState()) return
   const region = regionFromLocale(locale)
-  if (region !== null && IMPERIAL_REGIONS.has(region)) {
+  if (region === null) return
+  if (IMPERIAL_REGIONS.has(region)) {
     setLengthUnit('arch')
+  } else if (MILLIMETER_REGIONS.has(region)) {
+    setLengthUnit('mm')
   }
 }

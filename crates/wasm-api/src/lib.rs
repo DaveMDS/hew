@@ -772,6 +772,27 @@ fn node_ids(kinds: &[u8], ids: &[u64]) -> Result<Vec<NodeId>, ApiError> {
         .collect()
 }
 
+/// A history entry's structured description (docs/LOCALIZATION.md): `{"id":
+/// "transform", "args": {"verb": "move", "noun": "object", "count": 3}}`,
+/// with a nested kind under `args` for `repeat`/`bundle`. The app builds
+/// its localized undo/redo labels from this; `label` stays the English
+/// rendering for API callers.
+fn history_kind_json(kind: &kernel::HistoryKind) -> serde_json::Value {
+    let args: serde_json::Map<String, serde_json::Value> = kind
+        .args
+        .iter()
+        .map(|(key, value)| {
+            let v = match value {
+                kernel::HistoryArg::Text(s) => serde_json::json!(s),
+                kernel::HistoryArg::Count(n) => serde_json::json!(n),
+                kernel::HistoryArg::Kind(inner) => history_kind_json(inner),
+            };
+            (key.to_string(), v)
+        })
+        .collect();
+    serde_json::json!({ "id": kind.id, "args": args })
+}
+
 /// The undo label of a multi-node tag batch ("Tag 3 objects" / "Untag 1
 /// object").
 /// `HistoryOrigin` as `hew.history.status`'s wire shape (`crates/api/src/
@@ -6803,6 +6824,7 @@ impl Scene {
         let entry_json = |e: &kernel::HistoryEntryInfo| {
             serde_json::json!({
                 "label": e.label,
+                "kind": history_kind_json(&e.kind),
                 "origin": history_origin_json(&e.origin),
                 "bookkeeping": e.bookkeeping,
             })
@@ -12204,6 +12226,11 @@ mod tests {
             serde_json::from_str(&scene.history_entries_json()).unwrap();
         let undo = parsed["undo"].as_array().unwrap();
         assert_eq!(undo.len(), 1, "the first (saved) box remains on undo");
+        assert_eq!(
+            undo[0]["kind"]["id"], "push-pull",
+            "structured kind rides along with the label"
+        );
+        assert!(undo[0]["kind"]["args"].is_object());
         assert_eq!(undo[0]["label"], serde_json::json!("Push/Pull"));
         assert_eq!(undo[0]["origin"], serde_json::json!("user"));
 

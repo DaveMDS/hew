@@ -984,13 +984,13 @@ describe('TapeMeasureTool — Ctrl/Cmd measure-only mode (WP-7 item 1)', () => {
     const { tool } = makeTool(scene)
 
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0, kind: 'ground' }), RAY)
-    expect(tool.statusHint()).not.toContain('measuring only')
+    expect(tool.statusHint()).not.toContain('Measuring only')
 
     tool.setGuideCreationSuppressed(true)
-    expect(tool.statusHint()).toContain('measuring only')
+    expect(tool.statusHint()).toContain('Measuring only')
 
     tool.setGuideCreationSuppressed(false)
-    expect(tool.statusHint()).not.toContain('measuring only')
+    expect(tool.statusHint()).not.toContain('Measuring only')
   })
 
   it('releasing the modifier mid-gesture restores guide creation for the eventual commit', () => {

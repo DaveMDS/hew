@@ -197,6 +197,7 @@ export function cursorFor(toolName: string, copyBadge = false, eyedropper = fals
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${CURSOR_SIZE}" height="${CURSOR_SIZE}" viewBox="0 0 ${CURSOR_SIZE} ${CURSOR_SIZE}">` +
     `<g transform="translate(${offset} ${translate}) scale(${scale})" ` +
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- SVG markup attributes, not copy
     `fill="#111" stroke="#fff" stroke-width="${2.5 / scale}" stroke-linejoin="round" paint-order="stroke fill">` +
     glyph +
     `</g>` +

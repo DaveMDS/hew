@@ -7,6 +7,8 @@
  * (no `compact` branch).
  */
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { t } from '@lingui/core/macro'
+import { useLingui } from '@lingui/react/macro'
 import { PrintPage, PrintRoot } from '../print/PrintDocument'
 import { mmToPx } from '../print/layout'
 import { PAPER_LABEL, PAPER_NAMES, paperSize, type PaperName, type PaperSpec } from '../print/paper'
@@ -21,6 +23,7 @@ import {
   type PrintControllerProps,
 } from '../print/usePrintController'
 import { formatLengthIn, LENGTH_SYSTEM_OF, parseLengthToMeters, type LengthFormat } from '../settings/units'
+import { isComposingKey } from '../input/keyboard'
 
 export interface PrintDialogProps extends PrintControllerProps {
   onClose: () => void
@@ -31,6 +34,7 @@ export interface PrintDialogProps extends PrintControllerProps {
 function usePrintDialogKeys(onClose: () => void, doPrint: () => void): void {
   useEffect(() => {
     const onKey = (ev: KeyboardEvent): void => {
+      if (isComposingKey(ev)) return
       if (ev.key === 'Escape') {
         ev.preventDefault()
         onClose()
@@ -55,6 +59,15 @@ export function PrintDialog({ onClose, ...controllerProps }: PrintDialogProps) {
  * Shared formatting helpers
  * ====================================================================== */
 
+function fitLabel(label: string): string {
+  return t`${label} (fit)`
+}
+
+/** "+N more" under a Scene group whose pages are capped in the preview. */
+function moreNote(count: number): string {
+  return t`+${count} more`
+}
+
 /** Scale `<select>` rows: "1:10 — 1 cm = 10 cm" (metric) / "1″ = 1′-0″ —
  * 1:12" (imperial, label already carries the reading so the ratio trails). */
 function scaleMenuRows(presets: PrintScale[], format: LengthFormat, scale: PrintScale, presetIndex: number): { value: string; label: string }[] {
@@ -62,8 +75,8 @@ function scaleMenuRows(presets: PrintScale[], format: LengthFormat, scale: Print
     const hint = scaleHint(p, format)
     return { value: String(i), label: `${p.label} — ${hint ?? ratioText(p)}` }
   })
-  if (presetIndex < 0 && scale.kind === 'fit') rows.push({ value: 'fit', label: `${scale.label} (fit)` })
-  rows.push({ value: 'custom', label: 'Custom…' })
+  if (presetIndex < 0 && scale.kind === 'fit') rows.push({ value: 'fit', label: fitLabel(scale.label) })
+  rows.push({ value: 'custom', label: t`Custom…` })
   return rows
 }
 
@@ -214,6 +227,7 @@ function computePreviewScale(groups: PreviewGroup[], availW: number, availH: num
  * ====================================================================== */
 
 function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () => void }) {
+  const { t } = useLingui()
   const { opts, setOpts, format, job, plan, scenes, hasSelection, status, progress, error, busy, canPrint, previewPages, vectorNote, summary, printed, presets, presetIndex, isNudged, hasPrintFallback } = c
 
   // ---- custom paper (typed in the current unit family: mm metric, in imperial)
@@ -438,18 +452,23 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
     e.preventDefault()
     c.nudge(v[0], v[1])
   }
+  const sceneCount = scenes.length
   const nudgeMm = plan?.layout.nudgeMm ?? { dx: 0, dy: 0 }
+  const offsetX = Math.round(nudgeMm.dx)
+  const offsetY = Math.round(nudgeMm.dy)
 
   const previewCaption =
-    inspect !== null ? '100 % — drag to pan · click to go back' : opts.mode === 'scaled' && canNudge ? 'Drag the model to reposition · click a page to see it at 100 %' : 'Click a page to see it at 100 %'
+    inspect !== null ? t`100 % — drag to pan · click to go back` : opts.mode === 'scaled' && canNudge ? t`Drag the model to reposition · click a page to see it at 100 %` : t`Click a page to see it at 100 %`
 
   // The footer is quiet at rest — the preview and the controls already say
   // everything; it speaks only for progress, an error, or a warning.
+  const currentPage = progress === null ? 0 : Math.min(progress.done + 1, progress.total)
+  const totalPages = progress === null ? 0 : progress.total
   const summaryLine =
     status === 'rendering' && progress !== null
-      ? `Rendering page ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+      ? t`Rendering page ${currentPage} of ${totalPages}…`
       : status === 'error'
-        ? 'Couldn’t open the system print dialog.'
+        ? t`Couldn’t open the system print dialog.`
         : ''
   const isWarning = status === 'idle' && job !== null && job.totalPages > MANY_PAGES_WARNING
   const isError = status === 'error'
@@ -463,7 +482,7 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
         }}
         role="dialog"
         aria-modal="true"
-        aria-label="Print Layout"
+        aria-label={t`Print Layout`}
         className="hwprint"
         data-status={status}
         data-pages={job === null ? undefined : job.totalPages + c.cutPageCount}
@@ -473,16 +492,16 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
         onClick={(e) => e.stopPropagation()}
       >
         <div className="hwprint__header">
-          <div className="hwprint__title">Print Layout</div>
+          <div className="hwprint__title">{t`Print Layout`}</div>
           <SegControl
             testId="print-mode"
-            ariaLabel="Mode"
+            ariaLabel={t`Mode`}
             mode
             value={opts.mode}
             onChange={(v) => c.switchMode(v as PrintOptions['mode'])}
             options={[
-              { value: 'standard', label: 'Standard' },
-              { value: 'scaled', label: 'Scaled' },
+              { value: 'standard', label: t`Standard` },
+              { value: 'scaled', label: t`Scaled` },
             ]}
           />
         </div>
@@ -495,17 +514,17 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
                 type="button"
                 className="hwprint__center-btn"
                 onClick={c.centerNudge}
-                title={`Offset ${Math.round(nudgeMm.dx)} mm, ${Math.round(nudgeMm.dy)} mm — click to center`}
+                title={t`Offset ${offsetX} mm, ${offsetY} mm — click to center`}
                 data-testid="print-nudge-readout"
               >
-                Center
+                {t`Center`}
               </button>
             )}
             <div
               ref={previewScrollRef}
               data-testid="print-preview"
               tabIndex={0}
-              aria-label="Page preview — arrow keys nudge the tile grid in Scaled mode"
+              aria-label={t`Page preview — arrow keys nudge the tile grid in Scaled mode`}
               className={`hwprint__groups${inspect !== null ? ' hwprint__groups--inspect' : ''}`}
               style={{ justifyContent: multiGroup ? 'flex-start' : 'center', cursor: inspect !== null ? (dragging ? 'grabbing' : 'zoom-out') : canNudge ? (dragging ? 'grabbing' : 'grab') : 'default' }}
               onPointerDown={onGroupsPointerDown}
@@ -518,7 +537,7 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
                   </div>
                 </div>
               ) : job === null || plan === null || job.empty ? (
-                <div className="hwprint__empty">{job?.empty ? 'Nothing visible to print.' : 'Preparing…'}</div>
+                <div className="hwprint__empty">{job?.empty ? t`Nothing visible to print.` : t`Preparing…`}</div>
               ) : (
                 groups.map((g, gi) => (
                   <div key={`${g.label ?? ''}#${gi}`} className="hwprint__group">
@@ -528,7 +547,7 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
                         <PreviewTile key={`${pp.group ?? ''}#${pp.page.tile.id}#${pp.index}`} pp={pp} scale={gridScale} />
                       ))}
                     </div>
-                    {g.total.length > g.shown.length && <div className="hwprint__more-note">+{g.total.length - g.shown.length} more</div>}
+                    {g.total.length > g.shown.length && <div className="hwprint__more-note">{moreNote(g.total.length - g.shown.length)}</div>}
                   </div>
                 ))
               )}
@@ -539,12 +558,12 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
           {/* ---- controls (right, 302px) */}
           <div className="hwprint__controls" aria-busy={busy}>
             {opts.mode === 'scaled' && (
-              <Section title="Scale">
-                <Row label="View" htmlFor="print-view-select">
+              <Section title={t`Scale`}>
+                <Row label={t`View`} htmlFor="print-view-select">
                   <select
                     id="print-view-select"
                     className="hwprint__select"
-                    aria-label="View"
+                    aria-label={t`View`}
                     value={opts.view}
                     onChange={(e) => {
                       const view = e.target.value as PrintViewKind
@@ -557,150 +576,150 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
                     ))}
                   </select>
                 </Row>
-                <Row label="Scale" htmlFor="print-scale-select">
+                <Row label={t`Scale`} htmlFor="print-scale-select">
                   <div className="hwprint__inline">
-                    <select id="print-scale-select" className="hwprint__select" aria-label="Scale" style={{ flex: 1 }} value={scaleSelectValue} onChange={(e) => onScaleSelect(e.target.value)}>
+                    <select id="print-scale-select" className="hwprint__select" aria-label={t`Scale`} style={{ flex: 1 }} value={scaleSelectValue} onChange={(e) => onScaleSelect(e.target.value)}>
                       {scaleRows.map((r) => (
                         <option key={r.value} value={r.value}>{r.label}</option>
                       ))}
                     </select>
-                    <button type="button" className="hwprint__btn" onClick={fitScale} title="Largest standard scale that fits one page">Fit</button>
+                    <button type="button" className="hwprint__btn" onClick={fitScale} title={t`Largest standard scale that fits one page`}>{t`Fit`}</button>
                   </div>
                 </Row>
                 {showCustomScaleUi && (
                   <Solo>
                     <div className="hwprint__inline hwprint__inline--wrap">
-                      <input aria-label="On paper" className="hwprint__input" placeholder={LENGTH_SYSTEM_OF[format] === 'metric' ? '1 cm' : '1 in'} value={customScalePaper} onChange={(e) => editCustomPaper(e.target.value)} onBlur={commitCustomScale} onKeyDown={(e) => e.key === 'Enter' && commitCustomScale()} />
-                      <span className="hwprint__inline-text">on paper =</span>
-                      <input aria-label="In model" className="hwprint__input" placeholder={LENGTH_SYSTEM_OF[format] === 'metric' ? '10 cm' : '1 ft'} value={customScaleModel} onChange={(e) => editCustomModel(e.target.value)} onBlur={commitCustomScale} onKeyDown={(e) => e.key === 'Enter' && commitCustomScale()} />
-                      <span className="hwprint__inline-text">in model</span>
+                      <input aria-label={t`On paper`} className="hwprint__input" placeholder={LENGTH_SYSTEM_OF[format] === 'metric' ? t`1 cm` : t`1 in`} value={customScalePaper} onChange={(e) => editCustomPaper(e.target.value)} onBlur={commitCustomScale} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomScale() }} />
+                      <span className="hwprint__inline-text">{t`on paper =`}</span>
+                      <input aria-label={t`In model`} className="hwprint__input" placeholder={LENGTH_SYSTEM_OF[format] === 'metric' ? t`10 cm` : t`1 ft`} value={customScaleModel} onChange={(e) => editCustomModel(e.target.value)} onBlur={commitCustomScale} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomScale() }} />
+                      <span className="hwprint__inline-text">{t`in model`}</span>
                     </div>
                   </Solo>
                 )}
                 {showCustomScaleUi && customScaleErr !== null && <Solo className="hwprint__error">{customScaleErr}</Solo>}
-                <Row label="Extent">
+                <Row label={t`Extent`}>
                   <SegControl
                     testId="print-extent"
-                    ariaLabel="Extent"
+                    ariaLabel={t`Extent`}
                     value={opts.extent}
                     onChange={(v) => setOpts((o) => ({ ...o, extent: v as PrintOptions['extent'], view: v === 'view' ? 'current' : o.view }))}
                     options={[
-                      { value: 'model', label: 'Model' },
-                      { value: 'selection', label: 'Selection', disabled: !hasSelection, title: hasSelection ? 'Only the selected parts' : 'Nothing is selected.' },
-                      { value: 'view', label: 'Current view', title: 'Exactly what the viewport frames right now (sets View: Current view)' },
+                      { value: 'model', label: t`Model` },
+                      { value: 'selection', label: t`Selection`, disabled: !hasSelection, title: hasSelection ? t`Only the selected parts` : t`Nothing is selected.` },
+                      { value: 'view', label: t`Current view`, title: t`Exactly what the viewport frames right now (sets View: Current view)` },
                     ]}
                   />
                 </Row>
               </Section>
             )}
 
-            <Section title="Page">
+            <Section title={t`Page`}>
               {opts.mode === 'standard' && (
-                <Row label="Zoom">
+                <Row label={t`Zoom`}>
                   <SegControl
                     testId="print-zoom"
-                    ariaLabel="Zoom"
+                    ariaLabel={t`Zoom`}
                     value={opts.zoom}
                     onChange={(v) => setOpts((o) => ({ ...o, zoom: v as PrintOptions['zoom'] }))}
                     options={[
-                      { value: 'current', label: 'Current', title: 'The viewport\u2019s own framing' },
-                      { value: 'fit', label: 'Fit', title: 'Fill the page with the model' },
+                      { value: 'current', label: t`Current`, title: t`The viewport’s own framing` },
+                      { value: 'fit', label: t`Fit`, title: t`Fill the page with the model` },
                     ]}
                   />
                 </Row>
               )}
-              <Row label="Paper" htmlFor="print-paper-select">
-                <select id="print-paper-select" className="hwprint__select" aria-label="Paper" value={paperIsCustom ? 'custom' : (opts.paper as PaperName)} onChange={(e) => onPaperSelect(e.target.value)}>
+              <Row label={t`Paper`} htmlFor="print-paper-select">
+                <select id="print-paper-select" className="hwprint__select" aria-label={t`Paper`} value={paperIsCustom ? 'custom' : (opts.paper as PaperName)} onChange={(e) => onPaperSelect(e.target.value)}>
                   {PAPER_NAMES.map((n) => (
                     <option key={n} value={n}>{PAPER_LABEL[n]}</option>
                   ))}
-                  <option value="custom">Custom…</option>
+                  <option value="custom">{t`Custom…`}</option>
                 </select>
               </Row>
               {paperIsCustom && (
                 <Solo>
                   <div className="hwprint__inline">
-                    <input aria-label="Paper width" className="hwprint__input" value={paperWText} onChange={(e) => setPaperWText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => e.key === 'Enter' && commitCustomPaper()} />
+                    <input aria-label={t`Paper width`} className="hwprint__input" value={paperWText} onChange={(e) => setPaperWText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
                     <span className="hwprint__inline-text">×</span>
-                    <input aria-label="Paper height" className="hwprint__input" value={paperHText} onChange={(e) => setPaperHText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => e.key === 'Enter' && commitCustomPaper()} />
+                    <input aria-label={t`Paper height`} className="hwprint__input" value={paperHText} onChange={(e) => setPaperHText(e.target.value)} onBlur={commitCustomPaper} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') commitCustomPaper() }} />
                   </div>
                 </Solo>
               )}
               {paperIsCustom && paperErr !== null && <Solo className="hwprint__error">{paperErr}</Solo>}
-              <Row label="Orientation">
+              <Row label={t`Orientation`}>
                 <SegControl
                   testId="print-orientation"
-                  ariaLabel="Orientation"
+                  ariaLabel={t`Orientation`}
                   value={opts.orientation}
                   onChange={(v) => setOpts((o) => ({ ...o, orientation: v as PrintOptions['orientation'] }))}
                   options={[
-                    { value: 'auto', label: 'Auto' },
-                    { value: 'portrait', label: 'Portrait' },
-                    { value: 'landscape', label: 'Landscape' },
+                    { value: 'auto', label: t`Auto` },
+                    { value: 'portrait', label: t`Portrait` },
+                    { value: 'landscape', label: t`Landscape` },
                   ]}
                 />
               </Row>
-              <Row label="Margins">
+              <Row label={t`Margins`}>
                 <SegControl
                   testId="print-margins"
-                  ariaLabel="Margins"
+                  ariaLabel={t`Margins`}
                   value={opts.margin}
                   onChange={(v) => setOpts((o) => ({ ...o, margin: v as PrintOptions['margin'] }))}
                   options={[
-                    { value: 'normal', label: 'Normal', title: '½ in' },
-                    { value: 'narrow', label: 'Narrow', title: '¼ in' },
+                    { value: 'normal', label: t`Normal`, title: t`½ in` },
+                    { value: 'narrow', label: t`Narrow`, title: t`¼ in` },
                   ]}
                 />
               </Row>
               {scenes.length > 0 && (
-                <Row label="Pages" htmlFor="print-pages-select">
+                <Row label={t`Pages`} htmlFor="print-pages-select">
                   <span data-testid="print-pages">
-                    <select id="print-pages-select" className="hwprint__select" aria-label="Pages" value={opts.pages} onChange={(e) => setOpts((o) => ({ ...o, pages: e.target.value as PrintOptions['pages'] }))}>
-                      <option value="current">Current view</option>
-                      <option value="each_scene">Each Scene ({scenes.length})</option>
+                    <select id="print-pages-select" className="hwprint__select" aria-label={t`Pages`} value={opts.pages} onChange={(e) => setOpts((o) => ({ ...o, pages: e.target.value as PrintOptions['pages'] }))}>
+                      <option value="current">{t`Current view`}</option>
+                      <option value="each_scene">{t`Each Scene (${sceneCount})`}</option>
                     </select>
                   </span>
                 </Row>
               )}
             </Section>
 
-            <Section title="Appearance">
-              <Row label="Style">
+            <Section title={t`Appearance`}>
+              <Row label={t`Style`}>
                 <SegControl
                   testId="print-style"
-                  ariaLabel="Style"
+                  ariaLabel={t`Style`}
                   value={opts.style}
                   onChange={(v) => setOpts((o) => ({ ...o, style: v as PrintOptions['style'] }))}
                   options={[
-                    { value: 'shaded', label: 'As shown' },
-                    { value: 'lineart', label: 'Line art' },
+                    { value: 'shaded', label: t`As shown` },
+                    { value: 'lineart', label: t`Line art` },
                   ]}
                 />
               </Row>
-              <Row label="Include" top>
+              <Row label={t`Include`} top>
                 <div className="hwprint__checks">
                   <label className="hwprint__check">
-                    <input type="checkbox" checked={opts.includeDimensions} onChange={(e) => setOpts((o) => ({ ...o, includeDimensions: e.target.checked }))} /> Dimensions &amp; text
+                    <input type="checkbox" checked={opts.includeDimensions} onChange={(e) => setOpts((o) => ({ ...o, includeDimensions: e.target.checked }))} /> {t`Dimensions & text`}
                   </label>
                   <label className="hwprint__check">
-                    <input type="checkbox" checked={opts.includeGuides} onChange={(e) => setOpts((o) => ({ ...o, includeGuides: e.target.checked }))} /> Guides
+                    <input type="checkbox" checked={opts.includeGuides} onChange={(e) => setOpts((o) => ({ ...o, includeGuides: e.target.checked }))} /> {t`Guides`}
                   </label>
                   {opts.mode === 'standard' && (
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.includeGridAxes} onChange={(e) => setOpts((o) => ({ ...o, includeGridAxes: e.target.checked }))} /> Grid &amp; axes
+                      <input type="checkbox" checked={opts.includeGridAxes} onChange={(e) => setOpts((o) => ({ ...o, includeGridAxes: e.target.checked }))} /> {t`Grid & axes`}
                     </label>
                   )}
                   {opts.mode === 'scaled' && (
                     <label className={`hwprint__check${opts.style !== 'lineart' ? ' hwprint__check--disabled' : ''}`}>
-                      <input type="checkbox" disabled={opts.style !== 'lineart'} checked={opts.hiddenDashed} onChange={(e) => setOpts((o) => ({ ...o, hiddenDashed: e.target.checked }))} /> Hidden lines dashed
+                      <input type="checkbox" disabled={opts.style !== 'lineart'} checked={opts.hiddenDashed} onChange={(e) => setOpts((o) => ({ ...o, hiddenDashed: e.target.checked }))} /> {t`Hidden lines dashed`}
                     </label>
                   )}
                   <label className="hwprint__check">
-                    <input type="checkbox" checked={opts.cutList} onChange={(e) => setOpts((o) => ({ ...o, cutList: e.target.checked }))} /> Cut list page
+                    <input type="checkbox" checked={opts.cutList} onChange={(e) => setOpts((o) => ({ ...o, cutList: e.target.checked }))} /> {t`Cut list page`}
                   </label>
                   {opts.mode === 'standard' && (
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.titleBlock} onChange={(e) => setOpts((o) => ({ ...o, titleBlock: e.target.checked }))} /> Title block
+                      <input type="checkbox" checked={opts.titleBlock} onChange={(e) => setOpts((o) => ({ ...o, titleBlock: e.target.checked }))} /> {t`Title block`}
                     </label>
                   )}
                 </div>
@@ -708,20 +727,20 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
             </Section>
 
             {opts.mode === 'scaled' && (
-              <Section title="On the page">
+              <Section title={t`On the page`}>
                 <Solo>
                   <div className="hwprint__checks">
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.overlap} onChange={(e) => setOpts((o) => ({ ...o, overlap: e.target.checked }))} /> Overlap for gluing
+                      <input type="checkbox" checked={opts.overlap} onChange={(e) => setOpts((o) => ({ ...o, overlap: e.target.checked }))} /> {t`Overlap for gluing`}
                     </label>
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.marks} onChange={(e) => setOpts((o) => ({ ...o, marks: e.target.checked }))} /> Marks
+                      <input type="checkbox" checked={opts.marks} onChange={(e) => setOpts((o) => ({ ...o, marks: e.target.checked }))} /> {t`Marks`}
                     </label>
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.scaleBar} onChange={(e) => setOpts((o) => ({ ...o, scaleBar: e.target.checked }))} /> Scale bar
+                      <input type="checkbox" checked={opts.scaleBar} onChange={(e) => setOpts((o) => ({ ...o, scaleBar: e.target.checked }))} /> {t`Scale bar`}
                     </label>
                     <label className="hwprint__check">
-                      <input type="checkbox" checked={opts.titleBlock} onChange={(e) => setOpts((o) => ({ ...o, titleBlock: e.target.checked }))} /> Title block
+                      <input type="checkbox" checked={opts.titleBlock} onChange={(e) => setOpts((o) => ({ ...o, titleBlock: e.target.checked }))} /> {t`Title block`}
                     </label>
                   </div>
                 </Solo>
@@ -741,14 +760,14 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
             )}
             {isError && hasPrintFallback && (
               <button type="button" className="hwprint__link-btn" onClick={() => void c.doPrintFallback()}>
-                Open the browser print dialog instead
+                {t`Open the browser print dialog instead`}
               </button>
             )}
           </div>
           <div className="hwprint__footer-actions">
-            <button type="button" className="hwprint__btn hwprint__btn--ghost" onClick={onClose}>{status === 'sent' || status === 'saved' ? 'Done' : 'Cancel'}</button>
-            <button type="button" className="hwprint__btn hwprint__btn--savepdf" onClick={() => void c.doSavePdf()} disabled={!canPrint} data-testid="print-save-pdf">Save PDF…</button>
-            <button type="button" className="hwprint__btn hwprint__btn--print" onClick={() => void c.doPrint()} disabled={!canPrint} data-testid="print-confirm">Print…</button>
+            <button type="button" className="hwprint__btn hwprint__btn--ghost" onClick={onClose}>{status === 'sent' || status === 'saved' ? t`Done` : t`Cancel`}</button>
+            <button type="button" className="hwprint__btn hwprint__btn--savepdf" onClick={() => void c.doSavePdf()} disabled={!canPrint} data-testid="print-save-pdf">{t`Save PDF…`}</button>
+            <button type="button" className="hwprint__btn hwprint__btn--print" onClick={() => void c.doPrint()} disabled={!canPrint} data-testid="print-confirm">{t`Print…`}</button>
           </div>
         </div>
       </div>
@@ -757,6 +776,7 @@ function DesktopPrintDialog({ c, onClose }: { c: PrintController; onClose: () =>
   )
 }
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS source, not copy
 const PRINT_CSS = `
 .hwprint__overlay {
   position: fixed;

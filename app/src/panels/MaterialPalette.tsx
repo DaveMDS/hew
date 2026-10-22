@@ -30,9 +30,11 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { MATERIAL_SENTINEL } from '../tools/PaintTool'
 import { libraryStore } from '../io/libraryStore'
+import { isComposingKey } from '../input/keyboard'
 
 interface Props {
   scene: WasmScene
@@ -179,6 +181,7 @@ export function MaterialPalette({
   onRenameMaterial,
   onDeleteMaterial,
 }: Props) {
+  const { t } = useLingui()
   // Suppress the docRev-triggers-re-render lint — we intentionally use it to
   // re-query material_ids from the WASM scene on each document change.
   void docRev
@@ -323,6 +326,7 @@ export function MaterialPalette({
   const [draggingAlpha, setDraggingAlpha] = useState<number | null>(null)
   const selectedMaterialInfo =
     currentMaterialId === MATERIAL_SENTINEL ? undefined : scene.material_info(currentMaterialId)
+  const selectedName = selectedMaterialInfo?.name()
   // A newly selected swatch starts from its own alpha, not a stale drag value
   // left over from whatever was selected before.
   useEffect(() => setDraggingAlpha(null), [currentMaterialId])
@@ -397,14 +401,14 @@ export function MaterialPalette({
     setTexError(null)
     const file = pendingFile
     if (file === null) {
-      setTexError('Choose an image file first.')
+      setTexError(t`Choose an image file first.`)
       return
     }
     const name = texName.trim() || file.name
     const ww = parseFloat(texWorldW)
     const wh = parseFloat(texWorldH)
     if (isNaN(ww) || ww <= 0 || isNaN(wh) || wh <= 0) {
-      setTexError('World size must be positive numbers.')
+      setTexError(t`World size must be positive numbers.`)
       return
     }
     const format = file.type === 'image/jpeg' ? 1 : 0
@@ -447,8 +451,8 @@ export function MaterialPalette({
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter materials…"
-          aria-label="Filter materials"
+          placeholder={t`Filter materials…`}
+          aria-label={t`Filter materials`}
           style={{
             flex: 1,
             fontSize: '11px',
@@ -471,7 +475,7 @@ export function MaterialPalette({
               // would drop to <body> rather than staying in the filter flow.
               filterInputRef.current?.focus()
             }}
-            aria-label="Clear filter"
+            aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
               right: '4px',
@@ -496,14 +500,14 @@ export function MaterialPalette({
       >
         <div
           onClick={() => onSelectMaterial(MATERIAL_SENTINEL)}
-          title="Default (unpainted)"
+          title={t`Default (unpainted)`}
           style={{
             ...SWATCH_STYLE,
             background: '#cccccc',
             borderColor: currentMaterialId === MATERIAL_SENTINEL ? 'var(--accent-base)' : 'transparent',
           }}
         />
-        <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>Default</span>
+        <span style={{ color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}><Trans>Default</Trans></span>
       </div>
 
       {/* Material swatches */}
@@ -552,11 +556,12 @@ export function MaterialPalette({
               {isEditing ? (
                 <input
                   autoFocus
-                  aria-label={`Rename material ${name}`}
+                  aria-label={t`Rename material ${name}`}
                   value={editingText}
                   onChange={(e) => setEditingText(e.target.value)}
                   onFocus={(e) => e.currentTarget.select()}
                   onKeyDown={(e) => {
+                    if (isComposingKey(e)) return
                     if (e.key === 'Enter') {
                       e.preventDefault()
                       commitRename(id, name)
@@ -602,7 +607,7 @@ export function MaterialPalette({
                     e.stopPropagation()
                     startRename(id, name)
                   }}
-                  aria-label={`Rename material ${name}`}
+                  aria-label={t`Rename material ${name}`}
                   style={{
                     background: 'none',
                     border: 'none',
@@ -624,7 +629,7 @@ export function MaterialPalette({
                     e.stopPropagation()
                     onDeleteMaterial(id)
                   }}
-                  aria-label={`Delete material ${name}`}
+                  aria-label={t`Delete material ${name}`}
                   style={{
                     background: 'none',
                     border: 'none',
@@ -650,14 +655,14 @@ export function MaterialPalette({
       })}
       {normalizedFilter !== '' && filteredMaterialIds.length === 0 && (
         <div style={{ color: 'var(--text-faint, #888)', fontSize: '10px', padding: '4px 0' }}>
-          No materials match
+          <Trans>No materials match</Trans>
         </div>
       )}
 
       {/* Opacity */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
       <div style={{ fontWeight: 'bold', color: 'var(--text-tertiary, #aaa)', fontSize: '10px' }}>
-        Opacity{selectedMaterialInfo !== undefined ? ` — ${selectedMaterialInfo.name()}` : ''}
+        {selectedMaterialInfo !== undefined ? t`Opacity — ${selectedName}` : t`Opacity`}
       </div>
       <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
         <input
@@ -673,10 +678,10 @@ export function MaterialPalette({
           onBlur={commitAlpha}
           aria-label={
             selectedMaterialInfo !== undefined
-              ? `Opacity for ${selectedMaterialInfo.name()}`
-              : 'Opacity (select a material swatch first)'
+              ? t`Opacity for ${selectedName}`
+              : t`Opacity (select a material swatch first)`
           }
-          title={selectedMaterialInfo === undefined ? 'Select a material swatch to adjust its opacity' : undefined}
+          title={selectedMaterialInfo === undefined ? t`Select a material swatch to adjust its opacity` : undefined}
           style={{
             flex: 1,
             opacity: selectedMaterialInfo === undefined ? 0.4 : 1,
@@ -693,7 +698,7 @@ export function MaterialPalette({
           origin-private storage). */}
       {selectedMaterialInfo !== undefined && onSaveToLibrary !== undefined && libraryStore().available() && (
         <button style={BTN_STYLE} onClick={() => onSaveToLibrary(currentMaterialId)}>
-          Save to Library
+          <Trans>Save to Library</Trans>
         </button>
       )}
 
@@ -701,7 +706,7 @@ export function MaterialPalette({
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
 
       {/* Add color */}
-      <SubPaneHeader label="Add color" expanded={colorOpen} onToggle={() => setColorOpen((v) => !v)} />
+      <SubPaneHeader label={t`Add color`} expanded={colorOpen} onToggle={() => setColorOpen((v) => !v)} />
       {colorOpen && (
         <>
           <input
@@ -709,9 +714,9 @@ export function MaterialPalette({
             type="text"
             value={newColorName}
             onChange={(e) => setNewColorName(e.target.value)}
-            placeholder="Name…"
+            placeholder={t`Name…`}
             style={INPUT_STYLE}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleAddColor() }}
+            onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') handleAddColor() }}
           />
           <div style={{ position: 'relative', width: '100%', height: '24px' }}>
             <input
@@ -731,7 +736,7 @@ export function MaterialPalette({
                 if (newColorHex === null) setNewColorHex(e.currentTarget.value)
               }}
               onChange={(e) => setNewColorHex(e.target.value)}
-              aria-label="Choose color"
+              aria-label={t`Choose color`}
               style={{
                 width: '100%',
                 height: '24px',
@@ -765,7 +770,7 @@ export function MaterialPalette({
                   fontFamily: 'monospace',
                 }}
               >
-                Choose color…
+                <Trans>Choose color…</Trans>
               </div>
             )}
           </div>
@@ -778,21 +783,21 @@ export function MaterialPalette({
             disabled={newColorHex === null}
             onClick={handleAddColor}
           >
-            + Add color
+            <Trans>+ Add color</Trans>
           </button>
         </>
       )}
 
       {/* Add texture */}
       <div style={{ borderTop: '1px solid var(--border-hairline, #444)', margin: '2px 0' }} />
-      <SubPaneHeader label="Add texture" expanded={textureOpen} onToggle={() => setTextureOpen((v) => !v)} />
+      <SubPaneHeader label={t`Add texture`} expanded={textureOpen} onToggle={() => setTextureOpen((v) => !v)} />
       {textureOpen && (
         <>
           <input
             type="text"
             value={texName}
             onChange={(e) => setTexName(e.target.value)}
-            placeholder="Name…"
+            placeholder={t`Name…`}
             style={INPUT_STYLE}
           />
           <input
@@ -803,7 +808,7 @@ export function MaterialPalette({
             style={{ fontSize: '10px', color: 'var(--text-tertiary, #aaa)' }}
           />
           <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
-            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>W:</span>
+            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>{t({ comment: 'Abbreviation for width, label beside the texture width field', message: 'W:' })}</span>
             <input
               type="number"
               value={texWorldW}
@@ -812,7 +817,7 @@ export function MaterialPalette({
               onChange={(e) => setTexWorldW(e.target.value)}
               style={{ ...INPUT_STYLE, width: '60px' }}
             />
-            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>H:</span>
+            <span style={{ color: 'var(--text-faint, #888)', flexShrink: 0 }}>{t({ comment: 'Abbreviation for height, label beside the texture height field', message: 'H:' })}</span>
             <input
               type="number"
               value={texWorldH}
@@ -831,7 +836,7 @@ export function MaterialPalette({
             <span style={{ color: 'var(--status-leaky)', fontSize: '10px' }}>{texError}</span>
           )}
           <button style={BTN_STYLE} onClick={() => { void handleAddTexture() }}>
-            + Add texture
+            <Trans>+ Add texture</Trans>
           </button>
         </>
       )}

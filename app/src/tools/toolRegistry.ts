@@ -24,6 +24,9 @@
  * default key for them either.
  */
 
+import { i18n } from '@lingui/core'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
 import type { ToolName } from './toolIcons'
 
 export type { ToolName }
@@ -31,7 +34,11 @@ export type { ToolName }
 export type ToolGroup = 'Draw' | 'Modify' | 'Inspect'
 
 export interface ToolSpec {
+  /** The tool ID: compared with === across the app, persisted, and used as
+   * `activeTool`. Never displayed — show `label` instead. */
   name: ToolName
+  /** Display name. Resolve with `i18n._(spec.label)` at render time. */
+  label: MessageDescriptor
   /** Tool-rail group. Undefined = no permanent rail slot (still reachable
    * via the Tools/Camera menus, and — once lands — the command
    * palette); matches `03_tool_rail.md`'s curated Draw/Modify/Inspect set,
@@ -43,63 +50,65 @@ export interface ToolSpec {
   winKey: string
 }
 
+// oxlint-disable lingui/no-unlocalized-strings -- tool IDs, rail group IDs, and shortcut keys are identifiers, not copy; every label is a msg descriptor
 export const TOOL_REGISTRY: readonly ToolSpec[] = [
   // ---- Draw ----
-  { name: 'Select', group: 'Draw', macKey: 'Spc', winKey: 'Spc' },
-  { name: 'Line', group: 'Draw', macKey: 'L', winKey: 'L' },
-  { name: 'Rectangle', group: 'Draw', macKey: 'R', winKey: 'R' },
-  { name: 'Circle', group: 'Draw', macKey: 'C', winKey: 'C' },
+  { name: 'Select', label: msg({ context: 'tool', message: 'Select' }), group: 'Draw', macKey: 'Spc', winKey: 'Spc' },
+  { name: 'Line', label: msg({ context: 'tool', message: 'Line' }), group: 'Draw', macKey: 'L', winKey: 'L' },
+  { name: 'Rectangle', label: msg`Rectangle`, group: 'Draw', macKey: 'R', winKey: 'R' },
+  { name: 'Circle', label: msg`Circle`, group: 'Draw', macKey: 'C', winKey: 'C' },
   // Polygon: SketchUp assigns no default key (it lives in the shapes
   // flyout) — reachable from the rail and the command palette only.
-  { name: 'Polygon', group: 'Draw', macKey: '', winKey: '' },
+  { name: 'Polygon', label: msg`Polygon`, group: 'Draw', macKey: '', winKey: '' },
   // Arc: 'A' is SketchUp's real arc key (the arc FAMILY key there — it
   // cycles 2-point/3-point/pie modes; Hew's Arc is the simpler 2-point
   // gesture, but the same key keeps muscle memory intact).
-  { name: 'Arc', group: 'Draw', macKey: 'A', winKey: 'A' },
+  { name: 'Arc', label: msg`Arc`, group: 'Draw', macKey: 'A', winKey: 'A' },
   // ---- Modify ----
-  { name: 'Push/Pull', group: 'Modify', macKey: 'P', winKey: 'P' },
+  { name: 'Push/Pull', label: msg`Push/Pull`, group: 'Modify', macKey: 'P', winKey: 'P' },
   // Follow Me: SketchUp defines no default key for it either.
-  { name: 'Follow Me', group: 'Modify', macKey: '', winKey: '' },
+  { name: 'Follow Me', label: msg`Follow Me`, group: 'Modify', macKey: '', winKey: '' },
   // Offset: 'F' is SketchUp's real offset key.
-  { name: 'Offset', group: 'Modify', macKey: 'F', winKey: 'F' },
-  { name: 'Move', group: 'Modify', macKey: 'M', winKey: 'M' },
-  { name: 'Rotate', group: 'Modify', macKey: 'Q', winKey: 'Q' },
-  { name: 'Scale', group: 'Modify', macKey: 'S', winKey: 'S' },
+  { name: 'Offset', label: msg({ context: 'tool', message: 'Offset' }), group: 'Modify', macKey: 'F', winKey: 'F' },
+  { name: 'Move', label: msg({ context: 'tool', message: 'Move' }), group: 'Modify', macKey: 'M', winKey: 'M' },
+  { name: 'Rotate', label: msg({ context: 'tool', message: 'Rotate' }), group: 'Modify', macKey: 'Q', winKey: 'Q' },
+  { name: 'Scale', label: msg({ context: 'tool', message: 'Scale' }), group: 'Modify', macKey: 'S', winKey: 'S' },
   // ---- Inspect ----
-  { name: 'Tape Measure', group: 'Inspect', macKey: 'T', winKey: 'T' },
+  { name: 'Tape Measure', label: msg`Tape Measure`, group: 'Inspect', macKey: 'T', winKey: 'T' },
   // Dimension: SketchUp's own Dimension tool has no default bare-letter key
   // either (it lives on the Tools/Construction toolbar, not the drawing
   // rail) — rail + palette per the design doc, no shortcut.
-  { name: 'Dimension', group: 'Inspect', macKey: '', winKey: '' },
-  { name: 'Paint', group: 'Inspect', macKey: 'B', winKey: 'B' },
+  { name: 'Dimension', label: msg({ context: 'tool', message: 'Dimension' }), group: 'Inspect', macKey: '', winKey: '' },
+  { name: 'Paint', label: msg({ context: 'tool', message: 'Paint' }), group: 'Inspect', macKey: 'B', winKey: 'B' },
   // Section Plane: SketchUp assigns no default key either.
-  { name: 'Section Plane', group: 'Inspect', macKey: '', winKey: '' },
+  { name: 'Section Plane', label: msg`Section Plane`, group: 'Inspect', macKey: '', winKey: '' },
   // ---- Menu/palette-only (no rail slot; see ToolSpec.group doc above) ----
-  { name: 'Protractor', macKey: '', winKey: '' },
-  { name: 'Slice', macKey: '', winKey: '' },
-  { name: 'Edit Vertex', macKey: '', winKey: '' },
+  { name: 'Protractor', label: msg`Protractor`, macKey: '', winKey: '' },
+  { name: 'Slice', label: msg({ context: 'tool', message: 'Slice' }), macKey: '', winKey: '' },
+  { name: 'Edit Vertex', label: msg`Edit Vertex`, macKey: '', winKey: '' },
   // Drawing Axes: SketchUp assigns no default key either.
-  { name: 'Drawing Axes', macKey: '', winKey: '' },
+  { name: 'Drawing Axes', label: msg`Drawing Axes`, macKey: '', winKey: '' },
   // Text: leader-text annotations (docs/design/dimensions-text.md) — menu/
   // palette-only, like Protractor/Slice/Edit Vertex above.
-  { name: 'Text', macKey: '', winKey: '' },
+  { name: 'Text', label: msg({ context: 'tool', message: 'Text' }), macKey: '', winKey: '' },
   // Position Texture: reached via the contextual dock on a textured face
   // (paint-tool design §3), not the rail — SketchUp assigns no default key.
-  { name: 'Position Texture', macKey: '', winKey: '' },
+  { name: 'Position Texture', label: msg`Position Texture`, macKey: '', winKey: '' },
   // Camera tools: SketchUp's real O / H / Z everywhere.
-  { name: 'Orbit', macKey: 'O', winKey: 'O' },
-  { name: 'Pan', macKey: 'H', winKey: 'H' },
-  { name: 'Zoom', macKey: 'Z', winKey: 'Z' },
+  { name: 'Orbit', label: msg`Orbit`, macKey: 'O', winKey: 'O' },
+  { name: 'Pan', label: msg({ context: 'tool', message: 'Pan' }), macKey: 'H', winKey: 'H' },
+  { name: 'Zoom', label: msg({ context: 'tool', message: 'Zoom' }), macKey: 'Z', winKey: 'Z' },
   // Zoom Window (docs/design/camera.md §3): no default bare-letter shortcut
   // in v1 — SketchUp ships none for it either (menu + command palette only).
-  { name: 'Zoom Window', macKey: '', winKey: '' },
+  { name: 'Zoom Window', label: msg`Zoom Window`, macKey: '', winKey: '' },
   // Position Camera / Look Around / Walk (docs/design/camera.md §4): no
   // default bare-letter shortcuts in v1 — SketchUp ships none for these
   // either (menu + command palette only).
-  { name: 'Position Camera', macKey: '', winKey: '' },
-  { name: 'Look Around', macKey: '', winKey: '' },
-  { name: 'Walk', macKey: '', winKey: '' },
+  { name: 'Position Camera', label: msg`Position Camera`, macKey: '', winKey: '' },
+  { name: 'Look Around', label: msg`Look Around`, macKey: '', winKey: '' },
+  { name: 'Walk', label: msg({ context: 'tool', message: 'Walk' }), macKey: '', winKey: '' },
 ]
+// oxlint-enable lingui/no-unlocalized-strings
 
 /** Every tool name, in registry order — replaces the old App.tsx `TOOLS` const. */
 export const TOOLS: readonly ToolName[] = TOOL_REGISTRY.map((t) => t.name)
@@ -122,8 +131,25 @@ export function shortcutFor(name: ToolName, isMac: boolean): string {
 }
 
 /** Tools grouped for the rail, in `03_tool_rail.md`'s Draw/Modify/Inspect order. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- rail group IDs (the heading text is resolved in ToolRail)
 export const RAIL_GROUPS: readonly ToolGroup[] = ['Draw', 'Modify', 'Inspect']
 
 export function toolsInGroup(group: ToolGroup): ToolSpec[] {
   return TOOL_REGISTRY.filter((t) => t.group === group)
+}
+
+/** Translated display name for a tool ID, resolved at call time. Falls back
+ * to the ID itself for a name the registry doesn't know (the viewport can
+ * report non-registry names). Use this wherever a tool name is SHOWN; keep
+ * comparing and storing `name`. */
+export function toolLabel(name: string): string {
+  const spec = BY_NAME.get(name as ToolName)
+  return spec === undefined ? name : i18n._(spec.label)
+}
+
+/** Rail group headings, keyed by the group ID. Resolve with `i18n._()`. */
+export const TOOL_GROUP_LABELS: Record<ToolGroup, MessageDescriptor> = {
+  Draw: msg`Draw`,
+  Modify: msg`Modify`,
+  Inspect: msg`Inspect`,
 }

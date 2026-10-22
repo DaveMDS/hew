@@ -78,6 +78,7 @@
  * ignored if no direction is available yet).
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, SnapConstraint, EditContext } from './types'
 import { editContextEq } from './types'
@@ -90,7 +91,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE, type FatSegmen
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { arrowToAxis, editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { displayedLength, isFreePick } from './displayedValue'
 import { segmentLength, directionBetween, rehomePlaneNormal, fromPointCandidate, dotV3 } from './lineInput'
@@ -273,17 +274,18 @@ export class LineTool implements Tool {
   statusHint(): string {
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
       if (this.retype.isOpen) {
-        return 'Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish.'
+        return t`Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish.`
       }
-      return 'Click the next point — type a length for an exact segment; double-click or Esc to finish.'
+      return t`Click the next point — type a length for an exact segment; double-click or Esc to finish.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click to start; same arrow or Esc unlocks.`
     }
     if (this.pin.current !== null) {
-      return 'Pinned to the hovered plane — click to start; Shift again or Esc unpins.'
+      return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
     }
-    return 'Click to start a line — on the ground plane or any face or sketch.'
+    return t`Click to start a line — on the ground plane or any face or sketch.`
   }
 
   private planeStage: PlaneStage = { kind: 'idle' }
@@ -1574,7 +1576,7 @@ export class LineTool implements Tool {
     // same-point re-click or a genuine snap-resolution defect, and mirrors
     // `OffsetTool._commit`'s identical guard/toast for the same reason.
     if (segmentLength(anchor, cursor) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast("That point is the same as the last one — move the cursor before clicking")
+      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
       return false
     }
 
@@ -1619,7 +1621,7 @@ export class LineTool implements Tool {
       const { result: closed, report } = runDraft(
         this.wasmScene,
         draftTargetFromSketchTarget(effectiveTarget),
-        'Line',
+        t({ context: 'tool', message: 'Line' }),
         (d) => addDraftSegment(this.wasmScene, d, anchor, cursor).length > 0,
       )
       const planeTag = effectiveTarget.kind === 'existing'
@@ -1644,7 +1646,7 @@ export class LineTool implements Tool {
         )
         if (spansEarlierPlane) {
           this.onToast(
-            "This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead.",
+            t`This outline spans two planes, so it can't close into a single face — finish the shape on one plane instead.`,
           )
         }
       }
@@ -1750,7 +1752,7 @@ export class LineTool implements Tool {
     const { points, object, face } = this.faceStage
     const last = points[points.length - 1]
     if (segmentLength(last, point) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast("That point is the same as the last one — move the cursor before clicking")
+      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
       return false
     }
 
@@ -1792,7 +1794,7 @@ export class LineTool implements Tool {
    *  the drafting context, and it lifts the same drawing). */
   private _commitFaceSegment(object: bigint, face: bigint, a: V3, b: V3): boolean {
     const run = (target: DraftTarget) =>
-      runDraft(this.wasmScene, target, 'Line', (d) => addDraftSegment(this.wasmScene, d, a, b))
+      runDraft(this.wasmScene, target, t({ context: 'tool', message: 'Line' }), (d) => addDraftSegment(this.wasmScene, d, a, b))
     try {
       let outcome: ReturnType<typeof run>
       try {
@@ -1840,7 +1842,7 @@ export class LineTool implements Tool {
     // near-zero length is refused — and never silently (this file's rule:
     // an honest "nothing to commit" beats silence, see `_commitPlaneSegment`).
     if (Math.abs(distance) <= DEGENERATE_SEGMENT_EPS) {
-      this.onToast("That point is the same as the last one — move the cursor before clicking")
+      this.onToast(t`That point is the same as the last one — move the cursor before clicking`)
       this.typed = ''
       this.onMeasurementCb('')
       return

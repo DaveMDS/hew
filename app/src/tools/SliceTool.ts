@@ -61,6 +61,7 @@
  *     cursor, the same way Push/Pull targets the one face under the cursor.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -155,7 +156,7 @@ export class SliceTool implements Tool {
 
   /** Live status-bar guidance (see Tool.statusHint). */
   statusHint(): string {
-    return 'Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset.'
+    return t`Click a solid to cut it along the plane — arrow keys aim the plane along an axis, hovering a face aligns to it, or type an offset.`
   }
 
   private preview: THREE.Group
@@ -441,7 +442,7 @@ export class SliceTool implements Tool {
   private _commit(point: [number, number, number], normal: [number, number, number]): void {
     const target = this.lastPickObject
     if (target === null) {
-      this.onToast("Hover a solid's face before slicing")
+      this.onToast(t`Hover a solid's face before slicing`)
       return
     }
 

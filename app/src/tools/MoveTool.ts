@@ -67,6 +67,8 @@
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
 
+import { formatNumber } from '../i18n/format'
+import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
@@ -144,22 +146,22 @@ export class MoveTool implements Tool {
     if (this.stage.kind === 'idle') {
       if (this.retype.isOpen) {
         return this.arrayHot !== null
-          ? 'Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies.'
-          : 'Type an exact distance to redo the move you just made — or click a base point to start another.'
+          ? t`Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies.`
+          : t`Type an exact distance to redo the move you just made — or click a base point to start another.`
       }
       if (this.arrayHot !== null) {
-        return 'Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.'
+        return t`Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.`
       }
       if (this.selection.length === 0) {
-        return 'Click the object you want to move.'
+        return t`Click the object you want to move.`
       }
       return this.copyMode
-        ? `Copy is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to move instead.`
-        : 'Click a base point to start the move.'
+        ? t`Copy is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to move instead.`
+        : t`Click a base point to start the move.`
     }
     return this.copyMode
-      ? `Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to move instead.`
-      : `Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
+      ? t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to move instead.`
+      : t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -516,7 +518,7 @@ export class MoveTool implements Tool {
         }
       }
       if (nodes.length === 0) {
-        this.onToast('Click an object to move it')
+        this.onToast(t`Click an object to move it`)
         return
       }
 
@@ -702,7 +704,7 @@ export class MoveTool implements Tool {
       // direction to go in; say so rather than silently doing nothing.
       this._resetToIdle()
       if (dist !== 0) {
-        this.onToast('Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.')
+        this.onToast(t`Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.`)
       }
       return
     }
@@ -975,7 +977,10 @@ export class MoveTool implements Tool {
 
     const cap = this.wasmScene.max_array_count()
     if (spec.count > cap) {
-      this.onToast(`Array copy is limited to ${cap} copies`)
+      const limit = formatNumber(cap, { grouping: false })
+      this.onToast(
+        plural(cap, { one: `Array copy is limited to ${limit} copy`, other: `Array copy is limited to ${limit} copies` }),
+      )
       return
     }
 
@@ -988,7 +993,7 @@ export class MoveTool implements Tool {
     // keeps the window open.
     if (this.wasmScene.history_generation().toString() !== hot.historyGen) {
       this.arrayHot = null
-      this.onToast('Array entry ended — the model changed since the copy')
+      this.onToast(t`Array entry ended — the model changed since the copy`)
       return
     }
 
@@ -1053,7 +1058,7 @@ export class MoveTool implements Tool {
 
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */
   private _decorate(text: string): string {
-    return this.copyMode ? `Copy · ${text}` : text
+    return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
   }
 
   /**

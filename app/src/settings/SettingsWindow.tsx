@@ -15,14 +15,18 @@
  */
 
 import { useState, type CSSProperties, type ReactElement } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
 import { UnitsPane } from './UnitsPane'
 import { ThemePane } from './ThemePane'
+import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
-type Category = 'units' | 'theme' | 'folders' | 'advanced' | 'debug'
+type Category = 'units' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
 
 const iconProps = {
   width: 22,
@@ -67,6 +71,16 @@ function DebugIcon() {
   )
 }
 
+/** Globe — Language. */
+function LanguageIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M3.5 12h17M12 3.5c2.6 2.6 2.6 14.4 0 17M12 3.5c-2.6 2.6-2.6 14.4 0 17" />
+    </svg>
+  )
+}
+
 /** Folder — Folders. */
 function FoldersIcon() {
   return (
@@ -88,12 +102,13 @@ function AdvancedIcon() {
   )
 }
 
-const TABS: { id: Category; label: string; icon: ReactElement }[] = [
-  { id: 'units', label: 'Units', icon: <UnitsIcon /> },
-  { id: 'theme', label: 'Theme', icon: <ThemeIcon /> },
-  { id: 'folders', label: 'Folders', icon: <FoldersIcon /> },
-  { id: 'advanced', label: 'Advanced', icon: <AdvancedIcon /> },
-  { id: 'debug', label: 'Debug', icon: <DebugIcon /> },
+const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
+  { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
+  { id: 'theme', label: msg`Theme`, icon: <ThemeIcon /> },
+  { id: 'language', label: msg`Language`, icon: <LanguageIcon /> },
+  { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
+  { id: 'advanced', label: msg`Advanced`, icon: <AdvancedIcon /> },
+  { id: 'debug', label: msg`Debug`, icon: <DebugIcon /> },
 ]
 
 const tabStyle: CSSProperties = {
@@ -120,6 +135,7 @@ const activeTabStyle: CSSProperties = {
 }
 
 export function SettingsWindow() {
+  const { t, i18n } = useLingui()
   const [active, setActive] = useState<Category>('units')
   useTextFieldMenuActions()
 
@@ -145,7 +161,7 @@ export function SettingsWindow() {
       {/* Toolbar-style tab strip (icon above label, centered). */}
       <div
         role="tablist"
-        aria-label="Settings"
+        aria-label={t`Settings`}
         style={{
           display: 'flex',
           justifyContent: 'center',
@@ -170,7 +186,7 @@ export function SettingsWindow() {
               style={selected ? activeTabStyle : tabStyle}
             >
               {tab.icon}
-              <span>{tab.label}</span>
+              <span>{i18n._(tab.label)}</span>
             </button>
           )
         })}
@@ -185,6 +201,7 @@ export function SettingsWindow() {
       >
         {active === 'units' && <UnitsPane />}
         {active === 'theme' && <ThemePane />}
+        {active === 'language' && <LanguagePane />}
         {active === 'folders' && <FoldersPane />}
         {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}

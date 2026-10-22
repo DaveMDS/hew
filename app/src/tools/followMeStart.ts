@@ -99,6 +99,8 @@
  * predicts.)
  */
 
+import { t } from '@lingui/core/macro'
+
 /** A world point / direction. */
 export type Vec3 = readonly [number, number, number]
 
@@ -570,9 +572,9 @@ function evaluateOpen(path: PathPolyline, plane: PlaneDef): StartVerdict {
 export function refusalGuidance(reason: RefusalReason): string {
   switch (reason) {
     case 'corner-overhang':
-      return 'This profile will be refused: it hangs back over the corner, folding into its own material. Slide it fully past the corner.'
+      return t`This profile will be refused: it hangs back over the corner, folding into its own material. Slide it fully past the corner.`
     case 'detached':
-      return 'This profile will be refused: it is square to the path but does not touch it. Move it onto the path.'
+      return t`This profile will be refused: it is square to the path but does not touch it. Move it onto the path.`
   }
 }
 
@@ -580,5 +582,5 @@ export function refusalGuidance(reason: RefusalReason): string {
  *  warning: the profile isn't square to the path yet, but Follow Me will
  *  stand it upright automatically before sweeping (design §2c). */
 export function orientGuidance(): string {
-  return 'This profile isn’t square to the path yet — Follow Me will stand it upright automatically before sweeping.'
+  return t`This profile isn’t square to the path yet — Follow Me will stand it upright automatically before sweeping.`
 }

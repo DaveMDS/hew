@@ -45,6 +45,8 @@
  * a brand-new plane.
  */
 
+import { t } from '@lingui/core/macro'
+
 export interface RetypeScene {
   history_generation(): bigint
   scene_undo(): { free(): void }
@@ -185,7 +187,24 @@ export class RetypeWindow<Spec> {
 
 /** The toast every tool shows when `apply` answers 'stale'. */
 export function retypeStaleMessage(shape: string): string {
-  return `Dimension entry ended — the model changed since the ${shape} was drawn`
+  switch (shape) {
+    case 'line':
+      return t`Dimension entry ended — the model changed since the line was drawn`
+    case 'arc':
+      return t`Dimension entry ended — the model changed since the arc was drawn`
+    case 'circle':
+      return t`Dimension entry ended — the model changed since the circle was drawn`
+    case 'polygon':
+      return t`Dimension entry ended — the model changed since the polygon was drawn`
+    case 'rectangle':
+      return t`Dimension entry ended — the model changed since the rectangle was drawn`
+    case 'offset':
+      return t`Dimension entry ended — the model changed since the offset was drawn`
+    case 'push/pull':
+      return t`Dimension entry ended — the model changed since the push/pull was drawn`
+    default:
+      return t`Dimension entry ended — the model changed since the ${shape} was drawn`
+  }
 }
 
 /**

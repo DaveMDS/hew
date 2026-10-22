@@ -38,12 +38,25 @@ import {
   type ThemeSetting,
 } from './theme'
 import { getDebugMode, setDebugMode, subscribe as subscribeDebug } from './debugMode'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
+import {
+  SYSTEM_LANGUAGE,
+  getLanguageSetting,
+  setLanguageSetting,
+  subscribe as subscribeLanguage,
+  type LanguageSetting,
+} from '../i18n/language'
+import { languageOptions } from '../i18n/languageOptions'
 import { libraryStore } from '../io/libraryStore'
 import { describeIdentity, useServerSettingForm } from './serverForm'
 import { CLOUD_ORIGIN } from './server'
+import { isComposingKey } from '../input/keyboard'
 
 // Windows 11 app type ramp (Segoe UI Variable falls back to Segoe UI in
 // webviews that don't expose the variable face).
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
 const FONT = "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif"
 
 const pageStyle: CSSProperties = {
@@ -226,10 +239,11 @@ function ToggleSwitch({
   onChange: (next: boolean) => void
   ariaLabel: string
 }) {
+  const { t } = useLingui()
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexShrink: 0 }}>
       <span style={{ fontSize: '14px', color: 'var(--text-secondary, #ddd)' }}>
-        {checked ? 'On' : 'Off'}
+        {checked ? t`On` : t`Off`}
       </span>
       <button
         role="switch"
@@ -268,24 +282,29 @@ function ToggleSwitch({
   )
 }
 
-const SYSTEM_OPTIONS: { value: LengthSystem; label: string }[] = [
-  { value: 'metric', label: 'Metric' },
-  { value: 'imperial', label: 'Imperial' },
+const SYSTEM_OPTIONS: { value: LengthSystem; label: MessageDescriptor }[] = [
+  { value: 'metric', label: msg`Metric` },
+  { value: 'imperial', label: msg`Imperial` },
 ]
 
 // Windows 11 phrasing: apps offer "Use system setting" rather than "Auto".
-const THEME_OPTIONS: { value: ThemeSetting; label: string }[] = [
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
-  { value: 'auto', label: 'Use system setting' },
+const THEME_OPTIONS: { value: ThemeSetting; label: MessageDescriptor }[] = [
+  { value: 'light', label: msg`Light` },
+  { value: 'dark', label: msg`Dark` },
+  { value: 'auto', label: msg`Use system setting` },
 ]
 
 /** The "Server" section — the Windows mirror of AdvancedPane.tsx, on the
  *  same `useServerSettingForm` state machine (see serverForm.ts). */
 function ServerSection() {
+  const { t } = useLingui()
   const form = useServerSettingForm()
+  const cloudHost = CLOUD_ORIGIN.replace(/^https:\/\//, '')
   const selfHosted = form.draft.mode === 'self-hosted'
+  const reachableHost = form.test.kind === 'ok' ? new URL(form.test.identity.origin).host : ''
+  const reachableDetails = form.test.kind === 'ok' ? describeIdentity(form.test.identity) : ''
   const commitOnEnter = (e: React.KeyboardEvent<HTMLInputElement>): void => {
+    if (isComposingKey(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       void form.commit()
@@ -294,10 +313,10 @@ function ServerSection() {
   if (!form.available) {
     return (
       <>
-        <div style={sectionHeaderStyle}>Server</div>
+        <div style={sectionHeaderStyle}>{t`Server`}</div>
         <SettingsCard
-          title="Open on Phone server"
-          description="In the browser, Hew talks to the server it was loaded from — there is nothing to configure here."
+          title={t`Open on Phone server`}
+          description={t`In the browser, Hew talks to the server it was loaded from — there is nothing to configure here.`}
         >
           <span style={{ ...libraryPathInputStyle, flex: 'none' }} data-testid="settings-server-readonly">
             {typeof window !== 'undefined' ? window.location.origin : ''}
@@ -308,10 +327,10 @@ function ServerSection() {
   }
   return (
     <>
-      <div style={sectionHeaderStyle}>Server</div>
+      <div style={sectionHeaderStyle}>{t`Server`}</div>
       <SettingsCard
-        title="Open on Phone server"
-        description="Where the desktop uploads and where the QR code points your phone. A self-hosted server must serve the Hew web app with the relay under /relay/ (see the self-hosting guide)."
+        title={t`Open on Phone server`}
+        description={t`Where the desktop uploads and where the QR code points your phone. A self-hosted server must serve the Hew web app with the relay under /relay/ (see the self-hosting guide).`}
         htmlFor="fluent-server-mode"
       >
         <select
@@ -321,17 +340,17 @@ function ServerSection() {
           style={selectStyle}
         >
           <option value="cloud" style={optionStyle}>
-            Hew cloud ({CLOUD_ORIGIN.replace(/^https:\/\//, '')})
+            {t`Hew cloud (${cloudHost})`}
           </option>
           <option value="self-hosted" style={optionStyle}>
-            Self-hosted
+            {t`Self-hosted`}
           </option>
         </select>
       </SettingsCard>
       {selfHosted && (
         <div style={cardStyle}>
           <label htmlFor="fluent-server-origin" style={{ ...cardTitleStyle, flexShrink: 0 }}>
-            Address:
+            {t`Address:`}
           </label>
           <input
             id="fluent-server-origin"
@@ -350,15 +369,15 @@ function ServerSection() {
       )}
       {selfHosted && (
         <SettingsCard
-          title="Upload key"
-          description="Only if the server's admin set one. Stored on this computer in plain text and only ever sent to the address above — never to the Hew cloud."
+          title={t`Upload key`}
+          description={t`Only if the server's admin set one. Stored on this computer in plain text and only ever sent to the address above — never to the Hew cloud.`}
           htmlFor="fluent-server-upload-key"
         >
           <input
             id="fluent-server-upload-key"
             type="password"
             autoComplete="off"
-            placeholder="none"
+            placeholder={t`none`}
             value={form.draft.uploadKey}
             onChange={(e) => form.setUploadKeyDraft(e.target.value)}
             onBlur={() => void form.commit()}
@@ -373,15 +392,15 @@ function ServerSection() {
         </div>
       )}
       <SettingsCard
-        title="Test connection"
+        title={t`Test connection`}
         description={
           form.test.kind === 'ok'
-            ? `Reachable: ${new URL(form.test.identity.origin).host} — ${describeIdentity(form.test.identity)}`
+            ? t`Reachable: ${reachableHost} — ${reachableDetails}`
             : form.test.kind === 'fail'
               ? form.test.message
               : selfHosted
-                ? "Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone."
-                : 'Checks that the Hew cloud relay is reachable from this computer.'
+                ? t`Checks that the address serves a Hew relay and, if it needs one, that your upload key is accepted. Over plain http:// the phone's in-app scanner can't open the camera; scan with the camera app instead. A certificate from your own authority must be trusted on this computer and on the phone.`
+                : t`Checks that the Hew cloud relay is reachable from this computer.`
         }
       >
         <button
@@ -390,7 +409,7 @@ function ServerSection() {
           disabled={form.test.kind === 'testing'}
           style={fluentButtonStyle(form.test.kind === 'testing')}
         >
-          {form.test.kind === 'testing' ? 'Testing…' : 'Test connection'}
+          {form.test.kind === 'testing' ? t`Testing…` : t`Test connection`}
         </button>
       </SettingsCard>
     </>
@@ -398,9 +417,11 @@ function ServerSection() {
 }
 
 export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
+  const { t, i18n } = useLingui()
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
   const [theme, setTheme] = useState<ThemeSetting>(() => getThemeSetting())
   const [debug, setDebug] = useState<boolean>(() => getDebugMode())
+  const [language, setLanguage] = useState<LanguageSetting>(() => getLanguageSetting())
   const libStore = libraryStore()
   const libraryAvailable = libStore.available()
   const [libraryPath, setLibraryPath] = useState<string | null>(null)
@@ -408,6 +429,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   useEffect(() => subscribeUnits(setFormat), [])
   useEffect(() => subscribeTheme(setTheme), [])
   useEffect(() => subscribeDebug(setDebug), [])
+  useEffect(() => subscribeLanguage(setLanguage), [])
 
   useEffect(() => {
     if (!libraryAvailable) return
@@ -447,6 +469,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   // handlers so an open settings page can't also cancel a tool underneath.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -459,6 +482,7 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
 
   const system = LENGTH_SYSTEM_OF[format]
   const formatOptions = LENGTH_FORMATS_BY_SYSTEM[system]
+  const langOptions = languageOptions({ systemLabel: t`System default`, debugMode: debug })
 
   function handleSystemChange(next: LengthSystem): void {
     if (next === system) return
@@ -466,13 +490,13 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div style={pageStyle} role="region" aria-label="Settings">
+    <div style={pageStyle} role="region" aria-label={t`Settings`}>
       <div style={headerStyle}>
         <button
           style={backBtnStyle}
           onClick={onBack}
-          aria-label="Back"
-          title="Back"
+          aria-label={t`Back`}
+          title={t`Back`}
           autoFocus
           onMouseEnter={(e) => {
             e.currentTarget.style.background = 'var(--accent-tint-15, rgba(128,128,128,0.15))'
@@ -485,15 +509,15 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
             <path d="M7.5 3 2.8 8l4.7 5M3.2 8h10" />
           </svg>
         </button>
-        <h1 style={titleStyle}>Settings</h1>
+        <h1 style={titleStyle}>{t`Settings`}</h1>
       </div>
 
       <div style={scrollStyle}>
         <div style={contentStyle}>
-          <div style={sectionHeaderStyle}>Units</div>
+          <div style={sectionHeaderStyle}>{t`Units`}</div>
           <SettingsCard
-            title="Measurement system"
-            description="Model geometry is always stored in meters internally."
+            title={t`Measurement system`}
+            description={t`Model geometry is always stored in meters internally.`}
             htmlFor="fluent-units-system"
           >
             <select
@@ -504,14 +528,14 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
             >
               {SYSTEM_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value} style={optionStyle}>
-                  {opt.label}
+                  {i18n._(opt.label)}
                 </option>
               ))}
             </select>
           </SettingsCard>
           <SettingsCard
-            title="Length format"
-            description="How lengths are displayed — e.g. the Move tool's live measurement."
+            title={t`Length format`}
+            description={t`How lengths are displayed — e.g. the Move tool's live measurement.`}
             htmlFor="fluent-units-format"
           >
             <select
@@ -524,15 +548,15 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
                 const opt = LENGTH_FORMAT_OPTIONS.find((o) => o.value === value)
                 return (
                   <option key={value} value={value} style={optionStyle}>
-                    {opt?.label ?? value}
+                    {opt === undefined ? value : i18n._(opt.label)}
                   </option>
                 )
               })}
             </select>
           </SettingsCard>
 
-          <div style={sectionHeaderStyle}>Appearance</div>
-          <SettingsCard title="App theme" htmlFor="fluent-theme">
+          <div style={sectionHeaderStyle}>{t`Appearance`}</div>
+          <SettingsCard title={t`App theme`} htmlFor="fluent-theme">
             <select
               id="fluent-theme"
               value={theme}
@@ -541,23 +565,43 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
             >
               {THEME_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value} style={optionStyle}>
+                  {i18n._(opt.label)}
+                </option>
+              ))}
+            </select>
+          </SettingsCard>
+
+          <div style={sectionHeaderStyle}>{t`Language`}</div>
+          <SettingsCard
+            title={t`Language`}
+            description={t`System default follows your OS language, when Hew is available in it.`}
+            htmlFor="fluent-language"
+          >
+            <select
+              id="fluent-language"
+              value={langOptions.some((o) => o.value === language) ? language : SYSTEM_LANGUAGE}
+              onChange={(e) => setLanguageSetting(e.target.value as LanguageSetting)}
+              style={selectStyle}
+            >
+              {langOptions.map((opt) => (
+                <option key={opt.value} value={opt.value} style={optionStyle}>
                   {opt.label}
                 </option>
               ))}
             </select>
           </SettingsCard>
 
-          <div style={sectionHeaderStyle}>Library</div>
+          <div style={sectionHeaderStyle}>{t`Library`}</div>
           <div style={cardStyle}>
             <label htmlFor="fluent-library-folder-path" style={{ ...cardTitleStyle, flexShrink: 0 }}>
-              Library folder:
+              {t`Library folder:`}
             </label>
             <input
               id="fluent-library-folder-path"
               type="text"
               readOnly
               value={libraryAvailable ? (libraryPath ?? '') : ''}
-              placeholder={libraryAvailable ? 'Loading…' : 'Not available in the browser build yet.'}
+              placeholder={libraryAvailable ? t`Loading…` : t`Not available in the browser build yet.`}
               title={libraryPath ?? undefined}
               style={libraryPathInputStyle}
             />
@@ -567,18 +611,18 @@ export function FluentSettingsPage({ onBack }: { onBack: () => void }) {
               disabled={!libraryAvailable}
               style={fluentButtonStyle(!libraryAvailable)}
             >
-              Change…
+              {t`Change…`}
             </button>
           </div>
 
           <ServerSection />
 
-          <div style={sectionHeaderStyle}>Debug</div>
+          <div style={sectionHeaderStyle}>{t`Debug`}</div>
           <SettingsCard
-            title="Debug mode"
-            description="Enables the rolling diagnostic log file (diagnostic.log in the app log directory), low-level input recording, and kernel torture mode — extra validation after every op; slower, but surfaces flakes at the exact op."
+            title={t`Debug mode`}
+            description={t`Enables the rolling diagnostic log file (diagnostic.log in the app log directory), low-level input recording, and kernel torture mode — extra validation after every op; slower, but surfaces flakes at the exact op.`}
           >
-            <ToggleSwitch checked={debug} onChange={setDebugMode} ariaLabel="Debug mode" />
+            <ToggleSwitch checked={debug} onChange={setDebugMode} ariaLabel={t`Debug mode`} />
           </SettingsCard>
         </div>
       </div>

@@ -48,6 +48,30 @@ pnpm --dir app typecheck
 echo "=== pnpm --dir app typecheck:test ==="
 pnpm --dir app typecheck:test
 
+echo "=== pnpm --dir app lint ==="
+pnpm --dir app lint
+
+# Localization (docs/LOCALIZATION.md): the committed catalogs must match the
+# source — a wrapped string with no catalog entry, or a stale entry, fails
+# here rather than reaching a translator — and every SHIPPED locale's
+# catalog must be complete.
+echo "=== pnpm --dir app i18n:extract (catalogs in sync) ==="
+pnpm --dir app i18n:extract
+# `git diff` sees modified tracked files; the second test catches a catalog
+# extract just CREATED (a new locale's .po), which `git diff` never reports.
+if ! git diff --quiet --exit-code -- app/src/locales || git status --porcelain --untracked-files=all -- app/src/locales | grep -q '^??'; then
+  echo "verify: FAILED — message catalogs are out of date. Commit the result of:"
+  echo "  pnpm --dir app i18n:extract"
+  git --no-pager diff --stat -- app/src/locales
+  exit 1
+fi
+
+echo "=== pnpm --dir app i18n:check (shipped catalogs complete) ==="
+pnpm --dir app i18n:check
+
+echo "=== pnpm --dir app i18n:menus --check (native menu labels current) ==="
+pnpm --dir app i18n:menus --check
+
 echo "=== pnpm --dir app test ==="
 pnpm --dir app test
 

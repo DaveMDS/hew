@@ -980,6 +980,20 @@ below.
 
 ### Near-term
 
+- **Localization.** The app's text goes through Lingui macros into gettext
+  catalogs under `app/src/locales/`, with a Language setting (System
+  default, each shipped language in its own name, and a pseudo-locale
+  behind Debug Mode), locale-aware number formatting, and a lint rule that
+  rejects an unwrapped string (`docs/LOCALIZATION.md`). Landing in stages:
+  the plumbing and the sweep that wraps every string; a structured `kind`
+  on history entries so undo/redo labels are built in the app rather than
+  minted in Rust; native macOS menu labels generated from the same
+  catalogs; input-method-safe keyboard handling (physical-key tool
+  shortcuts, no dispatch during IME composition, NFKC-normalized palette
+  search); then the first translated language, Japanese, from a
+  contributor. The headless API, CLI, file format, user-typed names, and
+  the website stay English. Right-to-left layout and comma-decimal
+  measurement parsing are separate, later work
 - **Flat-path push/pull into a face's own holes.** Both push/pull paths
   are shipped (translate-and-build for any planar face, whole-wall radial
   offset for analytic curved walls — see Shipped). The one flat-path case

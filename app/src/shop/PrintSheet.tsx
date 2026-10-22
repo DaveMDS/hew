@@ -22,12 +22,14 @@
  */
 import { useEffect, useState } from 'react'
 import type { CSSProperties } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import { PrintPage, PrintRoot } from '../print/PrintDocument'
 import { mmToPx } from '../print/layout'
 import { PAPER_LABEL, PAPER_NAMES, paperLabel, type PaperName } from '../print/paper'
 import { scaleDisplay, scaleHint } from '../print/scale'
 import { usePrintController, type PrintControllerProps } from '../print/usePrintController'
 import type { ShopOrientation } from './orientation'
+import { isComposingKey } from '../input/keyboard'
 
 export interface PrintSheetProps extends Omit<PrintControllerProps, 'compact'> {
   open: boolean
@@ -103,6 +105,7 @@ export function PrintSheet({ open, ...rest }: PrintSheetProps) {
 }
 
 function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<PrintSheetProps, 'open'>) {
+  const { t } = useLingui()
   const c = usePrintController({ ...controllerProps, compact: true })
   const { opts, setOpts, job, status, progress, error, busy, canPrint, previewPages, printed, presets, presetIndex, format } = c
 
@@ -115,6 +118,7 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
 
   useEffect(() => {
     const onKey = (ev: KeyboardEvent): void => {
+      if (isComposingKey(ev)) return
       if (ev.key === 'Escape') {
         ev.preventDefault()
         onClose()
@@ -127,14 +131,15 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
   const applyCustom = (): void => setCustomScaleError(c.applyCustomScale(customPaperText, customModelText))
 
   const isLandscape = orientation === 'landscape'
+  const currentScale = scaleDisplay(opts.scale)
   const paperIsNamed = typeof opts.paper === 'string'
   const busyStyle: CSSProperties = busy ? { pointerEvents: 'none', opacity: 0.6 } : {}
 
   const modeSwitch = (
-    <div role="group" aria-label="Mode" style={segWrapStyle}>
+    <div role="group" aria-label={t`Mode`} style={segWrapStyle}>
       {(['standard', 'scaled'] as const).map((m) => (
         <button key={m} type="button" aria-pressed={opts.mode === m} onClick={() => c.switchMode(m)} style={segChipStyle(opts.mode === m)}>
-          {m === 'standard' ? 'Standard' : 'Scaled'}
+          {m === 'standard' ? t`Standard` : t`Scaled`}
         </button>
       ))}
     </div>
@@ -142,12 +147,12 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
 
   const paperRow = (
     <>
-      <button type="button" aria-label="Paper" aria-expanded={paperOpen} onClick={() => setPaperOpen((v) => !v)} style={rowButtonStyle}>
-        <span>Paper</span>
+      <button type="button" aria-label={t`Paper`} aria-expanded={paperOpen} onClick={() => setPaperOpen((v) => !v)} style={rowButtonStyle}>
+        <span>{t`Paper`}</span>
         <span style={rowValueStyle}>{paperLabel(opts.paper)} ›</span>
       </button>
       {paperOpen && (
-        <div role="listbox" aria-label="Paper size" style={{ padding: '2px 0 6px' }}>
+        <div role="listbox" aria-label={t`Paper size`} style={{ padding: '2px 0 6px' }}>
           {PAPER_NAMES.map((n: PaperName) => {
             const active = paperIsNamed && opts.paper === n
             return (
@@ -173,16 +178,16 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
   const scaleRow = opts.mode !== 'scaled' ? null : (
     <>
       <div style={rowDivStyle}>
-        <span>Scale</span>
+        <span>{t({ context: 'print', message: 'Scale' })}</span>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <button type="button" onClick={() => c.fit()} style={fitChipStyle}>Fit</button>
-          <button type="button" aria-label="Scale" aria-expanded={scaleOpen} onClick={() => setScaleOpen((v) => !v)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, ...rowValueStyle }}>
+          <button type="button" onClick={() => c.fit()} style={fitChipStyle}>{t`Fit`}</button>
+          <button type="button" aria-label={t({ context: 'print', message: 'Scale' })} aria-expanded={scaleOpen} onClick={() => setScaleOpen((v) => !v)} style={{ background: 'transparent', border: 'none', cursor: 'pointer', padding: 0, ...rowValueStyle }}>
             {scaleDisplay(opts.scale)} ›
           </button>
         </div>
       </div>
       {scaleOpen && (
-        <div role="listbox" aria-label="Scale preset" style={{ padding: '2px 0 6px' }}>
+        <div role="listbox" aria-label={t`Scale preset`} style={{ padding: '2px 0 6px' }}>
           {presets.map((p, i) => {
             const active = presetIndex === i && !showCustomScale
             const hint = scaleHint(p, format)
@@ -211,28 +216,28 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
             }}
             style={pickerItemStyle(showCustomScale)}
           >
-            Custom…
+            {t`Custom…`}
           </button>
         </div>
       )}
       {showCustomScale && (
         <div style={{ padding: '8px 2px 10px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '14px', color: 'var(--shop-text)', fontFamily: FONT }}>
-            <input aria-label="On paper" value={customPaperText} placeholder="1 cm" onChange={(e) => setCustomPaperText(e.target.value)} onBlur={applyCustom} onKeyDown={(e) => e.key === 'Enter' && applyCustom()} style={customInputStyle} />
-            <span>on paper =</span>
-            <input aria-label="In model" value={customModelText} placeholder="10 cm" onChange={(e) => setCustomModelText(e.target.value)} onBlur={applyCustom} onKeyDown={(e) => e.key === 'Enter' && applyCustom()} style={customInputStyle} />
+            <input aria-label={t`On paper`} value={customPaperText} placeholder="1 cm" onChange={(e) => setCustomPaperText(e.target.value)} onBlur={applyCustom} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') applyCustom() }} style={customInputStyle} />
+            <span>{t`on paper =`}</span>
+            <input aria-label={t`In model`} value={customModelText} placeholder="10 cm" onChange={(e) => setCustomModelText(e.target.value)} onBlur={applyCustom} onKeyDown={(e) => { if (isComposingKey(e)) return; if (e.key === 'Enter') applyCustom() }} style={customInputStyle} />
           </div>
           <div style={{ fontSize: '12.5px', fontFamily: FONT, color: customScaleError !== null ? 'var(--danger-base, #e5484d)' : 'var(--shop-text-faint)' }}>
-            {customScaleError ?? `Now: ${scaleDisplay(opts.scale)}`}
+            {customScaleError ?? t`Now: ${currentScale}`}
           </div>
         </div>
       )}
       <div style={rowDivStyle}>
-        <span>Extent</span>
-        <div role="group" aria-label="Extent" style={miniSegWrapStyle}>
+        <span>{t`Extent`}</span>
+        <div role="group" aria-label={t`Extent`} style={miniSegWrapStyle}>
           {(['model', 'view'] as const).map((v) => (
             <button key={v} type="button" aria-pressed={opts.extent === v} onClick={() => setOpts((o) => ({ ...o, extent: v }))} style={miniSegChipStyle(opts.extent === v)}>
-              {v === 'model' ? 'Model' : 'Current view'}
+              {v === 'model' ? t({ context: 'print', message: 'Model' }) : t`Current view`}
             </button>
           ))}
         </div>
@@ -242,11 +247,11 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
 
   const styleRow = (
     <div style={rowDivStyle}>
-      <span>Style</span>
-      <div role="group" aria-label="Style" style={miniSegWrapStyle}>
+      <span>{t`Style`}</span>
+      <div role="group" aria-label={t`Style`} style={miniSegWrapStyle}>
         {(['shaded', 'lineart'] as const).map((v) => (
           <button key={v} type="button" aria-pressed={opts.style === v} onClick={() => setOpts((o) => ({ ...o, style: v }))} style={miniSegChipStyle(opts.style === v)}>
-            {v === 'shaded' ? 'As shown' : 'Line art'}
+            {v === 'shaded' ? t`As shown` : t`Line art`}
           </button>
         ))}
       </div>
@@ -275,14 +280,17 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
 
   // Quiet at rest — the strip and the rows already say it all; the line
   // speaks only for progress, an empty document, or an error.
+  const renderingPage = progress === null ? 0 : Math.min(progress.done + 1, progress.total)
+  const renderingTotal = progress === null ? 0 : progress.total
+  const errorText = error ?? t`unknown error`
   const statusText =
     status === 'rendering' && progress !== null
-      ? `Rendering page ${Math.min(progress.done + 1, progress.total)} of ${progress.total}…`
+      ? t`Rendering page ${renderingPage} of ${renderingTotal}…`
       : status === 'error'
-        ? `Couldn't print: ${error ?? 'unknown error'}`
+        ? t`Couldn't print: ${errorText}`
         : ''
 
-  const summaryText = job !== null && job.empty ? 'Nothing visible to print.' : statusText
+  const summaryText = job !== null && job.empty ? t`Nothing visible to print.` : statusText
   const summaryBlock =
     summaryText === '' ? null : (
       <div data-testid="print-sheet-summary" style={{ fontSize: isLandscape ? '12px' : '13px', color: status === 'error' ? 'var(--danger-base, #e5484d)' : 'var(--shop-text-faint)', marginTop: isLandscape ? '4px' : '6px', fontFamily: FONT }}>
@@ -292,8 +300,8 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
 
   const buttons = (
     <>
-      <button type="button" disabled={!canPrint} onClick={() => void c.doSavePdf()} style={saveButtonStyle(canPrint)}>Save PDF…</button>
-      <button type="button" disabled={!canPrint} onClick={() => void c.doPrint()} style={printButtonStyle(canPrint)}>Print…</button>
+      <button type="button" disabled={!canPrint} onClick={() => void c.doSavePdf()} style={saveButtonStyle(canPrint)}>{t`Save PDF…`}</button>
+      <button type="button" disabled={!canPrint} onClick={() => void c.doPrint()} style={printButtonStyle(canPrint)}>{t`Print…`}</button>
     </>
   )
 
@@ -320,7 +328,7 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label="Print Layout"
+          aria-label={t`Print Layout`}
           data-status={status}
           data-testid="print-sheet-card"
           style={{
@@ -333,7 +341,7 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
           <div style={{ width: '44px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', margin: '0 auto' }} />
           <div style={{ display: 'flex', gap: '22px', marginTop: '10px', minHeight: 0, flex: 1, ...busyStyle }} aria-busy={busy}>
             <div style={{ flex: 1.15, display: 'flex', flexDirection: 'column', minWidth: 0, overflowY: 'auto' }}>
-              <div style={{ fontSize: '19px', fontWeight: 700, color: 'var(--shop-text)', fontFamily: FONT }}>Print Layout</div>
+              <div style={{ fontSize: '19px', fontWeight: 700, color: 'var(--shop-text)', fontFamily: FONT }}>{t`Print Layout`}</div>
               {controlsBody}
             </div>
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
@@ -349,7 +357,7 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
           ref={dialogRef}
           role="dialog"
           aria-modal="true"
-          aria-label="Print Layout"
+          aria-label={t`Print Layout`}
           data-status={status}
           data-testid="print-sheet-sheet"
           style={{
@@ -359,7 +367,7 @@ function PrintSheetPanel({ orientation, onClose, ...controllerProps }: Omit<Prin
           }}
         >
           <div style={{ width: '44px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', margin: '0 auto' }} />
-          <div style={{ fontSize: '21px', fontWeight: 700, color: 'var(--shop-text)', marginTop: '12px', fontFamily: FONT }}>Print Layout</div>
+          <div style={{ fontSize: '21px', fontWeight: 700, color: 'var(--shop-text)', marginTop: '12px', fontFamily: FONT }}>{t`Print Layout`}</div>
           <div style={busyStyle} aria-busy={busy}>
             {controlsBody}
             {strip}

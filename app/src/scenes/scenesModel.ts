@@ -10,6 +10,8 @@
  * camera, 2 hidden objects, 4 visible tags, 8 section plane, 16 display.
  */
 
+import { plural, t } from '@lingui/core/macro'
+
 export const PROP_CAMERA = 1
 export const PROP_HIDDEN_NODES = 2
 export const PROP_HIDDEN_TAGS = 4
@@ -19,6 +21,7 @@ export const PROP_ALL = PROP_CAMERA | PROP_HIDDEN_NODES | PROP_HIDDEN_TAGS | PRO
 
 /** The five capturable properties, in the order the details view lists them. */
 export type SceneProp = 'camera' | 'hiddenNodes' | 'hiddenTags' | 'section' | 'display'
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- scene property keys are identifiers
 export const SCENE_PROPS: readonly SceneProp[] = ['camera', 'hiddenNodes', 'hiddenTags', 'section', 'display']
 export const PROP_BIT: Record<SceneProp, number> = {
   camera: PROP_CAMERA,
@@ -29,11 +32,12 @@ export const PROP_BIT: Record<SceneProp, number> = {
 }
 /** UI labels per property (SPEC.md §1 "Captured properties"). */
 export const PROP_LABEL: Record<SceneProp, string> = {
-  camera: 'Camera',
-  hiddenNodes: 'Hidden objects',
-  hiddenTags: 'Visible tags',
-  section: 'Section plane',
-  display: 'Display (grid, axes, guides)',
+  // Getters resolve at read time so a language switch applies without a reload.
+  get camera() { return t`Camera` },
+  get hiddenNodes() { return t`Hidden objects` },
+  get hiddenTags() { return t`Visible tags` },
+  get section() { return t`Section plane` },
+  get display() { return t`Display (grid, axes, guides)` },
 }
 
 export interface CameraStateJson {
@@ -193,7 +197,9 @@ export function parseDriftJson(json: string): SceneDrift | null {
   const flag = (k: string): boolean => o[k] === true
   return {
     camera: flag('camera'),
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- scene property key
     hiddenNodes: flag('hiddenNodes'),
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- scene property key
     hiddenTags: flag('hiddenTags'),
     section: flag('section'),
     display: flag('display'),
@@ -221,6 +227,7 @@ export function neighborScene(entries: readonly SceneEntry[], activeSid: number 
 export function nextSceneName(entries: readonly SceneEntry[]): string {
   const taken = new Set(entries.map((e) => e.name))
   for (let n = 1; ; n++) {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- mirrors the kernel's English next_scene_name; the name is stored verbatim in the document
     const candidate = `Scene ${n}`
     if (!taken.has(candidate)) return candidate
   }
@@ -228,11 +235,15 @@ export function nextSceneName(entries: readonly SceneEntry[]): string {
 
 /** Copy strings (SPEC.md §5). */
 export const SCENE_COPY = {
-  duplicateName: (name: string) => `A Scene named "${name}" already exists.`,
-  deleteTitle: (name: string) => `Delete "${name}"?`,
-  deleteBody: "Deleting a Scene can't be undone.",
-  staleRefs: (n: number) => `${n} captured ${n === 1 ? 'object' : 'objects'} no longer ${n === 1 ? 'exists' : 'exist'}.`,
-  emptyState: 'No Scenes yet. Add Scene saves the current camera, visibility, and section cut.',
-  descriptionPlaceholder: 'Add a description — it shows on the phone.',
-  updateTooltip: 'Update Scene — the view has changed since capture.',
+  duplicateName: (name: string) => t`A Scene named "${name}" already exists.`,
+  deleteTitle: (name: string) => t`Delete "${name}"?`,
+  get deleteBody() { return t`Deleting a Scene can't be undone.` },
+  staleRefs: (n: number) =>
+    plural(n, {
+      one: '# captured object no longer exists.',
+      other: '# captured objects no longer exist.',
+    }),
+  get emptyState() { return t`No Scenes yet. Add Scene saves the current camera, visibility, and section cut.` },
+  get descriptionPlaceholder() { return t`Add a description — it shows on the phone.` },
+  get updateTooltip() { return t`Update Scene — the view has changed since capture.` },
 } as const

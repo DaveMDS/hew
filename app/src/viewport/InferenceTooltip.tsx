@@ -7,31 +7,35 @@
  * (from `Viewport.tsx`'s `onInferenceChange`, fired at the same point the
  * existing `onStatusChange` status-bar text is derived).
  */
+import { i18n } from '@lingui/core'
+import type { MessageDescriptor } from '@lingui/core'
+import { msg } from '@lingui/core/macro'
+import { useLingui } from '@lingui/react/macro'
 import { useEffect, useState } from 'react'
 import { inferenceAxisName, inferenceCssColor } from './inferenceColor'
 import type { InferenceInfo } from './Viewport'
 
-const KIND_LABEL: Record<string, string> = {
-  endpoint: 'Endpoint',
-  center: 'Center',
-  quadrant: 'Quadrant',
-  tangent: 'Tangent',
-  midpoint: 'Midpoint',
-  intersection: 'Intersection',
-  'on-edge': 'On Edge',
-  'on-face': 'On Face',
-  'on-guide': 'On Guide',
-  'on-axis': 'On Axis',
-  ground: 'Ground',
-  plane: 'On Plane',
+const KIND_LABEL: Record<string, MessageDescriptor> = {
+  endpoint: msg`Endpoint`,
+  center: msg`Center`,
+  quadrant: msg`Quadrant`,
+  tangent: msg`Tangent`,
+  midpoint: msg`Midpoint`,
+  intersection: msg`Intersection`,
+  'on-edge': msg`On Edge`,
+  'on-face': msg`On Face`,
+  'on-guide': msg`On Guide`,
+  'on-axis': msg`On Axis`,
+  ground: msg`Ground`,
+  plane: msg`On Plane`,
   /** `DimensionTool`'s dimension-row alignment snap (`have-b`'s
    *  `findAlignmentSnap`) — a tool-local cue kind, never emitted by
    *  SnapService itself (see `DimensionTool.lastSnap`'s doc). */
-  aligned: 'Aligned',
+  aligned: msg`Aligned`,
   /** `LineTool`'s from-point closing inference (module doc,
    *  `_findFromPointCandidate`) — another tool-local cue kind, same
    *  `lastSnap` opt-in as `aligned` above, never emitted by SnapService. */
-  'from-point': 'From Point',
+  'from-point': msg`From Point`,
 }
 
 /** The human-readable label for a snap `kind` (`'on-edge'` → `'On Edge'`,
@@ -41,7 +45,8 @@ const KIND_LABEL: Record<string, string> = {
  *  imperative DOM, round-3 playtest finding 4) don't invent a second
  *  kind→label map to drift out of sync with this one. */
 export function inferenceKindLabel(kind: string): string {
-  return KIND_LABEL[kind] ?? kind
+  const label = KIND_LABEL[kind]
+  return label === undefined ? kind : i18n._(label)
 }
 
 /** How long the same object must sit under the cursor before the tip's
@@ -57,17 +62,18 @@ export const HOVER_DETAIL_DWELL_MS = 400
  */
 export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo | null; detail?: string | null }) {
   const subject = info !== null && info.object !== undefined ? `${info.object}/${info.instance ?? ''}` : null
+  const { t } = useLingui()
   const [settled, setSettled] = useState<string | null>(null)
   useEffect(() => {
     setSettled(null)
     if (subject === null) return
-    const t = setTimeout(() => setSettled(subject), HOVER_DETAIL_DWELL_MS)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => setSettled(subject), HOVER_DETAIL_DWELL_MS)
+    return () => clearTimeout(timer)
   }, [subject])
 
   if (info === null) return null
 
-  const label = KIND_LABEL[info.kind] ?? info.kind
+  const label = inferenceKindLabel(info.kind)
   const axisName = inferenceAxisName(info)
   const chipColor = inferenceCssColor(info)
   const showDetail = detail !== null && subject !== null && settled === subject
@@ -103,10 +109,10 @@ export function InferenceTooltip({ info, detail = null }: { info: InferenceInfo 
             dropped. Saying so is the difference between an alignment aid and a
             chip claiming a snap the commit did not honour. */}
         {info.projected === true && (
-          <span style={{ color: 'var(--text-secondary)' }}>projected</span>
+          <span style={{ color: 'var(--text-secondary)' }}>{t({ comment: 'Snap tooltip suffix: the snap point sits above the drawing plane, so its height is dropped', message: 'projected' })}</span>
         )}
         {axisName !== null && info.kind !== 'on-axis' && (
-          <span style={{ color: `var(--axis-${axisName})` }}>on {axisName} axis</span>
+          <span style={{ color: `var(--axis-${axisName})` }}>{t({ comment: 'Snap tooltip; the placeholder is the axis letter x, y, or z', message: `on ${axisName} axis` })}</span>
         )}
       </div>
       {showDetail && (

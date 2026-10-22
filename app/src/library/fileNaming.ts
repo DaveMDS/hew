@@ -16,11 +16,13 @@
 import type { LibraryCategory } from './types'
 
 /** Category → the library folder's subfolder for that category. */
+/* oxlint-disable lingui/no-unlocalized-strings -- folder names on disk, not copy */
 const CATEGORY_DIR: Record<LibraryCategory, string> = {
   component: 'Components',
   material: 'Materials',
   model: 'Models',
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Slugify `name`, append a 6-hex-char suffix from `id`, and prefix with
  * `category`'s subfolder. Pure — no I/O, no randomness of its own (the

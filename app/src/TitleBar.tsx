@@ -21,6 +21,7 @@
  * native chrome (see the docked tray's Object Info, for a possible future home).
  */
 import { useEffect, useRef, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 
 type WindowApi = typeof import('@tauri-apps/api/window')
 
@@ -102,6 +103,7 @@ const btnStyle: React.CSSProperties = {
 }
 
 /** One resize grip's CSS box + the native resize direction it triggers. */
+/* oxlint-disable lingui/no-unlocalized-strings -- Tauri resize-direction identifiers, not copy */
 const GRIPS: { dir: ResizeDir; style: React.CSSProperties }[] = [
   { dir: 'North', style: { top: 0, left: GRIP, right: GRIP, height: GRIP, cursor: 'ns-resize' } },
   { dir: 'South', style: { bottom: 0, left: GRIP, right: GRIP, height: GRIP, cursor: 'ns-resize' } },
@@ -112,6 +114,7 @@ const GRIPS: { dir: ResizeDir; style: React.CSSProperties }[] = [
   { dir: 'SouthWest', style: { bottom: 0, left: 0, width: GRIP, height: GRIP, cursor: 'nesw-resize' } },
   { dir: 'SouthEast', style: { bottom: 0, right: 0, width: GRIP, height: GRIP, cursor: 'nwse-resize' } },
 ]
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 export interface TitleBarProps {
   /** Bare document name (no dirty mark, no " — Hew" suffix) — `documentSession.ts`'s `documentName()`. */
@@ -121,6 +124,7 @@ export interface TitleBarProps {
 }
 
 export function TitleBar({ name, saveState }: TitleBarProps) {
+  const { t } = useLingui()
   const apiRef = useRef<WindowApi | null>(null)
   const [maximized, setMaximized] = useState(false)
 
@@ -179,10 +183,10 @@ export function TitleBar({ name, saveState }: TitleBarProps) {
         <span style={nameStyle}>{name}</span>
         {saveState !== '' && <span style={saveStateStyle}>{saveState}</span>}
         <div style={dragFillStyle} data-tauri-drag-region />
-        <button style={btnStyle} title="Minimize" onClick={minimize} aria-label="Minimize">
+        <button style={btnStyle} title={t`Minimize`} onClick={minimize} aria-label={t`Minimize`}>
           <svg width="11" height="11" viewBox="0 0 11 11"><rect x="1" y="5" width="9" height="1" fill="currentColor" /></svg>
         </button>
-        <button style={btnStyle} title={maximized ? 'Restore' : 'Maximize'} onClick={toggleMax} aria-label="Maximize">
+        <button style={btnStyle} title={maximized ? t`Restore` : t`Maximize`} onClick={toggleMax} aria-label={t`Maximize`}>
           {maximized ? (
             <svg width="11" height="11" viewBox="0 0 11 11" fill="none" stroke="currentColor">
               <rect x="1.5" y="3.5" width="6" height="6" /><path d="M3.5 3.5V1.5h6v6h-2" />
@@ -195,9 +199,9 @@ export function TitleBar({ name, saveState }: TitleBarProps) {
         </button>
         <button
           style={btnStyle}
-          title="Close"
+          title={t`Close`}
           onClick={close}
-          aria-label="Close"
+          aria-label={t`Close`}
           onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--chrome-win-close-hover, #e53b41)'; e.currentTarget.style.color = '#fff' }}
           onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.color = 'var(--text-tertiary, #9aa3b0)' }}
         >

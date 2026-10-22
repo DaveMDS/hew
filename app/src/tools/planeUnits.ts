@@ -29,6 +29,7 @@
  * history (hide/unhide, a scene refresh).
  */
 
+import { t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef, NodeKind } from '../panels/treeModel'
 import type { V3 } from '../viewport/geoHelpers'
@@ -720,7 +721,7 @@ export const DRAFT_KINDS: readonly NodeKind[] = ['draft-island', 'draft-curve', 
  *  path "Edge shape" (an "Arc" when it carries a drawn arc); else "Shape". */
 export function unitName(unit: PlaneUnit): string {
   const n = unit.edges.length
-  if (n === 0) return 'Shape'
+  if (n === 0) return t({ context: 'drawn shape', message: 'Shape' })
   const q = (p: V3) => `${Math.round(p[0] * 1e6)},${Math.round(p[1] * 1e6)},${Math.round(p[2] * 1e6)}`
   const degree = new Map<string, number>()
   const adj = new Map<string, string[]>()
@@ -749,13 +750,13 @@ export function unitName(unit: PlaneUnit): string {
   const path = connected && !closed && degrees.every((d) => d <= 2)
   const hasCircle = unit.curves.some((c) => c.kind === 'circle')
   const polygon = unit.curves.find((c) => c.kind === 'polygon')
-  if (n === 1) return unit.curves.length > 0 && hasCircle ? 'Arc' : 'Line'
+  if (n === 1) return unit.curves.length > 0 && hasCircle ? t({ context: 'drawn shape', message: 'Arc' }) : t({ context: 'drawn shape', message: 'Line' })
   if (unit.curves.length === 1 && unit.curves[0].edges.length === n) {
-    if (polygon !== undefined) return 'Polygon'
-    return closed ? 'Circle' : 'Arc'
+    if (polygon !== undefined) return t({ context: 'drawn shape', message: 'Polygon' })
+    return closed ? t({ context: 'drawn shape', message: 'Circle' }) : t({ context: 'drawn shape', message: 'Arc' })
   }
   if (closed) {
-    if (hasCircle) return 'Arc shape'
+    if (hasCircle) return t({ context: 'drawn shape', message: 'Arc shape' })
     if (n === 4) {
       // Walk the loop in order to test the corners.
       const pts: V3[] = []
@@ -768,12 +769,12 @@ export function unitName(unit: PlaneUnit): string {
         used.add(next.key)
         cur = near(next.a, cur, 1e-6) ? next.b : next.a
       }
-      if (pts.length === 4 && isRectangle(pts)) return 'Rectangle'
+      if (pts.length === 4 && isRectangle(pts)) return t({ context: 'drawn shape', message: 'Rectangle' })
     }
-    return 'Shape'
+    return t({ context: 'drawn shape', message: 'Shape' })
   }
-  if (path) return hasCircle ? 'Arc' : 'Edge shape'
-  return 'Shape'
+  if (path) return hasCircle ? t({ context: 'drawn shape', message: 'Arc' }) : t({ context: 'drawn shape', message: 'Edge shape' })
+  return t({ context: 'drawn shape', message: 'Shape' })
 }
 
 /** A `draft-curve` run ref widened to its whole circle (the double-click
@@ -948,11 +949,11 @@ export function outlinerDrawing(scene: OutlinerScene, objects: readonly bigint[]
 /** A drawing row's name: one word per ref kind. */
 export function draftKindLabel(kind: NodeKind): string {
   switch (kind) {
-    case 'draft-island': return 'Shape'
-    case 'draft-curve': return 'Curve'
-    case 'draft-edge': return 'Line'
-    case 'draft-region': return 'Region'
-    default: return 'Shape'
+    case 'draft-island': return t({ context: 'drawn shape', message: 'Shape' })
+    case 'draft-curve': return t({ context: 'drawn shape', message: 'Curve' })
+    case 'draft-edge': return t({ context: 'drawn shape', message: 'Line' })
+    case 'draft-region': return t({ context: 'drawn shape', message: 'Region' })
+    default: return t({ context: 'drawn shape', message: 'Shape' })
   }
 }
 

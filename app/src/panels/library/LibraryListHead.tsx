@@ -14,6 +14,9 @@
  */
 
 import { useEffect, useRef } from 'react'
+import type { MessageDescriptor } from '@lingui/core'
+import { msg } from '@lingui/core/macro'
+import { useLingui } from '@lingui/react/macro'
 import type { ListSortColumn, ListSortDirection } from '../../library/libraryModel'
 
 /** Only Name and Type carry an explicit persisted width — Size is the
@@ -73,13 +76,14 @@ export interface LibraryListHeadProps {
   onResize(column: keyof LibraryListColWidths, width: number): void
 }
 
-const COLUMNS: { id: ListSortColumn; label: string }[] = [
-  { id: 'name', label: 'Name' },
-  { id: 'type', label: 'Type' },
-  { id: 'size', label: 'Size' },
+const COLUMNS: { id: ListSortColumn; label: MessageDescriptor }[] = [
+  { id: 'name', label: msg({ comment: 'Library list column header', message: 'Name' }) },
+  { id: 'type', label: msg({ comment: 'Library list column header', message: 'Type' }) },
+  { id: 'size', label: msg({ comment: 'Library list column header', message: 'Size' }) },
 ]
 
 export function LibraryListHead({ widths, sortColumn, sortDirection, onSort, onResize }: LibraryListHeadProps) {
+  const { t, i18n } = useLingui()
   // Drag state lives in a ref rather than React state — a resize fires many
   // pointermove events per drag, and only the width itself (surfaced through
   // `onResize`) needs to reach React; re-rendering this component on every
@@ -133,33 +137,36 @@ export function LibraryListHead({ widths, sortColumn, sortDirection, onSort, onR
 
   return (
     <div className="hwlib__list-head" role="row">
-      {COLUMNS.map((col, i) => (
-        <div
-          key={col.id}
-          role="columnheader"
-          aria-sort={ariaSort(col.id)}
-          className={`hwlib__list-head-cell hwlib__list-head-cell--${col.id}`}
-          style={col.id === 'size' ? { flex: '1 1 0', minWidth: LIST_COL_MIN.type } : { flex: `0 0 ${widths[col.id]}px`, width: widths[col.id] }}
-        >
-          <button type="button" className="hwlib__list-sort-btn" onClick={() => onSort(col.id)}>
-            {col.label}
-            {sortColumn === col.id && (
-              <span className="hwlib__list-sort-glyph" aria-hidden="true">
-                {sortDirection === 'asc' ? '▲' : '▼'}
-              </span>
+      {COLUMNS.map((col, i) => {
+        const columnLabel = i18n._(col.label)
+        return (
+          <div
+            key={col.id}
+            role="columnheader"
+            aria-sort={ariaSort(col.id)}
+            className={`hwlib__list-head-cell hwlib__list-head-cell--${col.id}`}
+            style={col.id === 'size' ? { flex: '1 1 0', minWidth: LIST_COL_MIN.type } : { flex: `0 0 ${widths[col.id]}px`, width: widths[col.id] }}
+          >
+            <button type="button" className="hwlib__list-sort-btn" onClick={() => onSort(col.id)}>
+              {columnLabel}
+              {sortColumn === col.id && (
+                <span className="hwlib__list-sort-glyph" aria-hidden="true">
+                  {sortDirection === 'asc' ? '▲' : '▼'}
+                </span>
+              )}
+            </button>
+            {i < COLUMNS.length - 1 && (
+              <span
+                className="hwlib__list-col-resize"
+                role="separator"
+                aria-orientation="vertical"
+                aria-label={t`Resize ${columnLabel} column`}
+                onPointerDown={(e) => beginResize(col.id as 'name' | 'type', e)}
+              />
             )}
-          </button>
-          {i < COLUMNS.length - 1 && (
-            <span
-              className="hwlib__list-col-resize"
-              role="separator"
-              aria-orientation="vertical"
-              aria-label={`Resize ${col.label} column`}
-              onPointerDown={(e) => beginResize(col.id as 'name' | 'type', e)}
-            />
-          )}
-        </div>
-      ))}
+          </div>
+        )
+      })}
     </div>
   )
 }

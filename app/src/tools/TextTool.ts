@@ -26,6 +26,7 @@
  *
  * Esc while dragging cancels the gesture with no annotation created.
  */
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -63,8 +64,8 @@ export class TextTool implements Tool {
 
   statusHint(): string {
     return this.stage.kind === 'dragging'
-      ? 'Drag out the leader, then click to place and type.'
-      : 'Click a face, edge, or point to anchor the leader text.'
+      ? t`Drag out the leader, then click to place and type.`
+      : t`Click a face, edge, or point to anchor the leader text.`
   }
 
   private stage: Stage = { kind: 'idle' }

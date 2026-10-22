@@ -40,6 +40,7 @@
  * goldens that were captured before this detection existed.
  */
 
+import { t } from '@lingui/core/macro'
 import { isLinux } from '../platform'
 import { isTauri } from '../io/fileHost'
 
@@ -93,7 +94,7 @@ export interface OverlayMessage {
  * the WebKitGTK env vars). No external links — there is no support page yet.
  */
 export function webglUnavailableMessage(env: GpuEnvironment): OverlayMessage {
-  const title = "Hew can't show the 3D view"
+  const title = t`Hew can't show the 3D view`
   switch (env) {
     case 'chromium':
       // "This browser", never "Chrome": this bucket also holds Edge, Brave,
@@ -107,26 +108,26 @@ export function webglUnavailableMessage(env: GpuEnvironment): OverlayMessage {
       return {
         title,
         lines: [
-          "This browser couldn't reach your graphics hardware, and Chromium-based browsers no longer fall back to software rendering.",
-          "Check that 'Use graphics acceleration when available' is turned on in the browser's system settings, then relaunch it.",
-          'If this is a company-managed computer, ask IT to enable the EnableUnsafeSwiftShader policy for your browser. On your own computer, you can launch the browser with the --enable-unsafe-swiftshader flag.',
-          'Firefox can run Hew on this computer without any of those changes — slowly, but it works.',
+          t`This browser couldn't reach your graphics hardware, and Chromium-based browsers no longer fall back to software rendering.`,
+          t`Check that 'Use graphics acceleration when available' is turned on in the browser's system settings, then relaunch it.`,
+          t`If this is a company-managed computer, ask IT to enable the EnableUnsafeSwiftShader policy for your browser. On your own computer, you can launch the browser with the --enable-unsafe-swiftshader flag.`,
+          t`Firefox can run Hew on this computer without any of those changes — slowly, but it works.`,
         ],
       }
     case 'firefox':
       return {
         title,
         lines: [
-          "Firefox couldn't create the 3D graphics context Hew needs (WebGL2).",
-          "Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config.",
+          t`Firefox couldn't create the 3D graphics context Hew needs (WebGL2).`,
+          t`Update your graphics drivers first — that fixes most cases. Then check that hardware acceleration is turned on in Firefox's Performance settings, and that webgl.disabled hasn't been switched on in about:config.`,
         ],
       }
     case 'tauri-linux':
       return {
         title,
         lines: [
-          "The system WebView couldn't create the 3D graphics context Hew needs. On Linux this usually means the WebView can't reach the GPU or its driver.",
-          'Try launching Hew with these environment variables, which switch it to a slower but reliable software renderer:',
+          t`The system WebView couldn't create the 3D graphics context Hew needs. On Linux this usually means the WebView can't reach the GPU or its driver.`,
+          t`Try launching Hew with these environment variables, which switch it to a slower but reliable software renderer:`,
           'WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 LIBGL_ALWAYS_SOFTWARE=1 hew',
         ],
       }
@@ -134,8 +135,8 @@ export function webglUnavailableMessage(env: GpuEnvironment): OverlayMessage {
       return {
         title,
         lines: [
-          "This browser couldn't create the 3D graphics context Hew needs (WebGL2).",
-          'Check that your graphics drivers are installed and that hardware acceleration is turned on, then try again.',
+          t`This browser couldn't create the 3D graphics context Hew needs (WebGL2).`,
+          t`Check that your graphics drivers are installed and that hardware acceleration is turned on, then try again.`,
         ],
       }
   }

@@ -161,6 +161,7 @@
  * active-context stack via `setEditContext`.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Tool, Snap, EditContext } from './types'
@@ -402,8 +403,9 @@ function crossGeometry(): THREE.BufferGeometry {
 }
 
 /** Guidance when a path-stage click lands on no followable geometry. */
-const PATH_MISS =
-  'Click the flat face to run the profile around it — or a drawn line or curve to follow.'
+function pathMiss(): string {
+  return t`Click the flat face to run the profile around it — or a drawn line or curve to follow.`
+}
 
 /**
  * Below this much arc length of movement between the arming press and the
@@ -606,10 +608,10 @@ export class FollowMeTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'pick-path') {
-      return 'Click the path to follow — a drawn line or curve, or a solid face to run around.'
+      return t`Click the path to follow — a drawn line or curve, or a solid face to run around.`
     }
     if (this.stage.kind === 'dragging') {
-      return 'Drag along the path for a partial sweep, or type a length — release to commit. Esc backs up.'
+      return t`Drag along the path for a partial sweep, or type a length — release to commit. Esc backs up.`
     }
     // A predicted verdict outranks the generic stage copy: the whole point of
     // the start verdict is that a wrong (or auto-fixed) placement is
@@ -621,7 +623,7 @@ export class FollowMeTool implements Tool {
         return refusalGuidance(this.profileVerdict.reason)
       }
       if (this.profileVerdict.kind === 'orient') {
-        return `${orientGuidance()} Click to sweep it, or drag along the path for a partial sweep.${this._mergeHintSuffix()}${this._groupGapSuffix()}`
+        return `${orientGuidance()} ${t`Click to sweep it, or drag along the path for a partial sweep.`}${this._mergeHintSuffix()}${this._groupGapSuffix()}`
       }
       if (this.profileVerdict.kind === 'ok') {
         // A carried (perpendicular-but-detached) open-path end is honest
@@ -629,8 +631,8 @@ export class FollowMeTool implements Tool {
         // path as drawn — the path's shape is carried to wherever the
         // profile stands (design §2a).
         const base = this.profileVerdict.carried === true
-          ? 'The sweep starts at the profile and follows the path’s shape — click to sweep it, or drag along the path for a partial sweep.'
-          : 'This profile starts cleanly on the path — click to sweep it, or drag along the path for a partial sweep.'
+          ? t`The sweep starts at the profile and follows the path’s shape — click to sweep it, or drag along the path for a partial sweep.`
+          : t`This profile starts cleanly on the path — click to sweep it, or drag along the path for a partial sweep.`
         return base + this._mergeHintSuffix() + this._groupGapSuffix()
       }
     }
@@ -655,8 +657,8 @@ export class FollowMeTool implements Tool {
         (path.instance === undefined ||
           (this._activeInstance !== null && path.instance === this._activeInstance))
       const base = autoMerges
-        ? 'Click this face to sweep it as the profile — it merges straight into the solid the path runs on.'
-        : 'Click this face to use it as the profile.'
+        ? t`Click this face to sweep it as the profile — it merges straight into the solid the path runs on.`
+        : t`Click this face to use it as the profile.`
       return base + this._groupGapSuffix(true)
     }
     // The face-click re-pick is offered only while the path is a leftover
@@ -665,8 +667,8 @@ export class FollowMeTool implements Tool {
     // the fallback face-profile pick (see the `hoveredProfileFace` branch
     // above) plus, for a face-loop path, the merge gesture.
     return this.stage.pathSource === 'preselection'
-      ? 'Click the profile to sweep along the highlighted path — a solid-face click follows that face instead; Esc re-picks the path.'
-      : `Click the profile to sweep along the highlighted path, or drag along it for a partial sweep.${this._mergeHintSuffix()} Esc re-picks the path.`
+      ? t`Click the profile to sweep along the highlighted path — a solid-face click follows that face instead; Esc re-picks the path.`
+      : `${t`Click the profile to sweep along the highlighted path, or drag along it for a partial sweep.`}${this._mergeHintSuffix()} ${t`Esc re-picks the path.`}`
   }
 
   /** " Ctrl/Cmd-click to merge with the solid." when the picked path is a
@@ -685,7 +687,7 @@ export class FollowMeTool implements Tool {
       (this.stage.path.instance === undefined ||
         (this._activeInstance !== null && this.stage.path.instance === this._activeInstance))
     ) {
-      return ' Ctrl/Cmd-click to merge with the solid.'
+      return ` ${t`Ctrl/Cmd-click to merge with the solid.`}`
     }
     return ''
   }
@@ -714,7 +716,7 @@ export class FollowMeTool implements Tool {
         this.stage.path.kind === 'face' &&
         this.stage.path.instance !== undefined)
     return noGroupSurface
-      ? ' — will land at the top level, not inside the group you’re editing'
+      ? ` ${t`It will land at the top level, not inside the group you’re editing.`}`
       : ''
   }
 
@@ -835,20 +837,20 @@ export class FollowMeTool implements Tool {
   private _ineligibleFaceHint(instance: bigint | undefined, forProfile: boolean): string {
     if (this._activeInstance !== null) {
       return instance === undefined
-        ? 'That face isn’t part of the component you’re editing — press Esc to step out first.'
-        : 'That face belongs to a different component instance — press Esc to step out first.'
+        ? t`That face isn’t part of the component you’re editing — press Esc to step out first.`
+        : t`That face belongs to a different component instance — press Esc to step out first.`
     }
     if (this._contextScoped || this._activeContext !== null) {
-      return 'That face isn’t part of what you’re editing — press Esc to step out first.'
+      return t`That face isn’t part of what you’re editing — press Esc to step out first.`
     }
     if (instance !== undefined) {
       // Only reachable for a PROFILE pick — a PATH pick never refuses an
       // instanced face for being one (see `_faceFollowable`).
-      return 'That face belongs to a component — Follow Me can only use a plain face as the profile. Pick a sketch region instead, or explode the instance.'
+      return t`That face belongs to a component — Follow Me can only use a plain face as the profile. Pick a sketch region instead, or explode the instance.`
     }
     return forProfile
-      ? 'That face is inside a group — enter the group to use it as the profile, or ungroup it first.'
-      : 'That face is inside a group — enter the group first, or ungroup it, then follow the face.'
+      ? t`That face is inside a group — enter the group to use it as the profile, or ungroup it first.`
+      : t`That face is inside a group — enter the group first, or ungroup it, then follow the face.`
   }
 
   onPointerMove(_snap: Snap | null, ray: Ray): void {
@@ -910,7 +912,7 @@ export class FollowMeTool implements Tool {
       // Never a silent no-op: a solid face cannot be preselected, so a
       // path-stage click that hits nothing — or lands on a face the tool
       // cannot correctly sweep (instanced / in-context) — says what to aim at.
-      this._notifyMiss(pick.kind === 'ineligible-face' ? pick.message : PATH_MISS)
+      this._notifyMiss(pick.kind === 'ineligible-face' ? pick.message : pathMiss())
       return
     }
 
@@ -1426,7 +1428,7 @@ export class FollowMeTool implements Tool {
           const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, false)
           this._finishCommit(objectId)
           this.onToast(
-            'The profile only touches the solid at an edge or corner — left as a separate object.',
+            t`The profile only touches the solid at an edge or corner — left as a separate object.`,
           )
           return
         } catch (fallbackErr) {
@@ -1632,14 +1634,14 @@ export class FollowMeTool implements Tool {
     stopLen?: number,
   ): string {
     if (stopLen !== undefined && stopLen < 0 && code === 'PathTooTight') {
-      return "This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse."
+      return t`This path can't be swept in reverse from here — it either only closes going one direction, or bends too tightly to walk backward. Drag forward instead, or start the profile somewhere with more room to reverse.`
     }
     if (path.kind === 'face') {
       if (code === 'ProfileNotPerpendicular') {
-        return 'That face is parallel to the profile — pick the flat face the profile stands across, not one it runs along.'
+        return t`That face is parallel to the profile — pick the flat face the profile stands across, not one it runs along.`
       }
       if (code === 'PathTooTight') {
-        return 'That face is thinner than the profile is deep — pick a wider face, or use a shallower profile.'
+        return t`That face is thinner than the profile is deep — pick a wider face, or use a shallower profile.`
       }
     }
     return kernelErrorMessage(code ?? 'Unknown', rawMsg)

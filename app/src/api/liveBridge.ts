@@ -168,6 +168,7 @@ function notReadyReply(frame: string): string | undefined {
     id,
     error: {
       code: NOT_READY_CODE,
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- JSON-RPC refusal text for the developer API, which stays English
       message: 'not ready: the live connection is still starting up',
     },
   })
@@ -403,6 +404,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
       void answer({
         ok: false,
         refusal: 'host_capability_missing',
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- API refusal text for developers, which stays English
         message: 'this window cannot run that operation',
       })
       return

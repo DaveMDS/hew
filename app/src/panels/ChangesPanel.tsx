@@ -22,7 +22,10 @@
  * 1.1 — no jump-to-that-point-in-history.
  */
 
+import { historyLabel } from '../i18n/historyLabels'
 import type React from 'react'
+import { plural } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { parseContentHistoryEntries, originConnection, entriesSinceSaved, describeChangeCount, type HistoryEntry } from './changesModel'
 import type { Scene } from '../wasm/loader'
 
@@ -70,16 +73,19 @@ function SavedMarker() {
   return (
     <div style={SAVED_MARKER_STYLE}>
       <span style={SAVED_MARKER_LINE_STYLE} />
-      <span>Saved</span>
+      <span>
+        <Trans>Saved</Trans>
+      </span>
       <span style={SAVED_MARKER_LINE_STYLE} />
     </div>
   )
 }
 
 function OriginBadge({ connection }: { connection: string }) {
+  const { t } = useLingui()
   return (
     <span
-      title={`API connection: ${connection}`}
+      title={t`API connection: ${connection}`}
       style={{
         flexShrink: 0,
         fontSize: '9px',
@@ -91,7 +97,7 @@ function OriginBadge({ connection }: { connection: string }) {
         letterSpacing: '0.02em',
       }}
     >
-      API
+      <Trans>API</Trans>
     </span>
   )
 }
@@ -113,7 +119,7 @@ function EntryRow({ entry, dimmed }: { entry: HistoryEntry; dimmed: boolean }) {
           textDecoration: dimmed ? 'line-through' : 'none',
         }}
       >
-        {entry.label}
+        {historyLabel(entry.kind, entry.label)}
       </span>
       {connection !== null && <OriginBadge connection={connection} />}
     </div>
@@ -154,13 +160,15 @@ export function ChangesPanel({ scene, docRev: _docRev, reasons }: ChangesPanelPr
     <div style={{ display: 'flex', flexDirection: 'column' }}>
       {timeline.length === 0 ? (
         <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', padding: '4px 0' }}>
-          No changes yet this session.
+          <Trans>No changes yet this session.</Trans>
         </div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           {dropped > 0 && (
             <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', fontStyle: 'italic', padding: '2px 0' }}>
-              and {dropped} more{savedMarkerHidden ? ' (including the last save)' : ''}
+              {savedMarkerHidden
+                ? plural(dropped, { one: 'and # more (including the last save)', other: 'and # more (including the last save)' })
+                : plural(dropped, { one: 'and # more', other: 'and # more' })}
             </div>
           )}
           {visible.map((entry, i) => (

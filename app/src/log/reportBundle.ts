@@ -48,7 +48,10 @@
  * build has no filesystem home to scrub, so `homeDir` is null there.
  */
 
+import { t } from '@lingui/core/macro'
+import { plural } from '@lingui/core/macro'
 import * as diagnosticLog from './diagnosticLog'
+import { formatNumber } from '../i18n/format'
 import type { InputEvent } from '../recording/inputRecorder'
 import { analyzeRecording, canCompress, gzipChunks, yieldTask, type ImportedFile } from './reportImports'
 import { getFailedOpen, type FailedOpen } from './failedOpen'
@@ -179,6 +182,7 @@ export interface BuildReportBundleResult extends ReportDescription {
 /** Thrown by a gather or build whose `signal` aborted. */
 export class ReportBuildCancelled extends Error {
   constructor() {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal control-flow error, never shown
     super('report build cancelled')
     this.name = 'ReportBuildCancelled'
   }
@@ -209,10 +213,25 @@ const LOG_TAIL_LINES = 200
 const RECORDING_PREVIEW_STEPS = 20
 
 
+/* oxlint-disable lingui/no-unlocalized-strings -- English size text for log lines (App.tsx logs call this); the dialog's previews use displayBytes */
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
   return `${(n / (1024 * 1024)).toFixed(1)} MB`
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+/** Size text for strings the Report Bug dialog shows (previews, the
+ *  too-large reason): the same units as `formatBytes`, with the active
+ *  locale's decimal separator. */
+function displayBytes(n: number): string {
+  if (n < 1024) return t`${n} B`
+  if (n < 1024 * 1024) {
+    const kb = formatNumber(n / 1024, { fractionDigits: 1 })
+    return t`${kb} KB`
+  }
+  const mb = formatNumber(n / (1024 * 1024), { fractionDigits: 1 })
+  return t`${mb} MB`
 }
 
 
@@ -252,6 +271,10 @@ export interface ReportSystemInfo {
   os: string
   gpu: string
   userAgent: string
+  /** The UI language the report was filed from (`document.documentElement.lang`,
+   *  set by `i18n/activate.ts`), so a report written in another language
+   *  arrives with that context. Empty when unknown. */
+  locale: string
 }
 
 export function gatherSystemInfo(appVersion: string, platform: string): ReportSystemInfo {
@@ -273,7 +296,13 @@ export function gatherSystemInfo(appVersion: string, platform: string): ReportSy
   } catch {
     gpu = ''
   }
-  return { appVersion, platform, os, gpu, userAgent }
+  let locale = ''
+  try {
+    locale = typeof document !== 'undefined' ? document.documentElement.lang : ''
+  } catch {
+    locale = ''
+  }
+  return { appVersion, platform, os, gpu, userAgent, locale }
 }
 
 function base64FromBytes(bytes: Uint8Array): string {
@@ -361,6 +390,7 @@ export function scrubHomeDir(text: string, homeDir: string | null): string {
  */
 export function extractRecordingSummary(recordingJson: string): { stepCount: number; lastStepNames: string[] } {
   try {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- JSON key scanned for in the recording text
     const marker = '"calls":['
     const markerIndex = recordingJson.indexOf(marker)
     if (markerIndex === -1) return { stepCount: 0, lastStepNames: [] }
@@ -552,7 +582,7 @@ export async function gatherReport(opts: GatherReportOptions): Promise<ReportCon
         : null,
     modelAvailable,
     modelDisabledReason:
-      crash !== null ? 'unavailable after a crash' : scene === null ? 'unavailable — no document loaded' : null,
+      crash !== null ? t`unavailable after a crash` : scene === null ? t`unavailable — no document loaded` : null,
     model,
     objectCount,
     logTail,
@@ -627,6 +657,7 @@ function* base64Pieces(bytes: Uint8Array, size: number): Generator<string> {
  * format, report, system, crash first (§3), the small fields the intake
  * service reads from the front of the first piece.
  */
+/* oxlint-disable lingui/no-unlocalized-strings -- bundleStrings writes the bundle's JSON for the maintainer, English by design */
 function* bundleStrings(
   c: ReportContent,
   inc: Inclusion,
@@ -685,6 +716,7 @@ function* bundleStrings(
   if (inc.input) yield `,"input":${JSON.stringify(c.input)}`
   yield '}'
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 function* utf8Pieces(strings: Iterable<string>, signal: AbortSignal | undefined): Generator<Uint8Array> {
   const encoder = new TextEncoder()
@@ -729,7 +761,7 @@ async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolea
       upload: {
         gzip: null,
         compressedBytes: null,
-        unavailableReason: 'This system can’t compress reports, so it can’t send them. Save the report to a file instead.',
+        unavailableReason: t`This system can’t compress reports, so it can’t send them. Save the report to a file instead.`,
       },
       dropped,
     }
@@ -757,15 +789,18 @@ async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolea
     }
     if (result.length > maxSendBytes && sendFailedFile) {
       sendFailedFile = false
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- ReportRowKey identifier
       dropped.push('failedFile')
       result = await compress()
     }
     if (result.length > maxSendBytes) {
+      const size = displayBytes(result.length)
+      const limit = displayBytes(maxSendBytes)
       return {
         upload: {
           gzip: null,
           compressedBytes: result.length,
-          unavailableReason: `This report is ${formatBytes(result.length)} compressed, over the ${formatBytes(maxSendBytes)} limit. Save it to a file instead.`,
+          unavailableReason: t`This report is ${size} compressed, over the ${limit} limit. Save it to a file instead.`,
         },
         dropped,
       }
@@ -774,10 +809,17 @@ async function planSend(c: ReportContent, opts: ReportBuildOptions, keep: boolea
   } catch (err) {
     if (err instanceof ReportBuildCancelled || opts.signal?.aborted) throw new ReportBuildCancelled()
     return {
-      upload: { gzip: null, compressedBytes: null, unavailableReason: 'Couldn’t compress this report. Save it to a file instead.' },
+      upload: { gzip: null, compressedBytes: null, unavailableReason: t`Couldn’t compress this report. Save it to a file instead.` },
       dropped,
     }
   }
+}
+
+/** The model row's preview when the model can't be included. */
+function modelUnavailableText(c: ReportContent): string {
+  if (c.crash !== null) return t`The model is unavailable after a crash.`
+  if (c.modelDisabledReason !== null) return t`The model is unavailable — no document loaded.`
+  return t`The model is unavailable.`
 }
 
 /** The checklist rows for `flags`. Cheap: works from the gathered content,
@@ -791,6 +833,9 @@ export function describeReport(
   const inc = inclusionOf(c, flags)
   const { system, recording, recordingSummary, importedFiles, failedOpen, input, debugMode } = c
   const hasImports = importedFiles.length > 0
+  const { stepCount } = recordingSummary
+  const { objectCount } = c
+  const eventCount = input.length
 
   // The recording is ASCII apart from rare non-ASCII names, and encoding a
   // few hundred megabytes just to count it isn't worth it; its length is
@@ -805,42 +850,42 @@ export function describeReport(
       bytes: utf8Length(JSON.stringify(system)),
       disabledReason: null,
       droppedFromSend: false,
-      preview: `${system.appVersion} · ${system.platform} · ${system.os || 'unknown OS'} · ${system.gpu || 'unknown GPU'} · ${system.userAgent}`,
+      preview: `${system.appVersion} · ${system.platform} · ${system.os || t`unknown OS`} · ${system.gpu || t`unknown GPU`} · ${system.userAgent}`,
     },
     recording: {
       included: inc.recording,
       bytes: recording !== null ? recording.length - importsChars : 0,
       disabledReason:
         recording === null
-          ? 'no recording available'
+          ? t`no recording available`
           : c.importScanFailed
-            ? 'couldn’t separate imported files from the steps'
+            ? t`couldn’t separate imported files from the steps`
             : null,
       droppedFromSend: false,
       preview:
         recording === null
-          ? 'No recorded steps available.'
-          : `${recordingSummary.stepCount} step${recordingSummary.stepCount === 1 ? '' : 's'} recorded\nLast steps:\n${recordingSummary.lastStepNames.join('\n')}`,
+          ? t`No recorded steps available.`
+          : `${plural(stepCount, { one: '# step recorded', other: '# steps recorded' })}\n${t`Last steps:`}\n${recordingSummary.lastStepNames.join('\n')}`,
     },
     imports: {
       included: inc.imports,
       bytes: importedFiles.reduce((n, f) => n + f.fileBytes, 0),
-      disabledReason: !hasImports ? 'no imported files' : !inc.recording ? 'sent only with recorded steps' : null,
+      disabledReason: !hasImports ? t`no imported files` : !inc.recording ? t`sent only with recorded steps` : null,
       droppedFromSend: dropped.includes('imports'),
       preview: hasImports
-        ? importedFiles.map((f) => `${f.label}, ${formatBytes(f.fileBytes)}`).join('\n')
-        : 'No imported files.',
+        ? importedFiles.map((f) => `${f.label}, ${displayBytes(f.fileBytes)}`).join('\n')
+        : t`No imported files.`,
     },
     failedFile: {
       included: inc.failedFile,
       bytes: failedOpen?.bytes.byteLength ?? 0,
-      disabledReason: failedOpen === null ? 'no file failed to open' : null,
+      disabledReason: failedOpen === null ? t`no file failed to open` : null,
       droppedFromSend: dropped.includes('failedFile'),
       preview:
         failedOpen === null
-          ? 'No file failed to open.'
-          : `${failedOpen.name} · ${failedOpen.label} · ${formatBytes(failedOpen.bytes.byteLength)}\n${
-              failedOpen.error ?? 'Hew stopped while opening it.'
+          ? t`No file failed to open.`
+          : `${failedOpen.name} · ${failedOpen.label} · ${displayBytes(failedOpen.bytes.byteLength)}\n${
+              failedOpen.error ?? t`Hew stopped while opening it.`
             }`,
     },
     model: {
@@ -849,8 +894,8 @@ export function describeReport(
       disabledReason: c.modelDisabledReason,
       droppedFromSend: dropped.includes('model'),
       preview: c.modelAvailable
-        ? `${c.scrubbedDocumentName} · ${c.objectCount} object${c.objectCount === 1 ? '' : 's'} · ${formatBytes(hewBytes)}`
-        : `The model is ${c.modelDisabledReason ?? 'unavailable'}.`,
+        ? `${c.scrubbedDocumentName} · ${plural(objectCount, { one: '# object', other: '# objects' })} · ${displayBytes(hewBytes)}`
+        : modelUnavailableText(c),
     },
     log: {
       included: inc.log,
@@ -862,9 +907,9 @@ export function describeReport(
     input: {
       included: inc.input,
       bytes: inputBytes,
-      disabledReason: debugMode ? null : 'only recorded in Debug Mode',
+      disabledReason: debugMode ? null : t`only recorded in Debug Mode`,
       droppedFromSend: false,
-      preview: `${input.length} event${input.length === 1 ? '' : 's'} recorded`,
+      preview: plural(eventCount, { one: '# event recorded', other: '# events recorded' }),
     },
   }
 

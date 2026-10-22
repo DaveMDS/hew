@@ -22,5 +22,6 @@
  * agreement.
  */
 export const CAMERA_HANDOFF_TOOL_NAMES: ReadonlySet<string> = new Set([
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool IDs compared against the active tool, never shown
   'Orbit', 'Pan', 'Zoom', 'Zoom Window', 'Position Camera', 'Look Around', 'Walk',
 ])

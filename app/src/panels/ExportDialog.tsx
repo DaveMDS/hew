@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useCallback, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { VIEW_LABEL, type PrintViewKind } from '../print/printJob'
 import { scalePresetsFor, type PrintScale } from '../print/scale'
 import {
@@ -32,6 +33,7 @@ import {
   type SvgExportOptions,
 } from '../io/savePanel'
 import { getLengthUnit } from '../settings/units'
+import { isComposingKey } from '../input/keyboard'
 
 export type { ExportFormat, SvgExportOptions } from '../io/savePanel'
 
@@ -123,6 +125,7 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
+  const { t } = useLingui()
   const [format, setFormat] = useState<ExportFormat>('glb')
   const [stlSegments, setStlSegments] = useState(DEFAULT_STL_SEGMENTS)
   // SVG line-drawing options (docs/design/printing.md §7b): a view, a
@@ -138,6 +141,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -159,12 +163,14 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Export"
+        aria-label={t`Export`}
       >
-        <div style={HEADING_STYLE}>Export</div>
+        <div style={HEADING_STYLE}>
+          <Trans>Export</Trans>
+        </div>
 
         <label style={LABEL_STYLE} htmlFor="export-format-select">
-          Format
+          <Trans>Format</Trans>
         </label>
         <select
           id="export-format-select"
@@ -182,23 +188,27 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
 
         {format === 'svg' && (
           <>
-            <label style={LABEL_STYLE} htmlFor="export-svg-view-select">View</label>
+            <label style={LABEL_STYLE} htmlFor="export-svg-view-select">
+              <Trans>View</Trans>
+            </label>
             <select id="export-svg-view-select" style={SELECT_STYLE} value={svgView} onChange={(e) => setSvgView(e.target.value as PrintViewKind)}>
               {(Object.keys(VIEW_LABEL) as PrintViewKind[]).map((v) => (
                 <option key={v} value={v}>{VIEW_LABEL[v]}</option>
               ))}
             </select>
-            <label style={LABEL_STYLE} htmlFor="export-svg-scale-select">Scale</label>
+            <label style={LABEL_STYLE} htmlFor="export-svg-scale-select">
+              <Trans>Scale</Trans>
+            </label>
             <select id="export-svg-scale-select" style={SELECT_STYLE} value={svgScaleIndex} onChange={(e) => setSvgScaleIndex(Number(e.target.value))}>
               {svgPresets.map((p, i) => (
                 <option key={p.label} value={i}>{svgScaleLabel(p, unitFormat)}</option>
               ))}
             </select>
             <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px' }}>
-              <input type="checkbox" checked={svgHidden} onChange={(e) => setSvgHidden(e.target.checked)} /> Hidden lines dashed
+              <input type="checkbox" checked={svgHidden} onChange={(e) => setSvgHidden(e.target.checked)} /> <Trans>Hidden lines dashed</Trans>
             </label>
             <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
-              <input type="checkbox" checked={svgDimensions} onChange={(e) => setSvgDimensions(e.target.checked)} /> Dimensions &amp; text
+              <input type="checkbox" checked={svgDimensions} onChange={(e) => setSvgDimensions(e.target.checked)} /> <Trans>Dimensions &amp; text</Trans>
             </label>
           </>
         )}
@@ -206,7 +216,7 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
         {format === 'stl' && (
           <>
             <label style={LABEL_STYLE} htmlFor="export-stl-resolution-select">
-              Curve resolution
+              <Trans>Curve resolution</Trans>
             </label>
             <select
               id="export-stl-resolution-select"
@@ -225,10 +235,10 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
 
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button style={EXPORT_BUTTON_STYLE} onClick={() => onExport(format, stlSegments, format === 'svg' ? svgOptions() : undefined)}>
-            Export
+            <Trans>Export</Trans>
           </button>
         </div>
       </div>

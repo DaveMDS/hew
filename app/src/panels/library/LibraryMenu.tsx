@@ -7,13 +7,20 @@
  * selected; the menu is a shortcut to get there, not a second code path.
  */
 
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
 import { isMac, isWindows } from '../../platform'
 
 /** "Reveal in the OS file manager" label, worded per platform. Exported so
  * `LibraryDetailPane`'s matching manage-row button can't drift from this
  * menu's wording — both sites reach for the same string instead of each
  * hardcoding "Reveal in Finder". */
-export const revealLabel: string = isMac ? 'Reveal in Finder' : isWindows ? 'Show in Explorer' : 'Show in file manager'
+export const revealLabel: MessageDescriptor = isMac
+  ? msg`Reveal in Finder`
+  : isWindows
+    ? msg`Show in Explorer`
+    : msg`Show in file manager`
 
 export interface LibraryMenuProps {
   itemName: string
@@ -58,6 +65,7 @@ export function LibraryMenu({
   onDownload,
   onDeleteRequest,
 }: LibraryMenuProps) {
+  const { t, i18n } = useLingui()
   // Popover pinned just under the anchor button, left-aligned; both axes
   // are clamped to the viewport so a bottom-row (or right-click-anywhere)
   // anchor can't push the menu off-screen (adversarial review S14). The
@@ -92,21 +100,21 @@ export function LibraryMenu({
           handling (which owns closing this menu on Escape instead — see
           LibraryDialog's handleKeyDown). */}
       <div className="hwlib__menu-scrim" onClick={onClose} />
-      <div className="hwlib__menu" style={style} role="menu" aria-label={`${itemName} actions`}>
+      <div className="hwlib__menu" style={style} role="menu" aria-label={t`${itemName} actions`}>
         {!errored && (
           <>
-            {item('Open as document', onOpenAsDocument)}
-            {item('Add to collection', onAddToCollection)}
-            {item('Rename', onRename)}
+            {item(t`Open as document`, onOpenAsDocument)}
+            {item(t`Add to collection`, onAddToCollection)}
+            {item(t`Rename`, onRename)}
             <div className="hwlib__menu-divider" />
-            {item('Re-render thumbnail', onRerenderThumbnail)}
-            {hasSourceInfo && item('Remove Source Info', onRemoveSourceInfo)}
+            {item(t`Re-render thumbnail`, onRerenderThumbnail)}
+            {hasSourceInfo && item(t`Remove Source Info`, onRemoveSourceInfo)}
           </>
         )}
-        {canReveal && item(revealLabel, onReveal)}
-        {canDownload && !errored && item('Download…', onDownload)}
+        {canReveal && item(i18n._(revealLabel), onReveal)}
+        {canDownload && !errored && item(t`Download…`, onDownload)}
         {(!errored || canReveal || canDownload) && <div className="hwlib__menu-divider" />}
-        {item('Delete from library…', onDeleteRequest, { danger: true })}
+        {item(t`Delete from library…`, onDeleteRequest, { danger: true })}
       </div>
     </>
   )

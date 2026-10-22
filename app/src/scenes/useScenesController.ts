@@ -18,6 +18,7 @@
  * persisted; activation is not a dirtying change).
  */
 
+import { t } from '@lingui/core/macro'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { RefObject } from 'react'
 import type { Scene } from '../wasm/loader'
@@ -341,7 +342,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         resolved = s.apply_scene(BigInt(sid))
       } catch (err) {
-        onToastRef.current(`Activate Scene failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Activate Scene failed: ${reason}`)
         return
       }
       applyResolved(sid, opts?.instant === true, resolved)
@@ -377,7 +379,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
         activeSidRef.current === null ? undefined : BigInt(activeSidRef.current),
       )
     } catch (err) {
-      onToastRef.current(`Add Scene failed: ${friendlyErrorText(err)}`)
+      const reason = friendlyErrorText(err)
+      onToastRef.current(t`Add Scene failed: ${reason}`)
       return null
     }
     const n = Number(sid)
@@ -398,7 +401,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         s.update_scene(BigInt(sid), entry.props, cameraJson(viewportApi.current), displayJson(displayRef.current))
       } catch (err) {
-        onToastRef.current(`Update Scene failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Update Scene failed: ${reason}`)
         return
       }
       markDirtyRef.current()
@@ -413,7 +417,7 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
   const rename = useCallback(
     (sid: number, name: string): string | null => {
       const s = sceneRef.current
-      if (s === null) return 'No document.'
+      if (s === null) return t`No document.`
       try {
         s.rename_scene(BigInt(sid), name)
       } catch (err) {
@@ -435,7 +439,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         s.set_scene_description(BigInt(sid), text)
       } catch (err) {
-        onToastRef.current(`Describe Scene failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Describe Scene failed: ${reason}`)
         return
       }
       markDirtyRef.current()
@@ -451,7 +456,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         s.set_scene_props(BigInt(sid), props, cameraJson(viewportApi.current), displayJson(displayRef.current))
       } catch (err) {
-        onToastRef.current(`Scene properties failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Scene properties failed: ${reason}`)
         return
       }
       markDirtyRef.current()
@@ -471,7 +477,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         s.move_scene(BigInt(sid), to)
       } catch (err) {
-        onToastRef.current(`Move Scene failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Move Scene failed: ${reason}`)
         return
       }
       markDirtyRef.current()
@@ -487,7 +494,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       try {
         s.remove_scene(BigInt(sid))
       } catch (err) {
-        onToastRef.current(`Delete Scene failed: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Delete Scene failed: ${reason}`)
         return
       }
       markDirtyRef.current()

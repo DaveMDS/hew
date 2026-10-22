@@ -9,8 +9,10 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { DocFormat } from '../io/fileHost'
 import { SAVE_FORMAT_CHOICES } from '../io/docFormat'
+import { isComposingKey } from '../input/keyboard'
 
 interface SaveFormatDialogProps {
   /** The format selected when the dialog opens. */
@@ -93,10 +95,12 @@ const CONFIRM_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDialogProps) {
+  const { t } = useLingui()
   const [format, setFormat] = useState<DocFormat>(initial)
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -124,10 +128,12 @@ export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDial
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Save As"
+        aria-label={t`Save As`}
       >
-        <div style={HEADING_STYLE}>Save As</div>
-        <div role="radiogroup" aria-label="File format">
+        <div style={HEADING_STYLE}>
+          <Trans>Save As</Trans>
+        </div>
+        <div role="radiogroup" aria-label={t`File format`}>
           {SAVE_FORMAT_CHOICES.map((choice) => (
             <label key={choice.format} style={OPTION_STYLE}>
               <input
@@ -147,10 +153,10 @@ export function SaveFormatDialog({ initial, onChoose, onCancel }: SaveFormatDial
         </div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button style={CONFIRM_BUTTON_STYLE} onClick={() => onChoose(format)}>
-            Continue
+            <Trans>Continue</Trans>
           </button>
         </div>
       </div>

@@ -14,6 +14,9 @@
  */
 
 import { useEffect, useState } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import {
   getLengthUnit,
   setLengthUnit,
@@ -34,12 +37,13 @@ import {
   settingsOptionStyle,
 } from './SettingsForm'
 
-const SYSTEM_OPTIONS: { value: LengthSystem; label: string }[] = [
-  { value: 'metric', label: 'Metric' },
-  { value: 'imperial', label: 'Imperial' },
+const SYSTEM_OPTIONS: { value: LengthSystem; label: MessageDescriptor }[] = [
+  { value: 'metric', label: msg`Metric` },
+  { value: 'imperial', label: msg`Imperial` },
 ]
 
 export function UnitsPane() {
+  const { t, i18n } = useLingui()
   const [format, setFormat] = useState<LengthFormat>(() => getLengthUnit())
 
   // Keep in sync with external changes (the other window, or another
@@ -56,7 +60,7 @@ export function UnitsPane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="System" htmlFor="settings-units-system">
+      <SettingsRow label={t`System`} htmlFor="settings-units-system">
         <select
           id="settings-units-system"
           value={system}
@@ -65,13 +69,13 @@ export function UnitsPane() {
         >
           {SYSTEM_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value} style={settingsOptionStyle}>
-              {opt.label}
+              {i18n._(opt.label)}
             </option>
           ))}
         </select>
       </SettingsRow>
 
-      <SettingsRow label="Format" htmlFor="settings-units-format">
+      <SettingsRow label={t`Format`} htmlFor="settings-units-format">
         <select
           id="settings-units-format"
           value={format}
@@ -82,7 +86,7 @@ export function UnitsPane() {
             const opt = LENGTH_FORMAT_OPTIONS.find((o) => o.value === value)
             return (
               <option key={value} value={value} style={settingsOptionStyle}>
-                {opt?.label ?? value}
+                {opt === undefined ? value : i18n._(opt.label)}
               </option>
             )
           })}
@@ -92,8 +96,10 @@ export function UnitsPane() {
       <SettingsSeparator />
 
       <SettingsNote>
-        Controls how lengths are displayed (e.g. the Move tool's live measurement).
-        Model geometry is always stored in meters internally.
+        <Trans>
+          Controls how lengths are displayed (e.g. the Move tool's live measurement).
+          Model geometry is always stored in meters internally.
+        </Trans>
       </SettingsNote>
     </SettingsForm>
   )

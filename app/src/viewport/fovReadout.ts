@@ -11,6 +11,8 @@
  * whenever fovDeg changes; blank the rest of the time (no camera tool
  * active, or under parallel projection — no lens to report).
  */
+import { t } from '@lingui/core/macro'
+import { formatNumber } from '../i18n/format'
 import { fovDegToFocalMm } from './fovUnits'
 
 /** Formats a fovDeg value in BOTH units (camera-playtest2.md §1): degrees
@@ -22,7 +24,9 @@ import { fovDegToFocalMm } from './fovUnits'
  * see `parseFovEntry`'s doc (fovUnits.ts) for why clamping happens before
  * this ever runs. */
 export function formatFov(fovDeg: number): string {
-  return `${fovDeg.toFixed(1)}° · ${fovDegToFocalMm(fovDeg).toFixed(1)} mm`
+  const degrees = formatNumber(fovDeg, { fractionDigits: 1, grouping: false })
+  const focalMm = formatNumber(fovDegToFocalMm(fovDeg), { fractionDigits: 1, grouping: false })
+  return t`${degrees}° · ${focalMm} mm`
 }
 
 /** Pure decision: given the active camera tool and projection, what should
@@ -51,6 +55,7 @@ export function fovReadoutText(
 export function activeCameraToolForName(
   toolName: string,
 ): 'Orbit' | 'Pan' | 'Zoom' | 'ZoomWindow' | null {
+  /* oxlint-disable lingui/no-unlocalized-strings -- tool names and camera-mode ids are identifiers */
   switch (toolName) {
     case 'Orbit': return 'Orbit'
     case 'Pan': return 'Pan'
@@ -58,4 +63,5 @@ export function activeCameraToolForName(
     case 'Zoom Window': return 'ZoomWindow'
     default: return null
   }
+  /* oxlint-enable lingui/no-unlocalized-strings */
 }

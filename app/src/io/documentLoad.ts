@@ -28,6 +28,7 @@ import { isPathUnder, tagPathKey } from '../panels/tagModel'
 
 /** Strings that signal the Scene borrow-lock after a Rust panic (mirrors
  *  the check `loader.ts`'s global reproducer-dump hook uses). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- substrings matched against raw wasm panic text
 const PANIC_SIGNATURES = ['recursive use of an object', 'unreachable']
 
 /** True when `message` (an error's `.message`, lower-cased by the caller or

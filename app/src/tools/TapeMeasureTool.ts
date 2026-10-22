@@ -190,11 +190,12 @@
  * session (or no session at all).
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, arrowToAxis, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, arrowToAxis, axisLockColorName, axisLockColorNameCapitalized } from './moveInput'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { planeFromSketch, axisDrawPlane, isPointOnDrawPlane, SketchPickCache, instanceOf, GROUND_PLANE_EPS, type DrawPlane } from './drawPlane'
@@ -319,12 +320,15 @@ export type OnGesturePoint = (points: readonly [number, number, number][]) => vo
 /** Toast shown when a session is open and the scoped-rescale arm gate
  *  (finding 6, group-session.md) declines because one of the two measured
  *  endpoints lies outside it — points the user at what actually resizes. */
-const SESSION_SCOPE_RESCALE_DECLINE_MESSAGE =
-  "That measurement reaches outside the open group or component — measure its own geometry to resize it."
+function sessionScopeRescaleDeclineMessage(): string {
+  return t`That measurement reaches outside the open group or component — measure its own geometry to resize it.`
+}
 
 /** Toast for a typed offset with no side to put the guide on yet — the cursor
  *  is still on the edge, so the distance has no direction. */
-const NO_OFFSET_SIDE_MESSAGE = 'Move the cursor to the side the guide should go, then type the distance.'
+function noOffsetSideMessage(): string {
+  return t`Move the cursor to the side the guide should go, then type the distance.`
+}
 
 /** Half-length of the previewed parallel-guide line (meters). */
 const GUIDE_HALF_LENGTH = 50
@@ -341,7 +345,16 @@ const AXIS_LEADER_HALF_LENGTH = 5
 /** The arrow key that locks/releases each offset axis (0/1/2), for the
  *  `offsetLock` status hint — the reverse of `arrowToAxis`'s key→axis
  *  mapping (ArrowRight→0, ArrowLeft→1, ArrowUp→2). */
-const OFFSET_LOCK_KEY_NAMES: readonly [string, string, string] = ['Right', 'Left', 'Up']
+function offsetLockKeyName(axis: 0 | 1 | 2): string {
+  switch (axis) {
+    case 0:
+      return t({ context: 'arrow key', message: 'Right' })
+    case 1:
+      return t({ context: 'arrow key', message: 'Left' })
+    case 2:
+      return t({ context: 'arrow key', message: 'Up' })
+  }
+}
 
 /** Adjacency tolerance (world meters) for `_resolveFaceAnchor`'s gate on a
  *  face pick actually passing through/near the source edge point, not
@@ -555,7 +568,7 @@ export class TapeMeasureTool implements Tool {
     const suppressSuffix =
       (this.stage.kind === 'parallel' || this.stage.kind === 'measure') &&
       (!this.createGuides || this._measureOnly)
-        ? ' — measuring only, no guide will be created.'
+        ? ` ${t`Measuring only; no guide will be created.`}`
         : ''
 
     switch (this.stage.kind) {
@@ -563,49 +576,48 @@ export class TapeMeasureTool implements Tool {
         if (this._offsetAxisRejectedHint !== null) return this._offsetAxisRejectedHint + suppressSuffix
         if (this.offsetLock !== null) {
           if (this._shiftAxisLock) {
-            return (
-              `Offset locked to ${AXIS_LOCK_COLOR_NAMES[this.offsetLock]} while Shift is held — ` +
-              `release Shift, or press an arrow to keep it.` + suppressSuffix
-            )
+            const axis = axisLockColorName(this.offsetLock)
+            return t`Offset locked to ${axis} while Shift is held — release Shift, or press an arrow to keep it.` + suppressSuffix
           }
-          const key = OFFSET_LOCK_KEY_NAMES[this.offsetLock]
-          return `Offset locked to ${AXIS_LOCK_COLOR_NAMES[this.offsetLock]} — ${key} again or Down to release.` + suppressSuffix
+          const axis = axisLockColorName(this.offsetLock)
+          const key = offsetLockKeyName(this.offsetLock)
+          return t`Offset locked to ${axis} — ${key} again or Down to release.` + suppressSuffix
         }
-        return 'Click to place the parallel guide — or type an exact offset.' + suppressSuffix
+        return t`Click to place the parallel guide — or type an exact offset.` + suppressSuffix
       }
       case 'measure': {
         if (this.lockAxis !== null) {
           if (this._shiftAxisLock) {
-            return (
-              `Measurement locked to ${AXIS_LOCK_COLOR_NAMES[this.lockAxis]} while Shift is held — ` +
-              `release Shift, or press an arrow to keep it.` + suppressSuffix
-            )
+            const axis = axisLockColorName(this.lockAxis)
+            return t`Measurement locked to ${axis} while Shift is held — release Shift, or press an arrow to keep it.` + suppressSuffix
           }
-          const key = OFFSET_LOCK_KEY_NAMES[this.lockAxis]
-          return `Measurement locked to ${AXIS_LOCK_COLOR_NAMES[this.lockAxis]} — ${key} again or Down to release.` + suppressSuffix
+          const axis = axisLockColorName(this.lockAxis)
+          const key = offsetLockKeyName(this.lockAxis)
+          return t`Measurement locked to ${axis} — ${key} again or Down to release.` + suppressSuffix
         }
-        return 'Click the second point to read the distance — or type an exact distance to drop a guide there.' + suppressSuffix
+        return t`Click the second point to read the distance — or type an exact distance to drop a guide there.` + suppressSuffix
       }
       case 'pendingRescale':
         if (this.stage.fromRecall) {
-          return 'Resize the model to the typed distance? Confirm in the dialog, or Esc to leave the model alone.'
+          return t`Resize the model to the typed distance? Confirm in the dialog, or Esc to leave the model alone.`
         }
-        return 'Resize the model to the typed distance? Confirm in the dialog, or Esc to just drop a guide instead.'
+        return t`Resize the model to the typed distance? Confirm in the dialog, or Esc to just drop a guide instead.`
       default:
         // Idle precedence (tape-measure-rework part 2, first match wins): an
         // OPEN typed buffer beats everything else, since Enter/Esc act on it
         // right now; an idle plane lock is the next most specific state;
         // an eligible-but-untyped recall is next; plain idle is the fallback.
         if (this.typed !== '') {
-          return 'Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is.'
+          return t`Press Enter to resize the model to the typed distance — Esc to keep the measurement as it is.`
         }
         if (this.idlePlaneLock !== null) {
-          return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+          const axis = axisLockColorName(this.idlePlaneLock)
+          return t`Locked to the ${axis} plane — click to start; same arrow or Esc unlocks.`
         }
         if (this._recall !== null) {
-          return 'Type a distance and press Enter to resize the model to it — or click a point to measure from.'
+          return t`Type a distance and press Enter to resize the model to it — or click a point to measure from.`
         }
-        return 'Click a point to measure from — or click an edge to drop a parallel guide.'
+        return t`Click a point to measure from — or click an edge to drop a parallel guide.`
     }
   }
 
@@ -1316,10 +1328,12 @@ export class TapeMeasureTool implements Tool {
         // `offsetLock`/`_shiftAxisLock`/`_shiftLatchPending` — a live Shift
         // lock survives a rejected arrow untouched.
         const others = ([0, 1, 2] as const).filter((i) => i !== requested && viable[i])
-        const rejected = AXIS_LOCK_COLOR_NAMES[requested]
-        const rejectedCap = rejected.charAt(0).toUpperCase() + rejected.slice(1)
-        const otherNames = others.map((i) => AXIS_LOCK_COLOR_NAMES[i]).join(' or ')
-        this._offsetAxisRejectedHint = `${rejectedCap} runs along this edge — lock ${otherNames} instead.`
+        const rejectedCap = axisLockColorNameCapitalized(requested)
+        const [first, second] = others.map((i) => axisLockColorName(i))
+        this._offsetAxisRejectedHint =
+          second !== undefined
+            ? t`${rejectedCap} runs along this edge — lock ${first} or ${second} instead.`
+            : t`${rejectedCap} runs along this edge — lock ${first} instead.`
         return
       }
 
@@ -1929,7 +1943,7 @@ export class TapeMeasureTool implements Tool {
         this.onGuideCreated()
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err)
-        this.onToast(`Couldn't create guide line: ${raw}`)
+        this.onToast(t`Couldn't create guide line: ${raw}`)
       }
     }
     this._resetToIdle()
@@ -1968,7 +1982,7 @@ export class TapeMeasureTool implements Tool {
         this.onGuideCreated()
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err)
-        this.onToast(`Couldn't create guide: ${raw}`)
+        this.onToast(t`Couldn't create guide: ${raw}`)
       }
     }
     this._resetToIdle()
@@ -1996,7 +2010,7 @@ export class TapeMeasureTool implements Tool {
           // the same degenerate input. Nothing committed — freeze would
           // show a misleading stale typed echo, so clear instead.
           this._resetToIdle('clear')
-          this.onToast(NO_OFFSET_SIDE_MESSAGE)
+          this.onToast(noOffsetSideMessage())
           return
         }
         const sign = dotV3(rel, offsetPlane.u) < 0 ? -1 : 1
@@ -2014,7 +2028,7 @@ export class TapeMeasureTool implements Tool {
           // No offset direction yet (cursor sitting on the edge) — nothing
           // committed, so clear rather than freeze.
           this._resetToIdle('clear')
-          this.onToast(NO_OFFSET_SIDE_MESSAGE)
+          this.onToast(noOffsetSideMessage())
           return
         }
         dir = [rel[0] / relLen, rel[1] / relLen, rel[2] / relLen]
@@ -2066,7 +2080,7 @@ export class TapeMeasureTool implements Tool {
         // live-arm fallback would (the ordinary guide-point commit), rather
         // than ever reaching the confirmation dialog.
         if (!this._isAttributionInScope(p0Attribution) || !this._isAttributionInScope(p1Attribution)) {
-          this.onToast(SESSION_SCOPE_RESCALE_DECLINE_MESSAGE)
+          this.onToast(sessionScopeRescaleDeclineMessage())
           this._commitMeasure(p0, endpoint, false)
           return
         }
@@ -2107,7 +2121,7 @@ export class TapeMeasureTool implements Tool {
     const r = this._recall
     if (r === null) return
     if (dist <= 1e-6) {
-      this.onToast('Type a length greater than zero to resize the model.')
+      this.onToast(t`Type a length greater than zero to resize the model.`)
       return
     }
     // Scoped-rescale arm gate (finding 6, group-session.md) — see
@@ -2118,7 +2132,7 @@ export class TapeMeasureTool implements Tool {
     // (typing again would just decline the same way, harmlessly — a fresh
     // eligible measurement is what actually clears it).
     if (!this._isAttributionInScope(r.p0Attribution) || !this._isAttributionInScope(r.p1Attribution)) {
-      this.onToast(SESSION_SCOPE_RESCALE_DECLINE_MESSAGE)
+      this.onToast(sessionScopeRescaleDeclineMessage())
       this.typed = ''
       this._pushReadout(formatLength(r.dist), true)
       return
@@ -2173,8 +2187,13 @@ export class TapeMeasureTool implements Tool {
       this.onRescaleApplied(factor, scoped)
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
-      const target = scoped ? (scopeLabel ?? 'the selection') : 'the model'
-      this.onToast(`Couldn't resize ${target}: ${raw}`)
+      if (!scoped) {
+        this.onToast(t`Couldn't resize the model: ${raw}`)
+      } else if (scopeLabel != null) {
+        this.onToast(t`Couldn't resize ${scopeLabel}: ${raw}`)
+      } else {
+        this.onToast(t`Couldn't resize the selection: ${raw}`)
+      }
     }
     // The document/session just rescaled — the saved world points (if any
     // recall was still around) are now stale. Don't rescale them, just drop

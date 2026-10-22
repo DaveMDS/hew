@@ -25,6 +25,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { plural } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { LoadedFont } from '../text/fonts'
 import { lastSelectedFont, loadFontEntry, rememberSelectedFont } from '../text/fonts'
 import {
@@ -37,6 +39,7 @@ import {
 } from '../text/fontSources'
 import { validateGlyphOutlines } from '../text/outlineValidation'
 import { formatLength, getLengthUnit, getLengthUnitSuffix, parseLengthToMeters } from '../settings/units'
+import { isComposingKey } from '../input/keyboard'
 
 export interface TextDialogResult {
   text: string
@@ -215,6 +218,7 @@ const MAX_VISIBLE_FAMILIES = 150
 /** Case- and diacritic-insensitive normalization for the filter box. */
 function normalizeForFilter(s: string): string {
   return s
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- Unicode normalization form name
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '') // strip combining diacritical marks
     .toLowerCase()
@@ -302,6 +306,8 @@ async function registerPreviewFontFace(cssFamily: string, source: URL | File | A
 type SectionKind = 'bundled' | 'system' | 'user'
 
 export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
+  const { t } = useLingui()
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- sample text placed into the model (the product name), not interface copy
   const [text, setText] = useState('Hew')
   const [heightText, setHeightText] = useState(() => formatLength(DEFAULT_HEIGHT_M))
   const [depthText, setDepthText] = useState(() => formatLength(DEFAULT_DEPTH_M))
@@ -413,13 +419,14 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(`Couldn't load the selected font: ${err instanceof Error ? err.message : String(err)}`)
+          const errorText = err instanceof Error ? err.message : String(err)
+          setError(t`Couldn't load the selected font: ${errorText}`)
         }
       })
     return () => {
       cancelled = true
     }
-  }, [selectedId, providers, bundledEntries, systemEntries, userEntries])
+  }, [selectedId, providers, bundledEntries, systemEntries, userEntries, t])
 
   // Outline-quality warning (never a block — docs/design/3d-text-fonts.md):
   // recompute whenever the resolved font, text, or height changes.
@@ -435,13 +442,14 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
     } else {
       const chars = warnings.map((w) => `"${w.char}"`).join(', ')
       setOutlineWarning(
-        `Some glyphs in this font overlap themselves (${chars}) and may not extrude cleanly — you can still place it.`,
+        t`Some glyphs in this font overlap themselves (${chars}) and may not extrude cleanly — you can still place it.`,
       )
     }
-  }, [selectedFont, text, heightText])
+  }, [selectedFont, text, heightText, t])
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         onCancel()
@@ -487,7 +495,9 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
       selectEntry(entry.id)
       setError(null)
     } catch (err) {
-      setError(`Couldn't load "${file.name}" as a font: ${err instanceof Error ? err.message : String(err)}`)
+      const fileName = file.name
+      const errorText = err instanceof Error ? err.message : String(err)
+      setError(t`Couldn't load "${fileName}" as a font: ${errorText}`)
       return
     }
     // Preview registration (including reading `file`'s bytes) is entirely
@@ -550,16 +560,16 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="3D Text"
+        aria-label={t`3D Text`}
       >
-        <div style={HEADING_STYLE}>3D Text</div>
+        <div style={HEADING_STYLE}><Trans>3D Text</Trans></div>
 
         {error !== null && <div style={ERROR_STYLE}>{error}</div>}
         {error === null && outlineWarning !== null && <div style={WARNING_STYLE}>{outlineWarning}</div>}
 
         <div style={FIELD_ROW_STYLE}>
           <label style={LABEL_STYLE} htmlFor="text-3d-input">
-            Text
+            <Trans>Text</Trans>
           </label>
           <textarea
             id="text-3d-input"
@@ -572,20 +582,20 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
 
         <div style={FIELD_ROW_STYLE}>
           <label style={LABEL_STYLE} htmlFor="text-3d-font-filter">
-            Font{selectedLabel !== null ? ` — ${selectedLabel}` : ''}
+            {selectedLabel !== null ? t`Font — ${selectedLabel}` : t`Font`}
           </label>
           <input
             id="text-3d-font-filter"
             type="text"
-            placeholder="Filter fonts…"
+            placeholder={t`Filter fonts…`}
             style={INPUT_STYLE}
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
           />
           <div style={PICKER_STYLE}>
-            <div style={PICKER_LIST_STYLE} role="listbox" aria-label="Font family">
+            <div style={PICKER_LIST_STYLE} role="listbox" aria-label={t`Font family`}>
               <FamilySection
-                heading="Bundled"
+                heading={t`Bundled`}
                 groups={bundledGroups}
                 section="bundled"
                 selectedId={selectedId}
@@ -593,38 +603,40 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
               />
               {systemProviderKind !== null && (
                 <>
-                  <div style={SECTION_HEADING_STYLE}>System</div>
+                  <div style={SECTION_HEADING_STYLE}><Trans>System</Trans></div>
                   {systemState === 'idle' && (
                     <div style={{ ...NOTE_STYLE, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      System fonts need your permission to read.
+                      <Trans>System fonts need your permission to read.</Trans>
                       <button type="button" style={SMALL_BUTTON_STYLE} onClick={() => void handleUseSystemFonts()}>
-                        Use my system fonts…
+                        <Trans>Use my system fonts…</Trans>
                       </button>
                     </div>
                   )}
-                  {systemState === 'loading' && <div style={NOTE_STYLE}>Loading system fonts…</div>}
+                  {systemState === 'loading' && <div style={NOTE_STYLE}><Trans>Loading system fonts…</Trans></div>}
                   {systemState === 'empty' && (
                     <div style={{ ...NOTE_STYLE, display: 'flex', alignItems: 'center', gap: '8px' }}>
                       {systemProviderKind === 'system-web'
-                        ? 'No system fonts were found — your browser may have blocked access without asking.'
-                        : 'No system fonts were found on this system.'}
+                        ? t`No system fonts were found — your browser may have blocked access without asking.`
+                        : t`No system fonts were found on this system.`}
                       {systemProviderKind === 'system-web' && (
                         <button type="button" style={SMALL_BUTTON_STYLE} onClick={() => void handleUseSystemFonts()}>
-                          Ask again…
+                          <Trans>Ask again…</Trans>
                         </button>
                       )}
                     </div>
                   )}
                   {systemState === 'denied' && (
                     <div style={{ ...NOTE_STYLE, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      Permission was denied.
+                      <Trans>Permission was denied.</Trans>
                       <button type="button" style={SMALL_BUTTON_STYLE} onClick={() => void handleUseSystemFonts()}>
-                        Ask again…
+                        <Trans>Ask again…</Trans>
                       </button>
                     </div>
                   )}
                   {systemState === 'error' && (
-                    <div style={NOTE_STYLE}>Couldn't list system fonts{systemErrorMessage ? `: ${systemErrorMessage}` : '.'}</div>
+                    <div style={NOTE_STYLE}>
+                      {systemErrorMessage ? t`Couldn't list system fonts: ${systemErrorMessage}` : t`Couldn't list system fonts.`}
+                    </div>
                   )}
                   {systemState === 'loaded' && (
                     <FamilySection
@@ -639,7 +651,7 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
               )}
               {userGroups.length > 0 && (
                 <FamilySection
-                  heading="Loaded this session"
+                  heading={t`Loaded this session`}
                   groups={userGroups}
                   section="user"
                   selectedId={selectedId}
@@ -650,7 +662,7 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
             <button type="button" style={SMALL_BUTTON_STYLE} onClick={handleLoadFontClick}>
-              Load font file…
+              <Trans>Load font file…</Trans>
             </button>
             <input
               ref={fileInputRef}
@@ -667,7 +679,7 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
         <div style={TWO_COL_STYLE}>
           <div style={{ ...FIELD_ROW_STYLE, flex: 1 }}>
             <label style={LABEL_STYLE} htmlFor="text-3d-height">
-              Height ({unit})
+              <Trans>Height ({unit})</Trans>
             </label>
             <input
               id="text-3d-height"
@@ -678,7 +690,7 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
           </div>
           <div style={{ ...FIELD_ROW_STYLE, flex: 1 }}>
             <label style={LABEL_STYLE} htmlFor="text-3d-depth">
-              Extrusion depth ({unit})
+              <Trans>Extrusion depth ({unit})</Trans>
             </label>
             <input
               id="text-3d-depth"
@@ -691,14 +703,14 @@ export function TextDialog({ onPlace, onCancel }: TextDialogProps) {
 
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button
             style={{ ...PLACE_BUTTON_STYLE, opacity: canPlace ? 1 : 0.5, cursor: canPlace ? 'pointer' : 'default' }}
             disabled={!canPlace}
             onClick={handlePlace}
           >
-            OK
+            <Trans>OK</Trans>
           </button>
         </div>
       </div>
@@ -730,6 +742,7 @@ interface FamilySectionProps {
  *  post-filter (docs/design/3d-text-fonts.md's windowing requirement) with
  *  an honest "N more" note rather than silently truncating. */
 function FamilySection({ heading, groups, section, selectedId, onSelect }: FamilySectionProps) {
+  const { t } = useLingui()
   if (groups.length === 0) return null
   const visible = groups.slice(0, MAX_VISIBLE_FAMILIES)
   const hiddenCount = groups.length - visible.length
@@ -739,7 +752,7 @@ function FamilySection({ heading, groups, section, selectedId, onSelect }: Famil
       {visible.map((group) => (
         <FamilyRow key={`${section}-${group.family}`} group={group} selectedId={selectedId} onSelect={onSelect} />
       ))}
-      {hiddenCount > 0 && <div style={NOTE_STYLE}>+{hiddenCount} more — refine your search</div>}
+      {hiddenCount > 0 && <div style={NOTE_STYLE}>{plural(hiddenCount, { one: '+# more — refine your search', other: '+# more — refine your search' })}</div>}
     </div>
   )
 }
@@ -751,6 +764,8 @@ interface FamilyRowProps {
 }
 
 function FamilyRow({ group, selectedId, onSelect }: FamilyRowProps) {
+  const { t } = useLingui()
+  const family = group.family
   const activeFace = group.faces.find((f) => f.id === selectedId) ?? group.faces[0]
   const isSelected = group.faces.some((f) => f.id === selectedId)
   const previewFamily = activeFace.source === 'system' ? activeFace.family : activeFace.id
@@ -775,7 +790,7 @@ function FamilyRow({ group, selectedId, onSelect }: FamilyRowProps) {
       </span>
       {group.faces.length > 1 && (
         <select
-          aria-label={`${group.family} style`}
+          aria-label={t`${family} style`}
           value={activeFace.id}
           style={STYLE_SELECT_STYLE}
           onClick={(e) => e.stopPropagation()}

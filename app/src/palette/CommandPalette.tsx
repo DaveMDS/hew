@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import { InlineIcon } from '../panels/InlineIcon'
 import boltSvg from '@material-symbols/svg-400/outlined/bolt.svg?raw'
@@ -19,6 +20,7 @@ import { paletteEntries, paletteShortcut, type PaletteEntry, type PaletteGate, t
 import { rankEntries } from './search'
 import { getRecent, recordRun, subscribe as subscribeRecent } from './recency'
 import { isMac } from '../platform'
+import { isComposingKey } from '../input/keyboard'
 
 export interface CommandPaletteProps {
   open: boolean
@@ -37,14 +39,16 @@ export interface CommandPaletteProps {
   initialQuery?: string
 }
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- group IDs; the header text is resolved by groupTitle()
 const GROUP_ORDER: PaletteGroup[] = ['Tools', 'Actions', 'Model', 'Library']
 
 function RowIcon({ entry }: { entry: PaletteEntry }) {
-  const raw = entry.group === 'Tools' ? TOOL_ICON_SVG[entry.label as keyof typeof TOOL_ICON_SVG] : boltSvg
+  const raw = entry.toolName === undefined ? boltSvg : TOOL_ICON_SVG[entry.toolName]
   return <InlineIcon svg={raw ?? boltSvg} size={17} />
 }
 
 export function CommandPalette({ open, onClose, onRun, extraEntries, gates, initialQuery }: CommandPaletteProps) {
+  const { t, i18n } = useLingui()
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
@@ -74,7 +78,8 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
 
   const allEntries = useMemo(
     () => [...paletteEntries(), ...(extraEntries ?? [])],
-    [extraEntries],
+    // `i18n.locale`: the entries carry resolved text, so rebuild on a language switch.
+    [extraEntries, i18n.locale],
   )
   const ranked = useMemo(() => rankEntries(query, allEntries, recentIds), [query, allEntries, recentIds])
   // The rows as the user SEES them: ranked order, regrouped under the group
@@ -110,6 +115,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
   }
 
   const onKeyDown = (ev: React.KeyboardEvent) => {
+    if (isComposingKey(ev)) return
     if (ev.key === 'Escape') {
       ev.preventDefault()
       ev.stopPropagation()
@@ -141,6 +147,24 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
     items: shown.filter((e) => e.group === group),
   })).filter((g) => g.items.length > 0)
 
+  const groupTitle = (group: PaletteGroup): string => {
+    switch (group) {
+      case 'Tools':
+        return t`Tools`
+      case 'Actions':
+        return t`Actions`
+      case 'Model':
+        return t`Model`
+      case 'Library':
+        return t`Library`
+    }
+  }
+  const recentLabels = recentIds
+    .map((id) => allEntries.find((e) => e.id === id)?.label)
+    .filter((label): label is string => label !== undefined)
+    .slice(0, 3)
+    .join(', ')
+
   let flatIndex = -1
 
   return (
@@ -160,7 +184,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
       <div
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t`Command palette`}
         onMouseDown={(e) => {
           e.stopPropagation()
           // Keep focus in the search input: the key handler lives on this
@@ -198,8 +222,8 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search tools, actions, help…"
-            aria-label="Search"
+            placeholder={t`Search tools, actions, help…`}
+            aria-label={t`Search`}
             style={{
               flex: 1,
               border: 'none',
@@ -218,7 +242,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
               whiteSpace: 'nowrap',
             }}
           >
-            esc to close
+            <Trans>esc to close</Trans>
           </span>
         </div>
 
@@ -226,7 +250,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
         <div ref={listRef} style={{ overflowY: 'auto', padding: 'var(--space-3) 0' }}>
           {grouped.length === 0 && (
             <div style={{ padding: 'var(--space-7)', textAlign: 'center', color: 'var(--text-faint)', fontSize: '13px' }}>
-              No matches for “{query}”.
+              <Trans>No matches for “{query}”.</Trans>
             </div>
           )}
           {grouped.map(({ group, items }) => (
@@ -242,7 +266,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                   padding: '8px var(--space-6) 4px',
                 }}
               >
-                {group}
+                {groupTitle(group)}
               </div>
               {items.map((entry) => {
                 flatIndex += 1
@@ -307,7 +331,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        needs a selection
+                        <Trans>needs a selection</Trans>
                       </span>
                     )}
                     {shortcut !== '' && (
@@ -346,14 +370,10 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
             color: 'var(--text-faint)',
           }}
         >
-          <span>↑ ↓ navigate · ↵ run · esc close</span>
+          <span><Trans>↑ ↓ navigate · ↵ run · esc close</Trans></span>
           {recentIds.length > 0 && query === '' && (
             <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '50%' }}>
-              Recent: {recentIds
-                .map((id) => allEntries.find((e) => e.id === id)?.label)
-                .filter((label): label is string => label !== undefined)
-                .slice(0, 3)
-                .join(', ')}
+              {t`Recent: ${recentLabels}`}
             </span>
           )}
         </div>

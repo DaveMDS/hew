@@ -8,6 +8,8 @@ import { RecentsList } from './RecentsList'
 import type { RecentEntry } from '../io/recents'
 import type { ShopOrientation } from './orientation'
 
+import { useLingui } from '@lingui/react/macro'
+
 export interface RecentsSheetProps {
   open: boolean
   orientation: ShopOrientation
@@ -17,6 +19,7 @@ export interface RecentsSheetProps {
 }
 
 export function RecentsSheet({ open, orientation, entries, onClose, onOpen }: RecentsSheetProps) {
+  const { t } = useLingui()
   if (!open) return null
   const isLandscape = orientation === 'landscape'
   return (
@@ -29,7 +32,7 @@ export function RecentsSheet({ open, orientation, entries, onClose, onOpen }: Re
       />
       <div
         role="dialog"
-        aria-label="Recent models"
+        aria-label={t`Recent models`}
         style={
           isLandscape
             ? {
@@ -51,11 +54,11 @@ export function RecentsSheet({ open, orientation, entries, onClose, onOpen }: Re
       >
         <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', margin: '0 auto 10px' }} />
         <div style={{ padding: '0 10px 6px' }}>
-          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>Recent models</span>
+          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>{t`Recent models`}</span>
         </div>
         {entries.length === 0 ? (
           <div style={{ padding: '10px 14px 14px', fontFamily: 'var(--font-family-ui)', fontSize: '14px', color: 'var(--shop-text-muted)' }}>
-            No recent models yet — open one from Files or your desktop and it will be kept here for offline use.
+            {t`No recent models yet — open one from Files or your desktop and it will be kept here for offline use.`}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', padding: '0 4px' }}>

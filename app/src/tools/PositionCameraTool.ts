@@ -32,6 +32,7 @@
  * Around").
  */
 
+import { t } from '@lingui/core/macro'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import { getLengthUnit } from '../settings/units'
@@ -79,7 +80,7 @@ export class PositionCameraTool implements Tool {
   ) {}
 
   statusHint(): string {
-    return 'Click to stand there, facing your current view — or drag to look toward where you release. Type a height + Enter to set eye height. Esc returns to Select.'
+    return t`Click to stand there, facing your current view — or drag to look toward where you release. Type a height + Enter to set eye height. Esc returns to Select.`
   }
 
   onPointerMove(snap: Snap | null, _ray: Ray): void {

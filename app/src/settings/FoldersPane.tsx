@@ -20,6 +20,7 @@
  */
 
 import { useEffect, useState, type CSSProperties } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { libraryStore } from '../io/libraryStore'
 
 /** Brave with File System Access disabled (its default) simply doesn't
@@ -65,6 +66,7 @@ function buttonStyle(disabled: boolean): CSSProperties {
 }
 
 export function FoldersPane() {
+  const { t } = useLingui()
   const store = libraryStore()
   const available = store.available()
   const canChoose = store.capabilities().canChooseFolder
@@ -113,14 +115,14 @@ export function FoldersPane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="Library folder:" htmlFor="settings-library-folder-path">
+      <SettingsRow label={t`Library folder:`} htmlFor="settings-library-folder-path">
         <div style={rowStyle}>
           <input
             id="settings-library-folder-path"
             type="text"
             readOnly
             value={available ? (path ?? '') : ''}
-            placeholder={available ? '…' : 'Not available'}
+            placeholder={available ? '…' : t`Not available`}
             title={path ?? undefined}
             style={pathInputStyle}
           />
@@ -130,7 +132,7 @@ export function FoldersPane() {
             disabled={!available || !canChoose}
             onClick={handleChoose}
           >
-            Change…
+            <Trans>Change…</Trans>
           </button>
         </div>
       </SettingsRow>
@@ -149,25 +151,29 @@ export function FoldersPane() {
               setWebMode('browser')
             }}
           >
-            Use browser storage
+            <Trans>Use browser storage</Trans>
           </button>
         </SettingsRow>
       )}
 
       {!available ? (
-        <SettingsNote>The library is not available in this browser.</SettingsNote>
+        <SettingsNote>
+          <Trans>The library is not available in this browser.</Trans>
+        </SettingsNote>
       ) : webMode === 'browser' ? (
         <SettingsNote>
           {canChoose
-            ? 'Items are stored by this browser on this device. Choose a folder to keep them as ordinary .hew files on disk instead — a cloud-synced folder makes the library follow you.'
+            ? t`Items are stored by this browser on this device. Choose a folder to keep them as ordinary .hew files on disk instead — a cloud-synced folder makes the library follow you.`
             : isBrave()
-              ? 'Items are stored by this browser on this device. Brave ships with the folder-picker API turned off — enable "File System Access API" at brave://flags to keep items as ordinary .hew files in a folder instead.'
-              : 'Items are stored by this browser on this device. This browser doesn\u2019t offer the folder-picker API needed to keep them on disk (Chrome and Edge do).'}
+              ? t`Items are stored by this browser on this device. Brave ships with the folder-picker API turned off — enable "File System Access API" at brave://flags to keep items as ordinary .hew files in a folder instead.`
+              : t`Items are stored by this browser on this device. This browser doesn’t offer the folder-picker API needed to keep them on disk (Chrome and Edge do).`}
         </SettingsNote>
       ) : webMode === 'folder' ? (
         <SettingsNote>
-          The library is ordinary .hew files in the folder you picked. The browser may ask for
-          permission to it again after a restart.
+          <Trans>
+            The library is ordinary .hew files in the folder you picked. The browser may ask for
+            permission to it again after a restart.
+          </Trans>
         </SettingsNote>
       ) : null}
     </SettingsForm>

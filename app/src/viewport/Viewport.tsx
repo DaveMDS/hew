@@ -18,6 +18,8 @@
  *   - : context path navigation, group-aware picking
  */
 
+import { plural, t } from '@lingui/core/macro'
+import { isComposingKey, shortcutLetter } from '../input/keyboard'
 import { shownAnnotationIds } from './shownAnnotations'
 import { useEffect, useLayoutEffect, useRef } from 'react'
 import * as THREE from 'three'
@@ -196,17 +198,21 @@ function buildViewportOverlay(title: string, detail: string | readonly string[])
   overlay.style.cssText = [
     'position:absolute', 'inset:0', 'display:flex', 'flex-direction:column',
     'align-items:center', 'justify-content:center', 'gap:8px', 'padding:24px',
+    /* oxlint-disable lingui/no-unlocalized-strings -- CSS text, not copy */
     'text-align:center', 'background:var(--surface-panel, #d0d0d0)', 'color:var(--text-primary, #333)',
     'font-family:system-ui,sans-serif', 'z-index:10', 'pointer-events:none',
+    /* oxlint-enable lingui/no-unlocalized-strings */
   ].join(';')
   const h = document.createElement('div')
   h.textContent = title
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS text, not copy
   h.style.cssText = 'font-size:16px;font-weight:600'
   overlay.appendChild(h)
   const lines = typeof detail === 'string' ? [detail] : detail
   for (const line of lines) {
     const p = document.createElement('div')
     p.textContent = line
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS text, not copy
     p.style.cssText = 'font-size:13px;max-width:36em;line-height:1.4;opacity:0.8'
     overlay.appendChild(p)
   }
@@ -227,6 +233,7 @@ function buildSoftwareNotice(onDismiss: () => void): HTMLDivElement {
   notice.style.cssText = [
     // Below the camera-preset button row (top-left, ~40px tall) so the
     // notice never visually covers controls.
+    /* oxlint-disable lingui/no-unlocalized-strings -- CSS text, not copy */
     'position:absolute', 'top:52px', 'left:50%', 'transform:translateX(-50%)',
     'display:flex', 'align-items:center', 'gap:12px', 'padding:8px 14px',
     'max-width:calc(100% - 48px)',
@@ -234,15 +241,16 @@ function buildSoftwareNotice(onDismiss: () => void): HTMLDivElement {
     'border:1px solid var(--border-strong, rgba(0,0,0,0.2))', 'border-radius:6px',
     'box-shadow:var(--shadow-chip, 0 2px 8px rgba(0,0,0,0.25))',
     'font-family:system-ui,sans-serif', 'font-size:12.5px', 'line-height:1.4',
+    /* oxlint-enable lingui/no-unlocalized-strings */
     'z-index:9', 'pointer-events:none',
   ].join(';')
   const text = document.createElement('span')
-  text.textContent = 'Running without graphics acceleration — large models will be slow.'
+  text.textContent = t`Running without graphics acceleration — large models will be slow.`
   notice.appendChild(text)
   const button = document.createElement('button')
   button.type = 'button'
-  button.textContent = 'Dismiss'
-  button.setAttribute('aria-label', 'Dismiss the graphics-acceleration notice')
+  button.textContent = t`Dismiss`
+  button.setAttribute('aria-label', t`Dismiss the graphics-acceleration notice`)
   button.style.cssText = [
     'pointer-events:auto', 'cursor:pointer', 'font:inherit', 'font-weight:600',
     'background:none', 'border:none', 'padding:0', 'color:inherit',
@@ -3697,6 +3705,7 @@ export default function Viewport({
       if (dragMove === null) return
       if (dragMove.active) {
         toolController.activeTool.cancel()
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         switchToolRef.current?.('Select')
       }
       dragMove = null
@@ -3766,10 +3775,12 @@ export default function Viewport({
     // below does).
     const loupeCrosshairH = document.createElement('div')
     loupeCrosshairH.style.cssText =
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS text, not copy
       'position:absolute; left:0; top:50%; width:100%; height:1px; background:rgba(255,255,255,.85); transform:translateY(-0.5px);'
     loupeOverlay.appendChild(loupeCrosshairH)
     const loupeCrosshairV = document.createElement('div')
     loupeCrosshairV.style.cssText =
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS text, not copy
       'position:absolute; top:0; left:50%; width:1px; height:100%; background:rgba(255,255,255,.85); transform:translateX(-0.5px);'
     loupeOverlay.appendChild(loupeCrosshairV)
 
@@ -3780,9 +3791,11 @@ export default function Viewport({
     // a "found" target).
     const loupeDot = document.createElement('div')
     loupeDot.style.cssText =
+      /* oxlint-disable lingui/no-unlocalized-strings -- CSS text, not copy */
       'position:absolute; left:50%; top:50%; width:10px; height:10px; border-radius:50%; ' +
       'background:var(--shop-accent, #c1652f); border:1.5px solid rgba(255,255,255,.9); ' +
       'transform:translate(-50%,-50%); display:none;'
+      /* oxlint-enable lingui/no-unlocalized-strings */
     loupeOverlay.appendChild(loupeDot)
 
     // Cheap reuse of InferenceTooltip's own kind→label text (finding 4's
@@ -3793,9 +3806,11 @@ export default function Viewport({
     // the loupe's own overlay instead.
     const loupeLabel = document.createElement('div')
     loupeLabel.style.cssText =
+      /* oxlint-disable lingui/no-unlocalized-strings -- CSS text, not copy */
       'position:absolute; left:0; right:0; bottom:4px; text-align:center; ' +
       'font-family:var(--font-family-ui); font-size:10px; font-weight:600; ' +
       'color:#fff; text-shadow:0 1px 2px rgba(0,0,0,.8); pointer-events:none;'
+      /* oxlint-enable lingui/no-unlocalized-strings */
     loupeOverlay.appendChild(loupeLabel)
 
     /** Clamp a loupe-circle center coordinate so it never renders outside
@@ -4229,6 +4244,7 @@ export default function Viewport({
       // Shift may still be held when the gesture ends (e.g. a plain
       // release with Shift still down) — show its cursor, not the plain
       // Zoom one, so the user isn't told Shift stopped doing anything.
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
       renderer.domElement.style.cursor = cursorFor(shiftFovCursorActive ? 'Zoom Window' : 'Zoom')
     }
 
@@ -4361,6 +4377,7 @@ export default function Viewport({
       // branch — so it is already covered by the null above.)
       controls.touches.ONE = null
       renderer.domElement.setPointerCapture(ev.pointerId)
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
       renderer.domElement.style.cursor = cursorFor('Zoom Window')
     }
 
@@ -4538,16 +4555,23 @@ export default function Viewport({
         sceneRenderer.refreshGuides()
         onSelectManyRef.current?.(outcome.settledNodes, 'replace')
         scheduleRender()
-        const undoHint =
-          outcome.committedSteps === 1
-            ? 'undo once to restore it'
-            : `undo ${outcome.committedSteps} times to restore it`
-        const lead = outcome.retryFailed
-          ? 'Component exploded to solids, but the boolean then failed'
+        const steps = outcome.committedSteps
+        const reason = outcome.message
+        const toast = outcome.retryFailed
+          ? plural(steps, {
+              one: `Component exploded to solids, but the boolean then failed: ${reason} — undo once to restore it.`,
+              other: `Component exploded to solids, but the boolean then failed: ${reason} — undo # times to restore it.`,
+            })
           : outcome.otherOperandExploded
-            ? 'One component could not be fully exploded for the boolean (the other was, and is left exploded)'
-            : 'Component could not be fully exploded for the boolean'
-        handleToast(`${lead}: ${outcome.message} — ${undoHint}.`, outcome.code)
+            ? plural(steps, {
+                one: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo once to restore it.`,
+                other: `One component could not be fully exploded for the boolean (the other was, and is left exploded): ${reason} — undo # times to restore it.`,
+              })
+            : plural(steps, {
+                one: `Component could not be fully exploded for the boolean: ${reason} — undo once to restore it.`,
+                other: `Component could not be fully exploded for the boolean: ${reason} — undo # times to restore it.`,
+              })
+        handleToast(toast, outcome.code)
         return 'mutated-failed'
       }
 
@@ -4557,7 +4581,7 @@ export default function Viewport({
       onSelectRef.current?.(outcome.node, 'replace')
       scheduleRender()
       if (outcome.autoExploded) {
-        handleToast('Component exploded to solids for the boolean.')
+        handleToast(t`Component exploded to solids for the boolean.`)
       }
       return outcome.node
     }
@@ -4571,6 +4595,7 @@ export default function Viewport({
       // unrelated live object (see structuralSelection in treeModel.ts).
       const sel = structuralSelection(nodes)
       if (sel === null) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code, not copy
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return null
       }
@@ -4603,6 +4628,7 @@ export default function Viewport({
       // may cross into reparent_nodes' kind/id arrays.
       const sel = structuralSelection(nodes)
       if (sel === null) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code, not copy
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return false
       }
@@ -4688,7 +4714,7 @@ export default function Viewport({
       const { draftEdgeKeys, huskCandidates } = draftEdgesToErase(wasmScene, nodes, deletedSketches)
       for (const [ctx, keys] of draftEdgeKeys) {
         try {
-          runDraft(wasmScene, { kind: 'ctx', ctx }, 'Delete', (d) => {
+          runDraft(wasmScene, { kind: 'ctx', ctx }, t`Delete`, (d) => {
             wasmScene.draft_remove_edges(d, keysToArray([...keys]))
           })
         } catch (err) {
@@ -4761,6 +4787,7 @@ export default function Viewport({
       // kind-0 fallback that could alias an unrelated live object).
       const sel = structuralSelection(nodes)
       if (sel === null) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code, not copy
         handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
         return null
       }
@@ -5027,6 +5054,7 @@ export default function Viewport({
         const code = parseKernelErrorCode(err)
         if (code === 'ExplodeSessionPoseUnsupported' || code === 'ExplodeSessionGroupedInstance') {
           if (componentId !== undefined && wasmScene.component_has_nested_members(componentId)) {
+            // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code, not copy
             handleToast(kernelErrorMessage('NestedComponentInContext', ''), 'NestedComponentInContext')
             return
           }
@@ -6413,7 +6441,10 @@ export default function Viewport({
             const skipped = result.worldSketchesSkipped + result.annotationsSkipped
             if (skipped > 0) {
               handleToast(
-                `Inserted without ${skipped} loose sketch/annotation element${skipped === 1 ? '' : 's'} — library inserts carry solids, components, and guides.`,
+                plural(skipped, {
+                  one: 'Inserted without # loose sketch/annotation element — library inserts carry solids, components, and guides.',
+                  other: 'Inserted without # loose sketch/annotation elements — library inserts carry solids, components, and guides.',
+                }),
               )
             }
           },
@@ -6436,6 +6467,7 @@ export default function Viewport({
           handleToast,
         )
         toolController.setTool(tool)
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Move')
         scheduleRender()
       }
@@ -6609,6 +6641,7 @@ export default function Viewport({
         // Durable extrude-as-new toggle → badge the Push/Pull cursor with a
         // `+` (the same cursorFor pipeline as Move's copy toggle).
         (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
           renderer.domElement.style.cursor = cursorFor('Push/Pull', on)
         },
       )
@@ -6765,6 +6798,7 @@ export default function Viewport({
         // Durable copy toggle → badge the Move cursor with a `+` (the same
         // cursorFor pipeline the tool-switch cursor uses).
         (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
           renderer.domElement.style.cursor = cursorFor('Move', on)
         },
         // ×N / /N array re-resolve: the previous copies were scene-undone
@@ -6801,6 +6835,7 @@ export default function Viewport({
       multiClick.reset()
       const tool = makeMoveTool(dm.nodes)
       toolController.setTool(tool)
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
       renderer.domElement.style.cursor = cursorFor('Move')
       const { snap } = snapService.resolve(dm.pressRay, el.clientHeight, apertureBasis())
       tool.onPointerDown(snap, dm.pressRay)
@@ -6830,6 +6865,7 @@ export default function Viewport({
         // Durable copy toggle → badge the Rotate cursor with a `+` (see
         // makeMoveTool).
         (on: boolean) => {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
           renderer.domElement.style.cursor = cursorFor('Rotate', on)
         },
         // ×N / /N array re-resolve: full scene refresh, same reasoning as
@@ -6967,7 +7003,7 @@ export default function Viewport({
           screenX: p.x,
           screenY: p.y,
           initialText: '',
-          placeholder: 'Leader text…',
+          placeholder: t`Leader text…`,
         })
       })
     }
@@ -7099,10 +7135,12 @@ export default function Viewport({
         // App's React tool state (rail highlight, status bar) stays in sync;
         // a raw `toolController.setTool(...)` here would desync it exactly
         // like the SectionPlaneTool doc note above warns against.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         () => switchToolRef.current?.('Look Around'),
         // Esc returns to Select (design §4, user guide "viewing.md" — "Esc
         // returns to the Select tool from any of the three"), same as
         // Look Around/Walk below.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         () => switchToolRef.current?.('Select'),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -7115,6 +7153,7 @@ export default function Viewport({
         () => eyeHeightM,
         (h) => { eyeHeightM = h },
         applyWalkthroughPose,
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         () => switchToolRef.current?.('Select'),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -7127,6 +7166,7 @@ export default function Viewport({
         () => eyeHeightM,
         (h) => { eyeHeightM = h },
         applyWalkthroughPose,
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         () => switchToolRef.current?.('Select'),
         (text: string) => { onMeasurementRef.current?.(text) },
       )
@@ -7190,6 +7230,7 @@ export default function Viewport({
     // to where the eye ends up looking, so a subsequent orbit orbits around
     // what's actually on screen instead of wherever the target was frozen at
     // before the walkthrough began.
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
     const WALKTHROUGH_TOOL_NAMES = new Set(['Position Camera', 'Look Around', 'Walk'])
     // Fly's engagement flags (docs/design/fly-navigation.md; the Fly block near
     // the end of this effect owns them). Declared here, ahead of the tool
@@ -7905,6 +7946,7 @@ export default function Viewport({
       }
       if (!shiftPanActive && activeToolPropRef.current === 'Orbit') {
         shiftPanActive = true
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Pan')
       }
       // `!cameraDragActive` (finding 3, camera-playtest2 review): the
@@ -7925,6 +7967,7 @@ export default function Viewport({
         rig.projection === 'perspective'
       ) {
         shiftFovCursorActive = true
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Zoom Window')
       }
     }
@@ -7949,10 +7992,12 @@ export default function Viewport({
         // An active drag/wheel-adjust owns the cursor until its OWN
         // gesture ends (see restoreZoomDollyBinding) — don't stomp it back
         // to the plain Zoom cursor mid-drag.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         if (fovDragState === null) renderer.domElement.style.cursor = cursorFor('Zoom')
       }
       if (shiftPanActive && releasedCleanly) {
         shiftPanActive = false
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Orbit')
       }
     }
@@ -8161,6 +8206,7 @@ export default function Viewport({
       at.setEyedropper(true)
       if (paintEyedropperActive) return
       paintEyedropperActive = true
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
       renderer.domElement.style.cursor = cursorFor('Paint', false, true)
     }
     function onAltKeyUp(ev: KeyboardEvent): void {
@@ -8170,6 +8216,7 @@ export default function Viewport({
       if (!paintEyedropperActive) return
       paintEyedropperActive = false
       if (at instanceof PaintTool) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Paint')
       }
       // `onKeyDownTracked` (below) re-polls the status hint after every
@@ -8198,6 +8245,7 @@ export default function Viewport({
       if (!paintEyedropperActive) return
       paintEyedropperActive = false
       if (at instanceof PaintTool) {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
         renderer.domElement.style.cursor = cursorFor('Paint')
       }
       reportToolHint()
@@ -8544,9 +8592,8 @@ export default function Viewport({
       console.warn('[viewport] WebGL context lost')
       if (contextLostOverlay === null) {
         contextLostOverlay = buildViewportOverlay(
-          'Rendering paused',
-          'The graphics context was lost (this can follow sleep/resume or a ' +
-            'driver reset on Linux). Recovering automatically when it returns…',
+          t`Rendering paused`,
+          t`The graphics context was lost (this can follow sleep/resume or a driver reset on Linux). Recovering automatically when it returns…`,
         )
         el.appendChild(contextLostOverlay)
       }
@@ -9374,7 +9421,7 @@ export default function Viewport({
         screenX: p.x,
         screenY: p.y,
         initialText: initialEditorText(snapshot),
-        placeholder: snapshot.kind === 'leader' ? 'Leader text…' : 'Override (blank = computed)',
+        placeholder: snapshot.kind === 'leader' ? t`Leader text…` : t`Override (blank = computed)`,
       })
     }
 
@@ -9514,6 +9561,10 @@ export default function Viewport({
 
     // ------------------------------------------------------------------ keyboard
     function onKeyDown(ev: KeyboardEvent): void {
+      // Keystrokes inside an input-method composition are not commands
+      // and must never reach a tool's typed buffer or its Enter/Escape
+      // handling (docs/LOCALIZATION.md "Keyboard and input methods").
+      if (isComposingKey(ev)) return
       // Field of View typed entry (design §2) takes priority over everything
       // below while the Zoom camera mode is active and a digit has started
       // the buffer — mirrors how a real tool's capturesKey pre-empts the
@@ -9662,7 +9713,12 @@ export default function Viewport({
       // Space = Select, 1 = Select, 2 = Rectangle, 3 = Push/Pull, 4 = Move, 5 = Rotate, 6 = Scale
       const target = ev.target as HTMLElement
       const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (!isMod && !isTyping) {
+      if (!isMod && !ev.altKey && !isTyping) {
+        // Same letter resolution as App.tsx's window handler (produced ASCII
+        // letter first, physical key as the fallback) so the two listeners
+        // on `window` never disagree about which tool a keydown names.
+        const letter = shortcutLetter(ev)
+        /* oxlint-disable lingui/no-unlocalized-strings -- key values and tool ids are identifiers */
         if (ev.key === ' ') { ev.preventDefault(); switchToolRef.current?.('Select'); return }
         if (ev.key === '1') { switchToolRef.current?.('Select'); return }
         if (ev.key === '2') { switchToolRef.current?.('Rectangle'); return }
@@ -9670,18 +9726,21 @@ export default function Viewport({
         if (ev.key === '4') { switchToolRef.current?.('Move'); return }
         if (ev.key === '5') { switchToolRef.current?.('Rotate'); return }
         if (ev.key === '6') { switchToolRef.current?.('Scale'); return }
-        if (ev.key === 'r' || ev.key === 'R') { switchToolRef.current?.('Rectangle'); return }
-        if (ev.key === 'c' || ev.key === 'C') { switchToolRef.current?.('Circle'); return }
-        if (ev.key === 'a' || ev.key === 'A') { switchToolRef.current?.('Arc'); return }
+        if (letter === 'r') { switchToolRef.current?.('Rectangle'); return }
+        if (letter === 'c') { switchToolRef.current?.('Circle'); return }
+        if (letter === 'a') { switchToolRef.current?.('Arc'); return }
+        /* oxlint-enable lingui/no-unlocalized-strings */
         // ⇧L belongs to the Library dialog (App's global handler) — only an
         // UNSHIFTED l/L reaches Line here. The other shifted letters keep
         // their historical tool-switch tolerance.
-        if ((ev.key === 'l' || ev.key === 'L') && !ev.shiftKey) { switchToolRef.current?.('Line'); return }
-        if (ev.key === 'p' || ev.key === 'P') { switchToolRef.current?.('Push/Pull'); return }
-        if (ev.key === 'f' || ev.key === 'F') { switchToolRef.current?.('Offset'); return }
-        if (ev.key === 'm' || ev.key === 'M') { switchToolRef.current?.('Move'); return }
-        if (ev.key === 'q' || ev.key === 'Q') { switchToolRef.current?.('Rotate'); return }
-        if (ev.key === 's' || ev.key === 'S') { switchToolRef.current?.('Scale'); return }
+        /* oxlint-disable lingui/no-unlocalized-strings -- key values and tool ids are identifiers */
+        if (letter === 'l' && !ev.shiftKey) { switchToolRef.current?.('Line'); return }
+        if (letter === 'p') { switchToolRef.current?.('Push/Pull'); return }
+        if (letter === 'f') { switchToolRef.current?.('Offset'); return }
+        if (letter === 'm') { switchToolRef.current?.('Move'); return }
+        if (letter === 'q') { switchToolRef.current?.('Rotate'); return }
+        if (letter === 's') { switchToolRef.current?.('Scale'); return }
+        /* oxlint-enable lingui/no-unlocalized-strings */
       }
 
       // Undo: Cmd/Ctrl+Z — document-level, covers creations + per-object ops.
@@ -9872,6 +9931,7 @@ export default function Viewport({
           }
           // (If the tool is no longer mid-gesture — a VCB Enter or Esc ended
           // the move mid-drag — there is nothing to commit here.)
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool names are identifiers
           switchToolRef.current?.('Select')
           return
         }

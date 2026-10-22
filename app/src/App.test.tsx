@@ -806,6 +806,21 @@ describe('App — keyboard shortcuts', () => {
     expect(rectangleItem?.textContent).toContain('✓')
   })
 
+  it('a composing keystroke never switches tools, and the physical key wins over the produced character', async () => {
+    await renderAndLoad()
+    // Japanese IME mid-composition: Chromium reports key "Process" with
+    // isComposing; nothing may dispatch.
+    fireEvent.keyDown(document, { key: 'Process', code: 'KeyR', isComposing: true })
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    expect(menubar().getByText('Rectangle').closest('div')?.textContent).not.toContain('✓')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    // IME off but a full-width character produced: the physical R key still
+    // means Rectangle.
+    fireEvent.keyDown(document, { key: 'ｒ', code: 'KeyR' })
+    fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+    expect(menubar().getByText('Rectangle').closest('div')?.textContent).toContain('✓')
+  })
+
   it('bare A activates the Arc tool (SketchUp-for-Windows arc key)', async () => {
     await renderAndLoad()
     fireEvent.keyDown(document, { key: 'a' })

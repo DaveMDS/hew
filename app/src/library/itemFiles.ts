@@ -83,6 +83,7 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   // the `ArrayBuffer | SharedArrayBuffer` union) — a wasm-returned view in
   // particular could be backed by either. The bytes are never mutated here,
   // so the assertion is safe.
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- Web Crypto algorithm name
   const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, '0'))

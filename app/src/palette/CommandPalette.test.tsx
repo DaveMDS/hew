@@ -123,6 +123,23 @@ describe('CommandPalette', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('ignores Enter, Escape, and arrows that belong to an IME composition', () => {
+    const onClose = vi.fn()
+    const onRun = vi.fn()
+    render(<CommandPalette open onClose={onClose} onRun={onRun} />)
+    fireEvent.change(screen.getByPlaceholderText(/search tools, actions, help/i), { target: { value: 'rotate' } })
+    const dialog = screen.getByRole('dialog')
+    fireEvent.keyDown(dialog, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(dialog, { key: 'Enter', keyCode: 229 })
+    fireEvent.keyDown(dialog, { key: 'Escape', isComposing: true })
+    fireEvent.keyDown(dialog, { key: 'ArrowDown', isComposing: true })
+    expect(onRun).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    // The same Enter after the composition has ended still runs the command.
+    fireEvent.keyDown(dialog, { key: 'Enter' })
+    expect(onRun).toHaveBeenCalledWith('tool-rotate')
+  })
+
   it('ArrowDown moves the selection before Enter runs it', () => {
     const onRun = vi.fn()
     render(<CommandPalette open onClose={vi.fn()} onRun={onRun} />)

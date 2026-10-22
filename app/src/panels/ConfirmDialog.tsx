@@ -10,6 +10,8 @@
  */
 
 import { useCallback, useEffect } from 'react'
+import { Trans } from '@lingui/react/macro'
+import { isComposingKey } from '../input/keyboard'
 
 interface ConfirmDialogProps {
   /** Dialog heading, e.g. "Delete material?" */
@@ -96,6 +98,7 @@ const CONFIRM_BUTTON_DANGER_STYLE: React.CSSProperties = {
 export function ConfirmDialog({ heading, body, confirmLabel, danger = false, onConfirm, onCancel }: ConfirmDialogProps) {
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -123,7 +126,7 @@ export function ConfirmDialog({ heading, body, confirmLabel, danger = false, onC
         <div style={BODY_STYLE}>{body}</div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button
             style={danger ? CONFIRM_BUTTON_DANGER_STYLE : CONFIRM_BUTTON_STYLE}

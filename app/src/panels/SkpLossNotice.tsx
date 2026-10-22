@@ -10,6 +10,8 @@
  */
 
 import { useEffect } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { isComposingKey } from '../input/keyboard'
 
 export interface SkpLossNoticeData {
   /** What the file could not hold exactly, as short phrases. */
@@ -80,8 +82,10 @@ const BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function SkpLossNotice({ notice, onSaveHewCopy, onDismiss }: SkpLossNoticeProps) {
+  const { t } = useLingui()
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') onDismiss()
     }
     document.addEventListener('keydown', onKeyDown)
@@ -89,10 +93,12 @@ export function SkpLossNotice({ notice, onSaveHewCopy, onDismiss }: SkpLossNotic
   }, [onDismiss])
 
   return (
-    <div style={CARD_STYLE} role="status" aria-label="SketchUp file notice" data-testid="skp-loss-notice">
-      <div style={HEADING_STYLE}>The SketchUp file can&rsquo;t hold everything exactly</div>
+    <div style={CARD_STYLE} role="status" aria-label={t`SketchUp file notice`} data-testid="skp-loss-notice">
+      <div style={HEADING_STYLE}>
+        <Trans>The SketchUp file can&rsquo;t hold everything exactly</Trans>
+      </div>
       <div style={BODY_STYLE}>
-        Some parts of this model were simplified in the SketchUp file:
+        <Trans>Some parts of this model were simplified in the SketchUp file:</Trans>
       </div>
       <ul style={LIST_STYLE}>
         {notice.simplified.map((item, i) => (
@@ -102,11 +108,11 @@ export function SkpLossNotice({ notice, onSaveHewCopy, onDismiss }: SkpLossNotic
       <div style={BUTTON_ROW_STYLE}>
         {notice.offerHewCopy && (
           <button style={BUTTON_STYLE} onClick={onSaveHewCopy} data-testid="skp-loss-hew-copy">
-            Save a .hew copy
+            <Trans>Save a .hew copy</Trans>
           </button>
         )}
         <button style={BUTTON_STYLE} onClick={onDismiss} data-testid="skp-loss-dismiss">
-          Dismiss
+          <Trans>Dismiss</Trans>
         </button>
       </div>
     </div>

@@ -4,6 +4,7 @@
 // platform-neutral: the Tauri implementation loads lazily so the web bundle
 // never pulls Tauri code.
 
+import { t } from '@lingui/core/macro'
 import type { LibraryFileEntry } from '../library/types'
 import { isTauri } from './fileHost'
 
@@ -97,7 +98,7 @@ function makeWebFacade(): LibraryStore {
     typeof navigator.storage !== 'undefined' &&
     typeof navigator.storage.getDirectory === 'function'
   if (!supported) {
-    return unavailableLibraryStore('The library is not available in this browser.')
+    return unavailableLibraryStore(t`The library is not available in this browser.`)
   }
   let backend: LibraryStore | null = null
   const load = async (): Promise<LibraryStore> => {

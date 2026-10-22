@@ -42,6 +42,7 @@ export function buildSessionRecording(
     )
   }
   const cut = highLevelJson.length - m[0].length
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- JSON text of a recording file, not copy
   return `${highLevelJson.slice(0, cut)},"input":${inputJson}}`
 }
 

@@ -24,6 +24,7 @@ export interface PrintPageModel {
 
 export const PRINT_ROOT_ID = 'hew-print-root'
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
 const PAGE_FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 
 function gray(g: number): string {
@@ -142,6 +143,7 @@ export function PrintPage({ layout, page, scale = 1, pageNumber }: { layout: Pri
  * margins (Hew lays out its own), and "hide the app, show the pages". */
 export function printCss(layout: PrintLayout): string {
   const { w, h } = layout.page.paper
+  /* oxlint-disable lingui/no-unlocalized-strings -- CSS rules, not copy */
   return [
     `@page { size: ${w}mm ${h}mm; margin: 0; }`,
     `@media screen { #${PRINT_ROOT_ID} { display: none; } }`,
@@ -153,6 +155,7 @@ export function printCss(layout: PrintLayout): string {
     `  #${PRINT_ROOT_ID} .hew-print-page:last-child { page-break-after: auto; break-after: auto; }`,
     `}`,
   ].join('\n')
+  /* oxlint-enable lingui/no-unlocalized-strings */
 }
 
 /**

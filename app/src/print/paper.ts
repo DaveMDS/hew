@@ -4,6 +4,9 @@
  * dimensions and `orient()` swaps them.
  */
 
+import { t } from '@lingui/core/macro'
+import { formatNumber } from '../i18n/format'
+
 export type PaperName = 'letter' | 'legal' | 'tabloid' | 'a5' | 'a4' | 'a3'
 export type PaperSpec = PaperName | { w_mm: number; h_mm: number }
 export type Orientation = 'auto' | 'portrait' | 'landscape'
@@ -26,14 +29,24 @@ export const PAPER_SIZES: Record<PaperName, PaperSize> = {
   a3: { w: 297, h: 420 },
 }
 
+// Getters so the names resolve in the active locale at read time; A3/A4/A5
+// are ISO 216 designations, the same in every language.
+/* oxlint-disable lingui/no-unlocalized-strings -- ISO 216 paper designations */
 export const PAPER_LABEL: Record<PaperName, string> = {
-  letter: 'Letter',
-  legal: 'Legal',
-  tabloid: 'Tabloid',
+  get letter() {
+    return t`Letter`
+  },
+  get legal() {
+    return t`Legal`
+  },
+  get tabloid() {
+    return t`Tabloid`
+  },
   a5: 'A5',
   a4: 'A4',
   a3: 'A3',
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Menu order: the imperial trio first for imperial users, ISO first otherwise
  * — the dialog decides; this is the canonical list. */
@@ -62,11 +75,13 @@ export function paperSize(spec: PaperSpec): PaperSize {
 export function paperLabel(spec: PaperSpec): string {
   if (typeof spec === 'string') return PAPER_LABEL[spec]
   const p = paperSize(spec)
-  return `Custom ${fmtMm(p.w)} × ${fmtMm(p.h)} mm`
+  const w = fmtMm(p.w)
+  const h = fmtMm(p.h)
+  return t`Custom ${w} × ${h} mm`
 }
 
 function fmtMm(v: number): string {
-  return Number.isInteger(v) ? String(v) : v.toFixed(1)
+  return formatNumber(v, { maxFractionDigits: 1, grouping: false })
 }
 
 /** Paper dimensions in the given (resolved, non-auto) orientation. */
@@ -88,6 +103,7 @@ export function matchNamedPaper(w_mm: number, h_mm: number): PaperName | null {
 
 /** Regions whose everyday paper is Letter; everyone else defaults to A4.
  * (Same region parser as Shop Mode's unit seed — `regionFromLocale`.) */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- ISO 3166 region codes
 export const LETTER_REGIONS: ReadonlySet<string> = new Set(['US', 'CA', 'MX', 'PH'])
 
 export function defaultPaperForRegion(region: string | null): PaperName {

@@ -10,6 +10,7 @@
  * action buttons, not a toggle/radio group — matches the spec's own mock,
  * which doesn't show any of them in a "pressed" state either.
  */
+import { useLingui } from '@lingui/react/macro'
 import type { StandardView } from './Viewport'
 
 export interface ViewportHUDProps {
@@ -33,6 +34,7 @@ const chipStyle: React.CSSProperties = {
 }
 
 export function ViewportHUD({ onSelectView, onOrbit }: ViewportHUDProps) {
+  const { t } = useLingui()
   return (
     <div
       data-testid="viewport-hud"
@@ -46,13 +48,13 @@ export function ViewportHUD({ onSelectView, onOrbit }: ViewportHUDProps) {
         zIndex: 20,
       }}
     >
-      <button type="button" onClick={onOrbit} title="Orbit" style={chipStyle}>
+      <button type="button" onClick={onOrbit} title={t`Orbit`} style={chipStyle}>
         <span aria-hidden="true" style={{ width: '10px', height: '10px', borderRadius: '50%', border: '1.4px solid currentColor' }} />
-        Orbit
+        {t`Orbit`}
       </button>
-      <button type="button" onClick={() => onSelectView('top')} title="Standard View: Top" style={chipStyle}>Top</button>
-      <button type="button" onClick={() => onSelectView('iso')} title="Standard View: Iso" style={chipStyle}>Iso</button>
-      <button type="button" onClick={() => onSelectView('front')} title="Standard View: Front" style={chipStyle}>Front</button>
+      <button type="button" onClick={() => onSelectView('top')} title={t`Standard View: Top`} style={chipStyle}>{t`Top`}</button>
+      <button type="button" onClick={() => onSelectView('iso')} title={t`Standard View: Iso`} style={chipStyle}>{t`Iso`}</button>
+      <button type="button" onClick={() => onSelectView('front')} title={t`Standard View: Front`} style={chipStyle}>{t`Front`}</button>
     </div>
   )
 }

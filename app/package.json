@@ -10,6 +10,10 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "lint": "oxlint src && node scripts/i18n-lint-gaps.mjs",
+    "i18n:extract": "lingui extract",
+    "i18n:check": "node scripts/i18n-check.mjs",
+    "i18n:menus": "node scripts/i18n-menus.mjs",
     "test": "vitest run",
     "e2e": "playwright test",
     "e2e:visual": "playwright test --project=visual",
@@ -17,6 +21,8 @@
     "e2e:install": "playwright install --with-deps"
   },
   "dependencies": {
+    "@lingui/core": "6.10.0",
+    "@lingui/react": "6.10.0",
     "@material-symbols/svg-400": "^0.45.10",
     "@tauri-apps/api": "^2.11.1",
     "@tauri-apps/plugin-clipboard-manager": "^2.3.3",
@@ -30,6 +36,9 @@
     "workbox-window": "^7.4.1"
   },
   "devDependencies": {
+    "@lingui/cli": "6.10.0",
+    "@lingui/format-po": "6.10.0",
+    "@lingui/vite-plugin": "6.10.0",
     "@playwright/test": "^1.62.1",
     "@testing-library/jest-dom": "^7.0.0",
     "@testing-library/react": "^16.3.2",
@@ -40,7 +49,9 @@
     "@types/react-dom": "^19.2.4",
     "@types/three": "^0.185.4",
     "@vitejs/plugin-react": "^6.0.5",
+    "eslint-plugin-lingui": "0.16.0",
     "jsdom": "^30.0.1",
+    "oxlint": "1.89.0",
     "typescript": "^7.0.2",
     "vite": "^8.2.1",
     "vite-plugin-pwa": "^1.3.0",

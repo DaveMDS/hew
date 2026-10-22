@@ -10,6 +10,8 @@
  * repeating until the batch succeeds or is empty. Pure of React; the panel
  * and Object Info call `runBatch` and show the result.
  */
+import { i18n } from '@lingui/core'
+import { msg, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { canCloseRow, type HealthFamilyGroup, type HealthGroup, type HealthRow } from './healthReport'
 import { SPLIT_PIECE_LEFT, batchToast, rowWarning, UNDO_LABEL, type KindKey } from './healthCopy'
@@ -41,7 +43,7 @@ export interface BatchOptions {
   cascade?: (failed: BatchOp, remaining: readonly BatchOp[]) => { ops: BatchOp[]; explanation: string } | null
 }
 
-export const STALE_OBJECT_EXPLANATION = 'This object is no longer in the model.'
+export const STALE_OBJECT_EXPLANATION = msg`This object is no longer in the model.`
 
 let frameId = 0
 
@@ -110,7 +112,7 @@ export function runBatch(
           live.push(op)
           idOf.set(op, ids[i])
         } else {
-          failed.push({ object: op.object, method: op.method, explanation: STALE_OBJECT_EXPLANATION })
+          failed.push({ object: op.object, method: op.method, explanation: i18n._(STALE_OBJECT_EXPLANATION) })
         }
       })
       remaining = live
@@ -128,11 +130,12 @@ export function runBatch(
         break
       }
       const index = reply.error.data?.failed_index
+      const fallback = (): string => t`Hew couldn't make that change.`
       if (typeof index !== 'number' || index < 0 || index >= remaining.length) {
-        throw new Error(reply.error.data?.explanation ?? reply.error.message ?? "Hew couldn't make that change.")
+        throw new Error(reply.error.data?.explanation ?? reply.error.message ?? fallback())
       }
       const bad = remaining[index]
-      const explanation = refusalReason(reply.error.data, reply.error.message ?? "Hew couldn't make that change.")
+      const explanation = refusalReason(reply.error.data, reply.error.message ?? fallback())
       failed.push({ object: bad.object, method: bad.method, explanation })
       const dropped = new Set<BatchOp>([bad])
       const extra = options.cascade?.(bad, remaining)
@@ -183,18 +186,10 @@ export function failureLine(kind: BatchKind, explanation: string): string {
   return rowWarning(ACTION_ROW[kind], explanation)
 }
 
-const TOAST_VERBS: Record<BatchKind, [string, string]> = {
-  close: ['Closed', 'closed'],
-  mark: ['Kept', 'kept'],
-  thicken: ['Added thickness to', 'given a thickness'],
-  repair: ['Rejoined', 'rejoined'],
-}
-
 /** "Closed 11 objects. 1 couldn't be closed; see the list." (also the
  *  all-failed and nothing-failed forms). */
 export function batchSummary(kind: BatchKind, result: BatchResult): string {
-  const [done, failedVerb] = TOAST_VERBS[kind]
-  return batchToast(done, failedVerb, result.done.length, result.failed.length)
+  return batchToast(kind, result.done.length, result.failed.length)
 }
 
 export const capOp = (row: HealthRow): BatchOp => ({ object: row.object, method: 'hew.solid.cap' })
@@ -254,5 +249,5 @@ export const familyCascade: NonNullable<BatchOptions['cascade']> = (failed, rema
   const sheets = remaining.filter((op) => op.method === 'hew.solid.delete_faces')
   return sheets.length === 0
     ? null
-    : { ops: sheets, explanation: SPLIT_PIECE_LEFT }
+    : { ops: sheets, explanation: i18n._(SPLIT_PIECE_LEFT) }
 }

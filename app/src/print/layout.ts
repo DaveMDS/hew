@@ -11,6 +11,7 @@
  *    (the orthographic camera's own frustum frame — `modelRect` maps
  *    directly onto `left/right/top/bottom`).
  */
+import { plural } from '@lingui/core/macro'
 import { MM_PER_INCH, orient, type PaperSize } from './paper'
 
 export type PrintMode = 'standard' | 'scaled'
@@ -434,6 +435,6 @@ export function fitRatioFor(input: Omit<LayoutInput, 'ratio' | 'mode' | 'nudgeMm
 /** Page count summary text used by the dialog and tests: "6 pages (3 × 2)". */
 export function pageCountText(layout: PrintLayout): string {
   const n = layout.tiles.length
-  if (n === 1) return '1 page'
-  return `${n} pages (${layout.cols} × ${layout.rows})`
+  const { cols, rows } = layout
+  return plural(n, { one: '# page', other: `# pages (${cols} × ${rows})` })
 }

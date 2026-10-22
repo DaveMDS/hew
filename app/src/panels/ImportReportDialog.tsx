@@ -19,8 +19,11 @@
  */
 
 import { useEffect, useCallback } from 'react'
+import { plural } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { ImportReport } from '../io/fileHost'
 import { REPORT, ACTION, importSummary } from '../health/healthCopy'
+import { isComposingKey } from '../input/keyboard'
 
 interface ImportReportDialogProps {
   report: ImportReport
@@ -110,8 +113,10 @@ const SECONDARY_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function ImportReportDialog({ report, opened = false, onClose, onMakeSolid }: ImportReportDialogProps) {
+  const { t } = useLingui()
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -138,22 +143,31 @@ export function ImportReportDialog({ report, opened = false, onClose, onMakeSoli
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={opened ? 'Open report' : 'Import report'}
+        aria-label={opened ? t`Open report` : t`Import report`}
       >
-        <div style={HEADING_STYLE}>{opened ? 'Open Complete' : 'Import Complete'}</div>
+        <div style={HEADING_STYLE}>{opened ? t`Open Complete` : t`Import Complete`}</div>
 
         {/* Summary row */}
         <div style={{ ...SECTION_STYLE, fontSize: '13px', color: 'var(--text-primary)' }}>
           {objects_created === 0 ? (
             <span style={{ color: 'var(--text-muted)' }}>
               {lines_added > 0
-                ? `No objects were created. ${lines_added === 1 ? '1 line' : `${lines_added} lines`} of drawing came in.`
-                : 'No objects were created.'}
+                ? plural(lines_added, {
+                    one: `No objects were created. ${lines_added} line of drawing came in.`,
+                    other: `No objects were created. ${lines_added} lines of drawing came in.`,
+                  })
+                : t`No objects were created.`}
             </span>
           ) : (
             <div data-import-headline>
+              {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- enum argument selecting healthCopy's wording, not copy */}
               {importSummary(opened ? 'Opened' : 'Imported', objects_created, health.solids)}
-              {lines_added > 0 && ` ${lines_added === 1 ? '1 line' : `${lines_added} lines`} of drawing came in too.`}
+              {lines_added > 0 &&
+                ' ' +
+                  plural(lines_added, {
+                    one: `${lines_added} line of drawing came in too.`,
+                    other: `${lines_added} lines of drawing came in too.`,
+                  })}
             </div>
           )}
         </div>
@@ -165,8 +179,10 @@ export function ImportReportDialog({ report, opened = false, onClose, onMakeSoli
             style={{ ...SECTION_STYLE, fontSize: '13px', color: 'var(--status-warning)' }}
             data-import-incomplete
           >
-            This file looks incomplete or damaged, so parts of the model may be missing.
-            If it was downloaded or copied, a fresh copy may open whole.
+            <Trans>
+              This file looks incomplete or damaged, so parts of the model may be missing. If it was downloaded or
+              copied, a fresh copy may open whole.
+            </Trans>
           </div>
         )}
 

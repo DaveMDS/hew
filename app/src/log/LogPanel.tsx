@@ -6,6 +6,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { plural } from '@lingui/core/macro'
+import { useLingui } from '@lingui/react/macro'
 import * as LogStore from './LogStore'
 import type { LogEntry } from './LogStore'
 import { RenderStatsReadout } from './RenderStatsReadout'
@@ -18,11 +20,13 @@ function fmtTime(d: Date): string {
   return `${hh}:${mm}:${ss}`
 }
 
+/* oxlint-disable lingui/no-unlocalized-strings -- log level tokens, also written into the copied log text for bug reports */
 const LEVEL_COLORS: Record<LogStore.LogLevel, { fg: string; label: string }> = {
   info: { fg: 'var(--accent-base)', label: 'INFO' },
   warn: { fg: 'var(--status-warning)', label: 'WARN' },
   error: { fg: 'var(--status-leaky)', label: 'ERR ' },
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /**
  * Render the entries as plain text for the clipboard, oldest-first (reading
@@ -69,6 +73,7 @@ interface Props {
 }
 
 export function LogPanel({ panelHeight = 160 }: Props) {
+  const { t } = useLingui()
   const [entries, setEntries] = useState<readonly LogEntry[]>(LogStore.getEntries())
   const [collapsed, setCollapsed] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -90,11 +95,12 @@ export function LogPanel({ panelHeight = 160 }: Props) {
   const warnCount = entries.filter((e) => e.level === 'warn').length
 
   // Build badge summary for the header
-  let badgeText = `${entries.length} entries`
+  const entryCount = entries.length
+  let badgeText = plural(entryCount, { one: '# entry', other: '# entries' })
   if (errorCount > 0 || warnCount > 0) {
     const parts: string[] = []
-    if (errorCount > 0) parts.push(`${errorCount} err`)
-    if (warnCount > 0) parts.push(`${warnCount} warn`)
+    if (errorCount > 0) parts.push(t`${errorCount} err`)
+    if (warnCount > 0) parts.push(t`${warnCount} warn`)
     badgeText = parts.join(' · ')
   }
 
@@ -125,7 +131,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
         onClick={() => setCollapsed((c) => !c)}
       >
         <span style={{ color: 'var(--text-muted)', fontFamily: 'monospace', fontSize: '11px' }}>
-          {collapsed ? '▶' : '▼'} Log
+          {collapsed ? '▶' : '▼'} {t`Log`}
         </span>
         <span
           style={{
@@ -146,7 +152,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             handleCopy()
           }}
           disabled={entries.length === 0}
-          title="Copy all log entries to the clipboard"
+          title={t`Copy all log entries to the clipboard`}
           style={{
             padding: '1px 8px',
             fontSize: '11px',
@@ -159,7 +165,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             opacity: entries.length === 0 ? 0.5 : 1,
           }}
         >
-          {copied ? 'Copied' : 'Copy'}
+          {copied ? t`Copied` : t`Copy`}
         </button>
         <button
           onClick={(e) => {
@@ -177,7 +183,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
             cursor: 'pointer',
           }}
         >
-          Clear
+          {t`Clear`}
         </button>
       </div>
 
@@ -208,7 +214,7 @@ export function LogPanel({ panelHeight = 160 }: Props) {
                 textAlign: 'center',
               }}
             >
-              No log entries
+              {t`No log entries`}
             </div>
           )}
         </div>

@@ -22,6 +22,7 @@
  * ready for the next press.
  */
 
+import { t } from '@lingui/core/macro'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import { getLengthUnit } from '../settings/units'
@@ -118,7 +119,7 @@ export class WalkTool implements Tool {
   }
 
   statusHint(): string {
-    return 'Drag up/down to walk forward/back, left/right to turn. Hold Shift to strafe and change height. Esc returns to Select.'
+    return t`Drag up/down to walk forward/back, left/right to turn. Hold Shift to strafe and change height. Esc returns to Select.`
   }
 
   // Not used for this tool's own gesture (see the module doc), but the

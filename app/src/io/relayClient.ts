@@ -42,6 +42,7 @@ export class RelayError extends Error {
   }
 }
 
+/* oxlint-disable lingui/no-unlocalized-strings -- RelayError kind identifiers */
 const KINDS: ReadonlySet<string> = new Set<RelayErrorKind>([
   'invalidOrigin',
   'io',
@@ -53,6 +54,7 @@ const KINDS: ReadonlySet<string> = new Set<RelayErrorKind>([
   'notARelay',
   'status',
 ])
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Turns whatever `invoke` rejected with into a `RelayError`. A typed Rust
  *  error arrives as a plain object; anything else (an IPC-level failure, a

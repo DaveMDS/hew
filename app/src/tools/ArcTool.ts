@@ -88,6 +88,7 @@
  * starts `open`) or the document is replaced (`onDocumentReset`).
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -100,7 +101,7 @@ import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../view
 import { displayedLength, isFreePick, sagittaForDisplayedRadius } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { segmentLength, directionBetween } from './lineInput'
-import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { editLengthBuffer, isLengthInputKey, pointAlong, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftSegment, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
@@ -129,7 +130,9 @@ export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
 /** Measurement-line hint shown when a commit click lands with a flat bulge. */
-const FLAT_BULGE_HINT = 'Pull out the bulge'
+function flatBulgeHint(): string {
+  return t`Pull out the bulge`
+}
 
 /** How the committed arc is closed (Alt cycles, in this order). */
 export type ArcCompletion = 'open' | 'pie' | 'segment'
@@ -137,10 +140,15 @@ export type ArcCompletion = 'open' | 'pie' | 'segment'
 const COMPLETION_CYCLE: readonly ArcCompletion[] = ['open', 'pie', 'segment']
 
 /** Readout label per mode ('open' shows the bare radius). */
-const COMPLETION_LABEL: Record<ArcCompletion, string> = {
-  open: '',
-  pie: 'Pie',
-  segment: 'Segment',
+function completionLabel(completion: ArcCompletion): string {
+  switch (completion) {
+    case 'open':
+      return ''
+    case 'pie':
+      return t({ context: 'arc completion', message: 'Pie' })
+    case 'segment':
+      return t({ context: 'arc completion', message: 'Segment' })
+  }
 }
 
 /** Plane gesture: idle → endpoint A placed (chord) → chord (A,B) placed
@@ -221,22 +229,23 @@ export class ArcTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
-      return 'Type an exact bulge to redraw the arc you just drew — or click the first point of the next one.'
+      return t`Type an exact bulge to redraw the arc you just drew — or click the first point of the next one.`
     }
     const stage = this.faceStage.kind !== 'idle' ? this.faceStage.kind : this.planeStage.kind
     if (stage === 'chord') {
-      return "Click the arc's second endpoint — or type an exact chord length."
+      return t`Click the arc's second endpoint — or type an exact chord length.`
     }
     if (stage === 'bulge') {
-      return 'Click to set the curve — Alt cycles open arc / pie / segment; or type an exact bulge.'
+      return t`Click to set the curve — Alt cycles open arc / pie / segment; or type an exact bulge.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click to start; same arrow or Esc unlocks.`
     }
     if (this.pin.current !== null) {
-      return 'Pinned to the hovered plane — click to start; Shift again or Esc unpins.'
+      return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
     }
-    return "Click the arc's first endpoint — on the ground plane or any face or sketch."
+    return t`Click the arc's first endpoint — on the ground plane or any face or sketch.`
   }
 
   private planeStage: PlaneStage = { kind: 'idle' }
@@ -782,7 +791,7 @@ export class ArcTool implements Tool {
       if (this.typed !== '') {
         this.onMeasurementCb(this._measurementText(''))
       } else {
-        this.onMeasurementCb(next === 'open' ? 'Arc' : COMPLETION_LABEL[next])
+        this.onMeasurementCb(next === 'open' ? t({ context: 'tool', message: 'Arc' }) : completionLabel(next))
       }
       return
     }
@@ -811,7 +820,7 @@ export class ArcTool implements Tool {
    *  the readout is typed or pointer-derived. */
   private _measurementText(live: string): string {
     const text = this.typed !== '' ? this._typedReadout() : live
-    const label = COMPLETION_LABEL[this.completion]
+    const label = completionLabel(this.completion)
     if (label !== '' && text !== '' && this.capturingInput()) return `${text} · ${label}`
     return text
   }
@@ -904,12 +913,12 @@ export class ArcTool implements Tool {
     const { plane, target, a, b } = this.planeStage
     const sign = this._resolvePlaneSagittaSign(plane, a, b)
     if (sign === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     const chain = this._planeChain(plane, a, b, sign * distance)
     if (chain === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     const committed = this._commitPlaneChain(target, chain)
@@ -944,14 +953,14 @@ export class ArcTool implements Tool {
     if (this.faceStage.kind !== 'bulge') return
     const sign = this._resolveFaceSagittaSign()
     if (sign === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     const { object, face, a, b, normal } = this.faceStage
     const basis = facePlaneBasis(normal)
     const verts = basis === null ? null : arcPolylineOnPlane(a, b, sign * distance, basis.u, basis.v)
     if (verts === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     this.faceStage = { kind: 'idle' }
@@ -975,14 +984,14 @@ export class ArcTool implements Tool {
     const spec = this.retype.spec
     if (spec === null) return
     if (d < ARC_MIN_SAGITTA_M) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     const s = (spec.s < 0 ? -1 : 1) * d
     // Resolve the new geometry BEFORE touching history — a flat/invalid
     // bulge is refused up front rather than after an undo.
     if (this._hotGeometry(spec, s) === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     const outcome = this.retype.apply(
@@ -1181,7 +1190,7 @@ export class ArcTool implements Tool {
       : this._faceChordSagitta(a, b, plane.normal, cursor)
     const chain = s === null ? null : this._planeChain(plane, a, b, s)
     if (chain === null || s === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     // A free pick commits the sagitta of the DISPLAYED radius, as if typed.
@@ -1327,7 +1336,7 @@ export class ArcTool implements Tool {
     { chain: verts, curveSegments, geom }: ArcChain,
   ): boolean {
     try {
-      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, 'Arc', (d) => {
+      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, t`Arc`, (d) => {
         let last: bigint[] = []
         // A chain with no analytic circle (a degenerate, straight arc) still
         // commits as ONE curve chain, bracketed without a circle.
@@ -1505,7 +1514,7 @@ export class ArcTool implements Tool {
     const s = this._faceChordSagitta(a, b, normal, cursor)
     const verts = s === null ? null : this._facePolyline(a, b, normal, cursor)
     if (verts === null || s === null) {
-      this.onMeasurementCb(FLAT_BULGE_HINT)
+      this.onMeasurementCb(flatBulgeHint())
       return
     }
     // A free pick commits the sagitta of the DISPLAYED radius, as if typed.
@@ -1582,7 +1591,7 @@ export class ArcTool implements Tool {
       this.onMeasurementCb(this._measurementText(''))
       return
     }
-    this.onMeasurementCb(this._measurementText(`R ${formatLength(arc.radius)}`))
+    this.onMeasurementCb(this._measurementText(radiusReadout(formatLength(arc.radius))))
   }
 
   /** Report the radius from an already-built polyline (the bare arc, no
@@ -1606,7 +1615,7 @@ export class ArcTool implements Tool {
       return
     }
     const radius = (ab * am * bm) / (4 * Math.sqrt(areaSq))
-    this.onMeasurementCb(this._measurementText(`R ${formatLength(radius)}`))
+    this.onMeasurementCb(this._measurementText(radiusReadout(formatLength(radius))))
   }
 
   // ------------------------------------------------------------------ preview

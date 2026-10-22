@@ -27,7 +27,10 @@
  */
 
 import { useCallback, useEffect } from 'react'
+import { useLingui } from '@lingui/react/macro'
+import { formatNumber } from '../i18n/format'
 import { formatLength } from '../settings/units'
+import { isComposingKey } from '../input/keyboard'
 
 interface RescaleConfirmDialogProps {
   /** The real, currently-measured distance between the two picked points. */
@@ -131,10 +134,22 @@ export function RescaleConfirmDialog({
   onConfirm,
   onCancel,
 }: RescaleConfirmDialogProps) {
-  const heading = scope === null ? 'Resize the model?' : `Resize ${scope.label}?`
-  const ariaLabel = scope === null ? 'Resize the model' : `Resize ${scope.label}`
+  const { t } = useLingui()
+  const scopeLabel = scope?.label ?? ''
+  const heading = scope === null ? t`Resize the model?` : t`Resize ${scopeLabel}?`
+  const ariaLabel = scope === null ? t`Resize the model` : t`Resize ${scopeLabel}`
+  const measured = formatLength(currentDistance)
+  const typed = formatLength(typedDistance)
+  const body =
+    scope === null
+      ? t`The measured distance is ${measured}. Resize the whole model so it becomes ${typed}?`
+      : scope.isComponent
+        ? t`The measured distance is ${measured}. Resize ${scopeLabel} — every copy of it — so it becomes ${typed}? Geometry outside it stays put.`
+        : t`The measured distance is ${measured}. Resize ${scopeLabel} so it becomes ${typed}? Geometry outside it stays put.`
+  const factorText = formatNumber(factor, { fractionDigits: 4 })
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         // Consume the event here so it never reaches the Viewport's
@@ -168,30 +183,15 @@ export function RescaleConfirmDialog({
       >
         <div style={HEADING_STYLE}>{heading}</div>
         <div style={BODY_STYLE}>
-          {scope === null ? (
-            <>
-              The measured distance is {formatLength(currentDistance)}. Resize the whole model so it
-              becomes {formatLength(typedDistance)}?
-            </>
-          ) : scope.isComponent ? (
-            <>
-              The measured distance is {formatLength(currentDistance)}. Resize {scope.label} — every
-              copy of it — so it becomes {formatLength(typedDistance)}? Geometry outside it stays put.
-            </>
-          ) : (
-            <>
-              The measured distance is {formatLength(currentDistance)}. Resize {scope.label} so it
-              becomes {formatLength(typedDistance)}? Geometry outside it stays put.
-            </>
-          )}
+          {body}
         </div>
-        <div style={FACTOR_STYLE}>Scale factor: {factor.toFixed(4)}</div>
+        <div style={FACTOR_STYLE}>{t`Scale factor: ${factorText}`}</div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            {t`Cancel`}
           </button>
           <button style={CONFIRM_BUTTON_STYLE} onClick={onConfirm} autoFocus>
-            Resize
+            {t`Resize`}
           </button>
         </div>
       </div>

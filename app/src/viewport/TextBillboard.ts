@@ -605,6 +605,7 @@ export class TextBillboard {
 
 /** Matches `--font-family-ui` (theme/tokens.css) — canvas text has no
  * webfont-loading race since every listed face is a system stack. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS font stack
 const UI_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif'
 
 /** A halo/stroke color contrasting with `fill` — dark fill gets a light

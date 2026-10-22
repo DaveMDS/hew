@@ -10,6 +10,7 @@
  * instead of falling back to the document body.
  */
 import { useEffect, useRef, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import { InlineIcon } from './InlineIcon'
 import chevronLeftSvg from '@material-symbols/svg-400/outlined/chevron_left.svg?raw'
 import chevronRightSvg from '@material-symbols/svg-400/outlined/chevron_right.svg?raw'
@@ -30,6 +31,7 @@ function useFocusOnMount(focusOnMount: boolean) {
 }
 
 export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   const ref = useFocusOnMount(focusOnMount)
   return (
@@ -37,8 +39,8 @@ export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) 
       <button
         ref={ref}
         type="button"
-        aria-label="Hide tray"
-        title="Hide tray"
+        aria-label={t`Hide tray`}
+        title={t`Hide tray`}
         onClick={onClick}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
@@ -59,14 +61,16 @@ export function TrayHideRow({ onClick, focusOnMount = false }: TrayToggleProps) 
 }
 
 export function TrayShowTab({ onClick, focusOnMount = false }: TrayToggleProps) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   const ref = useFocusOnMount(focusOnMount)
   return (
     <button
       ref={ref}
       type="button"
-      aria-label="Show tray"
-      title="Show tray"
+      aria-label={t`Show tray`}
+      data-tray-show-tab="true"
+      title={t`Show tray`}
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}

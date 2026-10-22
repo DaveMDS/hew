@@ -55,6 +55,8 @@
  * (highlight + zoom). Long-press a row: `onLongPressRow` (isolate).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
+import { i18n } from '@lingui/core'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   formatLengthIn,
@@ -139,6 +141,7 @@ export function PartsSheet({
   onOpenUnitPicker,
   onHeightChange,
 }: PartsSheetProps) {
+  const { t } = useLingui()
   const isLandscape = orientation === 'landscape'
 
   const sections = useMemo(
@@ -147,7 +150,7 @@ export function PartsSheet({
   )
   const totalCount = useMemo(() => totalPartCount(sections), [sections])
   const visibleCount = useMemo(() => visiblePartCount(sections), [sections])
-  const shownLabel = `${visibleCount} of ${totalCount} shown`
+  const shownLabel = t`${visibleCount} of ${totalCount} shown`
 
   // Live length format (design §1's unit chip must reflect — and every
   // row's dims must re-render on — ANY change: this sheet's own chip, the
@@ -318,7 +321,7 @@ export function PartsSheet({
         <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', marginBottom: '8px' }} />
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', gap: '8px' }}>
           <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '16px', fontWeight: 600, lineHeight: 1.2, color: 'var(--shop-text)', flexShrink: 0 }}>
-            Cutlist
+            {t`Cutlist`}
           </span>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0 }}>
             <span style={{
@@ -344,10 +347,10 @@ export function PartsSheet({
           fontFamily: 'var(--font-family-mono)', fontSize: '10px', fontWeight: 600, letterSpacing: '0.08em',
           color: 'var(--shop-text-faint)',
         }}>
-          <span style={{ flex: 1 }}>PART</span>
-          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-l)' }}>L</span>
-          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-w)' }}>W</span>
-          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-h)' }}>H</span>
+          <span style={{ flex: 1 }}>{t`PART`}</span>
+          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-l)' }}>{t({ context: 'axis', comment: 'One-letter label for the length of a part', message: 'L' })}</span>
+          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-w)' }}>{t({ context: 'axis', comment: 'One-letter label for the width of a part', message: 'W' })}</span>
+          <span style={{ width: '64px', textAlign: 'right', color: 'var(--shop-axis-h)' }}>{t({ context: 'axis', comment: 'One-letter label for the height of a part', message: 'H' })}</span>
           <span aria-hidden="true" style={{ width: '48px', flexShrink: 0 }} />
         </div>
       )}
@@ -391,10 +394,12 @@ export function PartsSheet({
  *  exactly as before. Same technique as the section "Hide all"/"Show all"
  *  button below. */
 function UnitChip({ unit, onOpenUnitPicker }: { unit: LengthFormat; onOpenUnitPicker: () => void }) {
+  const { t } = useLingui()
+  const unitName = i18n._(LENGTH_FORMAT_NAME[unit])
   return (
     <button
       type="button"
-      aria-label={`Units: ${LENGTH_FORMAT_NAME[unit]}`}
+      aria-label={t`Units: ${unitName}`}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onOpenUnitPicker}
       style={{
@@ -434,6 +439,7 @@ function SectionBlock({
   onSelectRow: (node: NodeRef) => void
   onLongPressRow: (node: NodeRef) => void
 }) {
+  const { t } = useLingui()
   // Catch-all "Unfiled"/"Parts" section: the design's reserved fixed color,
   // never hashed (tagPalette.ts's module doc) — every real tag section gets
   // a stable hash-derived hue instead.
@@ -482,7 +488,7 @@ function SectionBlock({
               color: 'var(--shop-text-muted)', background: 'var(--shop-eyebg)',
               borderRadius: '8px', padding: '6px 10px',
             }}>
-              {section.hidden ? 'Show all' : 'Hide all'}
+              {section.hidden ? t`Show all` : t`Hide all`}
             </span>
           </button>
         )}
@@ -517,6 +523,8 @@ function PartRow({
   onSelectRow: (node: NodeRef) => void
   onLongPressRow: (node: NodeRef) => void
 }) {
+  const { t } = useLingui()
+  const rowLabel = row.label
   // Tap-vs-long-press-vs-scroll, the SAME shape as ShopApp.tsx's viewport
   // wrapper handlers (shared timing constants) — a row sits inside a
   // scrollable list, so a drag-to-scroll starting on one must cancel the
@@ -604,11 +612,11 @@ function PartRow({
           </span>
           {row.extentsM !== null && (
             <span style={{ fontFamily: 'var(--font-family-mono)', fontSize: '12px', color: 'var(--shop-text-dim)', whiteSpace: 'nowrap' }}>
-              <span style={{ color: 'var(--shop-axis-l)' }}>L</span> {formatLengthIn(row.extentsM[0], unit)}
+              <span style={{ color: 'var(--shop-axis-l)' }}>{t({ context: 'axis', comment: 'One-letter label for the length of a part', message: 'L' })}</span> {formatLengthIn(row.extentsM[0], unit)}
               {' · '}
-              <span style={{ color: 'var(--shop-axis-w)' }}>W</span> {formatLengthIn(row.extentsM[1], unit)}
+              <span style={{ color: 'var(--shop-axis-w)' }}>{t({ context: 'axis', comment: 'One-letter label for the width of a part', message: 'W' })}</span> {formatLengthIn(row.extentsM[1], unit)}
               {' · '}
-              <span style={{ color: 'var(--shop-axis-h)' }}>H</span> {formatLengthIn(row.extentsM[2], unit)}
+              <span style={{ color: 'var(--shop-axis-h)' }}>{t({ context: 'axis', comment: 'One-letter label for the height of a part', message: 'H' })}</span> {formatLengthIn(row.extentsM[2], unit)}
             </span>
           )}
         </span>
@@ -628,7 +636,7 @@ function PartRow({
       <EyeToggle
         hidden={row.hidden}
         onToggle={() => onToggleNode(row.node)}
-        label={row.hidden ? `Show ${row.label}` : `Hide ${row.label}`}
+        label={row.hidden ? t`Show ${rowLabel}` : t`Hide ${rowLabel}`}
       />
     </div>
   )

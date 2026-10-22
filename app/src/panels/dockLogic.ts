@@ -19,6 +19,10 @@
  * No React import — pure data in, pure data out, unit-testable directly.
  */
 
+import { i18n, type MessageDescriptor } from '@lingui/core'
+import { msg, t } from '@lingui/core/macro'
+import type { ToolName } from '../tools/toolIcons'
+import { toolLabel } from '../tools/toolRegistry'
 import { isSketchScopedKind, type NodeRef } from './treeModel'
 
 export type DockContext = 'empty' | 'object' | 'group' | 'instance' | 'multi' | 'sketch'
@@ -26,7 +30,17 @@ export type DockContext = 'empty' | 'object' | 'group' | 'instance' | 'multi' | 
 export interface DockVerb {
   /** Matches a `menuActionRef.current(id)` payload — see App.tsx. */
   id: string
-  label: string
+  /** Set on verbs that activate a tool: the label comes from the tool
+   * registry and the icon is keyed on it, never on translated text. */
+  toolName?: ToolName
+  /** Display copy for verbs that are not tools. Resolve via `dockVerbLabel`. */
+  label?: MessageDescriptor
+}
+
+/** The translated display label for a verb, resolved at render time. */
+export function dockVerbLabel(verb: DockVerb): string {
+  if (verb.toolName !== undefined) return toolLabel(verb.toolName)
+  return verb.label === undefined ? verb.id : i18n._(verb.label)
 }
 
 /**
@@ -48,15 +62,34 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
   return kind
 }
 
+/* oxlint-disable lingui/no-unlocalized-strings -- tool registry names are identifiers; the display label is resolved with toolLabel() */
+const TOOL_VERB_NAME: Record<string, ToolName> = {
+  'tool-rectangle': 'Rectangle',
+  'tool-line': 'Line',
+  'tool-circle': 'Circle',
+  'tool-arc': 'Arc',
+  'tool-pushpull': 'Push/Pull',
+  'tool-move': 'Move',
+  'tool-paint': 'Paint',
+  'tool-position-texture': 'Position Texture',
+  'tool-scale': 'Scale',
+  'tool-rotate': 'Rotate',
+}
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+function toolVerb(id: string): DockVerb {
+  return { id, toolName: TOOL_VERB_NAME[id] }
+}
+
 const EMPTY_VERBS: DockVerb[] = [
-  { id: 'tool-rectangle', label: 'Rectangle' },
-  { id: 'tool-line', label: 'Line' },
-  { id: 'tool-circle', label: 'Circle' },
-  { id: 'tool-arc', label: 'Arc' },
+  toolVerb('tool-rectangle'),
+  toolVerb('tool-line'),
+  toolVerb('tool-circle'),
+  toolVerb('tool-arc'),
   // Not a toggleable tool (it opens a dialog, docs/design/3d-text.md) but
   // reachable the same way every other Draw verb here is: same
   // `menuActionRef.current(id)` dispatch as the native menu and palette.
-  { id: 'draw-3d-text', label: '3D Text…' },
+  { id: 'draw-3d-text', label: msg`3D Text…` },
 ]
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is
@@ -65,22 +98,22 @@ const EMPTY_VERBS: DockVerb[] = [
  * Component rides along (gated by `DockGates.canMakeComponent`) so turning a
  * plain object into a reusable definition is one click, not a menu dive. */
 const OBJECT_VERBS: DockVerb[] = [
-  { id: 'tool-pushpull', label: 'Push/Pull' },
-  { id: 'tool-move', label: 'Move' },
-  { id: 'tool-paint', label: 'Paint' },
+  toolVerb('tool-pushpull'),
+  toolVerb('tool-move'),
+  toolVerb('tool-paint'),
   // Position Texture (paint-tool design §3): shown unconditionally, same
   // posture as Paint — the dock has no per-face gate (no face-level
   // selection model, see this module's doc comment), so the TOOL itself
   // toasts on a click that misses a textured face rather than the dock
   // hiding/disabling the verb.
-  { id: 'tool-position-texture', label: 'Position Texture' },
-  { id: 'edit-make-component', label: 'Make Component' },
+  toolVerb('tool-position-texture'),
+  { id: 'edit-make-component', label: msg`Make Component` },
   // Library effort: saves the selection as a reusable `.hew` item (gated by
   // DockGates.canSaveToLibrary — hidden outright on a platform with no
   // library backend). Sits ahead of Erase, matching the destructive-verb-
   // last convention every other row already follows.
-  { id: 'save-to-library', label: 'Save to Library' },
-  { id: 'edit-delete', label: 'Erase' },
+  { id: 'save-to-library', label: msg`Save to Library` },
+  { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /** Spec's Component/Group row: Edit (enter) primary, then Move · Scale ·
@@ -89,15 +122,15 @@ const OBJECT_VERBS: DockVerb[] = [
  * the dock stays a shortcut surface for the same verb, not a synonym).
  * Make Component (gated) promotes the group to a component definition. */
 const GROUP_VERBS: DockVerb[] = [
-  { id: 'enter-context', label: 'Edit' },
-  { id: 'tool-move', label: 'Move' },
-  { id: 'tool-scale', label: 'Scale' },
-  { id: 'edit-make-component', label: 'Make Component' },
-  { id: 'ungroup', label: 'Ungroup' },
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'edit-make-component', label: msg`Make Component` },
+  { id: 'ungroup', label: msg`Ungroup` },
   // See OBJECT_VERBS's comment — same Library effort addition, same
   // destructive-verb-last placement.
-  { id: 'save-to-library', label: 'Save to Library' },
-  { id: 'edit-delete', label: 'Erase' },
+  { id: 'save-to-library', label: msg`Save to Library` },
+  { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /** Spec's Component row verbatim — every verb already exists in Hew
@@ -105,20 +138,20 @@ const GROUP_VERBS: DockVerb[] = [
  * Save to Library (Library effort — appended, since this row has no Erase
  * verb to sit ahead of). */
 const INSTANCE_VERBS: DockVerb[] = [
-  { id: 'enter-context', label: 'Edit' },
-  { id: 'tool-move', label: 'Move' },
-  { id: 'tool-scale', label: 'Scale' },
-  { id: 'make-unique', label: 'Make Unique' },
-  { id: 'explode-instance', label: 'Explode' },
-  { id: 'save-to-library', label: 'Save to Library' },
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'make-unique', label: msg`Make Unique` },
+  { id: 'explode-instance', label: msg`Explode` },
+  { id: 'save-to-library', label: msg`Save to Library` },
 ]
 
 /** Group (gated by `DockGates.canGroup`) is the natural next step after
  * sweeping up several things — the same `edit-group` action as Object ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
-  { id: 'tool-move', label: 'Move' },
-  { id: 'edit-group', label: 'Group' },
-  { id: 'edit-delete', label: 'Erase' },
+  toolVerb('tool-move'),
+  { id: 'edit-group', label: msg`Group` },
+  { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /** A free-standing (not-yet-extruded) sketch's row: Push/Pull primary (it's
@@ -128,11 +161,11 @@ const MULTI_VERBS: DockVerb[] = [
  * then Erase. Same verb ids as the other rows so `menuActionRef` dispatch
  * and `activeToolId` highlighting need no special-casing for this context. */
 const SKETCH_VERBS: DockVerb[] = [
-  { id: 'tool-pushpull', label: 'Push/Pull' },
-  { id: 'tool-move', label: 'Move' },
-  { id: 'tool-rotate', label: 'Rotate' },
-  { id: 'tool-scale', label: 'Scale' },
-  { id: 'edit-delete', label: 'Erase' },
+  toolVerb('tool-pushpull'),
+  toolVerb('tool-move'),
+  toolVerb('tool-rotate'),
+  toolVerb('tool-scale'),
+  { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /**
@@ -195,11 +228,11 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
  * literal terms — Hew's rescoped equivalents below). */
 export function dockChipLabel(context: DockContext): string {
   switch (context) {
-    case 'empty': return 'DRAW'
-    case 'object': return 'OBJECT'
-    case 'group': return 'GROUP'
-    case 'instance': return 'COMPNT'
-    case 'multi': return 'MULTI'
-    case 'sketch': return 'SKETCH'
+    case 'empty': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'DRAW' })
+    case 'object': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'OBJECT' })
+    case 'group': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'GROUP' })
+    case 'instance': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'COMPNT' })
+    case 'multi': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'MULTI' })
+    case 'sketch': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'SKETCH' })
   }
 }

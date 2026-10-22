@@ -49,8 +49,12 @@ import {
   type LibraryListColWidths,
 } from './library/LibraryListHead'
 import { LibraryListRow } from './library/LibraryListRow'
+import { i18n, type MessageDescriptor } from '@lingui/core'
+import { msg, plural, t as tCore } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { LibraryMenu, revealLabel } from './library/LibraryMenu'
 import { LibraryTile, tileElementId } from './library/LibraryTile'
+import { isComposingKey } from '../input/keyboard'
 
 /** Persisted grid/list view choice — one key, shared by every window that
  * opens the browser (same convention as `settings/units.ts`'s
@@ -202,49 +206,63 @@ export interface LibraryDialogProps {
  * `item.category`, never this sidebar selection), so mixing categories in
  * one grid never confuses which verb a given tile's Enter/double-click
  * runs. */
-const CATEGORIES: { value: LibraryCategory | 'all'; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'component', label: 'Components' },
-  { value: 'material', label: 'Materials' },
-  { value: 'model', label: 'Models' },
+const CATEGORIES: { value: LibraryCategory | 'all'; label: MessageDescriptor }[] = [
+  { value: 'all', label: msg`All` },
+  { value: 'component', label: msg`Components` },
+  { value: 'material', label: msg`Materials` },
+  { value: 'model', label: msg`Models` },
 ]
 
-const SCOPES: { value: LibraryScope; label: string }[] = [
-  { value: 'all', label: 'All items' },
-  { value: 'in-model', label: 'In this model' },
-  { value: 'recent', label: 'Recently saved' },
+const SCOPES: { value: LibraryScope; label: MessageDescriptor }[] = [
+  { value: 'all', label: msg`All items` },
+  { value: 'in-model', label: msg`In this model` },
+  { value: 'recent', label: msg`Recently saved` },
 ]
 
-const CATEGORY_LABEL: Record<LibraryCategory | 'all', string> = {
-  all: 'All',
-  component: 'Components',
-  material: 'Materials',
-  model: 'Models',
+const CATEGORY_LABEL: Record<LibraryCategory | 'all', MessageDescriptor> = {
+  all: msg`All`,
+  component: msg`Components`,
+  material: msg`Materials`,
+  model: msg`Models`,
 }
 
-/** Lower-case, grammatically-plain form for the empty-category sentence
- * ("No components here yet.") — `CATEGORY_LABEL['all'].toLowerCase()` would
- * read "No all here yet.", so "All" gets its own word here instead. */
-const CATEGORY_LABEL_LOWER: Record<LibraryCategory | 'all', string> = {
-  all: 'items',
-  component: 'components',
-  material: 'materials',
-  model: 'models',
+/** The empty-category sentence, whole per category so each language can
+ * inflect the noun ("No components here yet."). */
+function emptyCategoryText(category: LibraryCategory | 'all'): string {
+  switch (category) {
+    case 'all':
+      return tCore`No items here yet.`
+    case 'component':
+      return tCore`No components here yet.`
+    case 'material':
+      return tCore`No materials here yet.`
+    case 'model':
+      return tCore`No models here yet.`
+  }
+}
+
+/** Copy for the native delete confirmation (desktop window variant). */
+function deleteConfirmCopy(displayName: string): { title: string; message: string; confirm: string } {
+  return {
+    title: tCore`Delete from Library`,
+    message: tCore`Delete "${displayName}" from the library? Documents that already used it are unaffected.`,
+    confirm: tCore`Delete`,
+  }
 }
 
 /** The category-default action's short verb, for the tile's hover button and
  * the footer's keyboard hint. */
 function defaultActionLabel(item: LibraryItem): string {
-  if (item.category === 'component') return 'Insert'
-  if (item.category === 'model') return 'Open'
-  return 'Paint'
+  if (item.category === 'component') return tCore`Insert`
+  if (item.category === 'model') return tCore`Open`
+  return tCore`Paint`
 }
 
 /** The "other" action (mod+Enter) — always the category's non-default verb. */
 function otherActionLabel(item: LibraryItem): string {
-  if (item.category === 'component') return 'Open'
-  if (item.category === 'model') return 'Insert'
-  return 'Add to Palette'
+  if (item.category === 'component') return tCore`Open`
+  if (item.category === 'model') return tCore`Insert`
+  return tCore`Add to Palette`
 }
 
 function describeError(err: unknown): string {
@@ -253,7 +271,7 @@ function describeError(err: unknown): string {
 
 /** "1 item" / "N items" — the footer count. */
 function itemCountLabel(n: number): string {
-  return n === 1 ? '1 item' : `${n} items`
+  return plural(n, { one: '# item', other: '# items' })
 }
 
 export function LibraryDialog({
@@ -267,6 +285,7 @@ export function LibraryDialog({
   materialInPalette,
   variant = 'modal',
 }: LibraryDialogProps) {
+  const { t } = useLingui()
   const [items, setItems] = useState<LibraryItem[]>([])
   const [loading, setLoading] = useState(true)
   const [unavailable, setUnavailable] = useState(false)
@@ -449,7 +468,7 @@ export function LibraryDialog({
       // for different content — drop the stale texture cache rather than
       // let a tile/detail pane keep showing the old image under it.
       clearTextureCache()
-      setReloadToken((t) => t + 1)
+      setReloadToken((n) => n + 1)
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open])
@@ -714,23 +733,23 @@ export function LibraryDialog({
     // S13).
     const entries = item.error
       ? [
-          ...(canReveal ? [{ id: 'reveal', label: revealLabel }] : []),
-          { id: 'delete', label: 'Delete from Library…' },
+          ...(canReveal ? [{ id: 'reveal', label: i18n._(revealLabel) }] : []),
+          { id: 'delete', label: t`Delete from Library…` },
         ]
       : [
-          { id: 'open', label: 'Open as Document' },
-          { id: 'rename', label: 'Rename' },
-          { id: 'collection', label: 'Add to Collection' },
+          { id: 'open', label: t`Open as Document` },
+          { id: 'rename', label: t`Rename` },
+          { id: 'collection', label: t`Add to Collection` },
           { id: 'sep1', label: '', separator: true },
-          { id: 'rerender', label: 'Re-render Thumbnail' },
+          { id: 'rerender', label: t`Re-render Thumbnail` },
           // Models are their own source, never extracted from another model
           // — Remove Source Info only ever applies to components/materials.
           ...(item.category !== 'model' && item.meta.sourceDoc !== undefined
-            ? [{ id: 'removeSourceInfo', label: 'Remove Source Info' }]
+            ? [{ id: 'removeSourceInfo', label: t`Remove Source Info` }]
             : []),
-          ...(canReveal ? [{ id: 'reveal', label: revealLabel }] : []),
+          ...(canReveal ? [{ id: 'reveal', label: i18n._(revealLabel) }] : []),
           { id: 'sep2', label: '', separator: true },
-          { id: 'delete', label: 'Delete from Library…' },
+          { id: 'delete', label: t`Delete from Library…` },
         ]
     const picked = await popupNativeMenu(entries)
     if (picked === 'open') handleOpenAsDocument(item)
@@ -738,11 +757,8 @@ export function LibraryDialog({
     else if (picked === 'removeSourceInfo') handleRemoveSourceInfo(item)
     else if (picked === 'reveal') void handleReveal(item)
     else if (picked === 'delete') {
-      const ok = await nativeConfirm(
-        'Delete from Library',
-        `Delete "${item.displayName}" from the library? Documents that already used it are unaffected.`,
-        'Delete',
-      )
+      const copy = deleteConfirmCopy(item.displayName)
+      const ok = await nativeConfirm(copy.title, copy.message, copy.confirm)
       if (ok) void handleDelete(item)
     }
     // 'rename'/'collection' just select the item — the detail pane's name
@@ -810,7 +826,8 @@ export function LibraryDialog({
       await reloadOne(item.file.fileName)
       setActionError(null)
     } catch (err) {
-      setActionError(`Couldn't save changes: ${describeError(err)}`)
+      const errorText = describeError(err)
+      setActionError(t`Couldn't save changes: ${errorText}`)
     }
   }
 
@@ -845,7 +862,8 @@ export function LibraryDialog({
       bumpVersion()
       setActionError(null)
     } catch (err) {
-      setActionError(`Couldn't save changes: ${describeError(err)}`)
+      const errorText = describeError(err)
+      setActionError(t`Couldn't save changes: ${errorText}`)
     }
   }
   /** Web: hand the item's bytes to the user as a plain `.hew` download —
@@ -870,7 +888,8 @@ export function LibraryDialog({
       await libraryStore().reveal(item.file.fileName)
       setActionError(null)
     } catch (err) {
-      setActionError(`Couldn't save changes: ${describeError(err)}`)
+      const errorText = describeError(err)
+      setActionError(t`Couldn't save changes: ${errorText}`)
     }
   }
   /** The detail pane's Delete flow (finding #5): the `'window'` variant
@@ -882,11 +901,8 @@ export function LibraryDialog({
   async function requestDelete(item: LibraryItem) {
     if (variant === 'window') {
       const { nativeConfirm } = await import('../library/nativeChrome')
-      const ok = await nativeConfirm(
-        'Delete from Library',
-        `Delete "${item.displayName}" from the library? Documents that already used it are unaffected.`,
-        'Delete',
-      )
+      const copy = deleteConfirmCopy(item.displayName)
+      const ok = await nativeConfirm(copy.title, copy.message, copy.confirm)
       if (ok) void handleDelete(item)
       return
     }
@@ -911,7 +927,8 @@ export function LibraryDialog({
       setDeleteConfirmFor(null)
       setActionError(null)
     } catch (err) {
-      setActionError(`Couldn't save changes: ${describeError(err)}`)
+      const errorText = describeError(err)
+      setActionError(t`Couldn't save changes: ${errorText}`)
     }
   }
 
@@ -1006,6 +1023,7 @@ export function LibraryDialog({
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (!open) return
+      if (isComposingKey(e)) return
       // The dialog is modal: swallow every keydown that reaches `document`
       // while it's open, so it can never ALSO reach a window-level handler
       // underneath it (Viewport sets tool axis/plane locks off arrow keys;
@@ -1107,6 +1125,7 @@ export function LibraryDialog({
   })
 
   if (!open) return null
+  const categoryName = i18n._(CATEGORY_LABEL[category])
 
   const canReveal = libraryStore().capabilities().canReveal
   const canDownload = libraryStore().capabilities().canDownload
@@ -1123,8 +1142,8 @@ export function LibraryDialog({
         <input
           ref={searchInputRef}
           type="text"
-          placeholder="Search name or keyword…"
-          aria-label="Search the library"
+          placeholder={t`Search name or keyword…`}
+          aria-label={t`Search the library`}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
@@ -1158,13 +1177,13 @@ export function LibraryDialog({
         onClick={variant === 'modal' ? (e) => e.stopPropagation() : undefined}
         role={variant === 'modal' ? 'dialog' : 'region'}
         aria-modal={variant === 'modal' ? 'true' : undefined}
-        aria-label="Library"
+        aria-label={t`Library`}
       >
         {variant === 'modal' && (
           <header className="hwlib__header">
-            <span className="hwlib__label">Library</span>
+            <span className="hwlib__label"><Trans>Library</Trans></span>
             {renderSearch()}
-            <button type="button" className="hwlib__close" aria-label="Close" onClick={onClose}>
+            <button type="button" className="hwlib__close" aria-label={t`Close`} onClick={onClose}>
               <CloseGlyph />
             </button>
           </header>
@@ -1174,8 +1193,8 @@ export function LibraryDialog({
           <aside className="hwlib__sidebar" style={{ flex: `0 0 ${colWidths.sidebar}px`, width: colWidths.sidebar }}>
             {variant === 'window' && <div className="hwlib__sidebar-search">{renderSearch()}</div>}
 
-            <div className="hwlib__section-label">Categories</div>
-            <div className="hwlib__cat-list" role="tablist" aria-label="Category">
+            <div className="hwlib__section-label"><Trans>Categories</Trans></div>
+            <div className="hwlib__cat-list" role="tablist" aria-label={t`Category`}>
               {CATEGORIES.map((c) => (
                 <button
                   key={c.value}
@@ -1185,20 +1204,20 @@ export function LibraryDialog({
                   className={`hwlib__cat-row${category === c.value ? ' hwlib__cat-row--active' : ''}`}
                   onClick={() => setCategory(c.value)}
                 >
-                  <span>{c.label}</span>
+                  <span>{i18n._(c.label)}</span>
                   <span className="hwlib__cat-count">{categoryCounts[c.value]}</span>
                 </button>
               ))}
             </div>
 
-            <div className="hwlib__section-label">Collections</div>
+            <div className="hwlib__section-label"><Trans>Collections</Trans></div>
             <div className="hwlib__collections">
               <button
                 type="button"
                 className={`hwlib__collection-row${selectedCollection === null ? ' hwlib__collection-row--active' : ''}`}
                 onClick={() => setSelectedCollection(null)}
               >
-                All
+                <Trans>All</Trans>
               </button>
               {allCollections.map((c) => (
                 <button
@@ -1213,17 +1232,18 @@ export function LibraryDialog({
               ))}
               {newCollectionInput === null ? (
                 <button type="button" className="hwlib__new-collection" onClick={() => setNewCollectionInput('')}>
-                  + New collection
+                  <Trans>+ New collection</Trans>
                 </button>
               ) : (
                 <input
                   className="hwlib__new-collection-input"
                   autoFocus
-                  aria-label="New collection name"
+                  aria-label={t`New collection name`}
                   value={newCollectionInput}
                   onChange={(e) => setNewCollectionInput(e.target.value)}
                   onBlur={commitNewCollection}
                   onKeyDown={(e) => {
+                    if (isComposingKey(e)) return
                     if (e.key === 'Enter') {
                       e.preventDefault()
                       commitNewCollection()
@@ -1244,7 +1264,7 @@ export function LibraryDialog({
             className="hwlib__col-resize"
             role="separator"
             aria-orientation="vertical"
-            aria-label="Resize sidebar"
+            aria-label={t`Resize sidebar`}
             onPointerDown={(e) => beginColResize('sidebar', e)}
           />
 
@@ -1254,7 +1274,7 @@ export function LibraryDialog({
               never differs between them. */}
           <div className="hwlib__center">
             <div className="hwlib__center-bar">
-              <div className="hwlib__scopes" role="radiogroup" aria-label="Scope">
+              <div className="hwlib__scopes" role="radiogroup" aria-label={t`Scope`}>
                 {SCOPES.map((s) => (
                   <button
                     key={s.value}
@@ -1263,15 +1283,15 @@ export function LibraryDialog({
                     aria-pressed={scope === s.value}
                     onClick={() => setScope(s.value)}
                   >
-                    {s.label}
+                    {i18n._(s.label)}
                   </button>
                 ))}
               </div>
-              <div className="hwlib__view-toggle" role="group" aria-label="View">
+              <div className="hwlib__view-toggle" role="group" aria-label={t`View`}>
                 <button
                   type="button"
                   className={`hwlib__view-btn${view === 'grid' ? ' hwlib__view-btn--active' : ''}`}
-                  aria-label="Grid view"
+                  aria-label={t`Grid view`}
                   aria-pressed={view === 'grid'}
                   onClick={() => setView('grid')}
                 >
@@ -1280,7 +1300,7 @@ export function LibraryDialog({
                 <button
                   type="button"
                   className={`hwlib__view-btn${view === 'list' ? ' hwlib__view-btn--active' : ''}`}
-                  aria-label="List view"
+                  aria-label={t`List view`}
                   aria-pressed={view === 'list'}
                   onClick={() => setView('list')}
                 >
@@ -1297,17 +1317,17 @@ export function LibraryDialog({
               // aria-sort is validly exposed). The thumbnail view stays a
               // flat listbox of options.
               role={view === 'list' ? 'grid' : 'listbox'}
-              aria-label={`${CATEGORY_LABEL[category]} items`}
+              aria-label={t`Library items in ${categoryName}`}
               tabIndex={0}
               aria-activedescendant={selectedItem ? tileElementId(selectedItem.file.fileName) : undefined}
             >
               {unavailable ? (
-                <div className="hwlib__empty">The library isn&rsquo;t available in this browser.</div>
+                <div className="hwlib__empty"><Trans>The library isn&rsquo;t available in this browser.</Trans></div>
               ) : loading ? (
-                <div className="hwlib__empty">Loading…</div>
+                <div className="hwlib__empty"><Trans>Loading…</Trans></div>
               ) : needsReconnect ? (
                 <div className="hwlib__empty">
-                  <div>Your library folder needs permission again.</div>
+                  <div><Trans>Your library folder needs permission again.</Trans></div>
                   <button
                     type="button"
                     className="hwlib__btn-secondary"
@@ -1318,29 +1338,31 @@ export function LibraryDialog({
                         .then((ok) => {
                           if (ok) {
                             setReconnectDenied(false)
-                            setReloadToken((t) => t + 1)
+                            setReloadToken((n) => n + 1)
                           } else {
                             setReconnectDenied(true)
                           }
                         })
                     }}
                   >
-                    Reconnect
+                    <Trans>Reconnect</Trans>
                   </button>
                   {reconnectDenied && (
                     <div style={{ marginTop: '10px' }}>
-                      The browser denied access. Pick the folder again under Settings ▸ Folders, or
-                      switch back to browser storage there.
+                      <Trans>
+                        The browser denied access. Pick the folder again under Settings ▸ Folders, or
+                        switch back to browser storage there.
+                      </Trans>
                     </div>
                   )}
                 </div>
               ) : loadError !== null ? (
-                <div className="hwlib__empty">Couldn&rsquo;t read the library: {loadError}</div>
+                <div className="hwlib__empty"><Trans>Couldn&rsquo;t read the library: {loadError}</Trans></div>
               ) : items.length === 0 ? (
-                <div className="hwlib__empty">Save a selection with &ldquo;Save to Library&rdquo; to get started.</div>
+                <div className="hwlib__empty"><Trans>Save a selection with &ldquo;Save to Library&rdquo; to get started.</Trans></div>
               ) : displayItems.length === 0 ? (
                 <div className="hwlib__empty">
-                  {query !== '' ? 'No items match your search.' : `No ${CATEGORY_LABEL_LOWER[category]} here yet.`}
+                  {query !== '' ? t`No items match your search.` : emptyCategoryText(category)}
                 </div>
               ) : view === 'list' ? (
                 <>
@@ -1407,7 +1429,7 @@ export function LibraryDialog({
             className="hwlib__col-resize"
             role="separator"
             aria-orientation="vertical"
-            aria-label="Resize detail pane"
+            aria-label={t`Resize detail pane`}
             onPointerDown={(e) => beginColResize('detail', e)}
           />
 
@@ -1444,8 +1466,8 @@ export function LibraryDialog({
 
         <footer className="hwlib__footer">
           <div className="hwlib__hints">
-            <kbd>↵</kbd> {selectedItem ? defaultActionLabel(selectedItem) : 'Insert'} · <kbd>⌘↵</kbd>{' '}
-            {selectedItem ? otherActionLabel(selectedItem) : 'Open'} · <kbd>Esc</kbd> Close
+            <kbd>↵</kbd> {selectedItem ? defaultActionLabel(selectedItem) : t`Insert`} · <kbd>⌘↵</kbd>{' '}
+            {selectedItem ? otherActionLabel(selectedItem) : t`Open`} · <kbd><Trans>Esc</Trans></kbd> <Trans>Close</Trans>
           </div>
           <div className="hwlib__footer-path">
             {!unavailable && (folderPath !== null ? `${folderPath} · ${itemCountLabel(items.length)}` : itemCountLabel(items.length))}
@@ -1502,6 +1524,7 @@ export function LibraryDialog({
 // so translucency reads the same in both themes).
 // ---------------------------------------------------------------------------
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- stylesheet text, not copy
 const LIBRARY_CSS = `
 .hwlib-overlay {
   position: fixed;

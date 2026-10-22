@@ -25,6 +25,8 @@ import { TOOL_MENU_IDS } from './App'
 import { TOOLS } from './tools/toolRegistry'
 import { dockVerbsFor } from './panels/dockLogic'
 import { paletteEntries } from './palette/registry'
+import { NATIVE_MENU_LABELS } from './i18n/nativeMenu'
+import { PSEUDO_LOCALE, SHIPPED_LOCALES } from './i18n/locales'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -338,10 +340,10 @@ describe('Copy/Cut/Paste/Paste In Place menu parity', () => {
   })
 
   it('is offered from the web MenuBar\'s Edit menu with the right gates', () => {
-    expect(menuBarSource).toContain('label="Cut"')
-    expect(menuBarSource).toContain('label="Copy"')
-    expect(menuBarSource).toContain('label="Paste"')
-    expect(menuBarSource).toContain('label="Paste In Place"')
+    expect(menuBarSource).toContain('label={t`Cut`}')
+    expect(menuBarSource).toContain('label={t`Copy`}')
+    expect(menuBarSource).toContain('label={t`Paste`}')
+    expect(menuBarSource).toContain('label={t`Paste In Place`}')
     expect(menuBarSource).toContain('hasStructuralSelection')
     expect(menuBarSource).toContain('clipboardHasContent')
   })
@@ -385,9 +387,9 @@ describe('Compact Tool Rail / Tray / Contextual Dock menu items parity', () => {
   })
 
   it('is offered from the web MenuBar', () => {
-    expect(menuBarSource.includes('label="Compact Tool Rail"')).toBe(true)
-    expect(menuBarSource.includes('label="Tray"')).toBe(true)
-    expect(menuBarSource.includes('label="Contextual Dock"')).toBe(true)
+    expect(menuBarSource.includes('label={t`Compact Tool Rail`}')).toBe(true)
+    expect(menuBarSource.includes('label={t`Tray`}')).toBe(true)
+    expect(menuBarSource.includes('label={t`Contextual Dock`}')).toBe(true)
   })
 })
 
@@ -438,7 +440,68 @@ describe('Camera ▸ Fly menu item parity', () => {
   })
 
   it('is offered from the web MenuBar and the command palette', () => {
-    expect(menuBarSource.includes('label="Fly"')).toBe(true)
+    expect(menuBarSource.includes('label={t`Fly`}')).toBe(true)
     expect(paletteEntries().some((e) => e.id === 'toggle-fly')).toBe(true)
+  })
+})
+
+describe('native menu labels come from the one table (docs/LOCALIZATION.md "Native menus")', () => {
+  // The shell builds every item with `lbl("<key>")`, a lookup into the
+  // per-locale JSON that scripts/i18n-menus.mjs generates from
+  // src/i18n/nativeMenu.ts. A key used in Rust but missing from the table
+  // would show its raw key; a table entry no Rust site uses is dead copy a
+  // translator would still be asked for. Both directions are checked, and
+  // the committed English JSON must be what the generator produces now.
+  const source = readFileSync(MAIN_RS, 'utf8')
+  // `lbl!("…")` during construction; `labels.get("…")` or `current_menu_labels(…).get("…")` where
+  // part of the menu is rebuilt at runtime (the Open Recent submenu) or a
+  // shell-built window or dialog is titled.
+  const rustKeys = new Set(
+    Array.from(source.matchAll(/(?:\blbl!|\b(?:labels|current_menu_labels\([^)]*\))\s*\.\s*get)\(\s*"([^"]+)"\s*\)/g), (m) => m[1]),
+  )
+  const tableKeys = new Set(Object.keys(NATIVE_MENU_LABELS))
+
+  it('every lbl() key in main.rs has a table entry', () => {
+    const missing = [...rustKeys].filter((k) => !tableKeys.has(k))
+    expect(missing, 'add these to NATIVE_MENU_LABELS').toEqual([])
+  })
+
+  it('every table entry is used by main.rs', () => {
+    const unused = [...tableKeys].filter((k) => !rustKeys.has(k))
+    expect(unused, 'remove these from NATIVE_MENU_LABELS or use them in main.rs').toEqual([])
+  })
+
+  it('no menu item is still built from a literal label', () => {
+    // Every id-bearing builder must take its label through lbl().
+    const literal = Array.from(
+      source.matchAll(/(?:with_id\(\s*"[^"]+"|check_item\(\s*handle,\s*&mut \w+,\s*"[^"]+"|gated_item\(\s*handle,\s*&mut \w+,\s*"[^"]+"|edit_item\(\s*handle,\s*&mut \w+,\s*"[^"]+")\s*,\s*"([^"]+)"/g),
+      (m) => m[1],
+    )
+    expect(literal, 'labels still hard-coded in main.rs').toEqual([])
+  })
+
+  it('the shell embeds a menu file for every shipped locale, and only those', () => {
+    // menu_labels.rs's MENU_LOCALES is a hand-kept list of include_str!
+    // lines; SHIPPED_LOCALES (src/i18n/locales.ts) is the app's. A shipped
+    // locale missing here would show English menus; an extra one would
+    // embed a file the generator no longer maintains.
+    const rs = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), '../../shells/tauri/src-tauri/src/menu_labels.rs'),
+      'utf8',
+    )
+    const embedded = Array.from(rs.matchAll(/\(\s*"([a-zA-Z-]+)",\s*include_str!\("\.\.\/locales\/menu\.([a-zA-Z-]+)\.json"\),?\s*\)/g), (m) => {
+      expect(m[1], 'locale tag and file name disagree in MENU_LOCALES').toBe(m[2])
+      return m[1]
+    })
+    // The pseudo-locale's file is embedded as a debug aid, never shipped.
+    expect([...embedded].sort()).toEqual([...SHIPPED_LOCALES, PSEUDO_LOCALE].sort())
+  })
+
+  it('the committed menu.en.json is what the generator produces', async () => {
+    const { menuFileFor, readTableRows, MENU_LOCALES_DIR } = await import('../scripts/i18n-menus-lib.mjs')
+    const rows = readTableRows()
+    expect(rows.length).toBe(tableKeys.size)
+    const committed = readFileSync(resolve(MENU_LOCALES_DIR, 'menu.en.json'), 'utf8')
+    expect(committed, 'run `pnpm --dir app i18n:menus`').toBe(menuFileFor(rows, 'en'))
   })
 })

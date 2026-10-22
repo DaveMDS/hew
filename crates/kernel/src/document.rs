@@ -625,17 +625,244 @@ impl Default for SavedMark {
 /// kernel derives from the action itself, and who authored it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntryInfo {
-    /// A short label for the entry: the transaction's own label when it
-    /// was committed through [`Document::commit_transaction`], otherwise
-    /// derived from the action's kind and payload (`"Push/Pull"`,
-    /// `"Move 3 objects"`, `"Rename 'Box' → 'Base'"`).
+    /// A short English label for the entry: the transaction's own label
+    /// when it was committed through [`Document::commit_transaction`],
+    /// otherwise rendered from `kind` by [`render_history_label`]
+    /// (`"Push/Pull"`, `"Move 3 objects"`, `"Rename 'Box' → 'Base'"`).
+    /// The API's `expected_label` guard matches this string; the app
+    /// builds its own localized label from `kind` instead.
     pub label: String,
+    /// What the entry did, as data (docs/LOCALIZATION.md): the app keys
+    /// its localized undo/redo labels on `kind.id` and fills in `args`.
+    pub kind: HistoryKind,
     pub origin: HistoryOrigin,
     /// Session bookkeeping (entering/leaving a group or component edit):
     /// undoable, but not a change to what a save writes — excluded from
     /// the saved-depth accounting and from "changes since last save"
     /// ([`Document::content_depth`]).
     pub bookkeeping: bool,
+}
+
+/// A history entry's description as data: a stable `id` the app keys its
+/// localized label table on, plus the parameters that label needs, in a
+/// fixed order per id. [`render_history_label`] turns one into the English
+/// [`HistoryEntryInfo::label`], so the string and the structure can never
+/// disagree. Ids are kebab-case and part of the public WASM contract
+/// (`history_entries_json`); add ids, never rename them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryKind {
+    pub id: &'static str,
+    pub args: Vec<(&'static str, HistoryArg)>,
+}
+
+/// One parameter of a [`HistoryKind`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HistoryArg {
+    /// A name the user typed, or a fixed vocabulary word (`"object"`,
+    /// `"move"`) the app maps to its own words.
+    Text(String),
+    /// A count the app pluralizes.
+    Count(usize),
+    /// A nested entry (an unlabeled compound's representative child).
+    Kind(Box<HistoryKind>),
+}
+
+impl HistoryKind {
+    pub fn new(id: &'static str) -> Self {
+        HistoryKind {
+            id,
+            args: Vec::new(),
+        }
+    }
+
+    fn text(mut self, key: &'static str, value: impl Into<String>) -> Self {
+        self.args.push((key, HistoryArg::Text(value.into())));
+        self
+    }
+
+    fn maybe_text(self, key: &'static str, value: Option<impl Into<String>>) -> Self {
+        match value {
+            Some(v) => self.text(key, v),
+            None => self,
+        }
+    }
+
+    fn count(mut self, key: &'static str, n: usize) -> Self {
+        self.args.push((key, HistoryArg::Count(n)));
+        self
+    }
+
+    fn inner(mut self, key: &'static str, kind: HistoryKind) -> Self {
+        self.args.push((key, HistoryArg::Kind(Box::new(kind))));
+        self
+    }
+
+    /// The argument named `key`, if present.
+    pub fn arg(&self, key: &str) -> Option<&HistoryArg> {
+        self.args.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
+    }
+
+    pub fn text_arg(&self, key: &str) -> Option<&str> {
+        match self.arg(key) {
+            Some(HistoryArg::Text(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn count_arg(&self, key: &str) -> Option<usize> {
+        match self.arg(key) {
+            Some(HistoryArg::Count(n)) => Some(*n),
+            _ => None,
+        }
+    }
+
+    pub fn kind_arg(&self, key: &str) -> Option<&HistoryKind> {
+        match self.arg(key) {
+            Some(HistoryArg::Kind(k)) => Some(k),
+            _ => None,
+        }
+    }
+}
+
+/// The vocabulary a `transform*` kind's `verb` argument uses.
+fn transform_verb_id(t: &Transform) -> &'static str {
+    match transform_verb(t) {
+        "Move" => "move",
+        "Rotate" => "rotate",
+        _ => "scale",
+    }
+}
+
+fn annotation_word(what: &str) -> &'static str {
+    match what {
+        "dimension" => "Dimension",
+        "text" => "Text",
+        _ => "Annotation",
+    }
+}
+
+/// The English label for a [`HistoryKind`] — the one place that knows how
+/// each id reads. Every arm here has a counterpart in the app's localized
+/// table (`app/src/i18n/historyLabels.ts`).
+pub fn render_history_label(kind: &HistoryKind) -> String {
+    let text = |k: &str| kind.text_arg(k).unwrap_or("");
+    let count = |k: &str| kind.count_arg(k).unwrap_or(0);
+    let verb = match kind.text_arg("verb") {
+        Some("move") => "Move",
+        Some("rotate") => "Rotate",
+        Some("scale") => "Scale",
+        _ => "Transform",
+    };
+    let inner = || {
+        kind.kind_arg("inner")
+            .map(render_history_label)
+            .unwrap_or_default()
+    };
+    let with_name = |base: &str| match kind.text_arg("name") {
+        Some(n) => format!("{base} '{n}'"),
+        None => base.to_string(),
+    };
+    match kind.id {
+        "labeled" => text("label").to_string(),
+        "edit" => "Edit".to_string(),
+        "repeat" => format!("{} ×{}", inner(), count("count")),
+        "bundle" => format!("{} (+{} more)", inner(), count("more")),
+        "text-3d" => "3D Text".to_string(),
+        "set-attribute" => format!("Set attribute {}.{}", text("namespace"), text("key")),
+        "delete-attribute" => format!("Delete attribute {}", text("namespace")),
+        "follow-me" => "Follow Me".to_string(),
+        "push-pull" => "Push/Pull".to_string(),
+        "draw-on-face" => "Draw on face".to_string(),
+        "delete-imprint" => "Delete imprint".to_string(),
+        "move-imprint" => "Move imprint".to_string(),
+        "edit-face" => "Edit face".to_string(),
+        "union" => "Union".to_string(),
+        "subtract" => "Subtract".to_string(),
+        "intersect" => "Intersect".to_string(),
+        "slice" => "Slice".to_string(),
+        "push-through" => "Push/Pull through".to_string(),
+        "close-openings" => {
+            if count("count") == 1 {
+                "Close an opening".to_string()
+            } else {
+                format!("Close {} openings", count("count"))
+            }
+        }
+        "delete-faces" => format!("Delete {}", count_label(count("count"), "face")),
+        "add-thickness" => "Add thickness".to_string(),
+        "transform" => format!("{verb} {}", count_label(count("count"), text("noun"))),
+        "transform-sketch" => format!("{verb} sketch"),
+        "transform-instance" => format!("{verb} instance"),
+        "detach-sketch" => "Move sketch off its plane".to_string(),
+        "copy-sketch" => "Copy sketch".to_string(),
+        "attach-sketch" => "Attach sketch".to_string(),
+        "group-sketch" => "Group sketch".to_string(),
+        "rescale" => format!("Resize model ×{}", text("factor")),
+        "move-axes" => "Move drawing axes".to_string(),
+        "move-sketch-point" => "Move sketch point".to_string(),
+        "draw" => "Draw".to_string(),
+        "group" => "Group".to_string(),
+        "ungroup" => "Ungroup".to_string(),
+        "delete-node" => {
+            let what = match (text("node"), kind.text_arg("name")) {
+                ("group", Some(name)) => format!("group '{name}'"),
+                (_, Some(name)) => format!("'{name}'"),
+                (node, None) => node.to_string(),
+            };
+            format!("Delete {what}")
+        }
+        "make-component" => with_name("Make component"),
+        "place-instance" => "Place instance".to_string(),
+        "copy" => "Copy".to_string(),
+        "copy-array" => format!("Copy ×{}", count("count")),
+        "guide" => "Guide".to_string(),
+        "delete-guide" => "Delete guide".to_string(),
+        "delete-guides" => format!("Delete {}", count_label(count("count"), "guide")),
+        "add-annotation" => annotation_word(text("what")).to_string(),
+        "edit-annotation" => format!("Edit {}", annotation_word(text("what")).to_lowercase()),
+        "delete-annotation" => format!("Delete {}", annotation_word(text("what")).to_lowercase()),
+        "delete-sketch" => "Delete sketch".to_string(),
+        "explode" => "Explode".to_string(),
+        "make-unique" => "Make unique".to_string(),
+        "edit-component" => with_name("Edit component"),
+        "finish-editing-component" => with_name("Finish editing component"),
+        "edit-group" => "Edit group".to_string(),
+        "finish-editing-group" => "Finish editing group".to_string(),
+        "paint-face" => "Paint face".to_string(),
+        "paint-object" => "Paint object".to_string(),
+        "position-texture" => "Position texture".to_string(),
+        "replace-material" => {
+            format!(
+                "Replace material on {}",
+                count_label(count("count"), "face")
+            )
+        }
+        "material-opacity" => "Change material opacity".to_string(),
+        "rename-material" => "Rename material".to_string(),
+        "delete-material" => "Delete material".to_string(),
+        "delete-component" => "Delete component".to_string(),
+        "move-into-group" => "Move into group".to_string(),
+        "move-out-of-group" => "Move out of group".to_string(),
+        "rename" => match (kind.text_arg("from"), kind.text_arg("to")) {
+            (Some(a), Some(b)) => format!("Rename '{a}' → '{b}'"),
+            (None, Some(b)) => format!("Rename to '{b}'"),
+            _ => "Rename".to_string(),
+        },
+        "clear-name" => format!("Clear name '{}'", text("from")),
+        "tag" => "Tag".to_string(),
+        "untag" => "Untag".to_string(),
+        "change-tags" => "Change tags".to_string(),
+        "rename-component" => match (kind.text_arg("from"), kind.text_arg("to")) {
+            (Some(a), Some(b)) => format!("Rename component '{a}' → '{b}'"),
+            (_, Some(b)) => format!("Rename component to '{b}'"),
+            _ => "Rename component".to_string(),
+        },
+        "delete-tags" => format!("Delete {}", count_label(count("count"), "tag")),
+        "rename-tag" => "Rename tag".to_string(),
+        "import" => format!("Import {}", count_label(count("count"), "item")),
+        "delete-component-member" => "Delete component member".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Both stacks at once ([`Document::history_entries`]).
@@ -1806,10 +2033,16 @@ pub enum PendingActionKind {
     Other,
 }
 
-/// `"3 objects"` / `"1 object"`.
+/// `"3 objects"` / `"1 object"` / `"2 sketches"`.
 fn count_label(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
+    } else if noun.ends_with("ch")
+        || noun.ends_with("sh")
+        || noun.ends_with('s')
+        || noun.ends_with('x')
+    {
+        format!("{n} {noun}es")
     } else {
         format!("{n} {noun}s")
     }
@@ -18098,70 +18331,73 @@ impl Document {
             } => meta.origin.clone(),
             _ => HistoryOrigin::User,
         };
+        let kind = self.describe_action(action, undo_index);
         HistoryEntryInfo {
-            label: self.describe_action(action, undo_index),
+            label: render_history_label(&kind),
+            kind,
             origin,
             bookkeeping: action.is_bookkeeping(),
         }
     }
 
-    /// A short human label for a history entry. `undo_index` is the
+    /// What a history entry did, as a [`HistoryKind`]. `undo_index` is the
     /// entry's position on the undo stack (oldest = 0) when it sits there
-    /// — a per-object op's label is resolved against the object's own op
+    /// — a per-object op's kind is resolved against the object's own op
     /// stack by counting the later entries that touched the same object,
     /// which needs to know where in the stack this entry is; redo entries
     /// pass `None` and resolve against the object's redo stack instead.
-    fn describe_action(&self, action: &DocAction, undo_index: Option<usize>) -> String {
+    fn describe_action(&self, action: &DocAction, undo_index: Option<usize>) -> HistoryKind {
+        let k = HistoryKind::new;
         match action {
             DocAction::Compound {
                 meta: Some(meta), ..
-            } => meta.label.clone(),
+            } => k("labeled").text("label", meta.label.clone()),
             DocAction::Compound {
                 actions,
                 meta: None,
             } => self.describe_children(actions, undo_index),
-            DocAction::PlaceTextCompound(_) => "3D Text".to_string(),
-            DocAction::AttrSet { ns, key, .. } => format!("Set attribute {ns}.{key}"),
-            DocAction::AttrDeleted { ns, .. } => format!("Delete attribute {ns}"),
+            DocAction::PlaceTextCompound(_) => k("text-3d"),
+            DocAction::AttrSet { ns, key, .. } => k("set-attribute")
+                .text("namespace", ns.clone())
+                .text("key", key.clone()),
+            DocAction::AttrDeleted { ns, .. } => {
+                k("delete-attribute").text("namespace", ns.clone())
+            }
             DocAction::CreatedObject { merged_base, .. } => {
                 if merged_base.is_some() {
-                    "Follow Me".to_string()
+                    k("follow-me")
                 } else {
-                    "Push/Pull".to_string()
+                    k("push-pull")
                 }
             }
             DocAction::ObjectOp { object } => self.describe_object_op(*object, undo_index),
             DocAction::DefObjectOp { object, .. } => self.describe_object_op(*object, undo_index),
             DocAction::Boolean { op, .. } | DocAction::BooleanNodes { op, .. } => match op {
-                BooleanOp::Union => "Union".to_string(),
-                BooleanOp::Subtract => "Subtract".to_string(),
-                BooleanOp::Intersect => "Intersect".to_string(),
+                BooleanOp::Union => k("union"),
+                BooleanOp::Subtract => k("subtract"),
+                BooleanOp::Intersect => k("intersect"),
             },
-            DocAction::Sliced { .. } => "Slice".to_string(),
-            DocAction::PushThrough { .. } => "Push/Pull through".to_string(),
+            DocAction::Sliced { .. } => k("slice"),
+            DocAction::PushThrough { .. } => k("push-through"),
             DocAction::Repaired { kind, .. } => match *kind {
-                RepairKind::Cap { rims: 1 } => "Close an opening".to_string(),
-                RepairKind::Cap { rims } => format!("Close {rims} openings"),
-                RepairKind::DeleteFaces { faces } => {
-                    format!("Delete {}", count_label(faces, "face"))
-                }
-                RepairKind::Thicken => "Add thickness".to_string(),
+                RepairKind::Cap { rims } => k("close-openings").count("count", rims),
+                RepairKind::DeleteFaces { faces } => k("delete-faces").count("count", faces),
+                RepairKind::Thicken => k("add-thickness"),
             },
             DocAction::Transform {
                 objects, forward, ..
-            } => format!(
-                "{} {}",
-                transform_verb(forward),
-                count_label(objects.len(), "object")
-            ),
+            } => k("transform")
+                .text("verb", transform_verb_id(forward))
+                .text("noun", "object")
+                .count("count", objects.len()),
             DocAction::TransformSketch { forward, .. }
             | DocAction::TransformSketchIsland { forward, .. } => {
-                format!("{} sketch", transform_verb(forward))
+                k("transform-sketch").text("verb", transform_verb_id(forward))
             }
-            DocAction::DetachedSketchIsland { .. } => "Move sketch off its plane".to_string(),
-            DocAction::CopiedSketchIslands { .. } => "Copy sketch".to_string(),
-            DocAction::SketchOwnerChanged { .. } => "Attach sketch".to_string(),
-            DocAction::SketchGroupChanged { .. } => "Group sketch".to_string(),
+            DocAction::DetachedSketchIsland { .. } => k("detach-sketch"),
+            DocAction::CopiedSketchIslands { .. } => k("copy-sketch"),
+            DocAction::SketchOwnerChanged { .. } => k("attach-sketch"),
+            DocAction::SketchGroupChanged { .. } => k("group-sketch"),
             DocAction::TransformSelection {
                 objects,
                 sketches,
@@ -18176,88 +18412,75 @@ impl Document {
                     (false, false, true) => "instance",
                     _ => "item",
                 };
-                format!(
-                    "{} {}",
-                    transform_verb(forward),
-                    count_label(o + s + i, noun)
-                )
+                k("transform")
+                    .text("verb", transform_verb_id(forward))
+                    .text("noun", noun)
+                    .count("count", o + s + i)
             }
-            DocAction::Rescale { factor, .. } => format!("Resize model ×{factor:.4}")
-                .trim_end_matches('0')
-                .trim_end_matches('.')
-                .to_string(),
-            DocAction::SetAxes { .. } => "Move drawing axes".to_string(),
+            DocAction::Rescale { factor, .. } => {
+                let factor = format!("{factor:.4}");
+                let factor = factor.trim_end_matches('0').trim_end_matches('.');
+                k("rescale").text("factor", factor)
+            }
+            DocAction::SetAxes { .. } => k("move-axes"),
             DocAction::MovedSketchVertex { .. } | DocAction::RearrangedSketchVertex { .. } => {
-                "Move sketch point".to_string()
+                k("move-sketch-point")
             }
-            DocAction::SketchGesture { .. } => "Draw".to_string(),
-            DocAction::Grouped { .. } => "Group".to_string(),
-            DocAction::Ungrouped { .. } => "Ungroup".to_string(),
-            DocAction::Deleted { node, .. } => format!("Delete {}", self.history_node_label(*node)),
-            DocAction::MadeComponent { component, .. } => match self.component_name(*component) {
-                Some(name) => format!("Make component '{name}'"),
-                None => "Make component".to_string(),
-            },
-            DocAction::PlacedInstance { .. } => "Place instance".to_string(),
-            DocAction::Duplicated { .. } => "Copy".to_string(),
-            DocAction::DuplicatedArray { roots, .. } => format!("Copy ×{}", roots.len()),
-            DocAction::CreatedGuide { .. } => "Guide".to_string(),
-            DocAction::DeletedGuide { .. } => "Delete guide".to_string(),
-            DocAction::DeletedGuides { guides } => {
-                format!("Delete {}", count_label(guides.len(), "guide"))
+            DocAction::SketchGesture { .. } => k("draw"),
+            DocAction::Grouped { .. } => k("group"),
+            DocAction::Ungrouped { .. } => k("ungroup"),
+            DocAction::Deleted { node, .. } => {
+                let (node_kind, name) = self.history_node_label(*node);
+                k("delete-node")
+                    .text("node", node_kind)
+                    .maybe_text("name", name)
             }
-            DocAction::CreatedAnnotation { annotation }
-            | DocAction::UpdatedAnnotation { annotation, .. } => {
-                let what = self.annotation_label(*annotation);
-                if matches!(action, DocAction::CreatedAnnotation { .. }) {
-                    what
-                } else {
-                    format!("Edit {}", what.to_lowercase())
-                }
+            DocAction::MadeComponent { component, .. } => {
+                k("make-component").maybe_text("name", self.component_name(*component))
+            }
+            DocAction::PlacedInstance { .. } => k("place-instance"),
+            DocAction::Duplicated { .. } => k("copy"),
+            DocAction::DuplicatedArray { roots, .. } => k("copy-array").count("count", roots.len()),
+            DocAction::CreatedGuide { .. } => k("guide"),
+            DocAction::DeletedGuide { .. } => k("delete-guide"),
+            DocAction::DeletedGuides { guides } => k("delete-guides").count("count", guides.len()),
+            DocAction::CreatedAnnotation { annotation } => {
+                k("add-annotation").text("what", self.annotation_label(*annotation))
+            }
+            DocAction::UpdatedAnnotation { annotation, .. } => {
+                k("edit-annotation").text("what", self.annotation_label(*annotation))
             }
             DocAction::DeletedAnnotation { annotation } => {
-                format!(
-                    "Delete {}",
-                    self.annotation_label(*annotation).to_lowercase()
-                )
+                k("delete-annotation").text("what", self.annotation_label(*annotation))
             }
-            DocAction::DeletedSketch { .. } => "Delete sketch".to_string(),
+            DocAction::DeletedSketch { .. } => k("delete-sketch"),
             DocAction::TransformInstance { prev, next, .. } => {
                 let forward = prev.inverse().map(|inv| inv.then(next)).unwrap_or(*next);
-                format!("{} instance", transform_verb(&forward))
+                k("transform-instance").text("verb", transform_verb_id(&forward))
             }
-            DocAction::Exploded { .. } => "Explode".to_string(),
-            DocAction::MadeUnique { .. } => "Make unique".to_string(),
-            DocAction::SessionOpened { component, .. }
-            | DocAction::SessionClosed { component, .. } => {
-                let verb = if matches!(action, DocAction::SessionOpened { .. }) {
-                    "Edit"
-                } else {
-                    "Finish editing"
-                };
-                match self.component_name(*component) {
-                    Some(name) => format!("{verb} component '{name}'"),
-                    None => format!("{verb} component"),
-                }
+            DocAction::Exploded { .. } => k("explode"),
+            DocAction::MadeUnique { .. } => k("make-unique"),
+            DocAction::SessionOpened { component, .. } => {
+                k("edit-component").maybe_text("name", self.component_name(*component))
             }
-            DocAction::GroupSessionOpened { .. } => "Edit group".to_string(),
-            DocAction::GroupSessionClosed { .. } => "Finish editing group".to_string(),
-            DocAction::PaintFace { .. } => "Paint face".to_string(),
-            DocAction::SetObjectMaterial { .. } => "Paint object".to_string(),
-            DocAction::SetFaceUvFrame { .. } => "Position texture".to_string(),
+            DocAction::SessionClosed { component, .. } => {
+                k("finish-editing-component").maybe_text("name", self.component_name(*component))
+            }
+            DocAction::GroupSessionOpened { .. } => k("edit-group"),
+            DocAction::GroupSessionClosed { .. } => k("finish-editing-group"),
+            DocAction::PaintFace { .. } => k("paint-face"),
+            DocAction::SetObjectMaterial { .. } => k("paint-object"),
+            DocAction::SetFaceUvFrame { .. } => k("position-texture"),
             DocAction::ReplaceMaterial {
                 faces, defaults, ..
-            } => format!(
-                "Replace material on {}",
-                count_label(faces.len() + defaults.len(), "face")
-            ),
-            DocAction::SetMaterialAlpha { .. } => "Change material opacity".to_string(),
-            DocAction::MaterialRenamed { .. } => "Rename material".to_string(),
-            DocAction::MaterialDeleted { .. } => "Delete material".to_string(),
-            DocAction::DefinitionDeleted { .. } => "Delete component".to_string(),
+            } => k("replace-material").count("count", faces.len() + defaults.len()),
+            DocAction::SetMaterialAlpha { .. } => k("material-opacity"),
+            DocAction::MaterialRenamed { .. } => k("rename-material"),
+            DocAction::MaterialDeleted { .. } => k("delete-material"),
+            DocAction::DefinitionDeleted { .. } => k("delete-component"),
             DocAction::Reparented { next_parent, .. } => match next_parent {
-                Some(_) => "Move into group".to_string(),
-                None => "Move out of group".to_string(),
+                Some(_) => k("move-into-group"),
+                None => k("move-out-of-group"),
             },
             DocAction::NodeMetaChanged {
                 prev_name,
@@ -18268,74 +18491,79 @@ impl Document {
             } => {
                 if prev_name != next_name {
                     match (prev_name, next_name) {
-                        (Some(a), Some(b)) => format!("Rename '{a}' → '{b}'"),
-                        (None, Some(b)) => format!("Rename to '{b}'"),
-                        (Some(a), None) => format!("Clear name '{a}'"),
-                        (None, None) => "Rename".to_string(),
+                        (Some(a), None) => k("clear-name").text("from", a.clone()),
+                        (from, to) => k("rename")
+                            .maybe_text("from", from.clone())
+                            .maybe_text("to", to.clone()),
                     }
                 } else if next_tags.len() > prev_tags.len() {
-                    "Tag".to_string()
+                    k("tag")
                 } else if next_tags.len() < prev_tags.len() {
-                    "Untag".to_string()
+                    k("untag")
                 } else {
-                    "Change tags".to_string()
+                    k("change-tags")
                 }
             }
             DocAction::ComponentRenamed {
                 prev_name,
                 next_name,
                 ..
-            } => match (prev_name, next_name) {
-                (Some(a), Some(b)) => format!("Rename component '{a}' → '{b}'"),
-                (_, Some(b)) => format!("Rename component to '{b}'"),
-                _ => "Rename component".to_string(),
-            },
+            } => k("rename-component")
+                .maybe_text("from", prev_name.clone())
+                .maybe_text("to", next_name.clone()),
             DocAction::TagDeleted { registry, .. } => {
-                format!("Delete {}", count_label(registry.len(), "tag"))
+                k("delete-tags").count("count", registry.len())
             }
-            DocAction::TagRenamed { .. } => "Rename tag".to_string(),
-            DocAction::FollowMeFace { .. } => "Follow Me".to_string(),
+            DocAction::TagRenamed { .. } => k("rename-tag"),
+            DocAction::FollowMeFace { .. } => k("follow-me"),
             DocAction::Imported {
                 objects, instances, ..
-            } => format!(
-                "Import {}",
-                count_label(objects.len() + instances.len(), "item")
-            ),
-            DocAction::DeletedDefMember { .. } => "Delete component member".to_string(),
-            DocAction::ConsumedScaffolding { .. } => "Draw".to_string(),
+            } => k("import").count("count", objects.len() + instances.len()),
+            DocAction::DeletedDefMember { .. } => k("delete-component-member"),
+            DocAction::ConsumedScaffolding { .. } => k("draw"),
         }
     }
 
-    /// A label for an unlabeled compound: its children's common label
-    /// (with a count when they all agree), else the first child's label
+    /// The kind for an unlabeled compound: its children's common kind
+    /// (with a count when they all agree), else the first child's kind
     /// plus how many more it bundles.
-    fn describe_children(&self, actions: &[DocAction], undo_index: Option<usize>) -> String {
-        let labels: Vec<String> = actions
+    fn describe_children(&self, actions: &[DocAction], undo_index: Option<usize>) -> HistoryKind {
+        let kinds: Vec<HistoryKind> = actions
             .iter()
             .map(|a| self.describe_action(a, undo_index))
             .collect();
-        match labels.as_slice() {
-            [] => "Edit".to_string(),
+        // Grouped by rendered label, exactly as the labels-only version did,
+        // so an unlabeled compound reads the same as before.
+        match kinds.as_slice() {
+            [] => HistoryKind::new("edit"),
             [one] => one.clone(),
-            [first, rest @ ..] if rest.iter().all(|l| l == first) => {
-                format!("{first} ×{}", labels.len())
+            [first, rest @ ..]
+                if rest
+                    .iter()
+                    .all(|k| render_history_label(k) == render_history_label(first)) =>
+            {
+                HistoryKind::new("repeat")
+                    .inner("inner", first.clone())
+                    .count("count", kinds.len())
             }
-            [first, rest @ ..] => format!("{first} (+{} more)", rest.len()),
+            [first, rest @ ..] => HistoryKind::new("bundle")
+                .inner("inner", first.clone())
+                .count("more", rest.len()),
         }
     }
 
-    /// The label for a per-object op entry: which of the object's own
+    /// The kind for a per-object op entry: which of the object's own
     /// recorded ops this entry stands for. The document stack and the
     /// object's [`History`] advance in lockstep for that object, so the
     /// entry at `undo_index` is the object's op `k` from its top, where
     /// `k` is the number of LATER document entries that touched the same
     /// object (compound children included). Redo entries mirror this
     /// against the object's redo stack. Anything unresolvable (a stale
-    /// object, a count past the stack) falls back to a generic label —
+    /// object, a count past the stack) falls back to a generic kind —
     /// a label is never worth a panic.
-    fn describe_object_op(&self, object: ObjectId, undo_index: Option<usize>) -> String {
+    fn describe_object_op(&self, object: ObjectId, undo_index: Option<usize>) -> HistoryKind {
         let Some(rec) = self.objects.get(object) else {
-            return "Edit face".to_string();
+            return HistoryKind::new("edit-face");
         };
         let op = match undo_index {
             Some(i) => {
@@ -18350,39 +18578,36 @@ impl Document {
             }
             None => rec.history.peek_redo(),
         };
-        match op {
+        HistoryKind::new(match op {
             Some(KernelOp::PushPull { .. })
             | Some(KernelOp::UnbuildPushPull { .. })
             | Some(KernelOp::ExtrudeSubFace { .. })
-            | Some(KernelOp::CollapseSubFace { .. }) => "Push/Pull".to_string(),
+            | Some(KernelOp::CollapseSubFace { .. }) => "push-pull",
             Some(KernelOp::SplitFace { .. }) | Some(KernelOp::SplitFaceInner { .. }) => {
-                "Draw on face".to_string()
+                "draw-on-face"
             }
             // A user reaches these only by deleting a drawn shape on a face
             // (an imprint sub-face, or a chord run); the boolean cleanup's
             // coplanar merges never record ops.
             Some(KernelOp::MergeFaces { .. }) | Some(KernelOp::MergeInnerFace { .. }) => {
-                "Delete imprint".to_string()
+                "delete-imprint"
             }
-            Some(KernelOp::TransformSubFace { .. }) => "Move imprint".to_string(),
+            Some(KernelOp::TransformSubFace { .. }) => "move-imprint",
             // A re-trace that inserts is a draw (a shape bridging separate
             // outlines); one that only removes is a delete along several
             // runs.
-            Some(KernelOp::RetraceFace { insert, .. }) if !insert.is_empty() => {
-                "Draw on face".to_string()
-            }
-            Some(KernelOp::RetraceFace { .. }) => "Delete imprint".to_string(),
-            None => "Edit face".to_string(),
-        }
+            Some(KernelOp::RetraceFace { insert, .. }) if !insert.is_empty() => "draw-on-face",
+            Some(KernelOp::RetraceFace { .. }) => "delete-imprint",
+            None => "edit-face",
+        })
     }
 
-    /// A node's name quoted for a history label — `'Base'`, `group
-    /// 'Walls'` — or its bare kind word when unnamed. Reads the records
-    /// directly rather than through the live-only name accessors: a
-    /// `Delete` entry names a node that is hidden by the time anyone
-    /// lists the history.
-    fn history_node_label(&self, node: NodeId) -> String {
-        let (kind, name): (&str, Option<String>) = match node {
+    /// A node's kind word (`"object"`, `"group"`, `"instance"`) and its
+    /// name for a history kind. Reads the records directly rather than
+    /// through the live-only name accessors: a `Delete` entry names a node
+    /// that is hidden by the time anyone lists the history.
+    fn history_node_label(&self, node: NodeId) -> (&'static str, Option<String>) {
+        match node {
             NodeId::Object(id) => ("object", self.objects.get(id).and_then(|r| r.name.clone())),
             NodeId::Group(id) => ("group", self.groups.get(id).and_then(|r| r.name.clone())),
             NodeId::Instance(id) => (
@@ -18393,21 +18618,17 @@ impl Document {
                         .or_else(|| self.components.get(r.def).and_then(|c| c.name.clone()))
                 }),
             ),
-        };
-        match (node, name) {
-            (NodeId::Group(_), Some(name)) => format!("group '{name}'"),
-            (_, Some(name)) => format!("'{name}'"),
-            (_, None) => kind.to_string(),
         }
     }
 
-    fn annotation_label(&self, annotation: AnnotationId) -> String {
+    /// The `what` vocabulary of the annotation kinds.
+    fn annotation_label(&self, annotation: AnnotationId) -> &'static str {
         match self.annotations.get(annotation).map(|r| &r.annotation) {
             Some(Annotation::LinearDimension { .. }) | Some(Annotation::RadialDimension { .. }) => {
-                "Dimension".to_string()
+                "dimension"
             }
-            Some(Annotation::LeaderText { .. }) => "Text".to_string(),
-            None => "Annotation".to_string(),
+            Some(Annotation::LeaderText { .. }) => "text",
+            None => "annotation",
         }
     }
 
@@ -24480,5 +24701,18 @@ mod tests {
         // inverse) and the object.
         doc.undo().expect("undo the group transform");
         assert_eq!(doc.instances[inst].pose, pose_before);
+    }
+}
+
+#[cfg(test)]
+mod count_label_tests {
+    use super::count_label;
+
+    #[test]
+    fn plurals_follow_english_spelling() {
+        assert_eq!(count_label(1, "object"), "1 object");
+        assert_eq!(count_label(3, "object"), "3 objects");
+        assert_eq!(count_label(2, "sketch"), "2 sketches");
+        assert_eq!(count_label(0, "face"), "0 faces");
     }
 }

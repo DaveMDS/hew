@@ -26,6 +26,7 @@
  *     with a generic usage hint; only the generic half ships here.
  */
 import { useEffect, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import { formatLengthIn, getLengthUnit, subscribe as subscribeLengthUnit, type LengthFormat } from '../settings/units'
 import { colorForTagPath, hexToRgba } from './tagPalette'
 import type { InspectResult } from './inspect'
@@ -62,14 +63,14 @@ const LEADER_GAP_PX = 14
  *  query today (`resolveInspect`'s edge arm reports length + owning-part
  *  label only) — kept as the follow-on spec note for whoever adds that
  *  query later. */
-const EDGE_CAPTION = 'double-tap zooms to part'
-const PART_CAPTION = 'tap away to dismiss · hold part to isolate'
-
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), Math.max(min, max))
 }
 
 export function InspectCard({ result, screenX, screenY, containerWidth, containerHeight, leaving = false }: InspectCardProps) {
+  const { t } = useLingui()
+  const EDGE_CAPTION = t`double-tap zooms to part`
+  const PART_CAPTION = t`tap away to dismiss · hold part to isolate`
   const [unit, setUnit] = useState<LengthFormat>(getLengthUnit)
   useEffect(() => subscribeLengthUnit(setUnit), [])
 
@@ -155,7 +156,7 @@ export function InspectCard({ result, screenX, screenY, containerWidth, containe
                   background: 'var(--shop-eyebg)', borderRadius: '6px', padding: '2px 7px', whiteSpace: 'nowrap',
                 }}
               >
-                edge
+                {t({ context: 'measurement', message: 'edge' })}
               </span>
             </div>
             <div style={{ fontFamily: 'var(--font-family-mono)', fontSize: '26px', fontWeight: 600, whiteSpace: 'nowrap' }}>
@@ -182,9 +183,9 @@ export function InspectCard({ result, screenX, screenY, containerWidth, containe
             </div>
             {result.extentsM !== null && (
               <div style={{ fontFamily: 'var(--font-family-mono)', fontSize: '15px', fontWeight: 600, whiteSpace: 'nowrap' }}>
-                <span style={{ color: 'var(--shop-axis-l)' }}>L</span> {formatLengthIn(result.extentsM[0], unit)}{' '}
-                <span style={{ color: 'var(--shop-axis-w)' }}>W</span> {formatLengthIn(result.extentsM[1], unit)}{' '}
-                <span style={{ color: 'var(--shop-axis-h)' }}>H</span> {formatLengthIn(result.extentsM[2], unit)}
+                <span style={{ color: 'var(--shop-axis-l)' }}>{t({ context: 'axis', comment: 'One-letter label for the length of a part', message: 'L' })}</span> {formatLengthIn(result.extentsM[0], unit)}{' '}
+                <span style={{ color: 'var(--shop-axis-w)' }}>{t({ context: 'axis', comment: 'One-letter label for the width of a part', message: 'W' })}</span> {formatLengthIn(result.extentsM[1], unit)}{' '}
+                <span style={{ color: 'var(--shop-axis-h)' }}>{t({ context: 'axis', comment: 'One-letter label for the height of a part', message: 'H' })}</span> {formatLengthIn(result.extentsM[2], unit)}
               </div>
             )}
             <div style={{ fontSize: '11px', color: 'var(--shop-text-faint)', marginTop: '4px', whiteSpace: 'nowrap' }}>

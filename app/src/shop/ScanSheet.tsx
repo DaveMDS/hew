@@ -37,6 +37,7 @@
  * preview replaces the row list.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { createQrEngine, type QrEngine } from './qrEngine'
 import { parseRecvParams, scannedOrigin, type RecvParams } from './shellMode'
 import { QrIcon } from './icons'
@@ -73,6 +74,7 @@ type ScanState =
 const SCAN_INTERVAL_MS = 200
 
 export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetProps) {
+  const { t } = useLingui()
   const [state, setState] = useState<ScanState>({ kind: 'requesting' })
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -258,6 +260,7 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
 
   const isLandscape = orientation === 'landscape'
   const scanning = state.kind === 'scanning'
+  const foreignHost = state.kind === 'foreign' ? state.host : ''
 
   return (
     <>
@@ -269,7 +272,7 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
       />
       <div
         role="dialog"
-        aria-label="Scan from desktop"
+        aria-label={t`Scan from desktop`}
         style={
           isLandscape
             ? {
@@ -294,7 +297,7 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
             <QrIcon size={22} />
           </span>
           <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '17px', fontWeight: 600, color: 'var(--shop-text)' }}>
-            Scan from desktop
+            {t`Scan from desktop`}
           </span>
         </div>
 
@@ -345,30 +348,30 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
 
         <div style={{ padding: '6px 14px 4px', display: 'flex', flexDirection: 'column', gap: '4px', minHeight: '40px' }}>
           {state.kind === 'requesting' && (
-            <p style={hintStyle}>Requesting camera access…</p>
+            <p style={hintStyle}>{t`Requesting camera access…`}</p>
           )}
           {state.kind === 'denied' && (
             <>
-              <p style={hintStyle}>Camera access is off for this site.</p>
-              <p style={hintStyle}>Or scan the QR with your camera app instead.</p>
+              <p style={hintStyle}>{t`Camera access is off for this site.`}</p>
+              <p style={hintStyle}>{t`Or scan the QR with your camera app instead.`}</p>
             </>
           )}
           {state.kind === 'unavailable' && (
             <>
-              <p style={hintStyle}>No camera is available on this device.</p>
-              <p style={hintStyle}>Or scan the QR with your camera app instead.</p>
+              <p style={hintStyle}>{t`No camera is available on this device.`}</p>
+              <p style={hintStyle}>{t`Or scan the QR with your camera app instead.`}</p>
             </>
           )}
           {state.kind === 'insecure' && (
             <>
-              <p style={hintStyle}>The camera needs a secure (https) connection — open the installed Hew app rather than a local preview.</p>
-              <p style={hintStyle}>Or scan the QR with your camera app instead.</p>
+              <p style={hintStyle}>{t`The camera needs a secure (https) connection — open the installed Hew app rather than a local preview.`}</p>
+              <p style={hintStyle}>{t`Or scan the QR with your camera app instead.`}</p>
             </>
           )}
           {state.kind === 'foreign' && (
             <>
               <p data-testid="shop-scan-foreign" style={hintStyle}>
-                This code is for <strong>{state.host}</strong>, not this server — open it there?
+                <Trans>This code is for <strong>{foreignHost}</strong>, not this server — open it there?</Trans>
               </p>
               <button
                 type="button"
@@ -381,15 +384,15 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
                   fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
                 }}
               >
-                Open on {state.host}
+                {t`Open on ${foreignHost}`}
               </button>
             </>
           )}
           {scanning && (state as { kind: 'scanning'; notHew: boolean }).notHew && (
-            <p data-testid="shop-scan-not-hew" style={hintStyle}>That doesn't look like a Hew code — keep scanning.</p>
+            <p data-testid="shop-scan-not-hew" style={hintStyle}>{t`That doesn't look like a Hew code — keep scanning.`}</p>
           )}
           {scanning && !(state as { kind: 'scanning'; notHew: boolean }).notHew && (
-            <p style={hintStyle}>Point the camera at the QR code on the desktop.</p>
+            <p style={hintStyle}>{t`Point the camera at the QR code on the desktop.`}</p>
           )}
         </div>
 
@@ -403,7 +406,7 @@ export function ScanSheet({ open, orientation, onClose, onDecoded }: ScanSheetPr
             fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
           }}
         >
-          Cancel
+          {t`Cancel`}
         </button>
       </div>
     </>

@@ -19,13 +19,17 @@
  * isCoarsePointer().
  */
 
+import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 import { isCoarsePointer } from '../platform'
 
 const HEW_FILE_TYPES: FilePickerAcceptType[] = [
   {
-    description: 'Hew model',
+    // Getter: resolved in the active locale when the picker opens, not at module load.
+    get description() {
+      return t`Hew model`
+    },
     accept: { 'application/octet-stream': ['.hew'] },
   },
 ]
@@ -57,7 +61,9 @@ const IMPORT_ACCEPT = {
  * the File System Access API accepts multiple extensions per key. */
 const OPEN_FILE_TYPES: FilePickerAcceptType[] = [
   {
-    description: 'All supported files',
+    get description() {
+      return t`All supported files`
+    },
     accept: { ...IMPORT_ACCEPT, 'application/octet-stream': ['.hew', '.skp'] },
   },
 ]
@@ -201,6 +207,7 @@ export class WebFileHost implements FileHost {
 
   async save(bytes: Uint8Array, ref: FileRef | null): Promise<FileRef | null> {
     if (ref === null) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- default file name, not copy
       return this.saveAs(bytes, 'Untitled.hew')
     }
     const format = ref.format
@@ -299,7 +306,7 @@ export class WebFileHost implements FileHost {
   async openForImport(): Promise<ImportPick | null> {
     const FILE_TYPES: FilePickerAcceptType[] = [
       {
-        description: 'Model files (COLLADA, SketchUp, glTF, STL)',
+        description: t`Model files (COLLADA, SketchUp, glTF, STL)`,
         accept: IMPORT_ACCEPT,
       },
     ]

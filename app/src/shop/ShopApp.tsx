@@ -29,6 +29,9 @@
  */
 import { buildFrameThumbnail } from '../viewport/frameThumbnail'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { loadKernel, type Scene } from '../wasm/loader'
 import Viewport, { type ViewportApi, type InferenceInfo, type StandardView } from '../viewport/Viewport'
 import type { Projection } from '../viewport/cameraRig'
@@ -104,6 +107,7 @@ import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/fa
 /** `loadHewBytes` for a `.hew` the user opened, keeping the file for a bug
  *  report should it fail to load (failedOpen.ts). */
 function loadUserHewBytes(scene: Scene, name: string, bytes: Uint8Array): ReturnType<typeof loadHewBytes> {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- bug-report bundle text, kept in English for the maintainer
   beginOpenAttempt({ name, label: 'Hew document (.hew)', bytes })
   const loaded = loadHewBytes(scene, bytes)
   if (loaded.ok) clearOpenAttempt()
@@ -155,10 +159,10 @@ const HINT_TICK_MS = 500
  *  test/E2E selectors (`getByRole('button', { name: /^tape measure$/i })`)
  *  see the same name as before the redesign. Select/Orbit need no
  *  `ariaLabel` override — their visible label already IS their full name. */
-const TOOL_SEGMENTS: { name: ShopToolName; label: string; ariaLabel?: string; Icon: React.ComponentType<ShopIconProps> }[] = [
-  { name: 'Select', label: 'Select', Icon: SelectIcon },
-  { name: 'Orbit', label: 'Orbit', Icon: OrbitIcon },
-  { name: 'Tape Measure', label: 'Tape', ariaLabel: 'Tape Measure', Icon: TapeIcon },
+const TOOL_SEGMENTS: { name: ShopToolName; label: MessageDescriptor; ariaLabel?: MessageDescriptor; Icon: React.ComponentType<ShopIconProps> }[] = [
+  { name: 'Select', label: msg`Select`, Icon: SelectIcon },
+  { name: 'Orbit', label: msg`Orbit`, Icon: OrbitIcon },
+  { name: 'Tape Measure', label: msg({ message: 'Tape', comment: 'Short dock label for the Tape Measure tool' }), ariaLabel: msg`Tape Measure`, Icon: TapeIcon },
 ]
 
 /** The same 3-name registry `TOOL_SEGMENTS` renders, as a `Set` for O(1)
@@ -250,6 +254,7 @@ function buildRecentThumbnail(frame: { width: number; height: number; pixels: Ui
 }
 
 export function ShopApp() {
+  const { t, i18n } = useLingui()
   const orientation = useShopOrientation()
   const isLandscape = orientation === 'landscape'
 
@@ -265,6 +270,7 @@ export function ShopApp() {
   // state at all (it never mutates the document, so there is nothing to
   // save). `null` = nothing opened yet (the empty state below).
   const [docName, setDocName] = useState<string | null>(null)
+  const documentMenuName = docName ?? t`Shop Mode`
   // The raw bytes behind whatever's currently loaded — kept around purely
   // so "Save a copy (.hew)" (docs/design/shop-mode.md §4's durable "Keep on
   // this phone" path) can hand them straight to an anchor-download without
@@ -277,6 +283,7 @@ export function ShopApp() {
   // `open_skp` needs a blank document to import into (see openSkpBytes).
   const blankBytesRef = useRef<Uint8Array | null>(null)
 
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- tool id
   const [activeTool, setActiveTool] = useState<ShopToolName>('Select')
   const [toolActivationSeq, setToolActivationSeq] = useState(0)
   // `activateTool`/`handleInternalToolChange` are declared further down
@@ -1010,7 +1017,6 @@ export function ShopApp() {
   // "link") for the failure toasts below rather than telling a link-arrived
   // failure to go "scan the QR again".
   const receiveDrop = useCallback(async (params: RecvParams, source: 'scanner' | 'link') => {
-    const noun = source === 'scanner' ? 'code' : 'link'
     let ciphertext: Uint8Array
     try {
       // The relay lives next to THIS page — `<origin>/relay/` (io/shareRelay.ts):
@@ -1021,12 +1027,16 @@ export function ShopApp() {
         // A 404 here means the token was already consumed, expired (10
         // minutes — share-relay's own TTL), or never existed — from the
         // phone's point of view all three just read as "expired".
-        showToast(`That ${noun} has expired — ask for a fresh one from the desktop.`)
+        showToast(
+          source === 'scanner'
+            ? t`That code has expired — ask for a fresh one from the desktop.`
+            : t`That link has expired — ask for a fresh one from the desktop.`,
+        )
         return
       }
       ciphertext = new Uint8Array(await response.arrayBuffer())
     } catch {
-      showToast('Could not reach the share server — check your internet connection and try again.')
+      showToast(t`Could not reach the share server — check your internet connection and try again.`)
       return
     }
     let bytes: Uint8Array
@@ -1039,7 +1049,11 @@ export function ShopApp() {
       // transit). Nothing to recover from client-side (the ciphertext is
       // already consumed — share-relay's one-shot GET — so even a retry
       // can't help); point back at the desktop for a fresh one.
-      showToast(`That ${noun} could not be decrypted — ask for a fresh one from the desktop.`)
+      showToast(
+        source === 'scanner'
+          ? t`That code could not be decrypted — ask for a fresh one from the desktop.`
+          : t`That link could not be decrypted — ask for a fresh one from the desktop.`,
+      )
       return
     }
     const liveScene = sceneRef.current
@@ -1050,7 +1064,7 @@ export function ShopApp() {
       return
     }
     applyOpenedBytes(liveScene, params.name, bytes)
-  }, [showToast, applyOpenedBytes])
+  }, [showToast, applyOpenedBytes, t])
 
   // A LINK-ARRIVED `#recv=…` handoff awaiting the user's explicit
   // confirmation (adversarial-review finding 1, CRITICAL) — captured at
@@ -1135,6 +1149,7 @@ export function ShopApp() {
     if (liveScene === null) return false
     const loaded = loadHewBytes(liveScene, bytes)
     if (!loaded.ok) return false
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- test-fixture file name
     applyOpenedBytes(liveScene, 'Fixture.hew', bytes)
     return true
   }, [applyOpenedBytes])
@@ -1166,17 +1181,19 @@ export function ShopApp() {
       return
     }
     // Kept for a bug report until the open lands (failedOpen.ts).
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- bug-report bundle text, kept in English for the maintainer
     beginOpenAttempt({ name, label: 'SketchUp model (.skp)', bytes: skpBytes })
     try {
       liveScene.open_skp(skpBytes)
     } catch (err: unknown) {
       openAttemptFailed(friendlyErrorText(err))
-      showToast(`Open failed: ${friendlyErrorText(err)}`)
+      const errorText = friendlyErrorText(err)
+      showToast(t`Open failed: ${errorText}`)
       return
     }
     clearOpenAttempt()
     applyOpenedBytes(liveScene, name, new Uint8Array(liveScene.save()))
-  }, [showToast, applyOpenedBytes])
+  }, [showToast, applyOpenedBytes, t])
 
   const openDocument = useCallback(async () => {
     const liveScene = sceneRef.current
@@ -1186,7 +1203,8 @@ export function ShopApp() {
     try {
       pick = await fileHostRef.current.openAny()
     } catch (err: unknown) {
-      showToast(`Open failed: ${friendlyErrorText(err)}`)
+      const errorText = friendlyErrorText(err)
+      showToast(t`Open failed: ${errorText}`)
       return
     }
     if (pick === null) return // user cancelled
@@ -1202,7 +1220,7 @@ export function ShopApp() {
       // import call that creates new objects — a real mutation. Shop Mode
       // issues none (module doc); point the user at the full editor rather
       // than silently downgrading to a read-only partial import.
-      showToast('Shop Mode can only open .hew and .skp files — use the full editor to import other formats.')
+      showToast(t`Shop Mode can only open .hew and .skp files — use the full editor to import other formats.`)
       return
     }
     const loaded = loadUserHewBytes(liveScene, pick.name, pick.bytes)
@@ -1211,7 +1229,7 @@ export function ShopApp() {
       return
     }
     applyOpenedBytes(liveScene, pick.name, pick.bytes)
-  }, [showToast, applyOpenedBytes, openSkpBytes])
+  }, [showToast, applyOpenedBytes, openSkpBytes, t])
 
   // Offline recents (design §"Offline recents"): tap a row in the empty
   // state's Recents list. The bytes are already in hand (IndexedDB, not a
@@ -1230,7 +1248,7 @@ export function ShopApp() {
       return
     }
     applyOpenedBytes(liveScene, entry.name, entry.bytes)
-  }, [showToast, applyOpenedBytes, openSkpBytes])
+  }, [showToast, applyOpenedBytes, openSkpBytes, t])
 
   // "Use full editor": persist the override and reload — the editor's own
   // "Shop Mode" entry point (design's symmetric affordance) is a later
@@ -1515,7 +1533,8 @@ export function ShopApp() {
     try {
       resolved = scn.resolve_scene(BigInt(sid))
     } catch (err) {
-      showToast(`Activate Scene failed: ${friendlyErrorText(err)}`)
+      const errorText = friendlyErrorText(err)
+      showToast(t`Activate Scene failed: ${errorText}`)
       return
     }
     try {
@@ -1539,7 +1558,7 @@ export function ShopApp() {
     activeSceneSidRef.current = sid
     setActiveSceneSid(sid)
     refreshSceneDrift()
-  }, [applyResolvedHidden, showToast, refreshSceneDrift])
+  }, [applyResolvedHidden, showToast, refreshSceneDrift, t])
   // `applyOpenedBytes` (declared above) activates the first Scene on open
   // through this ref — same declaration-order reason as the other refs.
   activateSceneRef.current = activateScene
@@ -1691,21 +1710,22 @@ export function ShopApp() {
       try {
         bytes = await api.exportUsdz()
       } catch (err: unknown) {
-        showToast(`Export failed: ${friendlyErrorText(err)}`)
+        const errorText = friendlyErrorText(err)
+        showToast(t`Export failed: ${errorText}`)
         return
       }
       if (bytes === null) {
         // Mirrors App.tsx's exportUsdz toast for the same null-bytes case
         // (crates/mesh-export's Scene::export refuses when the document has
         // no solids at all).
-        showToast('Nothing to export — the model has no solids.')
+        showToast(t`Nothing to export — the model has no solids.`)
         return
       }
       launchArQuickLook(bytes, (docName ?? 'Model').replace(/\.hew$/i, ''))
     } finally {
       setArBusy(false)
     }
-  }, [arBusy, docName, showToast, dismissInspectInstant])
+  }, [arBusy, docName, showToast, dismissInspectInstant, t])
 
   // The document menu's own "View in AR…" row dispatches here — closes the
   // menu (same "act, then close" order `saveCopy`'s own doc comment
@@ -2055,12 +2075,12 @@ export function ShopApp() {
             <div style={{ flex: '1 1 auto', minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '18px' }}>
               <HewMark size={72} strokeWidth={4.6} />
               <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '22px', fontWeight: 600, color: 'var(--shop-text)' }}>
-                Shop Mode
+                {t`Shop Mode`}
               </span>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', width: '100%', maxWidth: '320px', marginTop: '8px' }}>
                 <button type="button" className="shop-press" onClick={openDocument} style={emptyPrimaryButtonStyle}>
                   <UploadIcon size={20} />
-                  Open a model…
+                  {t`Open a model…`}
                 </button>
                 {/* Opens ScanSheet.tsx's in-app QR scanner — the empty
                     state's own seam onto the same "Open on Phone" handoff
@@ -2073,7 +2093,7 @@ export function ShopApp() {
                   style={emptyGhostButtonStyle}
                 >
                   <QrIcon size={20} />
-                  From your desktop…
+                  {t`From your desktop…`}
                 </button>
               </div>
             </div>
@@ -2084,7 +2104,7 @@ export function ShopApp() {
                   fontFamily: 'var(--font-family-ui)', fontSize: '11px', fontWeight: 700,
                   letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--shop-text-muted)',
                 }}>
-                  Recents
+                  {t`Recents`}
                 </span>
                 <RecentsList entries={recents} onOpen={openRecentEntry} limit={5} />
               </div>
@@ -2153,14 +2173,14 @@ export function ShopApp() {
           {!documentMenuOpen && (
             <button
               type="button"
-              aria-label={`Document menu — ${docName ?? 'Shop Mode'}`}
+              aria-label={t`Document menu — ${documentMenuName}`}
               className="shop-press"
               onClick={openDocumentMenu}
               style={topStripPillStyle}
             >
               <HewMark size={17} />
               <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {docName ?? 'Shop Mode'}
+                {documentMenuName}
               </span>
               <ChevronDownIcon size={13} style={{ flexShrink: 0, opacity: 0.7 }} />
             </button>
@@ -2171,7 +2191,7 @@ export function ShopApp() {
               `settingsMenuOpen`, restored the instant the panel closes. */}
           {!settingsMenuOpen && (
             <div style={{ pointerEvents: 'auto' }}>
-              <button type="button" aria-label="Settings" className="shop-press" onClick={openSettingsMenu} style={ellipsisButtonStyle}>
+              <button type="button" aria-label={t`Settings`} className="shop-press" onClick={openSettingsMenu} style={ellipsisButtonStyle}>
                 <EllipsisIcon size={20} />
               </button>
             </div>
@@ -2213,7 +2233,7 @@ export function ShopApp() {
           getViewportApi={() => viewportApi.current}
           getScene={() => sceneRef.current}
           getScenes={printScenes}
-          documentName={docName === null ? 'Untitled' : docName.replace(/\.hew$/i, '')}
+          documentName={docName === null ? t`Untitled` : docName.replace(/\.hew$/i, '')}
           sceneName={activeSceneEntry !== null && !activeSceneDrifted ? activeSceneEntry.name : null}
           printHost={printHostRef.current}
           savePdf={savePdfBytes}
@@ -2342,7 +2362,7 @@ export function ShopApp() {
                   invisible spacer to stay centered: a single icon button on
                   each side of `justify-content: space-between` is already
                   symmetric on its own. */}
-              <button type="button" aria-label="Views" className="shop-press" onClick={openViewsSheet} style={dockIconButtonStyle}>
+              <button type="button" aria-label={t`Views`} className="shop-press" onClick={openViewsSheet} style={dockIconButtonStyle}>
                 <ViewCubeIcon size={21} />
               </button>
 
@@ -2353,13 +2373,13 @@ export function ShopApp() {
                     <button
                       key={name}
                       type="button"
-                      aria-label={ariaLabel ?? label}
+                      aria-label={i18n._(ariaLabel ?? label)}
                       className="shop-press"
                       onClick={() => activateTool(name)}
                       style={segmentStyle(active)}
                     >
                       <Icon size={18} />
-                      <span aria-hidden="true">{label}</span>
+                      <span aria-hidden="true">{i18n._(label)}</span>
                     </button>
                   )
                 })}
@@ -2370,7 +2390,7 @@ export function ShopApp() {
                   this button's own camera jump dismisses a stale inspect
                   card too (that helper's own doc comment). Immediately RIGHT
                   of the tool group, mirroring "Views" on the left. */}
-              <button type="button" aria-label="Zoom Extents" className="shop-press" onClick={() => zoomToNodeOrExtents(null)} style={dockIconButtonStyle}>
+              <button type="button" aria-label={t`Zoom Extents`} className="shop-press" onClick={() => zoomToNodeOrExtents(null)} style={dockIconButtonStyle}>
                 <ZoomExtentsIcon size={21} />
               </button>
             </div>
@@ -2421,7 +2441,7 @@ export function ShopApp() {
                 rail is a single vertical column, so "left/right of the tool
                 group" (the portrait dock's own layout above) maps to
                 "above/below" here. */}
-            <button type="button" aria-label="Views" className="shop-press" onClick={openViewsSheet} style={railIconButtonStyle}>
+            <button type="button" aria-label={t`Views`} className="shop-press" onClick={openViewsSheet} style={railIconButtonStyle}>
               <ViewCubeIcon size={20} />
             </button>
             <div style={railDividerStyle} />
@@ -2431,7 +2451,7 @@ export function ShopApp() {
                 <button
                   key={name}
                   type="button"
-                  aria-label={ariaLabel ?? label}
+                  aria-label={i18n._(ariaLabel ?? label)}
                   className="shop-press"
                   onClick={() => activateTool(name)}
                   style={railSegmentStyle(active)}
@@ -2444,7 +2464,7 @@ export function ShopApp() {
             {/* `zoomToNodeOrExtents(null)` — see the portrait dock's own
                 identical button above for why. BELOW the tool group,
                 mirroring "Views" above it. */}
-            <button type="button" aria-label="Zoom Extents" className="shop-press" onClick={() => zoomToNodeOrExtents(null)} style={railIconButtonStyle}>
+            <button type="button" aria-label={t`Zoom Extents`} className="shop-press" onClick={() => zoomToNodeOrExtents(null)} style={railIconButtonStyle}>
               <ZoomExtentsIcon size={20} />
             </button>
           </div>
@@ -2561,6 +2581,7 @@ const ellipsisButtonStyle: React.CSSProperties = {
  *  two positioning wrappers (`isolateBannerContentStyle`'s own doc comment
  *  below) so they share one body instead of duplicating its markup. */
 function IsolateBannerBody({ label, onShowAll }: { label: string | null; onShowAll: () => void }) {
+  const { t } = useLingui()
   return (
     <>
       <svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--shop-accent-text)" strokeWidth={2}>
@@ -2568,10 +2589,10 @@ function IsolateBannerBody({ label, onShowAll }: { label: string | null; onShowA
         <path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7-10-7-10-7z" />
       </svg>
       <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '13px', fontWeight: 500, color: 'var(--shop-dock-text-strong)', whiteSpace: 'nowrap' }}>
-        Isolated{label !== null ? ` · ${label}` : ''}
+        {label !== null ? t`Isolated · ${label}` : t`Isolated`}
       </span>
       <button type="button" className="shop-press" onClick={onShowAll} style={isolateShowAllStyle}>
-        Show all
+        {t`Show all`}
       </button>
     </>
   )

@@ -19,6 +19,7 @@
  * rendered here in crash mode since the rest of the app tree is gone.
  */
 import { Component, type ErrorInfo, type ReactNode } from 'react'
+import { t } from '@lingui/core/macro'
 import { getEntries } from './log/LogStore'
 import { getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT, type KernelStop } from './log/panicCapture'
 import { ReportBugDialog } from './panels/ReportBugDialog'
@@ -31,6 +32,7 @@ export const LAST_ERROR_KEY = 'hew:lastError'
  *  what a user copies to paste into a bug report always matches what actually
  *  gets persisted. */
 function formatCrashReport(error: Error, componentStack: string, recentErrors: readonly string[]): string {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- crash report text for the maintainer, stays English
   return `${new Date().toISOString()}\n${error.message}\n\n${error.stack ?? ''}\n\n${componentStack}\n\n--- recent console errors ---\n${recentErrors.join('\n')}`
 }
 
@@ -82,6 +84,7 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- console.error label for developers
     this.recordCrash(error, info.componentStack ?? '', 'Hew crashed during render:')
   }
 
@@ -92,6 +95,7 @@ export class ErrorBoundary extends Component<Props, State> {
     const stop = getKernelStop()
     const error = new Error(getPanicCapture()?.message ?? 'kernel panic')
     this.setState({ error, source: 'panic', stop })
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- console.error label for developers
     this.recordCrash(error, '', stop !== null ? 'Hew stopped:' : 'Hew stopped on a kernel panic:')
   }
 
@@ -118,6 +122,7 @@ export class ErrorBoundary extends Component<Props, State> {
         const panic = localStorage.getItem('hew:lastPanic')
         if (panic !== null) {
           panicMessage = panic.slice(panic.indexOf('\n') + 1)
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- crash report text for the maintainer, stays English
           recentErrors.push(`kernel panic — ${panic}`)
         }
       } catch {
@@ -173,6 +178,7 @@ export class ErrorBoundary extends Component<Props, State> {
     }
     return {
       at: new Date().toISOString(),
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- fallback text for the maintainer's bug report
       message: this.state.error?.message ?? 'unknown error',
       recording: null,
     }
@@ -203,11 +209,11 @@ export class ErrorBoundary extends Component<Props, State> {
           userSelect: 'text',
         }}
       >
-        <h2 style={{ margin: '0 0 8px' }}>{stop !== null ? stop.headline : 'Hew hit an error'}</h2>
+        <h2 style={{ margin: '0 0 8px' }}>{stop !== null ? stop.headline : t`Hew hit an error`}</h2>
         <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0 }}>
           {stop !== null
             ? stop.detail
-            : 'The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered.'}
+            : t`The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered.`}
         </p>
         <button
           onClick={() => location.reload()}
@@ -223,7 +229,7 @@ export class ErrorBoundary extends Component<Props, State> {
             marginBottom: 16,
           }}
         >
-          Reload
+          {t`Reload`}
         </button>
         <button
           onClick={this.handleCopy}
@@ -239,7 +245,7 @@ export class ErrorBoundary extends Component<Props, State> {
             marginBottom: 16,
           }}
         >
-          {copied ? 'Copied' : 'Copy details'}
+          {copied ? t`Copied` : t`Copy details`}
         </button>
         <button
           onClick={this.handleOpenReport}
@@ -254,10 +260,10 @@ export class ErrorBoundary extends Component<Props, State> {
             marginBottom: 16,
           }}
         >
-          Report this crash
+          {t`Report this crash`}
         </button>
         <p style={{ color: 'var(--text-secondary, #bbb)', marginTop: 0, marginBottom: 16 }}>
-          Report this crash sends the steps that led here privately to the Hew developer, or saves them to a file.
+          {t`Report this crash sends the steps that led here privately to the Hew developer, or saves them to a file.`}
         </p>
         {reportOpen && (
           <ReportBugDialog
@@ -270,7 +276,7 @@ export class ErrorBoundary extends Component<Props, State> {
         {recentErrors.length > 0 && (
           <>
             <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>
-              Underlying error(s) — the first is usually the real cause:
+              {t`Underlying error(s) — the first is usually the real cause:`}
             </div>
             <pre
               style={{
@@ -290,7 +296,7 @@ export class ErrorBoundary extends Component<Props, State> {
         )}
         {source === 'render' && (
           <>
-            <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>Render error (symptom):</div>
+            <div style={{ color: 'var(--text-secondary, #bbb)', margin: '4px 0' }}>{t`Render error (symptom):`}</div>
             <pre
               style={{
                 whiteSpace: 'pre-wrap',

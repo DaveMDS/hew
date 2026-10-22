@@ -14,6 +14,7 @@ import {
   rememberThickenChoice,
   type ThickenSide,
 } from '../health/thickenSettings'
+import { isComposingKey } from '../input/keyboard'
 
 interface Props {
   /** How many panels get a thickness (heading copy). */
@@ -65,6 +66,7 @@ export function ThickenDialog({ count, onConfirm, onCancel }: Props) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()

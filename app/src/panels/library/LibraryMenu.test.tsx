@@ -7,6 +7,7 @@
 
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
+import { i18n } from '@lingui/core'
 import { LibraryMenu, revealLabel } from './LibraryMenu'
 
 function baseProps() {
@@ -34,13 +35,13 @@ describe('LibraryMenu', () => {
     render(<LibraryMenu {...props} canDownload />)
     fireEvent.click(screen.getByText('Download…'))
     expect(props.onDownload).toHaveBeenCalledOnce()
-    expect(screen.queryByText(revealLabel)).toBeNull()
+    expect(screen.queryByText(i18n._(revealLabel))).toBeNull()
   })
 
   it('hides Download… without canDownload (desktop shows Reveal instead)', () => {
     render(<LibraryMenu {...baseProps()} canReveal />)
     expect(screen.queryByText('Download…')).toBeNull()
-    expect(screen.getByText(revealLabel)).toBeInTheDocument()
+    expect(screen.getByText(i18n._(revealLabel))).toBeInTheDocument()
   })
 
   it('hides Download… for an errored item even when the backend supports it', () => {

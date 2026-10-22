@@ -18,6 +18,8 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { isComposingKey } from '../input/keyboard'
 
 export interface SaveToLibraryPopoverProps {
   /** Pre-filled, fully-selected starting value for the name field. */
@@ -43,6 +45,7 @@ export function SaveToLibraryPopover({
   onSave,
   onClose,
 }: SaveToLibraryPopoverProps) {
+  const { t } = useLingui()
   const [name, setName] = useState(defaultName)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -53,6 +56,7 @@ export function SaveToLibraryPopover({
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -90,7 +94,7 @@ export function SaveToLibraryPopover({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Save to Library"
+        aria-label={t`Save to Library`}
         style={{
           width: '280px',
           display: 'flex',
@@ -114,7 +118,7 @@ export function SaveToLibraryPopover({
             color: 'var(--text-section)',
           }}
         >
-          Save to Library
+          <Trans>Save to Library</Trans>
         </div>
         <input
           ref={inputRef}
@@ -122,12 +126,13 @@ export function SaveToLibraryPopover({
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
+            if (isComposingKey(e)) return
             if (e.key === 'Enter') {
               e.preventDefault()
               commit()
             }
           }}
-          aria-label="Item name"
+          aria-label={t`Item name`}
           style={{
             padding: '6px 8px',
             background: 'var(--surface-input)',
@@ -154,14 +159,14 @@ export function SaveToLibraryPopover({
             cursor: 'pointer',
           }}
         >
-          Save
+          <Trans>Save</Trans>
         </button>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', color: 'var(--text-faint)' }}>
           <span
             aria-hidden="true"
             style={{ width: '6px', height: '6px', borderRadius: '50%', background: ORIGIN_DOT_COLOR, flexShrink: 0 }}
           />
-          Inserts by its bottom center — or by the drawing axes origin, if you've placed axes
+          <Trans>Inserts by its bottom center — or by the drawing axes origin, if you've placed axes</Trans>
         </div>
       </div>
     </div>

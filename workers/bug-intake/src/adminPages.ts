@@ -116,6 +116,7 @@ ${field('Platform', orUnknown(head.platform))}
 ${field('OS', head.os)}
 ${field('GPU', head.gpu)}
 ${field('User agent', head.userAgent)}
+${field('UI language', head.locale)}
 ${field('Contact', head.contact)}
 </dl>
 <h2>What happened</h2>

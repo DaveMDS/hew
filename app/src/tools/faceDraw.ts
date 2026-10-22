@@ -36,6 +36,7 @@
  *   ink may fall through.
  */
 
+import { t } from '@lingui/core/macro'
 import type { Ray } from '../viewport/math'
 import type { Snap } from './types'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -187,12 +188,12 @@ export function distanceOffPlane(p: V3, point: V3, normal: V3): number {
  *  anything else was a grouped face. `verb` names the tool's action. */
 export function ineligibleFaceHint(verb: string, contextScoped: boolean, instance: bigint | undefined): string {
   if (contextScoped) {
-    return `${verb} is scoped to what you are editing — press Esc to step out first`
+    return t`${verb} is scoped to what you are editing — press Esc to step out first`
   }
   if (instance !== undefined) {
-    return 'That face is part of a component — double-click it to edit the component'
+    return t`That face is part of a component — double-click it to edit the component`
   }
-  return 'That face is inside a group — double-click to enter the group and edit it'
+  return t`That face is inside a group — double-click to enter the group and edit it`
 }
 
 /**

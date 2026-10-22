@@ -3,7 +3,7 @@
  * it runs for **every** suite — node (`.test.ts`) and jsdom (`.test.tsx`) alike —
  * and must be a no-op for the node ones.
  *
- * It does three things:
+ * It does four things:
  *  1. Registers `@testing-library/jest-dom`'s matchers (`toBeInTheDocument`, …).
  *  2. Provides an in-memory `localStorage`/`sessionStorage`. Neither Node 26 nor
  *     jsdom 25 exposes Web Storage by default, so components that persist settings
@@ -15,7 +15,33 @@
  *     don't leak DOM into one another.
  */
 import '@testing-library/jest-dom/vitest'
-import { afterEach } from 'vitest'
+import { afterEach, vi } from 'vitest'
+import type { RenderOptions } from '@testing-library/react'
+import { i18n } from '@lingui/core'
+import { messages as englishMessages } from '../locales/en/messages.po'
+
+// 4. Localization: activate the real English catalog for every suite (so
+//    `t`/`msg` resolve exactly as in the app, and `Intl` formatting has a
+//    locale), and wrap every Testing Library `render` in an I18nProvider
+//    (docs/LOCALIZATION.md) so components using `useLingui()`/`<Trans>`
+//    render without each test mounting a provider. A test's own `wrapper`
+//    option nests inside it.
+i18n.load('en', englishMessages)
+i18n.activate('en')
+
+vi.mock('@testing-library/react', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@testing-library/react')>()
+  const { createElement } = await import('react')
+  const { I18nTestProvider } = await import('./i18nTestProvider')
+  type RenderFn = typeof actual.render
+  const render = ((ui: React.ReactNode, options?: RenderOptions) => {
+    const Inner = options?.wrapper
+    const wrapper: React.ComponentType<{ children: React.ReactNode }> = ({ children }) =>
+      createElement(I18nTestProvider, null, Inner ? createElement(Inner, null, children) : children)
+    return actual.render(ui, { ...options, wrapper })
+  }) as RenderFn
+  return { ...actual, render }
+})
 
 class MemoryStorage implements Storage {
   private store = new Map<string, string>()

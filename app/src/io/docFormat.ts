@@ -5,6 +5,7 @@
  * without a DOM.
  */
 
+import { t } from '@lingui/core/macro'
 import type { DocFormat } from './fileHost'
 
 /** Every extension Hew opens or imports; stripped from a name before a new
@@ -66,11 +67,11 @@ export function saveFormatForPath(path: string, apiFormat: unknown, current: Doc
 export function formatDescription(format: DocFormat): string {
   switch (format) {
     case 'skp2026':
-      return 'SketchUp model'
+      return t`SketchUp model`
     case 'skp2017':
-      return 'SketchUp 2017 model'
+      return t`SketchUp 2017 model`
     default:
-      return 'Hew model'
+      return t`Hew model`
   }
 }
 
@@ -82,7 +83,33 @@ export interface SaveFormatChoice {
 
 /** The three options of the Save As format dialog, in display order. */
 export const SAVE_FORMAT_CHOICES: readonly SaveFormatChoice[] = [
-  { format: 'hew', label: 'Hew document (.hew)', hint: 'Keeps everything Hew stores.' },
-  { format: 'skp2026', label: 'SketchUp (.skp)', hint: 'The current SketchUp file format.' },
-  { format: 'skp2017', label: 'SketchUp 2017 (.skp)', hint: 'Opens in SketchUp Make 2017 and later.' },
+  // `label` and `hint` are getters so the text resolves in the active locale
+  // at read time, not at module load.
+  {
+    format: 'hew',
+    get label() {
+      return t`Hew document (.hew)`
+    },
+    get hint() {
+      return t`Keeps everything Hew stores.`
+    },
+  },
+  {
+    format: 'skp2026',
+    get label() {
+      return t`SketchUp (.skp)`
+    },
+    get hint() {
+      return t`The current SketchUp file format.`
+    },
+  },
+  {
+    format: 'skp2017',
+    get label() {
+      return t`SketchUp 2017 (.skp)`
+    },
+    get hint() {
+      return t`Opens in SketchUp Make 2017 and later.`
+    },
+  },
 ]

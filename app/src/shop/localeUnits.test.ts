@@ -57,6 +57,19 @@ describe('seedLocaleLengthUnit', () => {
     expect(getLengthUnit()).toBe('arch')
   })
 
+  it('does not seed on an existing install that never chose a unit', () => {
+    localStorage.setItem('hew.settings.theme', 'dark')
+    seedLocaleLengthUnit('ja-JP')
+    expect(getLengthUnit()).toBe('m')
+    expect(localStorage.getItem('hew.settings.lengthUnit')).toBe(null)
+  })
+
+  it('seeds Millimeters for a Japanese locale', () => {
+    seedLocaleLengthUnit('ja-JP')
+    expect(getLengthUnit()).toBe('mm')
+    expect(localStorage.getItem('hew.settings.lengthUnit')).toBe('mm')
+  })
+
   it('does not seed (leaves units.ts\'s own Meters default) for a metric locale', () => {
     seedLocaleLengthUnit('en-GB')
     expect(getLengthUnit()).toBe('m')

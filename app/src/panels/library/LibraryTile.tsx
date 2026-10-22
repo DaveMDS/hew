@@ -9,6 +9,7 @@
  * badge, and the hover-revealed action row (Insert/Open/Paint button + ⋯).
  */
 
+import { useLingui } from '@lingui/react/macro'
 import { materialSubline } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import { CubeGlyph, WarningGlyph } from './icons'
@@ -50,8 +51,11 @@ export function LibraryTile({
   onActivateDefault,
   onOpenMenu,
 }: LibraryTileProps) {
+  const { t } = useLingui()
+  const displayName = item.displayName
+  const failure = item.error
   const isMaterial = item.category === 'material'
-  const title = item.error ? `${item.displayName} — ${item.error}` : item.displayName
+  const title = item.error ? t`${displayName} — ${failure}` : item.displayName
 
   return (
     <div
@@ -118,7 +122,7 @@ export function LibraryTile({
           <button
             type="button"
             className="hwlib__tile-menu-btn"
-            aria-label={`${item.displayName} actions`}
+            aria-label={t`${displayName} actions`}
             onClick={(e) => {
               e.stopPropagation()
               onSelect()
@@ -133,11 +137,11 @@ export function LibraryTile({
       <div className="hwlib__tile-name">{item.displayName}</div>
       <div className="hwlib__tile-sub">
         {item.error
-          ? 'Failed to load'
+          ? t`Failed to load`
           : isMaterial
             ? materialSubline(item.summary.material_entries[0] ?? emptyMaterial())
             : placementCount > 0
-              ? `${placementCount} in this model`
+              ? t`${placementCount} in this model`
               : ''}
       </div>
     </div>

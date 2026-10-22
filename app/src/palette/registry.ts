@@ -27,6 +27,8 @@
  * commands (visible, greyed out when the selection doesn't qualify).
  */
 
+import { i18n, type MessageDescriptor } from '@lingui/core'
+import { msg, t } from '@lingui/core/macro'
 import { MENU } from '../health/healthCopy'
 import { TOOL_REGISTRY, shortcutFor, type ToolName } from '../tools/toolRegistry'
 
@@ -78,6 +80,9 @@ export interface PaletteEntry {
   /** Selection gate: when the named flag is false the entry renders
    * disabled (still listed — discoverable, like a greyed menu item). */
   gate?: PaletteGate
+  /** Set on Tools entries: the tool's ID (its `ToolName`), so callers can
+   * pick the icon without matching on the translated `label`. */
+  toolName?: ToolName
 }
 
 const TOOL_ACTION_ID: Record<ToolName, string> = {
@@ -112,43 +117,44 @@ const TOOL_ACTION_ID: Record<ToolName, string> = {
   'Zoom Window': 'tool-zoom-window',
 }
 
-const TOOL_DESCRIPTIONS: Record<ToolName, string> = {
-  'Select': 'Pick faces, edges, and objects in the model.',
-  'Line': 'Draw a straight edge between two points.',
-  'Rectangle': 'Draw a rectangular face on the ground or a face.',
-  'Circle': 'Draw a faceted circular face.',
-  'Polygon': 'Draw a regular N-sided polygon from a center point.',
-  'Arc': 'Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.',
-  'Push/Pull': 'Extrude a face into a solid, or reshape one.',
-  'Follow Me': 'Sweep a profile along a path into a solid.',
-  'Offset': "Copy a face or profile's boundary inward or outward at a set distance.",
-  'Paint': 'Apply the current material to a face or object.',
-  'Position Texture': "Move, scale, and rotate a textured face's texture about a fixed pin.",
-  'Move': 'Translate the selection, with inference snapping.',
-  'Rotate': 'Rotate the selection around an inferred axis.',
-  'Scale': 'Resize the selection uniformly about its center.',
-  'Tape Measure': 'Measure a distance, or create a parallel guide line.',
-  'Dimension': 'Place a linear or radius/diameter dimension between snap points.',
-  'Protractor': 'Measure an angle, or create an angular guide line.',
-  'Slice': 'Cut a solid into two separate watertight Objects.',
-  'Section Plane': 'Look inside the model with a non-destructive clipping plane.',
-  'Edit Vertex': 'Drag an individual vertex to reshape a face.',
-  'Drawing Axes': 'Reposition the drawing axes: click an origin, then the red and green directions.',
-  'Text': 'Place a leader-text annotation from a face, edge, or point.',
-  'Orbit': 'Rotate the camera around the model.',
-  'Pan': 'Slide the camera parallel to the view plane.',
-  'Zoom': 'Move the camera closer to or farther from the model.',
-  'Position Camera': 'Click to stand at a point facing your view, or drag to look toward where you release.',
-  'Walk': 'Drag to walk forward/back and turn; hold Shift to strafe and change height.',
-  'Look Around': 'Drag to look around from a fixed eye position.',
-  'Zoom Window': 'Drag a rectangle to zoom the camera onto it, then return to Select.',
+const TOOL_DESCRIPTIONS: Record<ToolName, MessageDescriptor> = {
+  'Select': msg`Pick faces, edges, and objects in the model.`,
+  'Line': msg`Draw a straight edge between two points.`,
+  'Rectangle': msg`Draw a rectangular face on the ground or a face.`,
+  'Circle': msg`Draw a faceted circular face.`,
+  'Polygon': msg`Draw a regular N-sided polygon from a center point.`,
+  'Arc': msg`Click two endpoints, then pull out the bulge. Alt cycles open · pie · segment.`,
+  'Push/Pull': msg`Extrude a face into a solid, or reshape one.`,
+  'Follow Me': msg`Sweep a profile along a path into a solid.`,
+  'Offset': msg`Copy a face or profile's boundary inward or outward at a set distance.`,
+  'Paint': msg`Apply the current material to a face or object.`,
+  'Position Texture': msg`Move, scale, and rotate a textured face's texture about a fixed pin.`,
+  'Move': msg`Translate the selection, with inference snapping.`,
+  'Rotate': msg`Rotate the selection around an inferred axis.`,
+  'Scale': msg`Resize the selection uniformly about its center.`,
+  'Tape Measure': msg`Measure a distance, or create a parallel guide line.`,
+  'Dimension': msg`Place a linear or radius/diameter dimension between snap points.`,
+  'Protractor': msg`Measure an angle, or create an angular guide line.`,
+  'Slice': msg`Cut a solid into two separate watertight Objects.`,
+  'Section Plane': msg`Look inside the model with a non-destructive clipping plane.`,
+  'Edit Vertex': msg`Drag an individual vertex to reshape a face.`,
+  'Drawing Axes': msg`Reposition the drawing axes: click an origin, then the red and green directions.`,
+  'Text': msg`Place a leader-text annotation from a face, edge, or point.`,
+  'Orbit': msg`Rotate the camera around the model.`,
+  'Pan': msg`Slide the camera parallel to the view plane.`,
+  'Zoom': msg`Move the camera closer to or farther from the model.`,
+  'Position Camera': msg`Click to stand at a point facing your view, or drag to look toward where you release.`,
+  'Walk': msg`Drag to walk forward/back and turn; hold Shift to strafe and change height.`,
+  'Look Around': msg`Drag to look around from a fixed eye position.`,
+  'Zoom Window': msg`Drag a rectangle to zoom the camera onto it, then return to Select.`,
 }
 
 /** One-line instructor hint for a tool, for the status bar's active-tool line
  * (`02_app_shell.md`). Reuses the palette's own tool descriptions so the two
  * surfaces never drift. Empty string for an unknown tool name. */
 export function toolHint(name: string): string {
-  return TOOL_DESCRIPTIONS[name as ToolName] ?? ''
+  const description = TOOL_DESCRIPTIONS[name as ToolName]
+  return description === undefined ? '' : i18n._(description)
 }
 
 /** The `menuActionRef` dispatch id for a tool name (e.g. `'Arc'` ->
@@ -159,105 +165,116 @@ export function toolActionId(name: string): string | undefined {
   return TOOL_ACTION_ID[name as ToolName]
 }
 
-const TOOL_SYNONYMS: Partial<Record<ToolName, string[]>> = {
-  'Push/Pull': ['extrude', 'pull', 'push'],
-  'Follow Me': ['sweep', 'pipe', 'molding', 'lathe', 'revolve'],
-  'Offset': ['inset', 'outset', 'concentric'],
-  'Rectangle': ['rect', 'box'],
-  'Polygon': ['polygon', 'hexagon', 'hex', 'pentagon', 'n-gon', 'nut', 'bolt'],
-  'Tape Measure': ['measure', 'distance', 'guide'],
-  'Dimension': ['dimension', 'measure', 'annotate', 'radius', 'diameter'],
-  'Protractor': ['angle'],
-  'Section Plane': ['section', 'cut', 'cross-section', 'clip', 'inside', 'wall thickness'],
-  'Edit Vertex': ['vertex', 'reshape'],
-  'Position Camera': ['stand', 'eye height', 'walkthrough', 'first person'],
-  'Walk': ['walkthrough', 'first person', 'fps'],
-  'Look Around': ['mouselook', 'walkthrough', 'first person'],
-  'Text': ['leader', 'label', 'note', 'annotate', 'annotation'],
-  'Drawing Axes': ['axes', 'axis', 'origin', 'reorient', 'custom axes'],
+function toolSynonyms(): Partial<Record<ToolName, string[]>> {
+  return {
+    'Push/Pull': [t`extrude`, t`pull`, t`push`],
+    'Follow Me': [t`sweep`, t`pipe`, t`molding`, t`lathe`, t`revolve`],
+    'Offset': [t`inset`, t`outset`, t`concentric`],
+    'Rectangle': [t`rect`, t`box`],
+    'Polygon': [t`polygon`, t`hexagon`, t`hex`, t`pentagon`, t`n-gon`, t`nut`, t`bolt`],
+    'Tape Measure': [t`measure`, t`distance`, t`guide`],
+    'Dimension': [t`dimension`, t`measure`, t`annotate`, t`radius`, t`diameter`],
+    'Protractor': [t`angle`],
+    'Section Plane': [t`section`, t`cut`, t`cross-section`, t`clip`, t`inside`, t`wall thickness`],
+    'Edit Vertex': [t`vertex`, t`reshape`],
+    'Position Camera': [t`stand`, t`eye height`, t`walkthrough`, t`first person`],
+    'Walk': [t`walkthrough`, t`first person`, t`fps`],
+    'Look Around': [t`mouselook`, t`walkthrough`, t`first person`],
+    'Text': [t`leader`, t`label`, t`note`, t`annotate`, t`annotation`],
+    'Drawing Axes': [t`axes`, t`axis`, t`origin`, t`reorient`, t`custom axes`],
+  }
 }
 
 function toolEntries(): PaletteEntry[] {
-  return TOOL_REGISTRY.map((t) => ({
-    id: TOOL_ACTION_ID[t.name],
-    label: t.name,
-    description: TOOL_DESCRIPTIONS[t.name],
+  const synonyms = toolSynonyms()
+  return TOOL_REGISTRY.map((spec) => ({
+    id: TOOL_ACTION_ID[spec.name],
+    toolName: spec.name,
+    label: i18n._(spec.label),
+    description: i18n._(TOOL_DESCRIPTIONS[spec.name]),
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- group ID
     group: 'Tools',
-    synonyms: TOOL_SYNONYMS[t.name],
+    synonyms: synonyms[spec.name],
   }))
 }
 
-/** Hand-authored: everything reachable via menuActionRef that isn't a tool. */
-const ACTION_ENTRIES: PaletteEntry[] = [
-  { id: 'new', label: 'New', description: 'Start a new, blank document.', group: 'Actions' },
-  { id: 'open', label: 'Open…', description: 'Open a .hew file from disk.', group: 'Actions' },
-  { id: 'import', label: 'Import…', description: 'Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.', group: 'Actions', gate: 'canImport' },
-  { id: 'export', label: 'Export…', description: 'Export the model as glTF, STL, 3MF, USDZ, or an SVG line drawing — format chosen in the dialog.', group: 'Actions', synonyms: ['stl', 'glb', 'gltf', '3mf', 'usdz', 'usd', 'ar', 'quick look', '3d print', 'slicer', 'svg', 'line drawing', 'laser', 'cnc'] },
-  { id: 'print', label: 'Print…', description: 'Print the current view to paper or PDF — standard, or to an exact scale across pages.', group: 'Actions', synonyms: ['pdf', 'paper', 'plot', 'scale', 'template', 'to scale', 'page'] },
-  { id: 'draw-3d-text', label: '3D Text…', description: 'Place extruded, watertight text on a face or the ground.', group: 'Actions', synonyms: ['text', 'font', 'letters', 'lettering', 'engrave', 'extrude text'], gate: 'canDrawText' },
-  { id: 'save', label: 'Save', description: 'Save the current document.', group: 'Actions' },
-  { id: 'save-as', label: 'Save As…', description: 'Save the current document under a new name.', group: 'Actions' },
-  { id: 'undo', label: 'Undo', description: 'Undo the last change.', group: 'Actions' },
-  { id: 'redo', label: 'Redo', description: 'Redo the last undone change.', group: 'Actions' },
-  { id: 'edit-select-all', label: 'Select All', description: 'Select every visible object, group, component, and sketch.', group: 'Actions', synonyms: ['select everything'] },
-  { id: 'edit-select-none', label: 'Select None', description: 'Deselect everything.', group: 'Actions', synonyms: ['deselect all', 'clear selection'] },
-  { id: 'edit-invert-selection', label: 'Invert Selection', description: 'Select everything that is not selected, and deselect what is.', group: 'Actions', synonyms: ['inverse selection', 'swap selection'] },
-  { id: 'edit-cut', label: 'Cut', description: 'Copy the selection to the clipboard, then delete it.', group: 'Actions', gate: 'hasStructuralSelection' },
-  { id: 'edit-copy', label: 'Copy', description: 'Copy the selected objects, groups, and components to the clipboard.', group: 'Actions', gate: 'hasStructuralSelection' },
-  { id: 'edit-paste', label: 'Paste', description: 'Place a copy of the clipboard at the cursor.', group: 'Actions', gate: 'clipboardHasContent' },
-  { id: 'edit-paste-in-place', label: 'Paste In Place', description: 'Insert the clipboard at its original position.', group: 'Actions', synonyms: ['paste in-place'], gate: 'clipboardHasContent' },
-  { id: 'edit-delete', label: 'Delete', description: 'Delete the current selection.', group: 'Actions', synonyms: ['remove', 'erase'], gate: 'selection' },
-  { id: 'edit-delete-guides', label: 'Delete Guide Lines', description: 'Remove every construction guide.', group: 'Actions' },
-  { id: 'edit-group', label: 'Group', description: 'Group the selected objects so they move together.', group: 'Actions', synonyms: ['make group'], gate: 'canGroup' },
-  { id: 'edit-ungroup', label: 'Ungroup', description: 'Dissolve the selected group back into its members.', group: 'Actions', synonyms: ['dissolve group'], gate: 'canUngroup' },
-  { id: 'edit-make-component', label: 'Make Component', description: 'Turn the selection into a reusable component definition.', group: 'Actions', synonyms: ['create component', 'component'], gate: 'canMakeComponent' },
-  { id: 'edit-place-copy', label: 'Place Copy', description: 'Place another instance of the selected component.', group: 'Actions', synonyms: ['duplicate', 'instance', 'copy component'], gate: 'canPlaceCopy' },
-  { id: 'edit-explode', label: 'Explode', description: 'Break the selected component instance into plain objects.', group: 'Actions', synonyms: ['explode instance', 'break component'], gate: 'canExplode' },
-  { id: 'edit-make-unique', label: 'Make Unique', description: 'Give the selected instance its own definition, detached from its siblings.', group: 'Actions', synonyms: ['unique component'], gate: 'canMakeUnique' },
-  { id: 'edit-union', label: 'Union', description: 'Merge two selected solids into one (boolean add).', group: 'Actions', synonyms: ['boolean', 'merge', 'combine', 'add', 'join'], gate: 'canBoolean' },
-  { id: 'edit-subtract', label: 'Subtract', description: 'Cut the second selected solid out of the first (boolean difference).', group: 'Actions', synonyms: ['boolean', 'difference', 'cut', 'carve'], gate: 'canBoolean' },
-  { id: 'edit-intersect', label: 'Intersect', description: 'Keep only the volume the two selected solids share (boolean intersection).', group: 'Actions', synonyms: ['boolean', 'common', 'overlap'], gate: 'canBoolean' },
-  { id: 'toggle-axes', label: 'Toggle Axes', description: 'Show or hide the world axes.', group: 'Actions' },
-  { id: 'reset-axes', label: 'Reset Drawing Axes', description: 'Reset the movable drawing axes back to world identity.', group: 'Actions', synonyms: ['drawing axes', 'origin', 'reset axes'] },
-  { id: 'toggle-grid', label: 'Toggle Grid', description: 'Show or hide the ground grid.', group: 'Actions' },
-  { id: 'toggle-guides', label: 'Toggle Guides', description: 'Show or hide construction guides.', group: 'Actions' },
-  { id: 'toggle-section-active', label: 'Section Cut', description: 'Turn the placed section plane\'s clip on or off without removing it.', group: 'Actions', synonyms: ['section', 'cut', 'section plane', 'cross-section', 'active cut', 'toggle section active', 'toggle section'] },
-  { id: 'zoom-extents', label: 'Zoom Extents', description: 'Fit the camera to all scene geometry.', group: 'Actions', synonyms: ['zoom to fit'] },
-  { id: 'toggle-parallel-projection', label: 'Parallel Projection', description: 'Toggle between perspective and parallel (orthographic) projection.', group: 'Actions', synonyms: ['orthographic', 'perspective', 'ortho'] },
-  { id: 'toggle-fly', label: 'Fly', description: 'Fly through the model with no button held: the mouse or a trackpad finger looks, W A S D move, E and Q climb and descend, the wheel or a pinch sets the speed, Shift goes faster. Esc exits.', group: 'Actions', synonyms: ['fly', 'wasd', 'first person', 'free camera', 'noclip', 'spectator', 'flythrough', 'fly through'] },
-  { id: 'view-top', label: 'Standard View: Top', description: 'Look straight down at the model.', group: 'Actions' },
-  { id: 'view-bottom', label: 'Standard View: Bottom', description: 'Look straight up at the model.', group: 'Actions' },
-  { id: 'view-front', label: 'Standard View: Front', description: 'Look at the model from the front.', group: 'Actions' },
-  { id: 'view-back', label: 'Standard View: Back', description: 'Look at the model from the back.', group: 'Actions' },
-  { id: 'view-left', label: 'Standard View: Left', description: 'Look at the model from the left.', group: 'Actions' },
-  { id: 'view-right', label: 'Standard View: Right', description: 'Look at the model from the right.', group: 'Actions' },
-  { id: 'view-iso', label: 'Standard View: Iso', description: 'Switch to the standard isometric view.', group: 'Actions' },
-  { id: 'toggle-tray', label: 'Toggle Tray', description: 'Show or hide the right-hand tray and all its panels.', group: 'Actions', synonyms: ['hide tray', 'show tray', 'panels', 'sidebar', 'inspector', 'more room', 'hide panels'] },
-  { id: 'toggle-dock', label: 'Toggle Contextual Dock', description: 'Show or hide the floating action dock at the bottom of the viewport.', group: 'Actions', synonyms: ['dock', 'action bar', 'floating toolbar', 'hide dock', 'show dock'] },
-  { id: 'toggle-compact-rail', label: 'Compact Tool Rail', description: 'Shrink the tool rail to icons only, or bring the tool names back.', group: 'Actions', synonyms: ['tool rail', 'toolbar', 'icons only', 'tool names', 'collapse', 'expand', 'sidebar'] },
-  { id: 'toggle-model-info', label: 'Toggle Model Info', description: 'Show or hide the Model Info panel.', group: 'Actions' },
-  { id: 'toggle-materials', label: 'Toggle Materials', description: 'Show or hide the Materials panel.', group: 'Actions' },
-  { id: 'toggle-components', label: 'Toggle Components', description: 'Show or hide the Components panel.', group: 'Actions' },
-  { id: 'toggle-tags', label: 'Toggle Tags', description: 'Show or hide the Tags panel.', group: 'Actions' },
-  { id: 'toggle-scenes', label: 'Toggle Scenes', description: 'Show or hide the Scenes panel.', group: 'Actions' },
-  { id: 'scenes-add', label: 'Add Scene', description: 'Save the current camera, visibility, and section cut as a new Scene.', group: 'Actions', synonyms: ['scene', 'save view', 'named view'] },
-  { id: 'scenes-update', label: 'Update Scene', description: 'Re-capture the active Scene’s checked properties.', group: 'Actions', synonyms: ['scene', 'refresh scene'], gate: 'sceneActive' },
-  { id: 'scenes-next', label: 'Next Scene', description: 'Activate the next Scene in the list.', group: 'Actions', synonyms: ['scene'], gate: 'scenesAny' },
-  { id: 'scenes-previous', label: 'Previous Scene', description: 'Activate the previous Scene in the list.', group: 'Actions', synonyms: ['scene'], gate: 'scenesAny' },
-  { id: 'scenes-transitions', label: 'Scene Transitions', description: 'Toggle the 0.6s camera tween when activating a Scene.', group: 'Actions', synonyms: ['scene', 'animation', 'tween'] },
-  { id: 'toggle-object-info', label: 'Toggle Object Info', description: 'Show or hide the Object Info panel.', group: 'Actions' },
-  { id: 'toggle-changes', label: 'Toggle Changes', description: 'Show or hide the Changes panel — this session’s undo/redo entries since the last save.', group: 'Actions', synonyms: ['history', 'undo', 'redo'] },
-  { id: 'toggle-debug-log', label: 'Toggle Debug Log', description: 'Show or hide the debug log panel.', group: 'Actions' },
-  { id: 'open-library', label: 'Library', description: 'Browse and insert saved components, materials, and models', group: 'Actions', synonyms: ['library', 'components', 'insert'] },
-  { id: 'save-to-library', label: 'Save Selection to Library…', description: 'Save the selected object, group, or component as a library item.', group: 'Actions', synonyms: ['library', 'component', 'save selection'], gate: 'canSaveSelectionToLibrary' },
-  { id: 'save-to-library-doc', label: 'Save to Library…', description: 'Save the whole document as a library item.', group: 'Actions', synonyms: ['library', 'component', 'model'] },
-  { id: 'make-solid', label: MENU.makeSolid, description: MENU.makeSolidHelp, group: 'Actions', synonyms: ['health', 'repair', 'fix', 'make solid', 'close openings', 'solid', 'watertight', 'check', 'import', 'thickness'] },
-  { id: 'model-health', label: MENU.modelHealthItem, description: MENU.modelHealthHelp, group: 'Actions', synonyms: ['health', 'openings', 'panels', 'solid', 'check', 'import'] },
-  { id: 'purge-unused', label: 'Purge Unused…', description: 'Delete every unused palette material and component definition.', group: 'Actions', synonyms: ['cleanup', 'clean up', 'materials', 'components'] },
-  { id: 'open-settings', label: 'Settings…', description: 'Open Hew Settings.', group: 'Actions', synonyms: ['preferences'] },
-  { id: 'report-bug', label: 'Report Bug…', description: 'Review and send a bug report, or save it to a file.', group: 'Actions' },
-  { id: 'open-guide', label: 'Hew Help', description: 'Open the online user guide in your browser.', group: 'Actions', synonyms: ['help', 'guide', 'documentation', 'docs', 'manual', 'learn', 'user guide'] },
-]
+/** Hand-authored: everything reachable via menuActionRef that isn't a tool.
+ * A function, not a constant: `t` resolves at call time so a locale switch
+ * is picked up the next time the palette builds its entries. */
+// oxlint-disable lingui/no-unlocalized-strings -- group and gate values are identifiers; every label, description, and synonym is wrapped in t``
+function actionEntries(): PaletteEntry[] {
+  return [
+    { id: 'new', label: t`New`, description: t`Start a new, blank document.`, group: 'Actions' },
+    { id: 'open', label: t`Open…`, description: t`Open a .hew file from disk.`, group: 'Actions' },
+    { id: 'import', label: t`Import…`, description: t`Import a COLLADA (.dae), SketchUp (.skp), glTF, or STL model.`, group: 'Actions', gate: 'canImport' },
+    { id: 'export', label: t`Export…`, description: t`Export the model as glTF, STL, 3MF, USDZ, or an SVG line drawing — format chosen in the dialog.`, group: 'Actions', synonyms: [t`stl`, t`glb`, t`gltf`, t`3mf`, t`usdz`, t`usd`, t`ar`, t`quick look`, t`3d print`, t`slicer`, t`svg`, t`line drawing`, t`laser`, t`cnc`] },
+    { id: 'print', label: t`Print…`, description: t`Print the current view to paper or PDF — standard, or to an exact scale across pages.`, group: 'Actions', synonyms: [t`pdf`, t`paper`, t`plot`, t`scale`, t`template`, t`to scale`, t`page`] },
+    { id: 'draw-3d-text', label: t`3D Text…`, description: t`Place extruded, watertight text on a face or the ground.`, group: 'Actions', synonyms: [t`text`, t`font`, t`letters`, t`lettering`, t`engrave`, t`extrude text`], gate: 'canDrawText' },
+    { id: 'save', label: t`Save`, description: t`Save the current document.`, group: 'Actions' },
+    { id: 'save-as', label: t`Save As…`, description: t`Save the current document under a new name.`, group: 'Actions' },
+    { id: 'undo', label: t`Undo`, description: t`Undo the last change.`, group: 'Actions' },
+    { id: 'redo', label: t`Redo`, description: t`Redo the last undone change.`, group: 'Actions' },
+    { id: 'edit-select-all', label: t`Select All`, description: t`Select every visible object, group, component, and sketch.`, group: 'Actions', synonyms: [t`select everything`] },
+    { id: 'edit-select-none', label: t`Select None`, description: t`Deselect everything.`, group: 'Actions', synonyms: [t`deselect all`, t`clear selection`] },
+    { id: 'edit-invert-selection', label: t`Invert Selection`, description: t`Select everything that is not selected, and deselect what is.`, group: 'Actions', synonyms: [t`inverse selection`, t`swap selection`] },
+    { id: 'edit-cut', label: t`Cut`, description: t`Copy the selection to the clipboard, then delete it.`, group: 'Actions', gate: 'hasStructuralSelection' },
+    { id: 'edit-copy', label: t`Copy`, description: t`Copy the selected objects, groups, and components to the clipboard.`, group: 'Actions', gate: 'hasStructuralSelection' },
+    { id: 'edit-paste', label: t`Paste`, description: t`Place a copy of the clipboard at the cursor.`, group: 'Actions', gate: 'clipboardHasContent' },
+    { id: 'edit-paste-in-place', label: t`Paste In Place`, description: t`Insert the clipboard at its original position.`, group: 'Actions', synonyms: [t`paste in-place`], gate: 'clipboardHasContent' },
+    { id: 'edit-delete', label: t`Delete`, description: t`Delete the current selection.`, group: 'Actions', synonyms: [t`remove`, t`erase`], gate: 'selection' },
+    { id: 'edit-delete-guides', label: t`Delete Guide Lines`, description: t`Remove every construction guide.`, group: 'Actions' },
+    { id: 'edit-group', label: t`Group`, description: t`Group the selected objects so they move together.`, group: 'Actions', synonyms: [t`make group`], gate: 'canGroup' },
+    { id: 'edit-ungroup', label: t`Ungroup`, description: t`Dissolve the selected group back into its members.`, group: 'Actions', synonyms: [t`dissolve group`], gate: 'canUngroup' },
+    { id: 'edit-make-component', label: t`Make Component`, description: t`Turn the selection into a reusable component definition.`, group: 'Actions', synonyms: [t`create component`, t`component`], gate: 'canMakeComponent' },
+    { id: 'edit-place-copy', label: t`Place Copy`, description: t`Place another instance of the selected component.`, group: 'Actions', synonyms: [t`duplicate`, t`instance`, t`copy component`], gate: 'canPlaceCopy' },
+    { id: 'edit-explode', label: t`Explode`, description: t`Break the selected component instance into plain objects.`, group: 'Actions', synonyms: [t`explode instance`, t`break component`], gate: 'canExplode' },
+    { id: 'edit-make-unique', label: t`Make Unique`, description: t`Give the selected instance its own definition, detached from its siblings.`, group: 'Actions', synonyms: [t`unique component`], gate: 'canMakeUnique' },
+    { id: 'edit-union', label: t`Union`, description: t`Merge two selected solids into one (boolean add).`, group: 'Actions', synonyms: [t`boolean`, t`merge`, t`combine`, t`add`, t`join`], gate: 'canBoolean' },
+    { id: 'edit-subtract', label: t`Subtract`, description: t`Cut the second selected solid out of the first (boolean difference).`, group: 'Actions', synonyms: [t`boolean`, t`difference`, t`cut`, t`carve`], gate: 'canBoolean' },
+    { id: 'edit-intersect', label: t`Intersect`, description: t`Keep only the volume the two selected solids share (boolean intersection).`, group: 'Actions', synonyms: [t`boolean`, t`common`, t`overlap`], gate: 'canBoolean' },
+    { id: 'toggle-axes', label: t`Toggle Axes`, description: t`Show or hide the world axes.`, group: 'Actions' },
+    { id: 'reset-axes', label: t`Reset Drawing Axes`, description: t`Reset the movable drawing axes back to world identity.`, group: 'Actions', synonyms: [t`drawing axes`, t`origin`, t`reset axes`] },
+    { id: 'toggle-grid', label: t`Toggle Grid`, description: t`Show or hide the ground grid.`, group: 'Actions' },
+    { id: 'toggle-guides', label: t`Toggle Guides`, description: t`Show or hide construction guides.`, group: 'Actions' },
+    { id: 'toggle-section-active', label: t`Section Cut`, description: t`Turn the placed section plane's clip on or off without removing it.`, group: 'Actions', synonyms: [t`section`, t`cut`, t`section plane`, t`cross-section`, t`active cut`, t`toggle section active`, t`toggle section`] },
+    { id: 'zoom-extents', label: t`Zoom Extents`, description: t`Fit the camera to all scene geometry.`, group: 'Actions', synonyms: [t`zoom to fit`] },
+    { id: 'toggle-parallel-projection', label: t`Parallel Projection`, description: t`Toggle between perspective and parallel (orthographic) projection.`, group: 'Actions', synonyms: [t`orthographic`, t`perspective`, t`ortho`] },
+    { id: 'toggle-fly', label: t`Fly`, description: t`Fly through the model with no button held: the mouse or a trackpad finger looks, W A S D move, E and Q climb and descend, the wheel or a pinch sets the speed, Shift goes faster. Esc exits.`, group: 'Actions', synonyms: [t`fly`, t`wasd`, t`first person`, t`free camera`, t`noclip`, t`spectator`, t`flythrough`, t`fly through`] },
+    { id: 'view-top', label: t`Standard View: Top`, description: t`Look straight down at the model.`, group: 'Actions' },
+    { id: 'view-bottom', label: t`Standard View: Bottom`, description: t`Look straight up at the model.`, group: 'Actions' },
+    { id: 'view-front', label: t`Standard View: Front`, description: t`Look at the model from the front.`, group: 'Actions' },
+    { id: 'view-back', label: t`Standard View: Back`, description: t`Look at the model from the back.`, group: 'Actions' },
+    { id: 'view-left', label: t`Standard View: Left`, description: t`Look at the model from the left.`, group: 'Actions' },
+    { id: 'view-right', label: t`Standard View: Right`, description: t`Look at the model from the right.`, group: 'Actions' },
+    { id: 'view-iso', label: t`Standard View: Iso`, description: t`Switch to the standard isometric view.`, group: 'Actions' },
+    { id: 'toggle-tray', label: t`Toggle Tray`, description: t`Show or hide the right-hand tray and all its panels.`, group: 'Actions', synonyms: [t`hide tray`, t`show tray`, t`panels`, t`sidebar`, t`inspector`, t`more room`, t`hide panels`] },
+    { id: 'toggle-dock', label: t`Toggle Contextual Dock`, description: t`Show or hide the floating action dock at the bottom of the viewport.`, group: 'Actions', synonyms: [t`dock`, t`action bar`, t`floating toolbar`, t`hide dock`, t`show dock`] },
+    { id: 'toggle-compact-rail', label: t`Compact Tool Rail`, description: t`Shrink the tool rail to icons only, or bring the tool names back.`, group: 'Actions', synonyms: [t`tool rail`, t`toolbar`, t`icons only`, t`tool names`, t`collapse`, t`expand`, t`sidebar`] },
+    { id: 'toggle-model-info', label: t`Toggle Model Info`, description: t`Show or hide the Model Info panel.`, group: 'Actions' },
+    { id: 'toggle-materials', label: t`Toggle Materials`, description: t`Show or hide the Materials panel.`, group: 'Actions' },
+    { id: 'toggle-components', label: t`Toggle Components`, description: t`Show or hide the Components panel.`, group: 'Actions' },
+    { id: 'toggle-tags', label: t`Toggle Tags`, description: t`Show or hide the Tags panel.`, group: 'Actions' },
+    { id: 'toggle-scenes', label: t`Toggle Scenes`, description: t`Show or hide the Scenes panel.`, group: 'Actions' },
+    { id: 'scenes-add', label: t`Add Scene`, description: t`Save the current camera, visibility, and section cut as a new Scene.`, group: 'Actions', synonyms: [t`scene`, t`save view`, t`named view`] },
+    { id: 'scenes-update', label: t`Update Scene`, description: t`Re-capture the active Scene’s checked properties.`, group: 'Actions', synonyms: [t`scene`, t`refresh scene`], gate: 'sceneActive' },
+    { id: 'scenes-next', label: t`Next Scene`, description: t`Activate the next Scene in the list.`, group: 'Actions', synonyms: [t`scene`], gate: 'scenesAny' },
+    { id: 'scenes-previous', label: t`Previous Scene`, description: t`Activate the previous Scene in the list.`, group: 'Actions', synonyms: [t`scene`], gate: 'scenesAny' },
+    { id: 'scenes-transitions', label: t`Scene Transitions`, description: t`Toggle the 0.6s camera tween when activating a Scene.`, group: 'Actions', synonyms: [t`scene`, t`animation`, t`tween`] },
+    { id: 'toggle-object-info', label: t`Toggle Object Info`, description: t`Show or hide the Object Info panel.`, group: 'Actions' },
+    { id: 'toggle-changes', label: t`Toggle Changes`, description: t`Show or hide the Changes panel — this session’s undo/redo entries since the last save.`, group: 'Actions', synonyms: [t`history`, t`undo`, t`redo`] },
+    { id: 'toggle-debug-log', label: t`Toggle Debug Log`, description: t`Show or hide the debug log panel.`, group: 'Actions' },
+    { id: 'open-library', label: t`Library`, description: t`Browse and insert saved components, materials, and models`, group: 'Actions', synonyms: [t`library`, t`components`, t`insert`] },
+    { id: 'save-to-library', label: t`Save Selection to Library…`, description: t`Save the selected object, group, or component as a library item.`, group: 'Actions', synonyms: [t`library`, t`component`, t`save selection`], gate: 'canSaveSelectionToLibrary' },
+    { id: 'save-to-library-doc', label: t`Save to Library…`, description: t`Save the whole document as a library item.`, group: 'Actions', synonyms: [t`library`, t`component`, t`model`] },
+    { id: 'make-solid', label: MENU.makeSolid, description: MENU.makeSolidHelp, group: 'Actions', synonyms: [t`health`, t`repair`, t`fix`, t`make solid`, t`close openings`, t`solid`, t`watertight`, t`check`, t`import`, t`thickness`] },
+    { id: 'model-health', label: MENU.modelHealthItem, description: MENU.modelHealthHelp, group: 'Actions', synonyms: [t`health`, t`openings`, t`panels`, t`solid`, t`check`, t`import`] },
+    { id: 'purge-unused', label: t`Purge Unused…`, description: t`Delete every unused palette material and component definition.`, group: 'Actions', synonyms: [t`cleanup`, t`clean up`, t`materials`, t`components`] },
+    { id: 'open-settings', label: t`Settings…`, description: t`Open Hew Settings.`, group: 'Actions', synonyms: [t`preferences`] },
+    { id: 'report-bug', label: t`Report Bug…`, description: t`Review and send a bug report, or save it to a file.`, group: 'Actions' },
+    { id: 'open-guide', label: t`Hew Help`, description: t`Open the online user guide in your browser.`, group: 'Actions', synonyms: [t`help`, t`guide`, t`documentation`, t`docs`, t`manual`, t`learn`, t`user guide`] },
+  ]
+}
+// oxlint-enable lingui/no-unlocalized-strings
 
 /**
  * Action ids the menuActionRef switch handles that are DELIBERATELY not in
@@ -266,6 +283,7 @@ const ACTION_ENTRIES: PaletteEntry[] = [
  * switch fail the test until they pick a side, so the palette can't silently
  * drift out of date again.
  */
+// oxlint-disable lingui/no-unlocalized-strings -- developer-facing reasons read only by registry.test.ts, never shown
 export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
   'open-palette': 'self-referential — the palette cannot usefully open itself',
   'close': 'window lifecycle, desktop shells only — not a model action',
@@ -277,11 +295,12 @@ export const PALETTE_EXCLUDED_ACTION_IDS: Record<string, string> = {
   'explode-instance': 'contextual-dock alias of edit-explode',
   'toggle-library': 'keyboard/native-menu/dock-icon toggle alias of open-library — the palette exposes the single "open" verb, not a checkbox toggle',
 }
+// oxlint-enable lingui/no-unlocalized-strings
 
 /** The full palette registry — tools first (spec ranks Tools above Actions
  * absent other signals), then hand-authored actions. */
 export function paletteEntries(): PaletteEntry[] {
-  return [...toolEntries(), ...ACTION_ENTRIES]
+  return [...toolEntries(), ...actionEntries()]
 }
 
 /** Convenience for callers (e.g. the palette UI) that also want the

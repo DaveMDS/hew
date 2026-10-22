@@ -9,8 +9,9 @@
  * purpose and never reads as a problem; only objects with openings, split
  * shapes and objects that need a closer look "need fixing".
  */
+import { plural, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { KIND_NAME, PANEL, count, rowDetail, type KindKey, type OpenReason } from './healthCopy'
+import { KIND_NAME, PANEL, rowDetail, type KindKey, type OpenReason } from './healthCopy'
 
 export type VerdictKind =
   | 'flat_sheet'
@@ -148,9 +149,15 @@ export function parseHealthReport(json: string): HealthReport {
 export type HealthScope = 'last' | 'selection' | 'document'
 
 export const HEALTH_SCOPE_LABELS: Record<HealthScope, string> = {
-  last: PANEL.scopeLastImport,
-  selection: PANEL.scopeSelection,
-  document: PANEL.scopeModel,
+  get last() {
+    return PANEL.scopeLastImport
+  },
+  get selection() {
+    return PANEL.scopeSelection
+  },
+  get document() {
+    return PANEL.scopeModel
+  },
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +249,7 @@ export function summarize(summary: HealthSummaryData): HealthSummary {
 // Words
 // ---------------------------------------------------------------------------
 
+/* oxlint-disable lingui/no-unlocalized-strings -- returns KindKey identifiers, not copy */
 /**
  * The one classification the panel, the wizard and the badge's lists share:
  * split shapes first (any row with a seam family), then flat panels and
@@ -261,6 +269,7 @@ export function classifyRow(row: HealthRow, inSplit: boolean = row.family !== nu
       return row.rims.length > 0 && row.rims.every((r) => r.cappable) ? 'openings' : 'closerLook'
   }
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /**
  * The seam families that really are split shapes: at least one piece, and
@@ -298,10 +307,11 @@ export function rowPlacements(row: HealthRow): number {
 /** The row's name: the definition's name for a member, else its own. */
 export function rowDisplayName(row: HealthRow): string {
   return row.definition !== null
-    ? (row.definitionName ?? row.name ?? 'Component')
-    : (row.name ?? 'Object')
+    ? (row.definitionName ?? row.name ?? t({ context: 'unnamed item', comment: 'Name shown for a component with no name', message: 'Component' }))
+    : (row.name ?? t({ context: 'unnamed item', comment: 'Name shown for an object with no name', message: 'Object' }))
 }
 
+/* oxlint-disable lingui/no-unlocalized-strings -- returns OpenReason identifiers, not copy */
 /**
  * Why Hew can't close a row with flat faces (design Revision 3, "Reasons"),
  * from the report's facts: open edges that branch or stop short first, then
@@ -314,6 +324,7 @@ export function openReason(row: HealthRow): OpenReason {
   if (row.rims.some((r) => r.sheetEdge)) return 'lip'
   return 'notFlat'
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** One-line detail under a row's name ("2 openings", "Flat panel", "Open edges branch"). */
 export function rowDetailText(row: HealthRow, inSplit?: boolean): string {
@@ -399,9 +410,10 @@ export function groupRows(report: HealthReport, rows: readonly HealthRow[]): Gro
     .sort((a, b) => a[0] - b[0])
     .map(([family, members]) => {
       const pieces = report.families[family]?.members.length ?? members.length
+      const name = rowDisplayName(members[0])
       return {
         family,
-        title: `${rowDisplayName(members[0])} → ${count(pieces, 'piece', 'pieces')}`,
+        title: plural(pieces, { one: `${name} → # piece`, other: `${name} → # pieces` }),
         rows: members,
       }
     })

@@ -37,6 +37,7 @@ export const isWindows: boolean =
   typeof navigator !== 'undefined' && /Win/.test(navigator.platform)
 
 /** Modifier prefix shown in shortcut hints: '⌘' on macOS, 'Ctrl+' elsewhere. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard modifier key cap, not translated (shortcuts are out of scope per LOCALIZATION.md)
 export const modLabel: string = isMac ? '⌘' : 'Ctrl+'
 
 /**
@@ -50,10 +51,12 @@ export const modLabel: string = isMac ? '⌘' : 'Ctrl+'
  * it. Only `'Alt'` or `'Control'` — the two forms `KeyboardEvent.key`
  * reports for these keys everywhere Hew ships.
  */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- KeyboardEvent.key identifiers
 export const COPY_MODIFIER_KEY: 'Alt' | 'Control' = isMac ? 'Alt' : 'Control'
 
 /** Human-readable label for `COPY_MODIFIER_KEY`, for status hints and docs:
  *  "Option" on macOS, "Ctrl" elsewhere. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard modifier key cap name, not translated
 export const COPY_MODIFIER_LABEL: string = isMac ? 'Option' : 'Ctrl'
 
 /**
@@ -85,6 +88,7 @@ export function isCoarsePointer(): boolean {
     // "re-check live" property the doc comment above promises.
     if (cachedPointerQuery === null || cachedPointerQueryFrom !== window.matchMedia) {
       cachedPointerQueryFrom = window.matchMedia
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS media query
       cachedPointerQuery = window.matchMedia('(pointer: coarse)')
     }
     return cachedPointerQuery.matches
@@ -111,6 +115,7 @@ export function prefersReducedMotion(): boolean {
   try {
     if (cachedReducedMotionQuery === null || cachedReducedMotionQueryFrom !== window.matchMedia) {
       cachedReducedMotionQueryFrom = window.matchMedia
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS media query
       cachedReducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
     }
     return cachedReducedMotionQuery.matches

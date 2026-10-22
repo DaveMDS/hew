@@ -37,6 +37,7 @@
  * more than once without reopening the dialog.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -56,7 +57,7 @@ import {
 import type { GlyphRunContour } from '../text/glyphRun'
 import { axisDrawPlane, groundDrawPlane, type DrawPlane } from './drawPlane'
 import { defaultFaceEligible, FacePickCache, type FaceEligible } from './faceDraw'
-import { nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { nextIdlePlaneLock, axisLockColorName } from './moveInput'
 
 export type OnPlaced = (instanceId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
@@ -463,12 +464,13 @@ export class TextPlaceTool implements Tool {
 
   statusHint(): string {
     if (this._componentContext !== null) {
-      return 'Click to place — 3D Text places at the top level while editing a component.'
+      return t`Click to place — 3D Text places at the top level while editing a component.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to place; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click to place; same arrow or Esc unlocks.`
     }
-    return 'Click a face, the ground, or an arrow-locked plane to place the text.'
+    return t`Click a face, the ground, or an arrow-locked plane to place the text.`
   }
 
   /** Resolve the plane THIS pointer event places onto: an active idle axis
@@ -721,7 +723,7 @@ export class TextPlaceTool implements Tool {
     )
 
     if (selected.length === 0) {
-      this.onToast('Nothing to place — the text has no visible strokes at this size.')
+      this.onToast(t`Nothing to place — the text has no visible strokes at this size.`)
       return
     }
 

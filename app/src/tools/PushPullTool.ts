@@ -12,6 +12,7 @@
  * Throws kernel "CODE: message" errors as toasts via onToast.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
@@ -179,14 +180,15 @@ export class PushPullTool implements Tool {
   statusHint(): string {
     if (this.stage.kind === 'idle') {
       if (this.retype.isOpen) {
-        return 'Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.'
+        return t`Type an exact distance to redo the push/pull you just made — or click another face; double-click repeats the last distance.`
       }
-      const base = 'Click a face to push or pull it — double-click repeats the last distance.'
-      return this.extrudeAsNewMode ? `${base} Ctrl is on — extrudes a new object.` : base
+      return this.extrudeAsNewMode
+        ? t`Click a face to push or pull it — double-click repeats the last distance. Ctrl is on — extrudes a new object.`
+        : t`Click a face to push or pull it — double-click repeats the last distance.`
     }
     return this.extrudeAsNewMode
-      ? 'Move to extrude a NEW object, click to commit — or type an exact distance. Tap Ctrl to push/pull instead.'
-      : 'Move to extrude, click to commit — or type an exact distance. Tap Ctrl to extrude a new object instead.'
+      ? t`Move to extrude a NEW object, click to commit — or type an exact distance. Tap Ctrl to push/pull instead.`
+      : t`Move to extrude, click to commit — or type an exact distance. Tap Ctrl to extrude a new object instead.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -428,6 +430,7 @@ export class PushPullTool implements Tool {
     const over = hit?.region.over ?? null
     if (over === null || over.object !== object) return face
     if (over.face !== null) return over.face
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel refusal codes, not copy
     return { refuse: over.why === 'pinch' ? 'RegionPinched' : over.why === 'sliver' ? 'RegionSliver' : 'RegionNotPushable' }
   }
 
@@ -868,7 +871,7 @@ export class PushPullTool implements Tool {
    *  component and anything else was a grouped face. */
   private _ineligibleFaceHint(instance: bigint | undefined): string {
     return ineligibleFaceHint(
-      'Push/pull',
+      t`Push/pull`,
       this._contextScoped || this._activeContext !== null || this._activeComponent !== null,
       instance,
     )
@@ -955,7 +958,7 @@ export class PushPullTool implements Tool {
     const spec = this.retype.spec
     if (spec === null) return
     if (Math.abs(d) < 1e-6) {
-      this.onToast('Move more before committing push/pull')
+      this.onToast(t`Move more before committing push/pull`)
       return
     }
     const signed = (spec.distance < 0 ? -1 : 1) * d
@@ -977,7 +980,7 @@ export class PushPullTool implements Tool {
       // onto the plane at the anchor), exactly as the first click did.
       const fresh = this._repickRegion(hot.anchor, target.normal, target.instance)
       if (fresh === null) {
-        this.onToast("Couldn't find the profile to redo the push/pull")
+        this.onToast(t`Couldn't find the profile to redo the push/pull`)
         return false
       }
       target = { ...target, sketchHandle: fresh.sketch, regionHandle: fresh.region }
@@ -1028,7 +1031,7 @@ export class PushPullTool implements Tool {
   /** True when the kernel accepted the commit (false = refused, toasted). */
   private _commit(target: PushPullTarget, distance: number): boolean {
     if (Math.abs(distance) < 1e-6) {
-      this.onToast('Move more before committing push/pull')
+      this.onToast(t`Move more before committing push/pull`)
       return false
     }
 

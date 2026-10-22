@@ -257,7 +257,9 @@ export function installFailureHandlers(): void {
   window.addEventListener('error', (event) => {
     if (isMutedError(event)) {
       try {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- log level identifier
         diagnosticLog.logUi('reproducer', 'WARN', {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- diagnostic log line for the maintainer
           message: 'ignored muted cross-origin error (no attribution, nothing to reproduce)',
         })
       } catch {

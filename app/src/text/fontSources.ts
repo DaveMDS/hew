@@ -70,6 +70,7 @@ export interface FontProvider {
  *  way to ask again") rather than a generic error toast. */
 export class LocalFontPermissionDeniedError extends Error {
   constructor() {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- developer-facing error message; the dialog shows its own wrapped note for this error type
     super('Local font access permission was denied.')
     this.name = 'LocalFontPermissionDeniedError'
   }

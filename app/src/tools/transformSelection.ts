@@ -73,6 +73,7 @@ import {
 } from './planeUnits'
 import { runDraft } from './draftCommit'
 import { applyAffine3x4, invertAffine3x4 } from '../viewport/geoHelpers'
+import { t } from '@lingui/core/macro'
 
 type V3 = [number, number, number]
 
@@ -533,7 +534,7 @@ export function commitSelectionTransform(
   selection: readonly NodeRef[],
   affineF64: Float64Array,
   activeInstance?: bigint | null,
-  label = 'Move',
+  label = t({ context: 'tool', message: 'Move' }),
 ): NodeRef[] {
   const committed: NodeRef[] = [...selection]
   const groups = planDraftTransforms(wasmScene, selection)
@@ -750,7 +751,7 @@ export function copyOwnersAndDrawing(
 ): NodeRef[] {
   if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
   if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
-  return inHistoryBracket(wasmScene, 'Copy', () => {
+  return inHistoryBracket(wasmScene, t`Copy`, () => {
     const plan = planCopy(wasmScene, [...owners, ...drawn], affines)
     const whole = copyWholeDrawing(wasmScene, plan, affines)
     const ownerCopies = copyOwners()
@@ -810,7 +811,7 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
     // each, re-finding the originals by geometry between reps.
     const original = g.edges.map((e) => e.key)
     try {
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, 'Copy', (d) => {
+      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         for (const affine of affines) wasmScene.draft_copy_edges(d, keysToArray(original), affine)
       })
       for (const affine of affines) addRefs(affine)
@@ -824,7 +825,7 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
       const anchors = g.edges.map((e) => [e.a, e.b] as [V3, V3])
       const keys = unitsAtSegments(pu, anchors).flatMap((u) => u.edges.map((e) => e.key))
       if (keys.length === 0) continue
-      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, 'Copy', (d) => {
+      runDraft(wasmScene, { kind: 'ctx', ctx: g.ctx }, t`Copy`, (d) => {
         wasmScene.draft_copy_edges(d, keysToArray(keys), affine)
       })
       addRefs(affine)
@@ -841,7 +842,7 @@ function copyWholeDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonl
 function copyMixedDrawing(wasmScene: WasmScene, plan: CopyPlan, affines: readonly Float64Array[]): NodeRef[] {
   const committed: NodeRef[] = []
   for (const [g, cap] of plan.mixed) {
-    redrawCaptured(wasmScene, g, cap, affines, 'Copy')
+    redrawCaptured(wasmScene, g, cap, affines, t`Copy`)
     const seen = new Set<string>()
     for (const affine of affines) {
       for (const ref of refsAtAnchors(wasmScene, g.ctx, movedAnchors(g, affine))) {
@@ -1067,7 +1068,7 @@ export function duplicateSketchSelectionByAffineArray(
   const steps = plan.pure.length + plan.mixed.size + (affines.length > 1 && plan.pure.length > 0 ? 1 : 0)
   return inHistoryBracket(
     wasmScene,
-    'Copy',
+    t`Copy`,
     () => [...copyWholeDrawing(wasmScene, plan, affines), ...copyMixedDrawing(wasmScene, plan, affines)],
     sketchPart || steps > 1,
   )

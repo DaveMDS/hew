@@ -29,6 +29,7 @@
  * "why is this dirty, I didn't change any geometry" moment has an answer.
  */
 
+import { t } from '@lingui/core/macro'
 import type { FileRef } from './fileHost'
 import { formatRelativeTime } from './relativeTime'
 import { stripKnownExtension } from './docFormat'
@@ -76,15 +77,28 @@ const EMPTY_REASONS: ReadonlySet<string> = new Set()
  * template, not a constant — the dialog and title both want the specific
  * file name. */
 export const NON_UNDOABLE_REASON = {
-  scenesEdited: 'Scenes edited',
-  libraryMaterials: 'Materials added from the Library',
-  libraryMetadata: 'Library metadata',
-  recovered: 'Recovered document',
-} as const
+  // Getters, not literals: the text is resolved in the active locale each time
+  // a reason is stamped, never at module load.
+  get scenesEdited() {
+    return t`Scenes edited`
+  },
+  get libraryMaterials() {
+    return t`Materials added from the Library`
+  },
+  get libraryMetadata() {
+    return t`Library metadata`
+  },
+  get recovered() {
+    return t`Recovered document`
+  },
+}
 
 /** `"Imported 'Kitchen.dae'"` — the reason stamped by `afterImport`. */
 export function importedReason(name: string): string {
-  return `Imported '${name}'`
+  // Quoted outside the message: ICU reads an apostrophe next to a brace as
+  // an escape, so `'${name}'` inside the template would print the braces.
+  const quoted = `'${name}'`
+  return t`Imported ${quoted}`
 }
 
 /** Initial (blank) session state. */
@@ -101,7 +115,7 @@ export const INITIAL_SESSION: DocSessionState = {
  * name and the `saveStateLabel` indicator as separate pieces rather than one
  * pre-formatted string. */
 export function documentName(state: DocSessionState): string {
-  return state.currentRef?.name ?? state.importedName ?? 'Untitled'
+  return state.currentRef?.name ?? state.importedName ?? t`Untitled`
 }
 
 /** The document name without its file extension (`Model.skp` -> `Model`) —
@@ -117,8 +131,8 @@ export function documentBaseName(state: DocSessionState): string {
  * Format: `[• ]<filename | importedName | 'Untitled'> — Hew`
  */
 export function deriveTitle(state: DocSessionState): string {
-  const dirtyMark = state.dirty ? '• ' : ''
-  return `${dirtyMark}${documentName(state)} — Hew`
+  const name = documentName(state)
+  return state.dirty ? t`• ${name} — Hew` : t`${name} — Hew`
 }
 
 /**
@@ -130,9 +144,13 @@ export function deriveTitle(state: DocSessionState): string {
  */
 export function saveStateLabel(state: DocSessionState, now: number): string {
   if (state.dirty) {
-    return state.lastEditAt === null ? 'Edited' : `Edited ${formatRelativeTime(state.lastEditAt, now)}`
+    if (state.lastEditAt === null) return t`Edited`
+    const when = formatRelativeTime(state.lastEditAt, now)
+    return t`Edited ${when}`
   }
-  return state.lastSavedAt === null ? '' : `Saved ${formatRelativeTime(state.lastSavedAt, now)}`
+  if (state.lastSavedAt === null) return ''
+  const when = formatRelativeTime(state.lastSavedAt, now)
+  return t`Saved ${when}`
 }
 
 /** `!atSavedMark || reasons.size > 0` — the one formula both `afterMutation`

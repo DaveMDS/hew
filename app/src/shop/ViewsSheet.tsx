@@ -23,6 +23,9 @@
  * unchanged). Rows act-and-close exactly like the standard-view rows below
  * them; no thumbnails (SPEC.md §2 "No thumbnails").
  */
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
 import type { StandardView } from '../viewport/Viewport'
 import type { Projection } from '../viewport/cameraRig'
 import type { ShopOrientation } from './orientation'
@@ -58,19 +61,19 @@ export interface ViewsSheetProps {
 /** The seven standard views (design task's own list) in the order they're
  *  listed there — ISO first (the default "orient yourself" view), then the
  *  six axis-aligned ones in opposite-pairs. */
-const STANDARD_VIEWS: { view: StandardView; label: string }[] = [
-  { view: 'iso', label: 'ISO' },
-  { view: 'front', label: 'Front' },
-  { view: 'back', label: 'Back' },
-  { view: 'left', label: 'Left' },
-  { view: 'right', label: 'Right' },
-  { view: 'top', label: 'Top' },
-  { view: 'bottom', label: 'Bottom' },
+const STANDARD_VIEWS: { view: StandardView; label: MessageDescriptor }[] = [
+  { view: 'iso', label: msg({ context: 'view', message: 'ISO' }) },
+  { view: 'front', label: msg({ context: 'view', message: 'Front' }) },
+  { view: 'back', label: msg({ context: 'view', message: 'Back' }) },
+  { view: 'left', label: msg({ context: 'view', message: 'Left' }) },
+  { view: 'right', label: msg({ context: 'view', message: 'Right' }) },
+  { view: 'top', label: msg({ context: 'view', message: 'Top' }) },
+  { view: 'bottom', label: msg({ context: 'view', message: 'Bottom' }) },
 ]
 
-const PROJECTION_SEGMENTS: { value: Projection; label: string }[] = [
-  { value: 'perspective', label: 'Perspective' },
-  { value: 'parallel', label: 'Parallel' },
+const PROJECTION_SEGMENTS: { value: Projection; label: MessageDescriptor }[] = [
+  { value: 'perspective', label: msg`Perspective` },
+  { value: 'parallel', label: msg`Parallel` },
 ]
 
 export function ViewsSheet({
@@ -85,6 +88,7 @@ export function ViewsSheet({
   drifted = false,
   onSelectScene,
 }: ViewsSheetProps) {
+  const { t, i18n } = useLingui()
   if (!open) return null
 
   const isLandscape = orientation === 'landscape'
@@ -99,7 +103,7 @@ export function ViewsSheet({
       />
       <div
         role="dialog"
-        aria-label="Views"
+        aria-label={t`Views`}
         style={
           isLandscape
             ? {
@@ -124,7 +128,7 @@ export function ViewsSheet({
       >
         <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', margin: '0 auto 10px' }} />
         <div style={{ padding: '0 10px 6px' }}>
-          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>Views</span>
+          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>{t`Views`}</span>
         </div>
 
         {scenes.length > 0 && (
@@ -135,7 +139,7 @@ export function ViewsSheet({
                 fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--shop-text-muted)',
               }}
             >
-              Scenes
+              {t`Scenes`}
             </span>
             {scenes.map((entry) => {
               const active = entry.sid === activeSid
@@ -190,7 +194,7 @@ export function ViewsSheet({
           <button
             key={view}
             type="button"
-            aria-label={label}
+            aria-label={i18n._(label)}
             onClick={() => { onSelectView(view); onClose() }}
             style={{
               display: 'flex', alignItems: 'center', width: '100%', height: '54px', padding: '0 14px',
@@ -199,13 +203,13 @@ export function ViewsSheet({
             }}
           >
             <span style={{ flex: 1, fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 500, color: 'var(--shop-text)' }}>
-              {label}
+              {i18n._(label)}
             </span>
           </button>
         ))}
 
         <div style={{ padding: '10px 14px 4px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--shop-hairline-2)', marginTop: '4px' }}>
-          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '14px', fontWeight: 500, color: 'var(--shop-text)' }}>Projection</span>
+          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '14px', fontWeight: 500, color: 'var(--shop-text)' }}>{t`Projection`}</span>
           <div style={{ display: 'flex', gap: '2px', background: 'var(--shop-eyebg)', borderRadius: '9px', padding: '3px' }}>
             {PROJECTION_SEGMENTS.map(({ value, label }) => {
               const active = projection === value
@@ -228,7 +232,7 @@ export function ViewsSheet({
                     border: 'none', borderRadius: '7px', padding: '7px 11px', cursor: 'pointer',
                   }}
                 >
-                  {label}
+                  {i18n._(label)}
                 </button>
               )
             })}

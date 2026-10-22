@@ -18,6 +18,9 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
+import { t } from '@lingui/core/macro'
+import { useLingui } from '@lingui/react/macro'
+import { formatNumber } from '../i18n/format'
 import { getSnapshot, subscribe, type RenderStatsSnapshot } from '../viewport/renderStats'
 
 // Snapshots arrive at most every NOTIFY_INTERVAL_MS (250ms) while renders
@@ -25,11 +28,6 @@ import { getSnapshot, subscribe, type RenderStatsSnapshot } from '../viewport/re
 // fps figure would be stale.
 const STALE_AFTER_MS = 600
 
-const TITLE =
-  'three.js renderer.info for the most recent frame. ' +
-  '"cpu ms" is the CPU-side renderer.render() duration (GPU work is async). ' +
-  'fps is smoothed over the current burst of renders; "idle" means the ' +
-  'on-demand render loop is at rest.'
 
 const containerStyle: React.CSSProperties = {
   fontFamily: 'monospace',
@@ -54,12 +52,20 @@ const idleStyle: React.CSSProperties = {
 
 /** Compact count: 1234 → "1234", 56789 → "56.8k", 1234567 → "1.23M". */
 function fmtCount(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`
-  if (n >= 10_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
+  if (n >= 1_000_000) {
+    const m = formatNumber(n / 1_000_000, { fractionDigits: 2 })
+    return t({ comment: 'Compact count in millions, e.g. 1.23M triangles', message: `${m}M` })
+  }
+  if (n >= 10_000) {
+    const k = formatNumber(n / 1_000, { fractionDigits: 1 })
+    return t({ comment: 'Compact count in thousands, e.g. 56.8k triangles', message: `${k}k` })
+  }
+  return formatNumber(n, { grouping: false })
 }
 
 export function RenderStatsReadout() {
+  const { t } = useLingui()
+  const title = t`three.js renderer.info for the most recent frame. "cpu ms" is the CPU-side renderer.render() duration (GPU work is async). fps is smoothed over the current burst of renders; "idle" means the on-demand render loop is at rest.`
   const [snap, setSnap] = useState<RenderStatsSnapshot | null>(() => getSnapshot())
   const [stale, setStale] = useState(true)
   const staleTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -81,31 +87,37 @@ export function RenderStatsReadout() {
 
   if (snap === null) {
     return (
-      <span style={{ ...containerStyle, ...mutedStyle }} title={TITLE}>
-        draw — · no frames yet
+      <span style={{ ...containerStyle, ...mutedStyle }} title={title}>
+        {t`draw — · no frames yet`}
       </span>
     )
   }
 
   const streaming = !stale && snap.fps !== null
+  const drawCalls = formatNumber(snap.drawCalls, { grouping: false })
+  const triangles = fmtCount(snap.triangles)
+  const geometries = formatNumber(snap.geometries, { grouping: false })
+  const textures = formatNumber(snap.textures, { grouping: false })
+  const cpuMs = formatNumber(snap.cpuMs, { fractionDigits: 1 })
+  const fps = formatNumber(Math.round(snap.fps ?? 0), { grouping: false })
   return (
-    <span style={containerStyle} title={TITLE}>
-      <span style={drawCallsStyle}>draw {snap.drawCalls}</span>
+    <span style={containerStyle} title={title}>
+      <span style={drawCallsStyle}>{t`draw ${drawCalls}`}</span>
       <span style={mutedStyle}>
-        {' · tri '}
-        {fmtCount(snap.triangles)}
-        {' · geo '}
-        {snap.geometries}
-        {' · tex '}
-        {snap.textures}
         {' · '}
-        {snap.cpuMs.toFixed(1)} cpu ms
+        {t`tri ${triangles}`}
+        {' · '}
+        {t`geo ${geometries}`}
+        {' · '}
+        {t`tex ${textures}`}
+        {' · '}
+        {t`${cpuMs} cpu ms`}
         {' · '}
       </span>
       {streaming ? (
-        <span style={mutedStyle}>{Math.round(snap.fps as number)} fps</span>
+        <span style={mutedStyle}>{t`${fps} fps`}</span>
       ) : (
-        <span style={idleStyle}>idle</span>
+        <span style={idleStyle}>{t`idle`}</span>
       )}
     </span>
   )

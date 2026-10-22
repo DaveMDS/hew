@@ -1,3 +1,4 @@
+/* oxlint-disable lingui/no-unlocalized-strings -- test helper: a word list that polices rendered copy, plus DOM attribute names; never shown to a person */
 /**
  * Test helper: the words that must never reach the screen from Model Health
  * and Make Solid (docs/design/import-health.md, Revisions 2 and 3, "Words"), and a

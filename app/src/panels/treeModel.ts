@@ -1,3 +1,4 @@
+import { t } from '@lingui/core/macro'
 import { draftKindLabel, draftRef, draftRefAlive, resolveDraft, type OutlinerDrawing, type PlaneUnitsScene } from '../tools/planeUnits'
 
 /**
@@ -243,12 +244,17 @@ export interface Crumb {
  * Generated app-side from handle order — no kernel naming, not persisted.
  */
 export function entityLabel(kind: EntityKind, index: number): string {
-  const name =
-    kind === 'object' ? 'Object' :
-    kind === 'group' ? 'Group' :
-    kind === 'instance' ? 'Component' :
-    'Sketch'
-  return `${name} ${index + 1}`
+  const n = index + 1
+  switch (kind) {
+    case 'object':
+      return t({ context: 'unnamed item', comment: 'Default row label for an unnamed object; n is its 1-based position', message: `Object ${n}` })
+    case 'group':
+      return t({ context: 'unnamed item', comment: 'Default row label for an unnamed group; n is its 1-based position', message: `Group ${n}` })
+    case 'instance':
+      return t({ context: 'unnamed item', comment: 'Default row label for an unnamed component; n is its 1-based position', message: `Component ${n}` })
+    default:
+      return t({ context: 'unnamed item', comment: 'Default row label for an unnamed sketch; n is its 1-based position', message: `Sketch ${n}` })
+  }
 }
 
 /**
@@ -383,7 +389,7 @@ export function breadcrumb(
   path: NodeRef[],
   labelFor: (node: NodeRef) => string,
 ): Crumb[] {
-  const root: Crumb = { label: 'Model', depth: -1 }
+  const root: Crumb = { label: t({ context: 'root', comment: 'Breadcrumb for the top level of the document', message: 'Model' }), depth: -1 }
   if (path.length === 0) {
     return [root]
   }

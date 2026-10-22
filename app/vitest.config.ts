@@ -1,5 +1,6 @@
 import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
+import { lingui } from '@lingui/vite-plugin'
 
 // Pure-logic suites (`.test.ts`) run on the lean `node` env; React component
 // suites (`.test.tsx`) need a DOM, so they run on `jsdom`. Keeping the split
@@ -15,7 +16,7 @@ export default defineConfig({
   test: {
     projects: [
       {
-        plugins: [react()],
+        plugins: [react(), lingui({ macroTransform: true })],
         test: {
           name: 'node',
           environment: 'node',
@@ -36,7 +37,7 @@ export default defineConfig({
         },
       },
       {
-        plugins: [react()],
+        plugins: [react(), lingui({ macroTransform: true })],
         test: {
           name: 'jsdom',
           environment: 'jsdom',

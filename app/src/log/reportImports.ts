@@ -18,6 +18,8 @@
  * pass over a few hundred megabytes cheap.
  */
 
+import { t } from '@lingui/core/macro'
+
 export interface ImportedFile {
   /** The recorded method, e.g. `import_skp`. */
   method: string
@@ -32,15 +34,56 @@ export interface ImportedFile {
 /** The recorded calls that embed a user's file (`RecordedCall` in
  *  crates/wasm-api/src/recording.rs, snake_case method tags), the key that
  *  holds its bytes, and the label the dialog lists it under. */
+// Labels are getters so they resolve in the active locale when read.
 const FILE_CALLS: Record<string, { key: string; label: string }> = {
-  import_skp: { key: 'bytes', label: 'SketchUp model (.skp)' },
-  import_gltf: { key: 'bytes', label: 'glTF model (.glb/.gltf)' },
-  import_stl: { key: 'bytes', label: 'STL model (.stl)' },
-  import_dae: { key: 'bytes', label: 'COLLADA model (.dae)' },
-  add_texture_material: { key: 'image', label: 'Texture image' },
-  insert_item: { key: 'bytes', label: 'Library item' },
-  insert_item_palette: { key: 'bytes', label: 'Library material' },
-  load: { key: 'bytes', label: 'Opened model (.hew)' },
+  import_skp: {
+    key: 'bytes',
+    get label() {
+      return t`SketchUp model (.skp)`
+    },
+  },
+  import_gltf: {
+    key: 'bytes',
+    get label() {
+      return t`glTF model (.glb/.gltf)`
+    },
+  },
+  import_stl: {
+    key: 'bytes',
+    get label() {
+      return t`STL model (.stl)`
+    },
+  },
+  import_dae: {
+    key: 'bytes',
+    get label() {
+      return t`COLLADA model (.dae)`
+    },
+  },
+  add_texture_material: {
+    key: 'image',
+    get label() {
+      return t`Texture image`
+    },
+  },
+  insert_item: {
+    key: 'bytes',
+    get label() {
+      return t`Library item`
+    },
+  },
+  insert_item_palette: {
+    key: 'bytes',
+    get label() {
+      return t`Library material`
+    },
+  },
+  load: {
+    key: 'bytes',
+    get label() {
+      return t`Opened model (.hew)`
+    },
+  },
 }
 
 /** One embedded payload: `[start, end)` spans the array value, brackets

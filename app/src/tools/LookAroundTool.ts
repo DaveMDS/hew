@@ -21,6 +21,7 @@
  * wherever the view already was, with no jump.
  */
 
+import { t } from '@lingui/core/macro'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import { getLengthUnit } from '../settings/units'
@@ -89,7 +90,7 @@ export class LookAroundTool implements Tool {
   }
 
   statusHint(): string {
-    return 'Drag to look around. Type a height + Enter to re-height the eye in place. Esc returns to Select.'
+    return t`Drag to look around. Type a height + Enter to re-height the eye in place. Esc returns to Select.`
   }
 
   // Not used for this tool's own gesture (see the module doc), but the

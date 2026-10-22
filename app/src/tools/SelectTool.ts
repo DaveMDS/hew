@@ -10,6 +10,7 @@
  * snap (for the status bar) and handles Escape.
  */
 
+import { t } from '@lingui/core/macro'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -24,7 +25,7 @@ export class SelectTool implements Tool {
 
   /** Live status-bar guidance (see Tool.statusHint). */
   statusHint(): string {
-    return 'Click to select — drag an object to move it, drag empty space for a marquee, double-click to enter a group or component.'
+    return t`Click to select — drag an object to move it, drag empty space for a marquee, double-click to enter a group or component.`
   }
 
   /** Last snap seen on hover (for status display) */

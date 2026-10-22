@@ -476,7 +476,9 @@ class SilhouetteCompositor {
         // sRGB encode, so it lands as (0,0,0) whatever the pipeline does).
         ink: { value: new THREE.Vector3(0, 0, 0) },
       },
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- GLSL source, not copy
       vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- GLSL source, not copy
       fragmentShader: `
         varying vec2 vUv;
         uniform sampler2D tColor, tNormal, tDepth;

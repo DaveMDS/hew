@@ -51,9 +51,9 @@ pub use camera::{CameraProjection, CameraState};
 pub use document::{
     AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun,
     DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
-    FollowMePath, HistoryEntries, HistoryEntryInfo, HistoryOrigin, IngestJob, IngestProgress,
-    InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH, MaterialScope, NodeId,
-    PendingActionKind, PlaneUnits, PurgeReport,
+    FollowMePath, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
+    IngestJob, IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
+    MaterialScope, NodeId, PendingActionKind, PlaneUnits, PurgeReport,
 };
 pub use error::TopologyError;
 pub use guide::{Guide, GuideSpan};

@@ -13,9 +13,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Instant;
+
+use menu_labels::MenuLabels;
 use tauri::{
     menu::{
-        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder,
+        CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItem, MenuItemBuilder, MenuItemKind,
         PredefinedMenuItem, SubmenuBuilder,
     },
     Emitter, Manager,
@@ -26,6 +28,7 @@ use tauri::{
 // (`read_font_file` takes an opaque token, never a path).
 mod fly_cursor;
 mod fonts;
+mod menu_labels;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
 // transport, the discovery file, and the token gate. See live.rs's
@@ -87,10 +90,11 @@ mod updater {
     pub async fn run_check(app: AppHandle, interactive: bool) {
         if app.state::<UpdateGuard>().0.swap(true, Ordering::SeqCst) {
             if interactive {
+                let labels = crate::current_menu_labels(&app);
                 info_dialog(
                     &app,
-                    "Update in progress",
-                    "Hew is already checking for updates.",
+                    labels.get("updater:in-progress-title"),
+                    labels.get("updater:in-progress-body"),
                 );
             }
             return;
@@ -135,15 +139,16 @@ mod updater {
     /// in place (the `.app` bundle on macOS, the NSIS install on Windows, the
     /// AppImage on Linux).
     async fn prompt_and_install(app: AppHandle, update: tauri_plugin_updater::Update) {
+        let labels = crate::current_menu_labels(&app);
         let install = confirm(
             &app,
-            "Update available",
-            &format!(
-                "Hew {} is available — you have {}.\n\nDownload and install it now?",
-                update.version, update.current_version
-            ),
-            "Install",
-            "Later",
+            labels.get("updater:available-title"),
+            &labels
+                .get("updater:available-body")
+                .replace("{version}", &update.version)
+                .replace("{current}", &update.current_version),
+            labels.get("updater:install"),
+            labels.get("updater:later"),
         )
         .await;
         if !install {
@@ -161,16 +166,18 @@ mod updater {
         {
             error_dialog(
                 &app,
-                &format!("The update could not be installed.\n\n{err}"),
+                &labels
+                    .get("updater:failed-body")
+                    .replace("{error}", &err.to_string()),
             );
             return;
         }
         let restart = confirm(
             &app,
-            "Update installed",
-            "The update has been installed. Restart Hew now to use it?",
-            "Restart",
-            "Later",
+            labels.get("updater:installed-title"),
+            labels.get("updater:installed-body"),
+            labels.get("updater:restart"),
+            labels.get("updater:later"),
         )
         .await;
         if restart {
@@ -453,6 +460,10 @@ struct WindowStateCache {
 struct MenuHandles {
     checks: HashMap<String, CheckMenuItem<tauri::Wry>>,
     items: HashMap<String, MenuItem<tauri::Wry>>,
+    /// The macOS app-menu items Tauri supplies (About, Hide, Quit, …),
+    /// keyed `predefined:<name>`: they carry no id of their own, so
+    /// `set_menu_locale` relabels them through these handles.
+    predefined: Vec<(String, PredefinedMenuItem<tauri::Wry>)>,
 }
 
 /// In-memory desktop clipboard for Copy/Cut/Paste/Paste In Place (Lane D,
@@ -962,9 +973,10 @@ fn rebuild_window_menu_tail(app: &tauri::AppHandle, list: &[WindowInfo]) {
             guard.dynamic_count += 1;
         }
     }
+    let labels = current_menu_labels(app);
     for w in list {
         let label = if w.title.is_empty() {
-            "Untitled".to_string()
+            labels.get("fallback:untitled").to_string()
         } else {
             w.title.clone()
         };
@@ -1315,6 +1327,89 @@ fn take_pending_window_open(
         }
     }
     Some(entry)
+}
+
+/// The label table the menu bar currently shows (English if the state is
+/// somehow unavailable), for code that rebuilds part of the menu at runtime.
+fn current_menu_labels(app: &tauri::AppHandle) -> MenuLabels {
+    app.try_state::<Mutex<MenuLabels>>()
+        .and_then(|s| s.lock().ok().map(|g| g.clone()))
+        .unwrap_or_else(|| MenuLabels::for_locale("en"))
+}
+
+/// Relabel every id-bearing item under `items` from `labels`, recursing
+/// into submenus. Ids with no label entry (`recent:<path>` file names, the
+/// dynamic undo/redo text the frontend pushes) are left alone.
+fn relabel_menu_items(items: Vec<MenuItemKind<tauri::Wry>>, labels: &MenuLabels) {
+    for item in items {
+        match item {
+            MenuItemKind::MenuItem(i) => {
+                if let Some(text) = labels.lookup(i.id().as_ref()) {
+                    let _ = i.set_text(text);
+                }
+            }
+            MenuItemKind::Check(i) => {
+                if let Some(text) = labels.lookup(i.id().as_ref()) {
+                    let _ = i.set_text(text);
+                }
+            }
+            MenuItemKind::Submenu(sub) => {
+                if let Some(text) = labels.lookup(sub.id().as_ref()) {
+                    let _ = sub.set_text(text);
+                }
+                if let Ok(children) = sub.items() {
+                    relabel_menu_items(children, labels);
+                }
+            }
+            MenuItemKind::Predefined(_) | MenuItemKind::Icon(_) => {}
+        }
+    }
+}
+
+/// Switch the native menu bar to `locale`'s labels in place — no rebuild,
+/// so ids, accelerators, check states, and enabled states all survive —
+/// and remember the locale so the next launch starts in it
+/// (docs/LOCALIZATION.md "Native menus"). An unshipped locale shows
+/// English. The frontend calls this after activating a catalog; every
+/// window does, so repeated calls with the same locale must be cheap and
+/// harmless.
+#[tauri::command]
+fn set_menu_locale(app: tauri::AppHandle, locale: String) -> Result<(), String> {
+    let labels = MenuLabels::for_locale(&locale);
+    if let Ok(config_dir) = app.path().app_config_dir() {
+        menu_labels::write_persisted_locale(&config_dir, labels.locale());
+    }
+    let already = app
+        .try_state::<Mutex<MenuLabels>>()
+        .and_then(|s| s.lock().ok().map(|g| g.locale() == labels.locale()))
+        .unwrap_or(false);
+    if !already {
+        if let Some(menu) = app.menu() {
+            let items = menu.items().map_err(|e| e.to_string())?;
+            relabel_menu_items(items, &labels);
+        }
+        if let Some(state) = app.try_state::<Mutex<MenuHandles>>() {
+            if let Ok(guard) = state.lock() {
+                for (key, item) in &guard.predefined {
+                    let _ = item.set_text(labels.get(key));
+                }
+            }
+        }
+        // The shell-built tool windows carry fixed titles; the document
+        // windows retitle themselves from the webview.
+        if let Some(window) = app.get_webview_window("settings") {
+            let _ = window.set_title(labels.get("window:settings"));
+        }
+        if let Some(window) = app.get_webview_window("library") {
+            let _ = window.set_title(labels.get("win-library"));
+        }
+        if let Some(state) = app.try_state::<Mutex<MenuLabels>>() {
+            if let Ok(mut guard) = state.lock() {
+                *guard = labels;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reflect webview state into the native menu bar: `checked` drives check
@@ -2304,12 +2399,13 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     }
     // Fixed-size, per macOS Settings convention (HIG: settings windows
     // aren't resizable; each pane determines its own compact height).
+    let title = current_menu_labels(&app).get("window:settings").to_string();
     tauri::WebviewWindowBuilder::new(
         &app,
         "settings",
         tauri::WebviewUrl::App("index.html#settings".into()),
     )
-    .title("Settings")
+    .title(title)
     .inner_size(520.0, 360.0)
     .resizable(false)
     .minimizable(false)
@@ -2329,12 +2425,13 @@ async fn open_library_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("library") {
         return existing.set_focus().map_err(|e| e.to_string());
     }
+    let title = current_menu_labels(&app).get("win-library").to_string();
     tauri::WebviewWindowBuilder::new(
         &app,
         "library",
         tauri::WebviewUrl::App("index.html#library".into()),
     )
-    .title("Library")
+    .title(title)
     .inner_size(920.0, 632.0)
     .min_inner_size(640.0, 420.0)
     .resizable(true)
@@ -2500,7 +2597,7 @@ fn push_recent(path: String, app: tauri::AppHandle) -> Result<(), String> {
     guard.paths.truncate(RECENTS_MAX);
     let paths = guard.paths.clone();
     save_recents(&app, &paths);
-    rebuild_recent_submenu(&guard.submenu, &app, &paths)
+    rebuild_recent_submenu(&guard.submenu, &app, &paths, &current_menu_labels(&app))
 }
 
 /// Return the recents list (most-recent first) for the in-app web menu (Linux,
@@ -2519,7 +2616,7 @@ fn clear_recent(app: tauri::AppHandle) -> Result<(), String> {
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.paths.clear();
     save_recents(&app, &[]);
-    rebuild_recent_submenu(&guard.submenu, &app, &[])
+    rebuild_recent_submenu(&guard.submenu, &app, &[], &current_menu_labels(&app))
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,11 +2685,10 @@ fn library_get_dir() -> String {
 async fn library_choose_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let current = resolved_library_dir();
-    let dialog = app
-        .dialog()
-        .file()
-        .set_title("Choose Library Folder")
-        .set_directory(&current);
+    let title = current_menu_labels(&app)
+        .get("dialog:choose-library-folder")
+        .to_string();
+    let dialog = app.dialog().file().set_title(title).set_directory(&current);
     let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_folder())
         .await
         .map_err(|e| e.to_string())?;
@@ -2743,6 +2839,7 @@ fn rebuild_recent_submenu(
     submenu: &tauri::menu::Submenu<tauri::Wry>,
     app: &tauri::AppHandle,
     paths: &[String],
+    labels: &MenuLabels,
 ) -> Result<(), String> {
     // Remove every existing item.
     while let Ok(Some(_)) = submenu.remove_at(0) {}
@@ -2760,7 +2857,7 @@ fn rebuild_recent_submenu(
     let sep = PredefinedMenuItem::separator(app).map_err(|e| e.to_string())?;
     submenu.append(&sep).map_err(|e| e.to_string())?;
 
-    let clear = MenuItemBuilder::with_id("recent-clear", "Clear Recent")
+    let clear = MenuItemBuilder::with_id("recent-clear", labels.get("recent-clear"))
         .build(app)
         .map_err(|e| e.to_string())?;
     submenu.append(&clear).map_err(|e| e.to_string())?;
@@ -2848,6 +2945,7 @@ fn main() {
             library_popup_menu,
             library_confirm,
             sync_menu_state,
+            set_menu_locale,
             clipboard_set,
             clipboard_get,
             push_recent,
@@ -2900,33 +2998,89 @@ fn main() {
             let mut checks: HashMap<String, CheckMenuItem<tauri::Wry>> = HashMap::new();
             let mut gated: HashMap<String, MenuItem<tauri::Wry>> = HashMap::new();
 
+            // Every label below comes from the per-locale table
+            // (menu_labels.rs; docs/LOCALIZATION.md "Native menus"), in the
+            // language the last session recorded so the first frame is
+            // already right. `set_menu_locale` relabels in place later.
+            let labels = MenuLabels::for_locale(
+                menu_labels::read_persisted_locale(handle.path().app_config_dir().ok().as_deref())
+                    .as_deref()
+                    .unwrap_or("en"),
+            );
+            // A macro rather than a closure: a closure returning a borrow of
+            // `labels` cannot name that lifetime, and every use here is a
+            // plain inline lookup.
+            macro_rules! lbl {
+                ($key:expr) => {
+                    labels.get($key)
+                };
+            }
+            let mut predefined: Vec<(String, PredefinedMenuItem<tauri::Wry>)> = Vec::new();
+            let mut predef = |key: &str, item: PredefinedMenuItem<tauri::Wry>| {
+                predefined.push((key.to_string(), item.clone()));
+                item
+            };
+            let predef_about = predef(
+                "predefined:about",
+                PredefinedMenuItem::about(handle, Some(lbl!("predefined:about")), None)?,
+            );
+            let predef_services = predef(
+                "predefined:services",
+                PredefinedMenuItem::services(handle, Some(lbl!("predefined:services")))?,
+            );
+            let predef_hide = predef(
+                "predefined:hide",
+                PredefinedMenuItem::hide(handle, Some(lbl!("predefined:hide")))?,
+            );
+            let predef_hide_others = predef(
+                "predefined:hide-others",
+                PredefinedMenuItem::hide_others(handle, Some(lbl!("predefined:hide-others")))?,
+            );
+            let predef_show_all = predef(
+                "predefined:show-all",
+                PredefinedMenuItem::show_all(handle, Some(lbl!("predefined:show-all")))?,
+            );
+            let predef_quit = predef(
+                "predefined:quit",
+                PredefinedMenuItem::quit(handle, Some(lbl!("predefined:quit")))?,
+            );
+            let predef_minimize = predef(
+                "predefined:minimize",
+                PredefinedMenuItem::minimize(handle, Some(lbl!("predefined:minimize")))?,
+            );
+            let predef_maximize = predef(
+                "predefined:maximize",
+                PredefinedMenuItem::maximize(handle, Some(lbl!("predefined:maximize")))?,
+            );
+
             // ----------------------------------------------------------------
             // App menu (macOS — About + Quit)
             // ----------------------------------------------------------------
-            let app_settings = MenuItemBuilder::with_id("app-settings", "Settings…")
+            let app_settings = MenuItemBuilder::with_id("app-settings", lbl!("app-settings"))
                 .accelerator("CmdOrCtrl+,")
                 .build(handle)?;
 
             // "Check for Updates…" follows About (macOS convention), present
             // only in updater-enabled builds.
-            let app_menu_builder = SubmenuBuilder::new(handle, "Hew")
-                .item(&PredefinedMenuItem::about(handle, None, None)?);
+            let app_menu_builder =
+                SubmenuBuilder::with_id(handle, "submenu:app", lbl!("submenu:app"))
+                    .item(&predef_about);
             #[cfg(feature = "updater")]
             let app_menu_builder = app_menu_builder.item(
-                &MenuItemBuilder::with_id("app-check-updates", "Check for Updates…")
+                &MenuItemBuilder::with_id("app-check-updates", lbl!("app-check-updates"))
                     .build(handle)?,
             );
             let app_menu = app_menu_builder
                 .separator()
                 .item(&app_settings)
                 .separator()
-                .item(&PredefinedMenuItem::services(handle, None)?)
+                .item(&predef_services)
                 .separator()
-                .item(&PredefinedMenuItem::hide(handle, None)?)
-                .item(&PredefinedMenuItem::hide_others(handle, None)?)
-                .item(&PredefinedMenuItem::show_all(handle, None)?)
+                .item(&predef_hide)
+                .item(&predef_hide_others)
+                .item(&predef_show_all)
                 .separator()
-                .item(&PredefinedMenuItem::quit(handle, None)?)
+                .item(&predef_quit)
                 .build()?;
 
             // ----------------------------------------------------------------
@@ -2936,30 +3090,40 @@ fn main() {
 
             // Build an empty submenu first, then populate via the helper so
             // the rebuild logic stays in one place.
-            let open_recent_submenu = SubmenuBuilder::new(handle, "Open Recent").build()?;
-            rebuild_recent_submenu(&open_recent_submenu, handle, &recents)
+            let open_recent_submenu =
+                SubmenuBuilder::with_id(handle, "submenu:open-recent", lbl!("submenu:open-recent"))
+                    .build()?;
+            rebuild_recent_submenu(&open_recent_submenu, handle, &recents, &labels)
                 .map_err(|e| tauri::Error::Anyhow(anyhow::anyhow!(e)))?;
 
             // ----------------------------------------------------------------
             // File menu
             // ----------------------------------------------------------------
-            let file_new = MenuItemBuilder::with_id("file-new", "New")
+            let file_new = MenuItemBuilder::with_id("file-new", lbl!("file-new"))
                 .accelerator("CmdOrCtrl+N")
                 .build(handle)?;
-            let file_open = MenuItemBuilder::with_id("file-open", "Open…")
+            let file_open = MenuItemBuilder::with_id("file-open", lbl!("file-open"))
                 .accelerator("CmdOrCtrl+O")
                 .build(handle)?;
             // Registered as a GATED item: Import refuses while an explode
             // session is open (ExplodeSessionScope), and the frontend's
             // sync_menu_state push disables the native item to match the
             // web MenuBar/palette gating.
-            let file_import = gated_item(handle, &mut gated, "file-import", "Import…", None, None)?;
+            let file_import = gated_item(
+                handle,
+                &mut gated,
+                "file-import",
+                lbl!("file-import"),
+                None,
+                None,
+            )?;
             // Export… opens the unified Export dialog (format — glTF/GLB or
             // STL — chosen there); there used to be a second "Export STL…"
             // item here, but the design calls for format choice handled in-dialog like
             // every other app.
-            let file_export = MenuItemBuilder::with_id("file-export", "Export…").build(handle)?;
-            let file_print = MenuItemBuilder::with_id("file-print", "Print…")
+            let file_export =
+                MenuItemBuilder::with_id("file-export", lbl!("file-export")).build(handle)?;
+            let file_print = MenuItemBuilder::with_id("file-print", lbl!("file-print"))
                 .accelerator("CmdOrCtrl+P")
                 .build(handle)?;
             // "Open on Phone…" (qr.rs, workers/share-relay/README.md):
@@ -2971,11 +3135,12 @@ fn main() {
             // `openOnPhoneDisabled` gating, App.tsx's "open-on-phone"
             // action).
             let file_open_on_phone =
-                MenuItemBuilder::with_id("file-open-on-phone", "Open on Phone…").build(handle)?;
-            let file_save = MenuItemBuilder::with_id("file-save", "Save")
+                MenuItemBuilder::with_id("file-open-on-phone", lbl!("file-open-on-phone"))
+                    .build(handle)?;
+            let file_save = MenuItemBuilder::with_id("file-save", lbl!("file-save"))
                 .accelerator("CmdOrCtrl+S")
                 .build(handle)?;
-            let file_save_as = MenuItemBuilder::with_id("file-save-as", "Save As…")
+            let file_save_as = MenuItemBuilder::with_id("file-save-as", lbl!("file-save-as"))
                 .accelerator("Shift+CmdOrCtrl+S")
                 .build(handle)?;
             // Prompts for a name (SaveToLibraryPopover's centered "modal"
@@ -2985,7 +3150,7 @@ fn main() {
             // a platform without a library backend, same posture as every
             // other native item that has no web-gated counterpart.
             let file_save_to_library =
-                MenuItemBuilder::with_id("file-save-to-library", "Save to Library…")
+                MenuItemBuilder::with_id("file-save-to-library", lbl!("file-save-to-library"))
                     .build(handle)?;
             // Deletes every unused palette material and component
             // definition as one undoable step (v1.1 assets lane). No
@@ -2994,8 +3159,9 @@ fn main() {
             // native item just opens that same flow (App.tsx's
             // "purge-unused" action).
             let file_purge_unused =
-                MenuItemBuilder::with_id("file-purge-unused", "Purge Unused…").build(handle)?;
-            let file_close = MenuItemBuilder::with_id("file-close", "Close")
+                MenuItemBuilder::with_id("file-purge-unused", lbl!("file-purge-unused"))
+                    .build(handle)?;
+            let file_close = MenuItemBuilder::with_id("file-close", lbl!("file-close"))
                 .accelerator("CmdOrCtrl+W")
                 .build(handle)?;
 
@@ -3003,7 +3169,7 @@ fn main() {
             // (New/Open/Open Recent), then Close + the save block, then
             // interchange (Import/Export), then sharing, with Print… last —
             // as the platform guidelines put it.
-            let file_menu = SubmenuBuilder::new(handle, "File")
+            let file_menu = SubmenuBuilder::with_id(handle, "submenu:file", lbl!("submenu:file"))
                 .item(&file_new)
                 .item(&file_open)
                 .item(&open_recent_submenu)
@@ -3035,7 +3201,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-undo",
-                "Undo",
+                lbl!("edit-undo"),
                 Some("CmdOrCtrl+Z"),
                 Some("CmdOrCtrl+Z"),
             )?;
@@ -3043,7 +3209,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-redo",
-                "Redo",
+                lbl!("edit-redo"),
                 Some("Shift+CmdOrCtrl+Z"),
                 Some("Shift+CmdOrCtrl+Z"),
             )?;
@@ -3053,7 +3219,14 @@ fn main() {
             // is scoped to the Select tool and guards typing contexts. Relying
             // on the JS handler for the keyboard path is the documented
             // fallback when the menu lib's accelerator can't be scoped.
-            let edit_delete = gated_item(handle, &mut gated, "edit-delete", "Delete", None, None)?;
+            let edit_delete = gated_item(
+                handle,
+                &mut gated,
+                "edit-delete",
+                lbl!("edit-delete"),
+                None,
+                None,
+            )?;
             // Cut / Copy / Select All / Paste In Place carry their standard
             // key equivalents on macOS ONLY, ungated there (`edit_item`):
             // WebKit hands a Command key equivalent to the page — and to a
@@ -3074,24 +3247,42 @@ fn main() {
             // table runs BEFORE the webview, so these items stay
             // accelerator-free and gated there (the JS handler owns the
             // keyboard path), exactly as before.
-            let edit_cut = edit_item(handle, &mut gated, "edit-cut", "Cut", "CmdOrCtrl+X")?;
-            let edit_copy = edit_item(handle, &mut gated, "edit-copy", "Copy", "CmdOrCtrl+C")?;
-            let edit_paste = edit_item(handle, &mut gated, "edit-paste", "Paste", "CmdOrCtrl+V")?;
+            let edit_cut = edit_item(
+                handle,
+                &mut gated,
+                "edit-cut",
+                lbl!("edit-cut"),
+                "CmdOrCtrl+X",
+            )?;
+            let edit_copy = edit_item(
+                handle,
+                &mut gated,
+                "edit-copy",
+                lbl!("edit-copy"),
+                "CmdOrCtrl+C",
+            )?;
+            let edit_paste = edit_item(
+                handle,
+                &mut gated,
+                "edit-paste",
+                lbl!("edit-paste"),
+                "CmdOrCtrl+V",
+            )?;
             let edit_paste_in_place = edit_item(
                 handle,
                 &mut gated,
                 "edit-paste-in-place",
-                "Paste In Place",
+                lbl!("edit-paste-in-place"),
                 "Shift+CmdOrCtrl+V",
             )?;
             let edit_select_all = accel(
-                MenuItemBuilder::with_id("edit-select-all", "Select All"),
+                MenuItemBuilder::with_id("edit-select-all", lbl!("edit-select-all")),
                 Some("CmdOrCtrl+A"),
                 None,
             )
             .build(handle)?;
             let edit_select_none = accel(
-                MenuItemBuilder::with_id("edit-select-none", "Select None"),
+                MenuItemBuilder::with_id("edit-select-none", lbl!("edit-select-none")),
                 Some("Shift+CmdOrCtrl+A"),
                 None,
             )
@@ -3100,10 +3291,10 @@ fn main() {
             // Ctrl+Shift+I is already claimed by Hew's Outliner toggle, so
             // Invert Selection is menu- and palette-only.
             let edit_invert_selection =
-                MenuItemBuilder::with_id("edit-invert-selection", "Invert Selection")
+                MenuItemBuilder::with_id("edit-invert-selection", lbl!("edit-invert-selection"))
                     .build(handle)?;
             let edit_delete_guides =
-                MenuItemBuilder::with_id("edit-delete-guides", "Delete Guide Lines")
+                MenuItemBuilder::with_id("edit-delete-guides", lbl!("edit-delete-guides"))
                     .build(handle)?;
 
             // Object commands (previously buttons inside the Outliner panel —
@@ -3113,7 +3304,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-group",
-                "Group",
+                lbl!("edit-group"),
                 Some("CmdOrCtrl+G"),
                 Some("CmdOrCtrl+G"),
             )?;
@@ -3121,7 +3312,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-ungroup",
-                "Ungroup",
+                lbl!("edit-ungroup"),
                 Some("Shift+CmdOrCtrl+G"),
                 Some("Shift+CmdOrCtrl+G"),
             )?;
@@ -3129,7 +3320,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-make-component",
-                "Make Component",
+                lbl!("edit-make-component"),
                 None,
                 None,
             )?;
@@ -3137,12 +3328,18 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-place-copy",
-                "Place Copy",
+                lbl!("edit-place-copy"),
                 None,
                 None,
             )?;
-            let edit_explode =
-                gated_item(handle, &mut gated, "edit-explode", "Explode", None, None)?;
+            let edit_explode = gated_item(
+                handle,
+                &mut gated,
+                "edit-explode",
+                lbl!("edit-explode"),
+                None,
+                None,
+            )?;
             // The contextual dock's Save to Library verb, here too so it
             // stays reachable with the dock turned off (View ▸ Contextual
             // Dock). Distinct from File ▸ Save to Library…, which saves the
@@ -3151,7 +3348,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-save-selection-to-library",
-                "Save Selection to Library…",
+                lbl!("edit-save-selection-to-library"),
                 None,
                 None,
             )?;
@@ -3159,18 +3356,31 @@ fn main() {
                 handle,
                 &mut gated,
                 "edit-make-unique",
-                "Make Unique",
+                lbl!("edit-make-unique"),
                 None,
                 None,
             )?;
-            let edit_union = gated_item(handle, &mut gated, "edit-union", "Union", None, None)?;
-            let edit_subtract =
-                gated_item(handle, &mut gated, "edit-subtract", "Subtract", None, None)?;
+            let edit_union = gated_item(
+                handle,
+                &mut gated,
+                "edit-union",
+                lbl!("edit-union"),
+                None,
+                None,
+            )?;
+            let edit_subtract = gated_item(
+                handle,
+                &mut gated,
+                "edit-subtract",
+                lbl!("edit-subtract"),
+                None,
+                None,
+            )?;
             let edit_intersect = gated_item(
                 handle,
                 &mut gated,
                 "edit-intersect",
-                "Intersect",
+                lbl!("edit-intersect"),
                 None,
                 None,
             )?;
@@ -3192,7 +3402,7 @@ fn main() {
             // Edit stays textbook HIG (undo block, delete/select block, then
             // the specialized guide cleanup); everything object-level lives in
             // the Object menu below.
-            let edit_menu = SubmenuBuilder::new(handle, "Edit")
+            let edit_menu = SubmenuBuilder::with_id(handle, "submenu:edit", lbl!("submenu:edit"))
                 .item(&edit_undo)
                 .item(&edit_redo)
                 .separator()
@@ -3221,42 +3431,67 @@ fn main() {
             // Make Solid… — always enabled (it works on the selection, or the whole
             // model when nothing is selected), so a plain item rather than `gated_item`.
             let object_make_solid =
-                MenuItemBuilder::with_id("object-make-solid", "Make Solid…").build(handle)?;
+                MenuItemBuilder::with_id("object-make-solid", lbl!("object-make-solid"))
+                    .build(handle)?;
             // Model Health… opens the floating window (docs/design/import-health.md),
             // or brings it forward; also always enabled, so a plain item.
             let object_model_health =
-                MenuItemBuilder::with_id("object-model-health", "Model Health…").build(handle)?;
-            let object_menu = SubmenuBuilder::new(handle, "Object")
-                .item(&edit_group)
-                .item(&edit_ungroup)
-                .separator()
-                .item(&edit_make_component)
-                .item(&edit_make_unique)
-                .item(&edit_place_copy)
-                .item(&edit_explode)
-                .item(&edit_save_selection_to_library)
-                .separator()
-                .item(&edit_union)
-                .item(&edit_subtract)
-                .item(&edit_intersect)
-                .separator()
-                .item(&object_make_solid)
-                .item(&object_model_health)
-                .build()?;
+                MenuItemBuilder::with_id("object-model-health", lbl!("object-model-health"))
+                    .build(handle)?;
+            let object_menu =
+                SubmenuBuilder::with_id(handle, "submenu:object", lbl!("submenu:object"))
+                    .item(&edit_group)
+                    .item(&edit_ungroup)
+                    .separator()
+                    .item(&edit_make_component)
+                    .item(&edit_make_unique)
+                    .item(&edit_place_copy)
+                    .item(&edit_explode)
+                    .item(&edit_save_selection_to_library)
+                    .separator()
+                    .item(&edit_union)
+                    .item(&edit_subtract)
+                    .item(&edit_intersect)
+                    .separator()
+                    .item(&object_make_solid)
+                    .item(&object_model_health)
+                    .build()?;
 
             // ----------------------------------------------------------------
             // View menu
             // ----------------------------------------------------------------
-            let view_axes = check_item(handle, &mut checks, "view-axes", "Axes", None, None)?;
+            let view_axes = check_item(
+                handle,
+                &mut checks,
+                "view-axes",
+                lbl!("view-axes"),
+                None,
+                None,
+            )?;
             // Reset the movable drawing axes (tool-parity §4) back to world
             // identity — a plain action, not a checkable toggle like Axes/
             // Grid/Guides above, so it's built with `MenuItemBuilder`
             // directly (same shape as "edit-delete-guides" below) rather
             // than `check_item`.
             let view_reset_axes =
-                MenuItemBuilder::with_id("view-reset-axes", "Reset Drawing Axes").build(handle)?;
-            let view_grid = check_item(handle, &mut checks, "view-grid", "Grid", None, None)?;
-            let view_guides = check_item(handle, &mut checks, "view-guides", "Guides", None, None)?;
+                MenuItemBuilder::with_id("view-reset-axes", lbl!("view-reset-axes"))
+                    .build(handle)?;
+            let view_grid = check_item(
+                handle,
+                &mut checks,
+                "view-grid",
+                lbl!("view-grid"),
+                None,
+                None,
+            )?;
+            let view_guides = check_item(
+                handle,
+                &mut checks,
+                "view-guides",
+                lbl!("view-guides"),
+                None,
+                None,
+            )?;
             // Section Plane's active (clipping) toggle — moved here from Tools
             // (section-plane-polish D3); same "toggle-section-active" dispatch
             // it always had. Checked only when a section is BOTH placed and
@@ -3271,7 +3506,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "view-section-plane",
-                "Section Cut",
+                lbl!("view-section-plane"),
                 None,
                 None,
             )?;
@@ -3283,7 +3518,7 @@ fn main() {
             // SketchUp key scheme. (Ctrl+K still opens the palette off-macOS
             // as an unadvertised alias — the JS handler keeps it.)
             let view_palette = accel(
-                MenuItemBuilder::with_id("view-palette", "Command Palette…"),
+                MenuItemBuilder::with_id("view-palette", lbl!("view-palette")),
                 Some("CmdOrCtrl+/"),
                 Some("CmdOrCtrl+/"),
             )
@@ -3298,16 +3533,23 @@ fn main() {
                 handle,
                 &mut checks,
                 "view-compact-rail",
-                "Compact Tool Rail",
+                lbl!("view-compact-rail"),
                 None,
                 None,
             )?;
-            let view_tray = check_item(handle, &mut checks, "view-tray", "Tray", None, None)?;
+            let view_tray = check_item(
+                handle,
+                &mut checks,
+                "view-tray",
+                lbl!("view-tray"),
+                None,
+                None,
+            )?;
             let view_dock = check_item(
                 handle,
                 &mut checks,
                 "view-dock",
-                "Contextual Dock",
+                lbl!("view-dock"),
                 None,
                 None,
             )?;
@@ -3320,7 +3562,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-model-info",
-                "Model Info",
+                lbl!("win-model-info"),
                 Some("Shift+CmdOrCtrl+I"),
                 Some("Shift+CmdOrCtrl+I"),
             )?;
@@ -3328,7 +3570,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-object-info",
-                "Object Info",
+                lbl!("win-object-info"),
                 Some("Shift+CmdOrCtrl+O"),
                 Some("Shift+CmdOrCtrl+O"),
             )?;
@@ -3336,7 +3578,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-materials",
-                "Materials",
+                lbl!("win-materials"),
                 Some("Shift+CmdOrCtrl+C"),
                 Some("Shift+CmdOrCtrl+C"),
             )?;
@@ -3344,7 +3586,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-components",
-                "Components",
+                lbl!("win-components"),
                 Some("Shift+CmdOrCtrl+M"),
                 Some("Shift+CmdOrCtrl+M"),
             )?;
@@ -3352,7 +3594,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-tags",
-                "Tags",
+                lbl!("win-tags"),
                 Some("Shift+CmdOrCtrl+T"),
                 Some("Shift+CmdOrCtrl+T"),
             )?;
@@ -3364,15 +3606,21 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-scenes",
-                "Scenes Panel",
+                lbl!("win-scenes"),
                 None,
                 None,
             )?;
             // Changes panel (Lane C, docs/design/v1.1-cycle.md): this
             // session's undo/redo entries since the last save. No
             // accelerator, same reasoning as win-scenes/win-debug-log.
-            let win_changes =
-                check_item(handle, &mut checks, "win-changes", "Changes", None, None)?;
+            let win_changes = check_item(
+                handle,
+                &mut checks,
+                "win-changes",
+                lbl!("win-changes"),
+                None,
+                None,
+            )?;
 
             // View ▸ Scenes (docs/design/scenes.md §5): Add/Update/Next/
             // Previous plus the Scene Transitions checkmark (a SPEC.md
@@ -3383,24 +3631,31 @@ fn main() {
             // platform (no CmdOrCtrl, so it isn't gated behind
             // `nativeMenuOwnsModCombos`) — a native accelerator here would
             // double-fire alongside it on macOS.
-            let scenes_add = MenuItemBuilder::with_id("scenes-add", "Add Scene").build(handle)?;
+            let scenes_add =
+                MenuItemBuilder::with_id("scenes-add", lbl!("scenes-add")).build(handle)?;
             let scenes_update = gated_item(
                 handle,
                 &mut gated,
                 "scenes-update",
-                "Update Scene",
+                lbl!("scenes-update"),
                 None,
                 None,
             )?;
             let _ = scenes_update.set_enabled(false); // nothing active at launch
-            let scenes_next =
-                gated_item(handle, &mut gated, "scenes-next", "Next Scene", None, None)?;
+            let scenes_next = gated_item(
+                handle,
+                &mut gated,
+                "scenes-next",
+                lbl!("scenes-next"),
+                None,
+                None,
+            )?;
             let _ = scenes_next.set_enabled(false); // no Scenes at launch
             let scenes_previous = gated_item(
                 handle,
                 &mut gated,
                 "scenes-previous",
-                "Previous Scene",
+                lbl!("scenes-previous"),
                 None,
                 None,
             )?;
@@ -3409,23 +3664,24 @@ fn main() {
                 handle,
                 &mut checks,
                 "scenes-transitions",
-                "Scene Transitions",
+                lbl!("scenes-transitions"),
                 None,
                 None,
             )?;
-            let scenes_menu = SubmenuBuilder::new(handle, "Scenes")
-                .item(&win_scenes)
-                .item(&PredefinedMenuItem::separator(handle)?)
-                .item(&scenes_add)
-                .item(&scenes_update)
-                .item(&PredefinedMenuItem::separator(handle)?)
-                .item(&scenes_next)
-                .item(&scenes_previous)
-                .item(&PredefinedMenuItem::separator(handle)?)
-                .item(&scenes_transitions)
-                .build()?;
+            let scenes_menu =
+                SubmenuBuilder::with_id(handle, "submenu:scenes", lbl!("submenu:scenes"))
+                    .item(&win_scenes)
+                    .item(&PredefinedMenuItem::separator(handle)?)
+                    .item(&scenes_add)
+                    .item(&scenes_update)
+                    .item(&PredefinedMenuItem::separator(handle)?)
+                    .item(&scenes_next)
+                    .item(&scenes_previous)
+                    .item(&PredefinedMenuItem::separator(handle)?)
+                    .item(&scenes_transitions)
+                    .build()?;
 
-            let view_menu = SubmenuBuilder::new(handle, "View")
+            let view_menu = SubmenuBuilder::with_id(handle, "submenu:view", lbl!("submenu:view"))
                 .item(&view_axes)
                 .item(&view_reset_axes)
                 .item(&view_grid)
@@ -3455,7 +3711,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "draw-rectangle",
-                "Rectangle",
+                lbl!("draw-rectangle"),
                 Some("CmdOrCtrl+K"),
                 Some("R"),
             )?;
@@ -3464,15 +3720,21 @@ fn main() {
                 handle,
                 &mut checks,
                 "draw-circle",
-                "Circle",
+                lbl!("draw-circle"),
                 None,
                 Some("C"),
             )?;
 
             // Polygon: SketchUp assigns no default key (it lives in the
             // shapes flyout) — no accelerator on either platform.
-            let draw_polygon =
-                check_item(handle, &mut checks, "draw-polygon", "Polygon", None, None)?;
+            let draw_polygon = check_item(
+                handle,
+                &mut checks,
+                "draw-polygon",
+                lbl!("draw-polygon"),
+                None,
+                None,
+            )?;
 
             // Arc : Cmd+J is SketchUp's arc-family
             // key on macOS, even though Hew's Arc is the simpler 2-point
@@ -3481,7 +3743,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "draw-arc",
-                "Arc",
+                lbl!("draw-arc"),
                 Some("CmdOrCtrl+J"),
                 Some("A"),
             )?;
@@ -3490,7 +3752,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "draw-line",
-                "Line",
+                lbl!("draw-line"),
                 Some("CmdOrCtrl+L"),
                 Some("L"),
             )?;
@@ -3501,14 +3763,20 @@ fn main() {
             // matches the web MenuBar and command palette (docs/design/3d-text.md).
             // Registered as a GATED item like Import above: 3D Text refuses
             // while an explode session is open.
-            let draw_3d_text =
-                gated_item(handle, &mut gated, "draw-3d-text", "3D Text…", None, None)?;
+            let draw_3d_text = gated_item(
+                handle,
+                &mut gated,
+                "draw-3d-text",
+                lbl!("draw-3d-text"),
+                None,
+                None,
+            )?;
 
             // Flat, in two groups: stroke tools (open paths), then closed
             // shapes — future curve tools join the first group, new
             // primitives the second. Submenus return only if the menu ever
             // outgrows ~10 items (the old "Lines" submenu held ONE item).
-            let draw_menu = SubmenuBuilder::new(handle, "Draw")
+            let draw_menu = SubmenuBuilder::with_id(handle, "submenu:draw", lbl!("submenu:draw"))
                 .item(&draw_line)
                 .item(&draw_arc)
                 .separator()
@@ -3526,17 +3794,23 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-select",
-                "Select",
+                lbl!("tool-select"),
                 None,
                 Some("Space"),
             )?;
-            let tool_paint =
-                check_item(handle, &mut checks, "tool-paint", "Paint", None, Some("B"))?;
+            let tool_paint = check_item(
+                handle,
+                &mut checks,
+                "tool-paint",
+                lbl!("tool-paint"),
+                None,
+                Some("B"),
+            )?;
             let tool_position_texture = check_item(
                 handle,
                 &mut checks,
                 "tool-position-texture",
-                "Position Texture",
+                lbl!("tool-position-texture"),
                 None,
                 None,
             )?;
@@ -3544,7 +3818,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-move",
-                "Move",
+                lbl!("tool-move"),
                 Some("CmdOrCtrl+0"),
                 Some("M"),
             )?;
@@ -3552,7 +3826,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-rotate",
-                "Rotate",
+                lbl!("tool-rotate"),
                 Some("CmdOrCtrl+8"),
                 Some("Q"),
             )?;
@@ -3560,7 +3834,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-scale",
-                "Scale",
+                lbl!("tool-scale"),
                 Some("CmdOrCtrl+9"),
                 Some("S"),
             )?;
@@ -3568,7 +3842,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-pushpull",
-                "Push/Pull",
+                lbl!("tool-pushpull"),
                 Some("CmdOrCtrl+="),
                 Some("P"),
             )?;
@@ -3576,7 +3850,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-follow-me",
-                "Follow Me",
+                lbl!("tool-follow-me"),
                 None,
                 None,
             )?;
@@ -3585,7 +3859,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-offset",
-                "Offset",
+                lbl!("tool-offset"),
                 None,
                 Some("F"),
             )?;
@@ -3593,7 +3867,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-tape-measure",
-                "Tape Measure",
+                lbl!("tool-tape-measure"),
                 Some("CmdOrCtrl+D"),
                 Some("T"),
             )?;
@@ -3601,7 +3875,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-dimension",
-                "Dimension",
+                lbl!("tool-dimension"),
                 None,
                 None,
             )?;
@@ -3609,16 +3883,23 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-protractor",
-                "Protractor",
+                lbl!("tool-protractor"),
                 None,
                 None,
             )?;
-            let tool_slice = check_item(handle, &mut checks, "tool-slice", "Slice", None, None)?;
+            let tool_slice = check_item(
+                handle,
+                &mut checks,
+                "tool-slice",
+                lbl!("tool-slice"),
+                None,
+                None,
+            )?;
             let tool_section_plane = check_item(
                 handle,
                 &mut checks,
                 "tool-section-plane",
-                "Section Plane",
+                lbl!("tool-section-plane"),
                 None,
                 None,
             )?;
@@ -3626,42 +3907,56 @@ fn main() {
                 handle,
                 &mut checks,
                 "tool-edit-vertex",
-                "Edit Vertex",
+                lbl!("tool-edit-vertex"),
                 None,
                 None,
             )?;
-            let tool_axes =
-                check_item(handle, &mut checks, "tool-axes", "Drawing Axes", None, None)?;
-            let tool_text = check_item(handle, &mut checks, "tool-text", "Text", None, None)?;
+            let tool_axes = check_item(
+                handle,
+                &mut checks,
+                "tool-axes",
+                lbl!("tool-axes"),
+                None,
+                None,
+            )?;
+            let tool_text = check_item(
+                handle,
+                &mut checks,
+                "tool-text",
+                lbl!("tool-text"),
+                None,
+                None,
+            )?;
 
             // Grouped by job, so future tools have an obvious slot: select,
             // transform (mirror/array variants land here), shape geometry
             // (chamfer/fillet land here), measure & annotate, materials,
             // model-space utilities.
-            let tools_menu = SubmenuBuilder::new(handle, "Tools")
-                .item(&tool_select)
-                .separator()
-                .item(&tool_move)
-                .item(&tool_rotate)
-                .item(&tool_scale)
-                .separator()
-                .item(&tool_pushpull)
-                .item(&tool_follow_me)
-                .item(&tool_offset)
-                .item(&tool_slice)
-                .item(&tool_edit_vertex)
-                .separator()
-                .item(&tool_tape_measure)
-                .item(&tool_protractor)
-                .item(&tool_dimension)
-                .item(&tool_text)
-                .separator()
-                .item(&tool_paint)
-                .item(&tool_position_texture)
-                .separator()
-                .item(&tool_axes)
-                .item(&tool_section_plane)
-                .build()?;
+            let tools_menu =
+                SubmenuBuilder::with_id(handle, "submenu:tools", lbl!("submenu:tools"))
+                    .item(&tool_select)
+                    .separator()
+                    .item(&tool_move)
+                    .item(&tool_rotate)
+                    .item(&tool_scale)
+                    .separator()
+                    .item(&tool_pushpull)
+                    .item(&tool_follow_me)
+                    .item(&tool_offset)
+                    .item(&tool_slice)
+                    .item(&tool_edit_vertex)
+                    .separator()
+                    .item(&tool_tape_measure)
+                    .item(&tool_protractor)
+                    .item(&tool_dimension)
+                    .item(&tool_text)
+                    .separator()
+                    .item(&tool_paint)
+                    .item(&tool_position_texture)
+                    .separator()
+                    .item(&tool_axes)
+                    .item(&tool_section_plane)
+                    .build()?;
 
             // ----------------------------------------------------------------
             // Camera menu
@@ -3673,7 +3968,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "cam-orbit",
-                "Orbit",
+                lbl!("cam-orbit"),
                 Some("CmdOrCtrl+B"),
                 Some("O"),
             )?;
@@ -3681,7 +3976,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "cam-pan",
-                "Pan",
+                lbl!("cam-pan"),
                 Some("CmdOrCtrl+R"),
                 Some("H"),
             )?;
@@ -3689,7 +3984,7 @@ fn main() {
                 handle,
                 &mut checks,
                 "cam-zoom",
-                "Zoom",
+                lbl!("cam-zoom"),
                 Some("CmdOrCtrl+\\"),
                 Some("Z"),
             )?;
@@ -3704,16 +3999,23 @@ fn main() {
                 handle,
                 &mut checks,
                 "cam-position-camera",
-                "Position Camera",
+                lbl!("cam-position-camera"),
                 None,
                 None,
             )?;
-            let cam_walk = check_item(handle, &mut checks, "cam-walk", "Walk", None, None)?;
+            let cam_walk = check_item(
+                handle,
+                &mut checks,
+                "cam-walk",
+                lbl!("cam-walk"),
+                None,
+                None,
+            )?;
             let cam_look_around = check_item(
                 handle,
                 &mut checks,
                 "cam-look-around",
-                "Look Around",
+                lbl!("cam-look-around"),
                 None,
                 None,
             )?;
@@ -3722,7 +4024,7 @@ fn main() {
             // LATCHES the same flight on for trackpads (§10) — a CHECK item
             // (on/off, synced from the webview), not a tool. No accelerator:
             // its keys (W A S D Q E) are live only while flying.
-            let cam_fly = check_item(handle, &mut checks, "cam-fly", "Fly", None, None)?;
+            let cam_fly = check_item(handle, &mut checks, "cam-fly", lbl!("cam-fly"), None, None)?;
             // Zoom Window (docs/design/camera.md §3): one-shot rectangle-drag
             // reframe, springs back to Select — no default shortcut in v1
             // (SketchUp ships none for it either), same as the tool registry.
@@ -3732,9 +4034,11 @@ fn main() {
             // (matches the web `MenuBar`'s plain `MenuItem` for the same
             // entry).
             let cam_zoom_window =
-                MenuItemBuilder::with_id("cam-zoom-window", "Zoom Window").build(handle)?;
+                MenuItemBuilder::with_id("cam-zoom-window", lbl!("cam-zoom-window"))
+                    .build(handle)?;
             let cam_zoom_extents =
-                MenuItemBuilder::with_id("cam-zoom-extents", "Zoom Extents").build(handle)?;
+                MenuItemBuilder::with_id("cam-zoom-extents", lbl!("cam-zoom-extents"))
+                    .build(handle)?;
             // No standalone fov-entry menu item (camera-playtest2.md §2 —
             // Kurt's playtest call): the lens is reachable only through
             // Zoom (typed-degree/mm entry, or Shift-drag/wheel — design
@@ -3745,48 +4049,59 @@ fn main() {
                 handle,
                 &mut checks,
                 "cam-parallel-projection",
-                "Parallel Projection",
+                lbl!("cam-parallel-projection"),
                 None,
                 None,
             )?;
 
             // Standard Views — axis-aligned + isometric framings.
-            let view_top = MenuItemBuilder::with_id("cam-view-top", "Top").build(handle)?;
-            let view_bottom =
-                MenuItemBuilder::with_id("cam-view-bottom", "Bottom").build(handle)?;
-            let view_front = MenuItemBuilder::with_id("cam-view-front", "Front").build(handle)?;
-            let view_back = MenuItemBuilder::with_id("cam-view-back", "Back").build(handle)?;
-            let view_left = MenuItemBuilder::with_id("cam-view-left", "Left").build(handle)?;
-            let view_right = MenuItemBuilder::with_id("cam-view-right", "Right").build(handle)?;
-            let view_iso = MenuItemBuilder::with_id("cam-view-iso", "Iso").build(handle)?;
-            let standard_views = SubmenuBuilder::new(handle, "Standard Views")
-                .item(&view_top)
-                .item(&view_bottom)
-                .item(&view_front)
-                .item(&view_back)
-                .item(&view_left)
-                .item(&view_right)
-                .separator()
-                .item(&view_iso)
-                .build()?;
+            let view_top =
+                MenuItemBuilder::with_id("cam-view-top", lbl!("cam-view-top")).build(handle)?;
+            let view_bottom = MenuItemBuilder::with_id("cam-view-bottom", lbl!("cam-view-bottom"))
+                .build(handle)?;
+            let view_front =
+                MenuItemBuilder::with_id("cam-view-front", lbl!("cam-view-front")).build(handle)?;
+            let view_back =
+                MenuItemBuilder::with_id("cam-view-back", lbl!("cam-view-back")).build(handle)?;
+            let view_left =
+                MenuItemBuilder::with_id("cam-view-left", lbl!("cam-view-left")).build(handle)?;
+            let view_right =
+                MenuItemBuilder::with_id("cam-view-right", lbl!("cam-view-right")).build(handle)?;
+            let view_iso =
+                MenuItemBuilder::with_id("cam-view-iso", lbl!("cam-view-iso")).build(handle)?;
+            let standard_views = SubmenuBuilder::with_id(
+                handle,
+                "submenu:standard-views",
+                lbl!("submenu:standard-views"),
+            )
+            .item(&view_top)
+            .item(&view_bottom)
+            .item(&view_front)
+            .item(&view_back)
+            .item(&view_left)
+            .item(&view_right)
+            .separator()
+            .item(&view_iso)
+            .build()?;
 
-            let camera_menu = SubmenuBuilder::new(handle, "Camera")
-                .item(&cam_orbit)
-                .item(&cam_pan)
-                .item(&cam_zoom)
-                .separator()
-                .item(&cam_position_camera)
-                .item(&cam_walk)
-                .item(&cam_look_around)
-                .item(&cam_fly)
-                .separator()
-                .item(&cam_zoom_window)
-                .item(&cam_zoom_extents)
-                .separator()
-                .item(&cam_parallel_projection)
-                .separator()
-                .item(&standard_views)
-                .build()?;
+            let camera_menu =
+                SubmenuBuilder::with_id(handle, "submenu:camera", lbl!("submenu:camera"))
+                    .item(&cam_orbit)
+                    .item(&cam_pan)
+                    .item(&cam_zoom)
+                    .separator()
+                    .item(&cam_position_camera)
+                    .item(&cam_walk)
+                    .item(&cam_look_around)
+                    .item(&cam_fly)
+                    .separator()
+                    .item(&cam_zoom_window)
+                    .item(&cam_zoom_extents)
+                    .separator()
+                    .item(&cam_parallel_projection)
+                    .separator()
+                    .item(&standard_views)
+                    .build()?;
 
             // ----------------------------------------------------------------
             // Window menu
@@ -3805,16 +4120,17 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-library",
-                "Library",
+                lbl!("win-library"),
                 Some("Shift+CmdOrCtrl+L"),
                 Some("Shift+CmdOrCtrl+L"),
             )?;
-            let window_menu = SubmenuBuilder::new(handle, "Window")
-                .item(&PredefinedMenuItem::minimize(handle, None)?)
-                .item(&PredefinedMenuItem::maximize(handle, Some("Zoom"))?)
-                .separator()
-                .item(&win_library)
-                .build()?;
+            let window_menu =
+                SubmenuBuilder::with_id(handle, "submenu:window", lbl!("submenu:window"))
+                    .item(&predef_minimize)
+                    .item(&predef_maximize)
+                    .separator()
+                    .item(&win_library)
+                    .build()?;
 
             // ----------------------------------------------------------------
             // Help menu
@@ -3825,18 +4141,20 @@ fn main() {
                 handle,
                 &mut checks,
                 "win-debug-log",
-                "Debug Log",
+                lbl!("win-debug-log"),
                 None,
                 None,
             )?;
             let help_report_bug =
-                MenuItemBuilder::with_id("help-report-bug", "Report Bug…").build(handle)?;
+                MenuItemBuilder::with_id("help-report-bug", lbl!("help-report-bug"))
+                    .build(handle)?;
             // Opens the online user guide in the default browser — dispatched
             // to the frontend ("open-guide"), which routes through the opener
             // plugin (the WelcomeScreen's guide-link pattern).
-            let help_guide = MenuItemBuilder::with_id("help-guide", "Hew Help").build(handle)?;
+            let help_guide =
+                MenuItemBuilder::with_id("help-guide", lbl!("help-guide")).build(handle)?;
 
-            let help_menu = SubmenuBuilder::new(handle, "Help")
+            let help_menu = SubmenuBuilder::with_id(handle, "submenu:help", lbl!("submenu:help"))
                 .item(&help_guide)
                 .separator()
                 .item(&help_report_bug)
@@ -3932,7 +4250,9 @@ fn main() {
             app.manage(Mutex::new(MenuHandles {
                 checks,
                 items: gated,
+                predefined,
             }));
+            app.manage(Mutex::new(labels));
             app.manage(ClipboardState(Mutex::new(None)));
             app.manage(fly_cursor::FlyCursorState::default());
             // Seeded past any main-N recovery slot a crashed session left, so

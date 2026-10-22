@@ -13,9 +13,11 @@
  */
 
 import type { CSSProperties, KeyboardEvent } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { SettingsForm, SettingsNote, SettingsRow, SettingsSeparator } from './SettingsForm'
 import { describeIdentity, useServerSettingForm } from './serverForm'
 import { CLOUD_ORIGIN } from './server'
+import { isComposingKey } from '../input/keyboard'
 
 const radioLabelStyle: CSSProperties = {
   display: 'flex',
@@ -70,27 +72,34 @@ const okStyle: CSSProperties = {
 }
 
 export function AdvancedPane() {
+  const { t } = useLingui()
   const form = useServerSettingForm()
 
   if (!form.available) {
     const origin = typeof window !== 'undefined' ? window.location.origin : ''
     return (
       <SettingsForm>
-        <SettingsRow label="Server:">
+        <SettingsRow label={t`Server:`}>
           <span style={{ fontFamily: 'var(--font-family-mono, monospace)', fontSize: '12px' }} data-testid="settings-server-readonly">
             {origin}
           </span>
         </SettingsRow>
         <SettingsNote>
-          In the browser, Hew talks to the server it was loaded from — there is nothing to configure here.
-          The desktop app can be pointed at a self-hosted server under Settings ▸ Advanced.
+          <Trans>
+            In the browser, Hew talks to the server it was loaded from — there is nothing to configure here.
+            The desktop app can be pointed at a self-hosted server under Settings ▸ Advanced.
+          </Trans>
         </SettingsNote>
       </SettingsForm>
     )
   }
 
+  const cloudHost = CLOUD_ORIGIN.replace(/^https:\/\//, '')
   const selfHosted = form.draft.mode === 'self-hosted'
+  const reachableHost = form.test.kind === 'ok' ? new URL(form.test.identity.origin).host : ''
+  const reachableDetails = form.test.kind === 'ok' ? describeIdentity(form.test.identity) : ''
   const commitOnEnter = (e: KeyboardEvent<HTMLInputElement>): void => {
+    if (isComposingKey(e)) return
     if (e.key === 'Enter') {
       e.preventDefault()
       void form.commit()
@@ -99,8 +108,8 @@ export function AdvancedPane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="Server:" alignTop>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }} role="radiogroup" aria-label="Server">
+      <SettingsRow label={t`Server:`} alignTop>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }} role="radiogroup" aria-label={t`Server`}>
           <label style={radioLabelStyle}>
             <input
               type="radio"
@@ -110,7 +119,7 @@ export function AdvancedPane() {
               onChange={() => form.setMode('cloud')}
               style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
             />
-            Hew cloud ({CLOUD_ORIGIN.replace(/^https:\/\//, '')})
+            <Trans>Hew cloud ({cloudHost})</Trans>
           </label>
           <label style={radioLabelStyle}>
             <input
@@ -121,12 +130,12 @@ export function AdvancedPane() {
               onChange={() => form.setMode('self-hosted')}
               style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
             />
-            Self-hosted
+            <Trans>Self-hosted</Trans>
           </label>
         </div>
       </SettingsRow>
 
-      <SettingsRow label="Address:" htmlFor="settings-server-origin">
+      <SettingsRow label={t`Address:`} htmlFor="settings-server-origin">
         <input
           id="settings-server-origin"
           type="url"
@@ -143,12 +152,12 @@ export function AdvancedPane() {
         />
       </SettingsRow>
       {selfHosted && (
-        <SettingsRow label="Upload key:" htmlFor="settings-server-upload-key">
+        <SettingsRow label={t`Upload key:`} htmlFor="settings-server-upload-key">
           <input
             id="settings-server-upload-key"
             type="password"
             autoComplete="off"
-            placeholder="none"
+            placeholder={t`none`}
             value={form.draft.uploadKey}
             onChange={(e) => form.setUploadKeyDraft(e.target.value)}
             onBlur={() => void form.commit()}
@@ -159,8 +168,10 @@ export function AdvancedPane() {
       )}
       {selfHosted && (
         <SettingsNote>
-          Only needed if the server's admin set one. Stored on this computer in plain text and only ever sent
-          to the address above — never to the Hew cloud.
+          <Trans>
+            Only needed if the server's admin set one. Stored on this computer in plain text and only ever sent
+            to the address above — never to the Hew cloud.
+          </Trans>
         </SettingsNote>
       )}
       {form.error !== null && (
@@ -177,13 +188,13 @@ export function AdvancedPane() {
             disabled={form.test.kind === 'testing'}
             onClick={() => void form.testConnection()}
           >
-            {form.test.kind === 'testing' ? 'Testing…' : 'Test connection'}
+            {form.test.kind === 'testing' ? t`Testing…` : t`Test connection`}
           </button>
         </div>
       </SettingsRow>
       {form.test.kind === 'ok' && (
         <div style={okStyle} role="status" data-testid="settings-server-test-ok">
-          Reachable: {new URL(form.test.identity.origin).host} — {describeIdentity(form.test.identity)}
+          <Trans>Reachable: {reachableHost} — {reachableDetails}</Trans>
         </div>
       )}
       {form.test.kind === 'fail' && (
@@ -195,10 +206,12 @@ export function AdvancedPane() {
       <SettingsSeparator />
 
       <SettingsNote>
-        A self-hosted server must serve the Hew web app too — the QR code points your phone at it — with the relay
-        under <code>/relay/</code> (see the self-hosting guide). If it uses a certificate from your own authority,
-        trust that authority on this computer and on the phone. Over plain <code>http://</code> the phone's in-app
-        scanner can't open the camera; scan with the camera app instead.
+        <Trans>
+          A self-hosted server must serve the Hew web app too — the QR code points your phone at it — with the relay
+          under <code>/relay/</code> (see the self-hosting guide). If it uses a certificate from your own authority,
+          trust that authority on this computer and on the phone. Over plain <code>http://</code> the phone's in-app
+          scanner can't open the camera; scan with the camera app instead.
+        </Trans>
       </SettingsNote>
     </SettingsForm>
   )

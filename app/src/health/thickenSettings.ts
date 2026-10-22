@@ -8,10 +8,17 @@ import { THICKNESS } from './healthCopy'
 
 export type ThickenSide = 'front' | 'behind' | 'centered'
 
+/** Getters, so each read follows the active language (not frozen at import). */
 export const THICKEN_SIDE_LABELS: Record<ThickenSide, string> = {
-  front: THICKNESS.inFront,
-  behind: THICKNESS.behind,
-  centered: THICKNESS.centered,
+  get front() {
+    return THICKNESS.inFront
+  },
+  get behind() {
+    return THICKNESS.behind
+  },
+  get centered() {
+    return THICKNESS.centered
+  },
 }
 
 /** The thickness a person starts from, in their display units: 3 mm in

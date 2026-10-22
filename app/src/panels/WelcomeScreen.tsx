@@ -18,13 +18,19 @@
  * overlay click both close into the blank document.
  */
 
+import { i18n } from '@lingui/core'
+import { t } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { useEffect, useCallback, type MouseEvent } from 'react'
 import { isTauri } from '../io/fileHost'
 import type { RecentEntry } from '../io/recents'
 import { formatRelativeTime } from '../io/relativeTime'
 import { LENGTH_FORMAT_OPTIONS, type LengthFormat } from '../settings/units'
+import { isComposingKey } from '../input/keyboard'
 
-/** One bundled sample: the asset file under `samples/` plus display copy. */
+/** One bundled sample: the asset file under `samples/` plus display copy.
+ * `title` and `description` are getters on the table below, so they resolve
+ * in the active locale each time they are read. */
 export interface SampleEntry {
   file: string
   title: string
@@ -36,15 +42,21 @@ export interface SampleEntry {
 export const BUNDLED_SAMPLES: SampleEntry[] = [
   {
     file: 'wall-clock.hew',
-    title: 'Wall Clock',
-    description:
-      'A finished piece: true-curve oak rim, brass hour markers as components, and a translucent glass cover.',
+    get title() {
+      return t`Wall Clock`
+    },
+    get description() {
+      return t`A finished piece: true-curve oak rim, brass hour markers as components, and a translucent glass cover.`
+    },
   },
   {
     file: 'cafe-table.hew',
-    title: 'Café Table',
-    description:
-      'A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup.',
+    get title() {
+      return t`Café Table`
+    },
+    get description() {
+      return t`A round table with a textured oak top, walnut cylinder legs, crossed stretchers, and a resting pen cup.`
+    },
   },
 ]
 
@@ -126,6 +138,7 @@ function HewLockup({ className }: { className?: string }) {
  * states and the layout reads in one place. All colors resolve through the
  * design tokens; `--brand` is the terracotta mark color from favicon.svg.
  */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS stylesheet text, not copy
 const WELCOME_CSS = `
 .hw-welcome__overlay {
   position: fixed;
@@ -397,8 +410,10 @@ export function WelcomeScreen({
   unit,
   onUnitChange,
 }: WelcomeScreenProps) {
+  const { t } = useLingui()
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -438,12 +453,12 @@ export function WelcomeScreen({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Welcome to Hew"
+        aria-label={t`Welcome to Hew`}
       >
         <aside className="hw-welcome__rail">
           <HewLockup className="hw-welcome__lockup" />
           <p className="hw-welcome__tagline">
-            The intuitive, Open Source, cross-platform, solids-first 3D modeler.
+            <Trans>The intuitive, Open Source, cross-platform, solids-first 3D modeler.</Trans>
           </p>
           <div className="hw-welcome__rail-spacer" />
           <a
@@ -453,13 +468,15 @@ export function WelcomeScreen({
             rel="noreferrer"
             onClick={handleGuideClick}
           >
-            Getting-started guide
+            <Trans>Getting-started guide</Trans>
             <ExternalIcon />
           </a>
         </aside>
 
         <div className="hw-welcome__pane">
-          <div className="hw-welcome__label">Sample models</div>
+          <div className="hw-welcome__label">
+            <Trans>Sample models</Trans>
+          </div>
           <div className="hw-welcome__cards">
             {BUNDLED_SAMPLES.map((s) => (
               <button
@@ -475,7 +492,9 @@ export function WelcomeScreen({
 
           {recentFiles.length > 0 && (
             <>
-              <div className="hw-welcome__label">Recent</div>
+              <div className="hw-welcome__label">
+                <Trans>Recent</Trans>
+              </div>
               <div className="hw-welcome__cards">
                 {recentFiles.slice(0, 5).map((path) => (
                   <button
@@ -500,7 +519,9 @@ export function WelcomeScreen({
               shelf's "no boilerplate empty state" convention. */}
           {webRecents !== undefined && webRecents.length > 0 && (
             <>
-              <div className="hw-welcome__label">Recents</div>
+              <div className="hw-welcome__label">
+                <Trans>Recents</Trans>
+              </div>
               <div className="hw-welcome__cards">
                 {webRecents.slice(0, 5).map((entry) => (
                   <button
@@ -517,26 +538,30 @@ export function WelcomeScreen({
             </>
           )}
 
-          <div className="hw-welcome__label">Open</div>
+          <div className="hw-welcome__label">
+            <Trans>Open</Trans>
+          </div>
           <div className="hw-welcome__cards">
             <button className="hw-welcome__card" onClick={onOpen}>
-              Open a file…
+              <Trans>Open a file…</Trans>
               <span className="hw-welcome__card-desc">
-                .hew, or import SketchUp, COLLADA, glTF, or STL.
+                <Trans>.hew, or import SketchUp, COLLADA, glTF, or STL.</Trans>
               </span>
             </button>
           </div>
 
-          <div className="hw-welcome__label">Units</div>
+          <div className="hw-welcome__label">
+            <Trans>Units</Trans>
+          </div>
           <div className="hw-welcome__units">
             <select
-              aria-label="Units"
+              aria-label={t`Units`}
               value={unit}
               onChange={(e) => onUnitChange(e.target.value as LengthFormat)}
             >
               {LENGTH_FORMAT_OPTIONS.map((o) => (
                 <option key={o.value} value={o.value}>
-                  {o.label}
+                  {i18n._(o.label)}
                 </option>
               ))}
             </select>
@@ -549,10 +574,10 @@ export function WelcomeScreen({
                 checked={showOnStartup}
                 onChange={(e) => onShowOnStartupChange(e.target.checked)}
               />
-              Show on startup
+              <Trans>Show on startup</Trans>
             </label>
             <button className="hw-welcome__start" onClick={onClose} autoFocus>
-              Start modeling
+              <Trans>Start modeling</Trans>
             </button>
           </div>
         </div>

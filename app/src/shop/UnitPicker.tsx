@@ -20,6 +20,7 @@
  * with the desktop deliberately, never a Shop-Mode-local preference).
  */
 import { useEffect, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import {
   getLengthUnit,
   setLengthUnit,
@@ -47,6 +48,7 @@ const ALL_FORMATS: LengthFormat[] = [
 ]
 
 export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
+  const { t, i18n } = useLingui()
   const [unit, setUnit] = useState<LengthFormat>(getLengthUnit)
   useEffect(() => subscribeLengthUnit(setUnit), [])
 
@@ -64,7 +66,7 @@ export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
       />
       <div
         role="dialog"
-        aria-label="Units"
+        aria-label={t`Units`}
         style={
           isLandscape
             ? {
@@ -89,7 +91,7 @@ export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
       >
         <div style={{ width: '40px', height: '5px', borderRadius: '3px', background: 'var(--shop-hairline)', margin: '0 auto 10px' }} />
         <div style={{ padding: '0 10px 6px' }}>
-          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>Units</span>
+          <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '18px', fontWeight: 600, color: 'var(--shop-text)' }}>{t`Units`}</span>
         </div>
         {ALL_FORMATS.map((format) => {
           const active = format === unit
@@ -97,7 +99,7 @@ export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
             <button
               key={format}
               type="button"
-              aria-label={LENGTH_FORMAT_NAME[format]}
+              aria-label={i18n._(LENGTH_FORMAT_NAME[format])}
               aria-pressed={active}
               onClick={() => { setLengthUnit(format); onClose() }}
               style={{
@@ -108,7 +110,7 @@ export function UnitPicker({ open, orientation, onClose }: UnitPickerProps) {
               }}
             >
               <span style={{ flex: 1, fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: active ? 600 : 500, color: 'var(--shop-text)' }}>
-                {LENGTH_FORMAT_NAME[format]}
+                {i18n._(LENGTH_FORMAT_NAME[format])}
               </span>
               {active && (
                 <span aria-hidden="true" style={{ marginLeft: '12px', color: 'var(--shop-accent)', display: 'flex' }}>

@@ -57,6 +57,7 @@
  * parseLengthToMeters), not Rectangle's editDimsBuffer/parseDimensions.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -68,7 +69,7 @@ import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
-import { editLengthBuffer, isLengthInputKey, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { editLengthBuffer, isLengthInputKey, nextIdlePlaneLock, axisLockColorName, radiusReadout } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { segmentLength } from './lineInput'
 import type { SketchTarget } from './sketchGesture'
@@ -158,18 +159,19 @@ export class CircleTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (!this.capturingInput() && this.idlePlaneLock === null && this.retype.isOpen) {
-      return 'Type an exact radius to resize the circle you just drew — or click the centre of the next one.'
+      return t`Type an exact radius to resize the circle you just drew — or click the centre of the next one.`
     }
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
-      return 'Click to set the radius — or type an exact radius.'
+      return t`Click to set the radius — or type an exact radius.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click to start; same arrow or Esc unlocks.`
     }
     if (this.pin.current !== null) {
-      return 'Pinned to the hovered plane — click to start; Shift again or Esc unpins.'
+      return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
     }
-    return "Click the circle's center — on the ground plane or any face or sketch."
+    return t`Click the circle's center — on the ground plane or any face or sketch.`
   }
 
   private planeStage: PlaneStage = { kind: 'idle' }
@@ -810,7 +812,7 @@ export class CircleTool implements Tool {
       return
     }
     const radius = Math.hypot(cursor[0] - center[0], cursor[1] - center[1], cursor[2] - center[2])
-    this.onMeasurementCb(`R ${formatLength(radius)}`)
+    this.onMeasurementCb(radiusReadout(formatLength(radius)))
   }
 
   /**
@@ -1025,7 +1027,7 @@ export class CircleTool implements Tool {
     radius: number,
   ): boolean {
     try {
-      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, 'Circle', (d) =>
+      const { result: regionsCreated, report } = runDraft(this.wasmScene, target, t`Circle`, (d) =>
         addDraftLoop(this.wasmScene, d, verts, { kind: 'circle', center, radius }),
       )
       refreshAfterDraft(report, {

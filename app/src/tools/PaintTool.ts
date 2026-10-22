@@ -26,6 +26,7 @@
  * Face picking reuses the existing pick_face() path (same as PushPullTool).
  */
 
+import { t } from '@lingui/core/macro'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -62,11 +63,9 @@ export class PaintTool implements Tool {
    *  for that one modifier. */
   statusHint(): string {
     if (this.eyedropper) {
-      return 'Alt-click a face to sample its material.'
+      return t`Alt-click a face to sample its material.`
     }
-    return 'Click a face to paint it with the current material — Shift-click replaces it everywhere, '
-      + 'Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, '
-      + 'Alt = eyedropper.'
+    return t`Click a face to paint it with the current material — Shift-click replaces it everywhere, Ctrl/Cmd+Shift-click replaces within the object, Ctrl/Cmd-click fills the whole object, Alt = eyedropper.`
   }
 
   private wasmScene: WasmScene

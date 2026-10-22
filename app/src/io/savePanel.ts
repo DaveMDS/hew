@@ -11,6 +11,7 @@
  * options from here, so the two offer exactly the same things.
  */
 
+import { t } from '@lingui/core/macro'
 import type { DocFormat } from './fileHost'
 import { isTauri } from './fileHost'
 import { SAVE_FORMAT_CHOICES, extensionFor } from './docFormat'
@@ -65,7 +66,10 @@ export async function pickSaveTarget(
 /** Save As's formats: the browser's in-app step's, by the same labels. */
 export const SAVE_PANEL_FORMATS: PanelFormat[] = SAVE_FORMAT_CHOICES.map((c) => ({
   id: c.format,
-  label: c.label,
+  // A getter so the label follows the active locale at read time.
+  get label() {
+    return c.label
+  },
   extension: extensionFor(c.format).slice(1),
 }))
 
@@ -84,22 +88,109 @@ export interface SvgExportOptions {
 
 /** Export's formats: the panel's labels (the in-app dialog adds a hint). */
 export const EXPORT_FORMATS: { format: ExportFormat; label: string; extension: string; hint: string }[] = [
-  { format: 'glb', label: 'glTF binary (.glb)', extension: 'glb', hint: 'Y-up, meters' },
-  { format: 'stl', label: 'STL binary (.stl)', extension: 'stl', hint: 'Z-up, millimeters, for 3D printing' },
-  { format: '3mf', label: '3MF (.3mf)', extension: '3mf', hint: 'Z-up, millimeters, keeps part names and colors' },
-  { format: 'usdz', label: 'USDZ (.usdz)', extension: 'usdz', hint: 'Y-up, meters, for AR Quick Look and USD pipelines' },
-  { format: 'svg', label: 'SVG line drawing (.svg)', extension: 'svg', hint: 'hidden lines removed, true size at a drawing scale' },
-  { format: 'skp', label: 'SketchUp (.skp)', extension: 'skp', hint: '' },
-  { format: 'skp2017', label: 'SketchUp 2017 (.skp)', extension: 'skp', hint: 'opens in SketchUp Make 2017 and later' },
+  {
+    format: 'glb',
+    get label() {
+      return t`glTF binary (.glb)`
+    },
+    extension: 'glb',
+    get hint() {
+      return t`Y-up, meters`
+    },
+  },
+  {
+    format: 'stl',
+    get label() {
+      return t`STL binary (.stl)`
+    },
+    extension: 'stl',
+    get hint() {
+      return t`Z-up, millimeters, for 3D printing`
+    },
+  },
+  {
+    format: '3mf',
+    get label() {
+      return t`3MF (.3mf)`
+    },
+    extension: '3mf',
+    get hint() {
+      return t`Z-up, millimeters, keeps part names and colors`
+    },
+  },
+  {
+    format: 'usdz',
+    get label() {
+      return t`USDZ (.usdz)`
+    },
+    extension: 'usdz',
+    get hint() {
+      return t`Y-up, meters, for AR Quick Look and USD pipelines`
+    },
+  },
+  {
+    format: 'svg',
+    get label() {
+      return t`SVG line drawing (.svg)`
+    },
+    extension: 'svg',
+    get hint() {
+      return t`hidden lines removed, true size at a drawing scale`
+    },
+  },
+  {
+    format: 'skp',
+    get label() {
+      return t`SketchUp (.skp)`
+    },
+    extension: 'skp',
+    hint: '',
+  },
+  {
+    format: 'skp2017',
+    get label() {
+      return t`SketchUp 2017 (.skp)`
+    },
+    extension: 'skp',
+    get hint() {
+      return t`opens in SketchUp Make 2017 and later`
+    },
+  },
 ]
 
 /** STL curve-resolution choices: segments per full turn (0 = stored facets). */
 export const STL_RESOLUTIONS: { value: number; label: string }[] = [
-  { value: 0, label: 'As modeled (stored facets)' },
-  { value: 24, label: 'Draft (24 segments per turn)' },
-  { value: 48, label: 'Standard (48 segments per turn)' },
-  { value: 96, label: 'Fine (96 segments per turn)' },
-  { value: 192, label: 'Ultra (192 segments per turn)' },
+
+  {
+    value: 0,
+    get label() {
+      return t`As modeled (stored facets)`
+    },
+  },
+  {
+    value: 24,
+    get label() {
+      return t`Draft (24 segments per turn)`
+    },
+  },
+  {
+    value: 48,
+    get label() {
+      return t`Standard (48 segments per turn)`
+    },
+  },
+  {
+    value: 96,
+    get label() {
+      return t`Fine (96 segments per turn)`
+    },
+  },
+  {
+    value: 192,
+    get label() {
+      return t`Ultra (192 segments per turn)`
+    },
+  },
 ]
 
 /** The STL resolution an export starts on. */
@@ -124,7 +215,7 @@ export function exportPanelFormats(unit: LengthFormat): PanelFormat[] {
       {
         kind: 'select',
         id: 'segments',
-        label: 'Curve resolution',
+        label: t`Curve resolution`,
         choices: STL_RESOLUTIONS.map((r) => ({ value: String(r.value), label: r.label })),
         value: String(DEFAULT_STL_SEGMENTS),
       },
@@ -133,19 +224,19 @@ export function exportPanelFormats(unit: LengthFormat): PanelFormat[] {
       {
         kind: 'select',
         id: 'view',
-        label: 'View',
+        label: t`View`,
         choices: (Object.keys(VIEW_LABEL) as PrintViewKind[]).map((v) => ({ value: v, label: VIEW_LABEL[v] })),
         value: 'current',
       },
       {
         kind: 'select',
         id: 'scale',
-        label: 'Scale',
+        label: t`Scale`,
         choices: presets.map((p, i) => ({ value: String(i), label: svgScaleLabel(p, unit) })),
         value: String(defaultSvgScaleIndex(presets)),
       },
-      { kind: 'check', id: 'hidden', label: 'Hidden lines dashed', value: false },
-      { kind: 'check', id: 'dimensions', label: 'Dimensions & text', value: true },
+      { kind: 'check', id: 'hidden', label: t`Hidden lines dashed`, value: false },
+      { kind: 'check', id: 'dimensions', label: t`Dimensions & text`, value: true },
     ],
   }
   return EXPORT_FORMATS.map((f) => ({

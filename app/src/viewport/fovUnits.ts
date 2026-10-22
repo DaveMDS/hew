@@ -52,9 +52,11 @@ const NUMBER = '[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+'
 // "45", "45.5", "45deg", "45 deg", "45°", "45 °" — degrees. The unit suffix
 // is optional (a bare number IS degrees, matching the existing typed-entry
 // behaviour this replaces).
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- regex source, not copy
 const DEGREES_RE = new RegExp(`^(${NUMBER})\\s*(?:deg|°)?$`)
 
 // "50mm", "50 mm" — focal length.
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- regex source, not copy
 const MM_RE = new RegExp(`^(${NUMBER})\\s*mm$`)
 
 /**

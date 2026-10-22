@@ -20,7 +20,7 @@
  */
 
 import { useState } from 'react'
-import { TOOL_ICON_SVG, type ToolName } from '../tools/toolIcons'
+import { TOOL_ICON_SVG } from '../tools/toolIcons'
 import { InlineIcon } from './InlineIcon'
 import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 import editSvg from '@material-symbols/svg-400/outlined/edit.svg?raw'
@@ -31,7 +31,7 @@ import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import bookmarkAddSvg from '@material-symbols/svg-400/outlined/bookmark_add.svg?raw'
-import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
+import { deriveDockContext, dockVerbsFor, dockChipLabel, dockVerbLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
 const NON_TOOL_ICON_SVG: Record<string, string> = {
@@ -56,7 +56,7 @@ const CHIP_COLOR: Record<DockContext, string> = {
 }
 
 function VerbIcon({ verb }: { verb: DockVerb }) {
-  const raw = TOOL_ICON_SVG[verb.label as ToolName] ?? NON_TOOL_ICON_SVG[verb.id]
+  const raw = (verb.toolName === undefined ? undefined : TOOL_ICON_SVG[verb.toolName]) ?? NON_TOOL_ICON_SVG[verb.id]
   if (raw === undefined) return null
   return <InlineIcon svg={raw} size={21} />
 }
@@ -82,7 +82,7 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
       onClick={isDisabled ? undefined : () => onRun(verb.id)}
       onMouseEnter={isDisabled ? undefined : () => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      title={verb.label}
+      title={dockVerbLabel(verb)}
       style={{
         display: 'flex',
         flexDirection: 'column',
@@ -108,7 +108,7 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
           whiteSpace: 'nowrap',
         }}
       >
-        {verb.label}
+        {dockVerbLabel(verb)}
       </span>
     </button>
   )

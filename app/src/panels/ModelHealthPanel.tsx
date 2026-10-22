@@ -23,6 +23,8 @@
  * draws nothing for a closed window.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { i18n } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   HEALTH_SCOPE_LABELS,
@@ -67,6 +69,7 @@ import { collectLeafIds, nodeRefFromJs, type NodeRef } from './treeModel'
 import { worldBoundsForSelection } from './objectBounds'
 import { kernelErrorMessage, parseKernelErrorCode } from '../kernelErrors'
 import type { IsolationTarget } from '../viewport/isolation'
+import { isComposingKey } from '../input/keyboard'
 
 interface Props {
   scene: WasmScene
@@ -205,13 +208,14 @@ export function ModelHealthPanel({
   onGeometryChanged,
   onToast,
 }: Props) {
+  const { t } = useLingui()
   const [query, setQuery] = useState('')
   /** `query` after the debounce: the one the listing filters by. */
   const [debouncedQuery, setDebouncedQuery] = useState('')
   useEffect(() => {
     if (query === debouncedQuery) return
-    const t = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
-    return () => clearTimeout(t)
+    const timer = setTimeout(() => setDebouncedQuery(query), SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(timer)
   }, [query, debouncedQuery])
   const [showAccepted, setShowAccepted] = useState(false)
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({})
@@ -552,7 +556,7 @@ export function ModelHealthPanel({
         )}
         {selected && classifyRow(row, inSplit(row)) === 'closerLook' && (
           <span data-health-reason style={{ flexBasis: '100%', fontSize: '11px', whiteSpace: 'normal', color: 'var(--text-secondary, #ccc)' }}>
-            {REASON_SENTENCE[openReason(row)]} {REASON_ON_PURPOSE}
+            {REASON_SENTENCE[openReason(row)]} {i18n._(REASON_ON_PURPOSE)}
           </span>
         )}
         {warnings.has(row.object) && (
@@ -677,7 +681,7 @@ export function ModelHealthPanel({
     <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }} data-model-health>
       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
         <select
-          aria-label="Scope"
+          aria-label={t`Scope`}
           value={scope}
           disabled={objectFilter !== null}
           onChange={(e) => onScopeChange(e.target.value as HealthScope)}
@@ -704,6 +708,7 @@ export function ModelHealthPanel({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
+            if (isComposingKey(e)) return
             if (e.key === 'Escape') e.stopPropagation()
           }}
           spellCheck={false}

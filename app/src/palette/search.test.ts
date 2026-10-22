@@ -72,3 +72,18 @@ describe('rankEntries — recency as a tie-breaker only', () => {
     expect(ranked[0].id).toBe('tool-rotate')
   })
 })
+
+
+describe('English tool names match in any locale (docs/LOCALIZATION.md)', () => {
+  it('ranks the tool id (its English name) like the translated label', async () => {
+    const { rankEntries } = await import('./search')
+    const entries = [
+      { id: 'tool-pushpull', label: 'プッシュ/プル', description: '', group: 'Tools' as const, toolName: 'Push/Pull' as const },
+      { id: 'tool-line', label: '線', description: '', group: 'Tools' as const, toolName: 'Line' as const },
+    ]
+    const byEnglish = rankEntries('push', entries, [])
+    expect(byEnglish[0]?.id).toBe('tool-pushpull')
+    const byTranslated = rankEntries('プッシュ', entries, [])
+    expect(byTranslated[0]?.id).toBe('tool-pushpull')
+  })
+})

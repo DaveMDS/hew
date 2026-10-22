@@ -35,6 +35,7 @@
  * switch) still fully resets to idle.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -71,11 +72,11 @@ export class AxesTool implements Tool {
   statusHint(): string {
     switch (this.stage.kind) {
       case 'origin-picked':
-        return 'Click a point along the new red (X) axis.'
+        return t`Click a point along the new red (X) axis.`
       case 'x-picked':
-        return 'Click a point along the new green (Y) axis — not in line with the first two.'
+        return t`Click a point along the new green (Y) axis — not in line with the first two.`
       default:
-        return 'Click a point for the new origin.'
+        return t`Click a point for the new origin.`
     }
   }
 
@@ -199,7 +200,7 @@ export class AxesTool implements Tool {
       this.onCommit()
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
-      this.onToast(`Couldn't move the drawing axes: ${raw}`)
+      this.onToast(t`Couldn't move the drawing axes: ${raw}`)
     }
     this.cancel()
   }

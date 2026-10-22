@@ -49,6 +49,7 @@ export function generateKey(): Uint8Array {
 }
 
 async function importAesKey(rawKey: Uint8Array, usage: KeyUsage): Promise<CryptoKey> {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- WebCrypto algorithm name
   return crypto.subtle.importKey('raw', rawKey as BufferSource, 'AES-GCM', false, [usage])
 }
 

@@ -14,17 +14,22 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
 import type { LibraryCategory, LibraryItem } from '../../library/types'
 import { CubeGlyph, RerenderGlyph, WarningGlyph } from './icons'
+import { i18n } from '@lingui/core'
+import { plural, t as tCore } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { revealLabel } from './LibraryMenu'
+import { isComposingKey } from '../../input/keyboard'
 
 /** Sentinel `<option>` value for "New collection…" — a leading NUL makes it
  * impossible to collide with a real collection path (`normalizeCollectionPath`
  * only ever joins trimmed, printable segments with `/`). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- sentinel option value, never displayed
 const NEW_COLLECTION_VALUE = '\u0000__new__'
 
 function actionLabels(category: LibraryCategory): { primary: string; secondary: string } {
-  if (category === 'component') return { primary: 'Insert', secondary: 'Open as document' }
-  if (category === 'model') return { primary: 'Open as document', secondary: 'Insert' }
-  return { primary: 'Paint', secondary: 'Add to palette' }
+  if (category === 'component') return { primary: tCore`Insert`, secondary: tCore`Open as document` }
+  if (category === 'model') return { primary: tCore`Open as document`, secondary: tCore`Insert` }
+  return { primary: tCore`Paint`, secondary: tCore`Add to palette` }
 }
 
 export interface LibraryDetailPaneProps {
@@ -108,6 +113,7 @@ export function LibraryDetailPane({
   onConfirmDelete,
   onCancelDelete,
 }: LibraryDetailPaneProps) {
+  const { t } = useLingui()
   const [nameDraft, setNameDraft] = useState(item?.displayName ?? '')
   const [addingKeyword, setAddingKeyword] = useState(false)
   const [keywordDraft, setKeywordDraft] = useState('')
@@ -158,7 +164,7 @@ export function LibraryDetailPane({
   if (item === null) {
     return (
       <div className="hwlib__detail hwlib__detail--empty" style={widthStyle}>
-        <p>Select an item to see its details.</p>
+        <p><Trans>Select an item to see its details.</Trans></p>
       </div>
     )
   }
@@ -174,7 +180,7 @@ export function LibraryDetailPane({
         {actionError !== null && <div className="hwlib__action-error">{actionError}</div>}
         <div className="hwlib__manage-row">
           <button type="button" className={btnClass('hwlib__btn-danger')} onClick={onRequestDelete}>
-            Delete from library…
+            <Trans>Delete from library…</Trans>
           </button>
         </div>
         {deleteArmed && (
@@ -187,6 +193,7 @@ export function LibraryDetailPane({
   const labels = actionLabels(item.category)
   const isMaterial = item.category === 'material'
   const materialEntry = item.summary.material_entries[0]
+  const sourceDoc = item.meta.sourceDoc
 
   /** Names are single-line by contract: pasted newlines (the one way the
    * wrapping textarea can still receive them) collapse to single spaces. */
@@ -246,9 +253,9 @@ export function LibraryDetailPane({
           type="button"
           className="hwlib__detail-rerender"
           onClick={onReRenderThumbnail}
-          aria-label="Re-render thumbnail"
+          aria-label={t`Re-render thumbnail`}
         >
-          <RerenderGlyph /> Re-render
+          <RerenderGlyph /> <Trans>Re-render</Trans>
         </button>
       </div>
 
@@ -256,15 +263,16 @@ export function LibraryDetailPane({
         ref={nameFieldRef}
         className="hwlib__name-input"
         value={nameDraft}
-        aria-label="Item name"
+        aria-label={t`Item name`}
         rows={1}
         onChange={(e) => setNameDraft(singleLine(e.target.value))}
         onBlur={commitName}
         onKeyDown={(e) => {
+          if (isComposingKey(e)) return
           // Enter commits (matches the old single-line input's behavior) —
           // it must never insert a newline into the name. Enter DURING IME
           // composition belongs to the composer, not to us.
-          if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+          if (e.key === 'Enter') {
             e.preventDefault()
             commitName()
             ;(e.target as HTMLTextAreaElement).blur()
@@ -272,11 +280,11 @@ export function LibraryDetailPane({
         }}
       />
 
-      <div className="hwlib__keywords" aria-label="Keywords">
+      <div className="hwlib__keywords" aria-label={t`Keywords`}>
         {(item.meta.keywords ?? []).map((kw) => (
           <span key={kw} className="hwlib__keyword-chip">
             {kw}
-            <button type="button" aria-label={`Remove keyword ${kw}`} onClick={() => onRemoveKeyword(kw)}>
+            <button type="button" aria-label={t`Remove keyword ${kw}`} onClick={() => onRemoveKeyword(kw)}>
               ×
             </button>
           </span>
@@ -286,11 +294,12 @@ export function LibraryDetailPane({
             className="hwlib__keyword-input"
             autoFocus
             value={keywordDraft}
-            aria-label="New keyword"
+            aria-label={t`New keyword`}
             onChange={(e) => setKeywordDraft(e.target.value)}
             onBlur={commitKeyword}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+              if (isComposingKey(e)) return
+              if (e.key === 'Enter') {
                 e.preventDefault()
                 commitKeyword()
               } else if (e.key === 'Escape') {
@@ -303,24 +312,25 @@ export function LibraryDetailPane({
           />
         ) : (
           <button type="button" className="hwlib__keyword-add" onClick={() => setAddingKeyword(true)}>
-            + keyword
+            <Trans>+ keyword</Trans>
           </button>
         )}
       </div>
 
       <label className="hwlib__field-row">
-        <span>Collection</span>
+        <span><Trans>Collection</Trans></span>
         {creatingCollection ? (
           <input
             className="hwlib__select"
             autoFocus
-            aria-label="New collection path"
-            placeholder="Hardware/Fasteners"
+            aria-label={t`New collection path`}
+            placeholder={t({ comment: 'Example collection path shown as placeholder text', message: 'Hardware/Fasteners' })}
             value={collectionDraft}
             onChange={(e) => setCollectionDraft(e.target.value)}
             onBlur={commitNewCollection}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+              if (isComposingKey(e)) return
+              if (e.key === 'Enter') {
                 e.preventDefault()
                 commitNewCollection()
               } else if (e.key === 'Escape') {
@@ -348,14 +358,14 @@ export function LibraryDetailPane({
               onChangeCollection(e.target.value === '' ? null : e.target.value)
             }}
           >
-            <option value="">None</option>
+            <option value=""><Trans>None</Trans></option>
             {collections.map((c) => (
               <option key={c.path} value={c.path}>
                 {'  '.repeat(c.depth)}
                 {c.label}
               </option>
             ))}
-            <option value={NEW_COLLECTION_VALUE}>+ New collection…</option>
+            <option value={NEW_COLLECTION_VALUE}><Trans>+ New collection…</Trans></option>
           </select>
         )}
       </label>
@@ -369,9 +379,9 @@ export function LibraryDetailPane({
             saved out of a document. */}
         {item.category !== 'model' && item.meta.sourceDoc !== undefined && (
           <div className="hwlib__source-row">
-            <span>from {item.meta.sourceDoc}</span>
+            <span><Trans>from {sourceDoc}</Trans></span>
             <button type="button" className="hwlib__btn-link" onClick={onRemoveSourceInfo}>
-              Remove Source Info
+              <Trans>Remove Source Info</Trans>
             </button>
           </div>
         )}
@@ -379,12 +389,12 @@ export function LibraryDetailPane({
 
       {placementCount > 0 && (
         <div className="hwlib__inmodel">
-          {placementCount} {placementCount === 1 ? 'instance' : 'instances'} in this model
+          {plural(placementCount, { one: '# instance in this model', other: '# instances in this model' })}
         </div>
       )}
       {/* Materials aren't "placed" as instances, so there's no count — same
           "in this model" wording as components, just without one. */}
-      {isMaterial && inPalette && <div className="hwlib__inmodel">In this model</div>}
+      {isMaterial && inPalette && <div className="hwlib__inmodel"><Trans>In this model</Trans></div>}
       {actionError !== null && <div className="hwlib__action-error">{actionError}</div>}
 
       <div className="hwlib__actions">
@@ -396,7 +406,7 @@ export function LibraryDetailPane({
         </button>
         {isMaterial && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onOpenAsDocument}>
-            Open as document
+            <Trans>Open as document</Trans>
           </button>
         )}
       </div>
@@ -404,16 +414,16 @@ export function LibraryDetailPane({
       <div className="hwlib__manage-row">
         {canReveal && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onReveal}>
-            {revealLabel}
+            {i18n._(revealLabel)}
           </button>
         )}
         {canDownload && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onDownload}>
-            Download…
+            <Trans>Download…</Trans>
           </button>
         )}
         <button type="button" className={btnClass('hwlib__btn-danger')} onClick={onRequestDelete}>
-          Delete from library…
+          <Trans>Delete from library…</Trans>
         </button>
       </div>
       {deleteArmed && <DeleteConfirm onConfirm={onConfirmDelete} onCancel={onCancelDelete} name={item.displayName} />}
@@ -422,15 +432,16 @@ export function LibraryDetailPane({
 }
 
 function DeleteConfirm({ onConfirm, onCancel, name }: { onConfirm: () => void; onCancel: () => void; name: string }) {
+  const { t } = useLingui()
   return (
-    <div className="hwlib__delete-confirm" role="alertdialog" aria-label={`Delete ${name} from the library?`}>
-      <p>Delete &ldquo;{name}&rdquo; from the library? This can&rsquo;t be undone.</p>
+    <div className="hwlib__delete-confirm" role="alertdialog" aria-label={t`Delete ${name} from the library?`}>
+      <p><Trans>Delete &ldquo;{name}&rdquo; from the library? This can&rsquo;t be undone.</Trans></p>
       <div className="hwlib__delete-confirm-actions">
         <button type="button" className="hwlib__btn-secondary" onClick={onCancel}>
-          Cancel
+          <Trans>Cancel</Trans>
         </button>
         <button type="button" className="hwlib__btn-danger" onClick={onConfirm} autoFocus>
-          Delete
+          <Trans>Delete</Trans>
         </button>
       </div>
     </div>

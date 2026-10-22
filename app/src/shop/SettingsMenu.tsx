@@ -27,6 +27,9 @@
  * label, theme setting).
  */
 import { useEffect, useState } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { getThemeSetting, setThemeSetting, subscribe as subscribeTheme, type ThemeSetting } from '../settings/theme'
 import { getLengthUnit, subscribe as subscribeLengthUnit, LENGTH_FORMAT_NAME, type LengthFormat } from '../settings/units'
 import { ChevronRightIcon } from './icons'
@@ -45,13 +48,14 @@ export interface SettingsMenuProps {
   onOpenUnitPicker: () => void
 }
 
-const THEME_SEGMENTS: { value: ThemeSetting; label: string }[] = [
-  { value: 'auto', label: 'System' },
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
+const THEME_SEGMENTS: { value: ThemeSetting; label: MessageDescriptor }[] = [
+  { value: 'auto', label: msg({ message: 'System', comment: 'Theme choice that follows the device appearance' }) },
+  { value: 'light', label: msg`Light` },
+  { value: 'dark', label: msg`Dark` },
 ]
 
 export function SettingsMenu({ open, orientation, onClose, onOpenUnitPicker }: SettingsMenuProps) {
+  const { t, i18n } = useLingui()
   const [unit, setUnit] = useState<LengthFormat>(getLengthUnit)
   useEffect(() => subscribeLengthUnit(setUnit), [])
   const [themeSetting, setThemeSettingState] = useState<ThemeSetting>(getThemeSetting)
@@ -60,21 +64,21 @@ export function SettingsMenu({ open, orientation, onClose, onOpenUnitPicker }: S
   return (
     <MenuPanel open={open} orientation={orientation} anchor="right" onClose={onClose} scrimTestId="shop-settings-scrim" panelTestId="shop-settings-panel">
       <div style={{ padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: '8px', background: 'var(--shop-eyebg)' }}>
-        <span style={sectionLabelStyle}>SETTINGS</span>
+        <span style={sectionLabelStyle}>{t`SETTINGS`}</span>
         <button
           type="button"
-          aria-label="Units"
+          aria-label={t`Units`}
           onClick={onOpenUnitPicker}
           style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '40px', width: '100%', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}
         >
-          <span style={rowLabelStyle}>Units</span>
+          <span style={rowLabelStyle}>{t`Units`}</span>
           <span style={{ display: 'flex', alignItems: 'center', gap: '6px', fontFamily: 'var(--font-family-mono)', fontSize: '13px', fontWeight: 600, color: 'var(--shop-accent-text)' }}>
-            {LENGTH_FORMAT_NAME[unit]}
+            {i18n._(LENGTH_FORMAT_NAME[unit])}
             <ChevronRightIcon size={13} />
           </span>
         </button>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', height: '40px' }}>
-          <span style={rowLabelStyle}>Theme</span>
+          <span style={rowLabelStyle}>{t`Theme`}</span>
           <div style={{ display: 'flex', gap: '2px', background: 'var(--shop-eyebg)', borderRadius: '9px', padding: '3px' }}>
             {THEME_SEGMENTS.map(({ value, label }) => {
               const active = themeSetting === value
@@ -105,7 +109,7 @@ export function SettingsMenu({ open, orientation, onClose, onOpenUnitPicker }: S
                     border: 'none', borderRadius: '7px', padding: '7px 11px', cursor: 'pointer',
                   }}
                 >
-                  {label}
+                  {i18n._(label)}
                 </button>
               )
             })}
@@ -114,10 +118,12 @@ export function SettingsMenu({ open, orientation, onClose, onOpenUnitPicker }: S
       </div>
 
       <div style={{ padding: '10px 16px 12px', borderTop: '1px solid var(--shop-hairline-2)' }}>
-        <span style={sectionLabelStyle}>GESTURES</span>
+        <span style={sectionLabelStyle}>{t`GESTURES`}</span>
         <div style={{ fontFamily: 'var(--font-family-ui)', fontSize: '12px', lineHeight: 1.7, color: 'var(--shop-text-muted)', marginTop: '4px' }}>
-          Tap a part — its size · Double-tap — zoom · Hold — isolate<br />
-          One finger orbits · Two fingers pan · Pinch zooms
+          <Trans>
+            Tap a part — its size · Double-tap — zoom · Hold — isolate<br />
+            One finger orbits · Two fingers pan · Pinch zooms
+          </Trans>
         </div>
       </div>
     </MenuPanel>

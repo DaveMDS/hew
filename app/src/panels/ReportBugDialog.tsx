@@ -22,6 +22,10 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { msg, t } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { formatNumber } from '../i18n/format'
 import {
   compressReportUpload,
   describeReport,
@@ -42,6 +46,7 @@ import { canSend, submitReport, ReportError, type ReportErrorKind } from '../io/
 import { getDebugMode } from '../settings/debugMode'
 import { isMac, isWindows, isLinux } from '../platform'
 import { isTauri, makeFileHost } from '../io/fileHost'
+import { isComposingKey } from '../input/keyboard'
 
 const GITHUB_NEW_ISSUE_URL = 'https://github.com/hew3d/hew/issues/new'
 const PRIVACY_URL = 'https://hew3d.com/privacy/bug-reports/'
@@ -52,14 +57,14 @@ const MAX_ISSUE_URL_LENGTH = 6000
 const DESCRIPTION_MIN = 10
 const DESCRIPTION_MAX = 10_000
 
-const ROW_ORDER: { key: ReportRowKey; label: string }[] = [
-  { key: 'system', label: 'App version and system' },
-  { key: 'recording', label: 'Recorded steps' },
-  { key: 'imports', label: 'Imported files' },
-  { key: 'failedFile', label: 'File that didn’t open' },
-  { key: 'model', label: 'Model file' },
-  { key: 'log', label: 'Diagnostic log' },
-  { key: 'input', label: 'Raw input events' },
+const ROW_ORDER: { key: ReportRowKey; label: MessageDescriptor }[] = [
+  { key: 'system', label: msg`App version and system` },
+  { key: 'recording', label: msg`Recorded steps` },
+  { key: 'imports', label: msg`Imported files` },
+  { key: 'failedFile', label: msg`File that didn’t open` },
+  { key: 'model', label: msg`Model file` },
+  { key: 'log', label: msg`Diagnostic log` },
+  { key: 'input', label: msg`Raw input events` },
 ]
 
 type SendState =
@@ -296,9 +301,13 @@ function afterPaint(): Promise<void> {
 }
 
 function formatBytes(n: number): string {
-  if (n < 1024) return `${n} B`
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  if (n < 1024) return t`${n} B`
+  if (n < 1024 * 1024) {
+    const kb = formatNumber(n / 1024, { fractionDigits: 1 })
+    return t`${kb} KB`
+  }
+  const mb = formatNumber(n / (1024 * 1024), { fractionDigits: 1 })
+  return t`${mb} MB`
 }
 
 /** Open an external URL the OS-appropriate way — the opener plugin on
@@ -329,6 +338,7 @@ function openExternal(url: string): void {
  * halves, leaving a lone unpaired surrogate that `encodeURIComponent`
  * throws a `URIError` on ("malformed URI sequence") — turning "also file a
  * GitHub issue" into a crash. */
+/* oxlint-disable lingui/no-unlocalized-strings -- the GitHub issue title, body footer, and URL are written for the maintainer and stay English */
 function githubIssueUrl(description: string, version: string, platform: string, id: string | null): string {
   const title = id !== null ? `Bug report ${id}` : 'Bug report'
   const footer =
@@ -346,32 +356,36 @@ function githubIssueUrl(description: string, version: string, platform: string, 
   if (bodyPoints.length < codePoints.length) body = `${body.trimEnd()}\n\n[truncated]`
   return `${base}${encodeURIComponent(body + footer)}`
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 function reportErrorMessage(err: unknown): { kind: ReportErrorKind; message: string } {
   if (err instanceof ReportError) {
     switch (err.kind) {
       case 'invalid':
-        return { kind: err.kind, message: 'The report was rejected as invalid — check the description length.' }
+        return { kind: err.kind, message: t`The report was rejected as invalid — check the description length.` }
       case 'tooLarge':
-        return { kind: err.kind, message: 'This report is too large to send.' }
+        return { kind: err.kind, message: t`This report is too large to send.` }
       case 'rateLimited':
-        return { kind: err.kind, message: 'Too many reports sent recently — try again in a few minutes.' }
+        return { kind: err.kind, message: t`Too many reports sent recently — try again in a few minutes.` }
       case 'full':
-        return { kind: err.kind, message: 'The report service is temporarily full — try again later.' }
+        return { kind: err.kind, message: t`The report service is temporarily full — try again later.` }
       case 'tls':
-        return { kind: err.kind, message: "The report service's certificate isn't trusted by this computer." }
+        return { kind: err.kind, message: t`The report service’s certificate isn’t trusted by this computer.` }
       case 'offline':
-        return { kind: err.kind, message: 'Could not reach the report service — check your internet connection.' }
+        return { kind: err.kind, message: t`Could not reach the report service — check your internet connection.` }
       case 'unreachable':
-        return { kind: err.kind, message: 'The report service is unavailable right now.' }
-      case 'status':
-        return { kind: err.kind, message: `Unexpected response from the report service${err.status ? ` (${err.status})` : ''}.` }
+        return { kind: err.kind, message: t`The report service is unavailable right now.` }
+      case 'status': {
+        const status = err.status
+        return { kind: err.kind, message: status ? t`Unexpected response from the report service (${status}).` : t`Unexpected response from the report service.` }
+      }
     }
   }
   return { kind: 'unreachable', message: err instanceof Error ? err.message : String(err) }
 }
 
 export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportBugDialogProps) {
+  const { t, i18n } = useLingui()
   const [description, setDescription] = useState('')
   const [expected, setExpected] = useState('')
   const [contact, setContact] = useState('')
@@ -519,6 +533,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -540,6 +555,8 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
   )
 
   const trimmedDescription = description.trim()
+  const trimmedLength = trimmedDescription.length
+  const descriptionLength = description.length
   const descriptionValid = trimmedDescription.length >= DESCRIPTION_MIN && description.length <= DESCRIPTION_MAX
   // The measurement says up front when Send can't go ahead (too large even
   // after dropping rows, or no compression). Send compresses again with the
@@ -548,20 +565,21 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
     descriptionValid && !busy && !gathering && currentMeasure !== null && currentMeasure.unavailableReason === null
   const canSave = !busy && !gathering
 
+  const approxSize = formatBytes(currentMeasure?.compressedBytes ?? 0)
   const statusNote = gathering
-    ? 'Gathering details…'
+    ? t`Gathering details…`
     : sending
       ? sendPercent === null
-        ? 'Compressing the report…'
-        : 'Uploading the report…'
+        ? t`Compressing the report…`
+        : t`Uploading the report…`
       : savingFile
-        ? 'Saving the report…'
+        ? t`Saving the report…`
         : !sendAvailable
         ? null
         : currentMeasure === null
-          ? 'Measuring the compressed size…'
+          ? t`Measuring the compressed size…`
           : (currentMeasure.unavailableReason ??
-            `About ${formatBytes(currentMeasure.compressedBytes ?? 0)} to send, compressed.`)
+            t`About ${approxSize} to send, compressed.`)
 
   const toggleRow = (key: ReportRowKey) => setFlags((f) => ({ ...f, [key]: !f[key] }))
   const toggleExpanded = (key: ReportRowKey) =>
@@ -589,8 +607,9 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
           if (mountedRef.current) {
             setSendState({
               kind: 'failed',
+              // oxlint-disable-next-line lingui/no-unlocalized-strings -- error-kind identifier, not copy
               kind_: 'tooLarge',
-              message: upload.unavailableReason ?? 'This report can’t be sent. Save it to a file instead.',
+              message: upload.unavailableReason ?? t`This report can’t be sent. Save it to a file instead.`,
             })
           }
           return
@@ -632,7 +651,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
         const bytes = await enqueueBuild(() => encodeReportFile(content, options))
         const name = `hew-bug-report-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
         const savedTo = await makeFileHost().exportBinary(bytes, name, {
-          description: 'Hew Bug Report',
+          description: t`Hew Bug Report`,
           ext: 'json',
           mime: 'application/json',
         })
@@ -642,7 +661,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
           remeasure()
           return
         }
-        const display = isTauri ? scrubHomeDir(savedTo, homeDir) : `Saved as "${savedTo}".`
+        const display = isTauri ? scrubHomeDir(savedTo, homeDir) : t`Saved as "${savedTo}".`
         setSaveState({ kind: 'saved', display, revealPath: isTauri ? savedTo : null })
       } catch {
         if (!mountedRef.current) return
@@ -663,13 +682,14 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
 
   /** "Show in Finder" (macOS) / "Show in Explorer" (Windows) / "Show in
    *  folder" (Linux) — the OS-conventional wording for revealing a file. */
-  const revealLabel = isMac ? 'Show in Finder' : isWindows ? 'Show in Explorer' : 'Show in folder'
+  const revealLabel = isMac ? t`Show in Finder` : isWindows ? t`Show in Explorer` : t`Show in folder`
 
   const handleOpenGithubIssueForSave = () => {
     openExternal(githubIssueUrl(description, system.appVersion, system.platform, null))
   }
 
   const [copied, setCopied] = useState(false)
+  const sentId = sendState.kind === 'sent' ? sendState.id : ''
   const handleCopyId = () => {
     if (sendState.kind !== 'sent') return
     void navigator.clipboard?.writeText(sendState.id)
@@ -699,9 +719,9 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={crash !== null ? 'Report this crash' : 'Report Bug'}
+        aria-label={crash !== null ? t`Report this crash` : t`Report Bug`}
       >
-        <div style={HEADING_STYLE}>{crash !== null ? 'Report this crash' : 'Report a Bug'}</div>
+        <div style={HEADING_STYLE}>{crash !== null ? t`Report this crash` : t`Report a Bug`}</div>
 
         {/* Once sent (or saved), the form gives way to the confirmation: a
             filled-in form above a below-the-fold success line reads as
@@ -709,7 +729,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
         {sendState.kind !== 'sent' && saveState.kind !== 'saved' && (
           <>
             <label style={LABEL_STYLE} htmlFor="report-bug-description">
-              What happened?
+              {t`What happened?`}
             </label>
             <textarea
               id="report-bug-description"
@@ -722,14 +742,14 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
             />
             <div style={HINT_STYLE}>
               {description.length === 0
-                ? `${DESCRIPTION_MIN}–${DESCRIPTION_MAX} characters`
+                ? t`${DESCRIPTION_MIN}–${DESCRIPTION_MAX} characters`
                 : !descriptionValid
-                  ? `Needs at least ${DESCRIPTION_MIN} characters (${trimmedDescription.length} so far)`
-                  : `${description.length} / ${DESCRIPTION_MAX}`}
+                  ? t`Needs at least ${DESCRIPTION_MIN} characters (${trimmedLength} so far)`
+                  : t`${descriptionLength} / ${DESCRIPTION_MAX}`}
             </div>
 
             <label style={LABEL_STYLE} htmlFor="report-bug-expected">
-              What did you expect instead?
+              {t`What did you expect instead?`}
             </label>
             <textarea
               id="report-bug-expected"
@@ -744,7 +764,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
             />
 
             <label style={LABEL_STYLE} htmlFor="report-bug-contact">
-              Email for follow-up (optional)
+              {t`Email for follow-up (optional)`}
             </label>
             <input
               id="report-bug-contact"
@@ -756,9 +776,10 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
               disabled={busy}
             />
 
-            <label style={{ ...LABEL_STYLE, marginBottom: 0 }}>What&rsquo;s included</label>
+            <label style={{ ...LABEL_STYLE, marginBottom: 0 }}>{t`What’s included`}</label>
             <div>
               {rowsToShow.map(({ key, label }) => {
+                const rowLabel = i18n._(label)
                 const row = described?.rows[key]
                 const disabled = row?.disabledReason != null
                 const checked = flags[key] && !disabled
@@ -771,12 +792,12 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                       // saving: those build from the checklist at the click.
                       disabled={gathering || disabled || busy}
                       onChange={() => toggleRow(key)}
-                      aria-label={label}
+                      aria-label={rowLabel}
                       style={{ marginTop: '2px' }}
                     />
                     <div style={{ flex: 1 }}>
                       <div style={{ display: 'flex', alignItems: 'center' }}>
-                        <span style={ROW_LABEL_STYLE}>{label}</span>
+                        <span style={ROW_LABEL_STYLE}>{rowLabel}</span>
                         <span style={ROW_SIZE_STYLE}>{row ? formatBytes(row.bytes) : ''}</span>
                         <button
                           type="button"
@@ -784,15 +805,15 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                           onClick={() => toggleExpanded(key)}
                           disabled={row === undefined}
                         >
-                          {expanded.has(key) ? 'Hide' : 'Show'}
+                          {expanded.has(key) ? t`Hide` : t`Show`}
                         </button>
                       </div>
                       {disabled && <div style={HINT_STYLE}>{row?.disabledReason}</div>}
                       {!disabled && checked && sendAvailable && row?.droppedFromSend === true && (
                         <div style={HINT_STYLE}>
                           {key === 'failedFile'
-                            ? 'Too large to send; its name, size, and error go instead. Save to file includes the file itself.'
-                            : 'Too large to send; still included in Save to file.'}
+                            ? t`Too large to send; its name, size, and error go instead. Save to file includes the file itself.`
+                            : t`Too large to send; still included in Save to file.`}
                         </div>
                       )}
                       {expanded.has(key) && row && <div style={PREVIEW_STYLE}>{row.preview}</div>}
@@ -809,26 +830,30 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
             )}
 
             <p style={NOTE_STYLE}>
-              Recorded steps and the model file contain your model&rsquo;s geometry. Imported files are the files you
-              imported or opened and the textures and library items you added, and the file that didn&rsquo;t open is
-              that file, all byte for byte. Untick these to send only the description, system details, and log.
+              <Trans>
+                Recorded steps and the model file contain your model’s geometry. Imported files are the files you
+                imported or opened and the textures and library items you added, and the file that didn’t open is
+                that file, all byte for byte. Untick these to send only the description, system details, and log.
+              </Trans>
             </p>
 
             {/* A build that can't send has no destination to name; the line
                 below it explains the file-and-issue route instead. */}
             {sendAvailable && (
               <p style={DESTINATION_STYLE}>
-                Sent privately to the Hew developer. Not posted publicly.{' '}
+                {t`Sent privately to the Hew developer. Not posted publicly.`}{' '}
                 <button type="button" style={LINK_STYLE} onClick={() => openExternal(PRIVACY_URL)}>
-                  Learn more
+                  {t`Learn more`}
                 </button>
               </p>
             )}
 
             {!sendAvailable && sendState.kind === 'idle' && (
               <p style={NOTE_STYLE}>
-                This build can&rsquo;t send reports directly. Save the file below and attach it to a GitHub issue
-                instead.
+                <Trans>
+                  This build can’t send reports directly. Save the file below and attach it to a GitHub issue
+                  instead.
+                </Trans>
               </p>
             )}
           </>
@@ -842,21 +867,23 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
 
         {saveState.kind === 'failed' && (
           <div style={ERROR_STYLE} role="alert">
-            Couldn&rsquo;t save the file.
+            {t`Couldn’t save the file.`}
           </div>
         )}
 
         {sendState.kind === 'sent' && (
           <div style={SUCCESS_STYLE} role="status">
             <div>
-              Report sent — ID <code>{sendState.id}</code>{' '}
+              <Trans>
+                Report sent — ID <code>{sentId}</code>
+              </Trans>{' '}
               <button type="button" style={LINK_STYLE} onClick={handleCopyId}>
-                {copied ? 'Copied' : 'Copy'}
+                {copied ? t`Copied` : t`Copy`}
               </button>
             </div>
             <div style={{ marginTop: '8px' }}>
               <button type="button" style={SECONDARY_BUTTON_STYLE} onClick={handleOpenGithubIssue}>
-                Also open a public GitHub issue
+                {t`Also open a public GitHub issue`}
               </button>
             </div>
           </div>
@@ -868,7 +895,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
             go?" bug this dialog exists to fix. */}
         {saveState.kind === 'saved' && (
           <div style={SUCCESS_STYLE} role="status">
-            <div>Report saved.</div>
+            <div>{t`Report saved.`}</div>
             <div style={{ marginTop: '4px', wordBreak: 'break-all' }}>{saveState.display}</div>
             <div style={{ marginTop: '8px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
               {saveState.revealPath !== null && (
@@ -877,7 +904,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                 </button>
               )}
               <button type="button" style={SECONDARY_BUTTON_STYLE} onClick={handleOpenGithubIssueForSave}>
-                Open a public GitHub issue
+                {t`Open a public GitHub issue`}
               </button>
             </div>
           </div>
@@ -891,7 +918,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
               onClick={onClose}
               disabled={busy}
             >
-              Cancel
+              {t`Cancel`}
             </button>
             <button
               type="button"
@@ -899,7 +926,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
               onClick={handleSaveToFile}
               disabled={!canSave}
             >
-              {savingFile ? 'Saving…' : 'Save to file…'}
+              {savingFile ? t`Saving…` : t`Save to file…`}
             </button>
             {sendAvailable && (
               <button
@@ -908,7 +935,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                 onClick={handleSend}
                 disabled={!canSubmit}
               >
-                {sending ? (sendPercent === null ? 'Sending…' : `Sending… ${sendPercent}%`) : 'Send report'}
+                {sending ? (sendPercent === null ? t`Sending…` : t`Sending… ${sendPercent}%`) : t`Send report`}
               </button>
             )}
           </div>
@@ -917,7 +944,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
         {(sendState.kind === 'sent' || saveState.kind === 'saved') && (
           <div style={BUTTON_ROW_STYLE}>
             <button type="button" style={SECONDARY_BUTTON_STYLE} onClick={onClose}>
-              Close
+              {t`Close`}
             </button>
           </div>
         )}

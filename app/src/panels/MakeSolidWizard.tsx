@@ -20,6 +20,8 @@
  * All wording is in `health/healthCopy.ts`; the plan is `health/fixPlan.ts`.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { i18n } from '@lingui/core'
+import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { openReason, readHealthReportFresh, type HealthOverlay } from '../health/healthReport'
 import { runBatch, type BatchFailure } from '../health/healthBatch'
@@ -246,6 +248,7 @@ interface Outcome {
 // --------------------------------------------------------------- component
 
 export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGeneration = 0, onClose, onWidthChange, onIsolate, onClearIsolation, onHealthOverlay, onGeometryChanged, onToast, isolationLost = 0, escapeBusy }: Props) {
+  const { t } = useLingui()
   const readScopeIds = (): bigint[] | null =>
     scope === 'import' ? Array.from(scene.last_import_object_ids()) : scope === 'selection' ? [...(objectIds ?? [])] : null
   const readPlan = (): FixPlan => buildPlan(readHealthReportFresh(scene, readScopeIds()))
@@ -560,7 +563,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
         style={{ margin: '8px 0 0', padding: '6px 10px', fontSize: '12px', border: '1px solid var(--border-strong)', borderRadius: '4px' }}
       >
         <p style={{ margin: 0 }}>
-          {REASON_SENTENCE[openReason(activeItem.rows[0])]} {REASON_ON_PURPOSE}
+          {REASON_SENTENCE[openReason(activeItem.rows[0])]} {i18n._(REASON_ON_PURPOSE)}
         </p>
       </div>
     )
@@ -678,6 +681,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
           <>
             <p>{WIZARD.splitBody}</p>
             {radio('wz-split', WIZARD.splitRejoin, choices.split === 'rejoin', () => setPageChoice('split', 'rejoin'), true)}
+            {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- wizard choice id, not copy */}
             {radio('wz-split', WIZARD.splitKeepWalls, choices.split === 'keepWalls', () => setPageChoice('split', 'keepWalls'), false)}
             {radio('wz-split', WIZARD.splitLeave, choices.split === 'leave', () => setPageChoice('split', 'leave'), false)}
           </>
@@ -686,7 +690,9 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
         return (
           <>
             <p>{WIZARD.panelsBody}</p>
+            {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- wizard choice id, not copy */}
             {radio('wz-flat', WIZARD.panelsKeep, choices.flatPanels === 'keep', () => setPageChoice('flatPanels', 'keep'), true)}
+            {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- wizard choice id, not copy */}
             {radio('wz-flat', WIZARD.panelsThicken, choices.flatPanels === 'thicken', () => setPageChoice('flatPanels', 'thicken'), false)}
             {(choices.flatPanels === 'thicken' || plan.items.flatPanels.some((i) => itemActs(i, choices))) && (
               <div style={{ margin: '6px 0 4px 24px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -910,7 +916,7 @@ export function MakeSolidWizard({ scene, scope, objectIds, docRev = 0, docGenera
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label="Resize"
+        aria-label={t`Resize`}
         data-wizard-resize
         style={HANDLE_STYLE}
         onPointerDown={onHandleDown}

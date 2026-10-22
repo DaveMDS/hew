@@ -75,6 +75,7 @@ export interface LoadedFont {
  * a block), but a bundled default should never need that guard to produce
  * a legible letter. License text for each lives alongside its .ttf in
  * `app/src/assets/fonts/<family>/OFL.txt`. */
+/* oxlint-disable lingui/no-unlocalized-strings -- font family names are proper names, shown verbatim in every language */
 export const BUNDLED_MANIFEST: ReadonlyArray<{ id: string; label: string; url: URL }> = [
   { id: 'bundled-onest', label: 'Onest', url: new URL('../assets/fonts/onest/Onest.ttf', import.meta.url) },
   { id: 'bundled-lora', label: 'Lora', url: new URL('../assets/fonts/lora/Lora.ttf', import.meta.url) },
@@ -94,6 +95,7 @@ export const BUNDLED_MANIFEST: ReadonlyArray<{ id: string; label: string; url: U
     url: new URL('../assets/fonts/alfa-slab-one/AlfaSlabOne-Regular.ttf', import.meta.url),
   },
 ]
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Parsed fonts, memoized per `FontFaceEntry.id` (parsing a ~1MB variable
  *  font isn't free; the picker may re-list/reselect the same entry

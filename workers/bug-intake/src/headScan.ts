@@ -198,6 +198,8 @@ export interface HeadDisplayFields {
   os?: string
   gpu?: string
   userAgent?: string
+  /** The UI language the report was filed from (BCP 47), when the app sent one. */
+  locale?: string
   crash?: { at?: string; message?: string }
 }
 
@@ -277,6 +279,7 @@ export function parseHeadForDisplay(text: string): HeadDisplayFields | null {
       os: str(system.os),
       gpu: str(system.gpu),
       userAgent: str(system.userAgent),
+      locale: str(system.locale),
       crash,
     }
   } catch {

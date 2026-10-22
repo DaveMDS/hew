@@ -18,19 +18,22 @@
  * than clearing immediately, and the caret says whether typing right now
  * would do anything.
  */
-const VCB_LABEL: Record<string, string> = {
-  'Move': 'Distance',
-  'Push/Pull': 'Push depth',
-  'Rotate': 'Angle',
-  'Scale': 'Factor',
-  'Tape Measure': 'Distance',
-  'Protractor': 'Angle',
-  'Follow Me': 'Swept length',
+import { i18n } from '@lingui/core'
+import type { MessageDescriptor } from '@lingui/core'
+import { msg, t } from '@lingui/core/macro'
+const VCB_LABEL: Record<string, MessageDescriptor> = {
+  'Move': msg`Distance`,
+  'Push/Pull': msg`Push depth`,
+  'Rotate': msg`Angle`,
+  'Scale': msg`Factor`,
+  'Tape Measure': msg`Distance`,
+  'Protractor': msg`Angle`,
+  'Follow Me': msg`Swept length`,
   // Camera ▸ Field of View activates the same 'Zoom' camera mode as
   // Camera ▸ Zoom / the Z shortcut (docs/design/camera.md §2) — the label
   // only ever shows while a value is present (MeasurementBox returns null
   // otherwise), i.e. only while the typed-FOV buffer is actually open.
-  'Zoom': 'Field of View',
+  'Zoom': msg`Field of View`,
 }
 
 export interface MeasurementBoxProps {
@@ -115,7 +118,8 @@ export function MeasurementBox({
   orientation = 'portrait',
 }: MeasurementBoxProps) {
   if (value === '') return null
-  const label = labelOverride ?? VCB_LABEL[toolName] ?? 'Value'
+  const toolLabel = VCB_LABEL[toolName]
+  const label = labelOverride ?? (toolLabel !== undefined ? i18n._(toolLabel) : t`Value`)
 
   if (variant === 'shop') {
     const positionStyle: React.CSSProperties =

@@ -15,6 +15,9 @@
  */
 
 import type React from 'react'
+import { plural, t } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { formatNumber } from '../i18n/format'
 
 /**
  * How far an open has come, for the overlay's bar and its line of text.
@@ -67,33 +70,54 @@ export function openProgressFraction(p: OpenProgress): number {
 }
 
 function formatCount(n: number): string {
-  return n.toLocaleString('en-US')
+  return formatNumber(n)
 }
 
 function formatBytes(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)} GB`
-  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)} MB`
-  if (n >= 1_000) return `${Math.round(n / 1_000)} KB`
-  return `${n} bytes`
+  if (n >= 1_000_000_000) {
+    const gb = formatNumber(n / 1_000_000_000, { fractionDigits: 1 })
+    return t`${gb} GB`
+  }
+  if (n >= 1_000_000) {
+    const mb = formatNumber(Math.round(n / 1_000_000))
+    return t`${mb} MB`
+  }
+  if (n >= 1_000) {
+    const kb = formatNumber(Math.round(n / 1_000))
+    return t`${kb} KB`
+  }
+  return plural(n, { one: '# byte', other: '# bytes' })
 }
 
 /** The line under the bar: what is happening and how far it has come. */
 export function openProgressText(p: OpenProgress): string {
   switch (p.phase) {
     case 'read':
-      return p.bytes !== undefined ? `Reading the file (${formatBytes(p.bytes)})` : 'Reading the file'
+      if (p.bytes !== undefined) {
+        const size = formatBytes(p.bytes)
+        return t`Reading the file (${size})`
+      }
+      return t`Reading the file`
     case 'shapes': {
-      const head = `Reading placements: ${formatCount(p.done)} of ${formatCount(p.total)}`
-      return p.shapes ? `${head}, ${formatCount(p.shapes)} shapes so far` : head
+      const done = formatCount(p.done)
+      const total = formatCount(p.total)
+      if (p.shapes) {
+        const shapes = formatCount(p.shapes)
+        return t`Reading placements: ${done} of ${total}, ${shapes} shapes so far`
+      }
+      return t`Reading placements: ${done} of ${total}`
     }
-    case 'objects':
-      return `Building objects: ${formatCount(p.done)} of ${formatCount(p.total)}`
+    case 'objects': {
+      const done = formatCount(p.done)
+      const total = formatCount(p.total)
+      return t`Building objects: ${done} of ${total}`
+    }
     case 'finishing':
-      return 'Checking the objects'
+      return t`Checking the objects`
     case 'source':
-      return 'Getting ready to save back to the file'
+      return t`Getting ready to save back to the file`
     case 'view':
-      return 'Getting the view ready'
+      return t`Getting the view ready`
   }
 }
 
@@ -186,17 +210,19 @@ export function ensureSpinnerKeyframes(): void {
   if (document.getElementById('hew-spin-keyframes') !== null) return
   const style = document.createElement('style')
   style.id = 'hew-spin-keyframes'
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS keyframes text, not copy
   style.textContent = '@keyframes hew-spin { to { transform: rotate(360deg); } }'
   document.head.appendChild(style)
 }
 
 export function ImportingOverlay({ fileName, opening = false, progress = null }: ImportingOverlayProps) {
+  const { t } = useLingui()
   ensureSpinnerKeyframes()
   const fraction = progress ? openProgressFraction(progress) : null
   const percent = fraction === null ? null : Math.round(fraction * 100)
 
   return (
-    <div style={OVERLAY_STYLE} aria-live="assertive" aria-label={opening ? 'Opening model' : 'Importing model'}>
+    <div style={OVERLAY_STYLE} aria-live="assertive" aria-label={opening ? t`Opening model` : t`Importing model`}>
       <div
         style={CARD_STYLE}
         role="status"
@@ -204,9 +230,15 @@ export function ImportingOverlay({ fileName, opening = false, progress = null }:
       >
         <div style={SPINNER_STYLE} aria-hidden="true" />
         <div style={MESSAGE_STYLE}>
-          {opening ? 'Opening' : 'Importing'}{' '}
-          <span style={FILE_NAME_STYLE}>&ldquo;{fileName}&rdquo;</span>
-          &hellip;
+          {opening ? (
+            <Trans>
+              Opening <span style={FILE_NAME_STYLE}>&ldquo;{fileName}&rdquo;</span>&hellip;
+            </Trans>
+          ) : (
+            <Trans>
+              Importing <span style={FILE_NAME_STYLE}>&ldquo;{fileName}&rdquo;</span>&hellip;
+            </Trans>
+          )}
         </div>
         {progress && percent !== null ? (
           <>
@@ -216,7 +248,7 @@ export function ImportingOverlay({ fileName, opening = false, progress = null }:
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={percent}
-              aria-label="Open progress"
+              aria-label={t`Open progress`}
             >
               <div style={{ ...BAR_FILL_STYLE, width: `${percent}%` }} />
             </div>
@@ -229,7 +261,9 @@ export function ImportingOverlay({ fileName, opening = false, progress = null }:
             </div>
           </>
         ) : (
-          <div style={HINT_STYLE}>This may take a moment for large files.</div>
+          <div style={HINT_STYLE}>
+            <Trans>This may take a moment for large files.</Trans>
+          </div>
         )}
       </div>
     </div>

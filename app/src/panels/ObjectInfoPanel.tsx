@@ -42,6 +42,8 @@
  */
 
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
+import { plural, t as tCore } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { entityLabel, resolveLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
 import { pathAbove } from './selectionPath'
@@ -71,6 +73,7 @@ import { worldBoundsForSelection, boundsExtents, type Bounds } from './objectBou
 import { formatLength } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { MIN_SEGMENTS_PER_TURN } from '../tools/arcMath'
+import { isComposingKey } from '../input/keyboard'
 
 /**
  * The fewest facets a circle may have. Mirrors the kernel's
@@ -164,11 +167,11 @@ interface AnnotationScene {
 
 /** Human-readable type label for each node kind. */
 function kindLabel(kind: NodeRef['kind']): string {
-  if (kind === 'object') return 'Object'
-  if (kind === 'group') return 'Group'
-  if (kind === 'sketch') return 'Sketch'
+  if (kind === 'object') return tCore`Object`
+  if (kind === 'group') return tCore`Group`
+  if (kind === 'sketch') return tCore`Sketch`
   if (isDraftKind(kind)) return draftKindLabel(kind)
-  return 'Component'
+  return tCore`Component`
 }
 
 const PANEL_STYLE: React.CSSProperties = {
@@ -235,6 +238,8 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
+  const { t } = useLingui()
+  const selectedCount = selectedIds.length
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
@@ -269,15 +274,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             scene.top_level_nodes().map(nodeRefFromJs),
             (groupId) => scene.group_members(groupId).map(nodeRefFromJs),
           )
-          store = 'on ' + objects.map((o) => {
+          const onNames = objects.map((o) => {
             const idx = treeIndex.get(nodeKey({ kind: 'object', id: o })) ?? 0
             return resolveLabel(scene.object_name(o), undefined, 'object', idx)
           }).join(', ')
+          store = t({ comment: 'Where a drawn shape sits, shown under its type; the placeholder is a comma-separated list of object names', message: `on ${onNames}` })
         } else if (anyFree) {
           // The ground is the z = 0 plane, whichever way its normal points.
           const pl = node.ctx !== undefined ? planeOfCtx(node.ctx) : null
           const onGround = pl !== null && Math.abs(Math.abs(pl.normal[2]) - 1) < 1e-9 && Math.abs(pl.point[2]) < 1e-9 && pl.instance === null
-          store = onGround ? 'on the ground' : 'drawing'
+          store = onGround ? t`on the ground` : t({ comment: 'Where a drawn shape sits when it floats free of any object, shown under its type', message: 'drawing' })
         }
         const ends = new Set<string>()
         const q = (v: number) => (Math.round(v * 1e6) / 1e6).toString()
@@ -317,7 +323,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
         id,
         kindNum: null as number | null,
         nameFromScene: undefined as string | undefined,
-        defaultLabel: store === null ? label : `${label} ${store}`,
+        defaultLabel: store === null ? label : `${label} ${store}`, // both halves are already translated
         store,
         tags: [] as string[][],
         solid: null as boolean | null,
@@ -439,7 +445,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, docRev, selectedIds])
+  }, [scene, docRev, selectedIds, t])
+  const instanceCount = nodeInfo?.instanceIds.length ?? 0
 
   // --------------------------------------------------------------------------
   // Selection path: where the selected object/group/instance sits, outermost
@@ -626,12 +633,14 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       // was typed would build a different circle than the one asked for. The
       // kernel refuses this too (`SegmentsBelowFloor`) — this is the same
       // refusal, said before the round trip.
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- 'SegmentsBelowFloor' is the typed kernel error code, not copy
       onToast?.(kernelErrorMessage('SegmentsBelowFloor', ''), 'SegmentsBelowFloor')
       setLocalSegments(String(nodeInfo.segments))
       return
     }
 
     try {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- undo history label; history labels move to structured kinds in a later phase
       runDraft(scene, { kind: 'ctx', ctx }, 'Segments', (d) => {
         scene.draft_refacet_curve(d, keyToId(curveKey), parsed)
       })
@@ -773,7 +782,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       try {
         scene.add_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), segments)
       } catch (err) {
-        onToast?.(`Add tag failed: ${err instanceof Error ? err.message : String(err)}`)
+        const errorText = err instanceof Error ? err.message : String(err)
+        onToast?.(t`Add tag failed: ${errorText}`)
         return
       }
     } else {
@@ -789,7 +799,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     try {
       scene.remove_node_tag_many(new Uint8Array(multi.kinds), new BigUint64Array(multi.ids), path)
     } catch (err) {
-      onToast?.(`Remove tag failed: ${err instanceof Error ? err.message : String(err)}`)
+      const errorText = err instanceof Error ? err.message : String(err)
+      onToast?.(t`Remove tag failed: ${errorText}`)
       return
     }
     onTagsChanged()
@@ -808,13 +819,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     const ann = scene as unknown as AnnotationScene
     const kind = ann.annotation_kind(selectedAnnotation)
     if (kind === undefined) return null
-    const type = kind === 'leader' ? 'Text' : kind === 'radial' ? 'Radial dimension' : 'Dimension'
+    const type = kind === 'leader' ? t`Text` : kind === 'radial' ? t`Radial dimension` : t`Dimension`
     const name = kind === 'leader' ? ann.annotation_text(selectedAnnotation) || type : type
     const tags = (ann.annotation_tags?.(selectedAnnotation) ?? []).map((t) => t.split('/'))
     return { name, type, tags }
     // docRev: text and tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotation, docRev])
+  }, [scene, selectedIds, selectedAnnotation, docRev, t])
 
   // A selected construction guide (read-only).
   const guideInfo = useMemo(() => {
@@ -823,9 +834,9 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     const kind = guides.guide_kind(selectedGuide)
     if (kind === undefined) return null
     const tags = guides.guide_tags(selectedGuide).map((t) => t.split('/'))
-    return { name: kind === 'point' ? 'Guide point' : 'Guide line', type: 'Guide', tags }
+    return { name: kind === 'point' ? t`Guide point` : t`Guide line`, type: t`Guide`, tags }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotation, selectedGuide, docRev])
+  }, [scene, selectedIds, selectedAnnotation, selectedGuide, docRev, t])
 
   // --------------------------------------------------------------------------
   // Render
@@ -835,16 +846,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return (
       <div style={PANEL_STYLE}>
         <div>
-          <div style={LABEL_STYLE}>Name</div>
+          <div style={LABEL_STYLE}><Trans>Name</Trans></div>
           <div style={VALUE_STYLE}>{annotationInfo.name}</div>
         </div>
         <div>
-          <div style={LABEL_STYLE}>Type</div>
+          <div style={LABEL_STYLE}><Trans>Type</Trans></div>
           <div style={VALUE_STYLE}>{annotationInfo.type}</div>
         </div>
         {annotationInfo.tags.length > 0 && (
           <div>
-            <div style={LABEL_STYLE}>Tags</div>
+            <div style={LABEL_STYLE}><Trans>Tags</Trans></div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
               {annotationInfo.tags.map((path) => (
                 <div key={path.join('/')} style={VALUE_STYLE}>
@@ -862,16 +873,16 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return (
       <div style={PANEL_STYLE}>
         <div>
-          <div style={LABEL_STYLE}>Name</div>
+          <div style={LABEL_STYLE}><Trans>Name</Trans></div>
           <div style={VALUE_STYLE}>{guideInfo.name}</div>
         </div>
         <div>
-          <div style={LABEL_STYLE}>Type</div>
+          <div style={LABEL_STYLE}><Trans>Type</Trans></div>
           <div style={VALUE_STYLE}>{guideInfo.type}</div>
         </div>
         {guideInfo.tags.length > 0 && (
           <div>
-            <div style={LABEL_STYLE}>Tags</div>
+            <div style={LABEL_STYLE}><Trans>Tags</Trans></div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
               {guideInfo.tags.map((path) => (
                 <div key={path.join('/')} style={VALUE_STYLE}>
@@ -899,18 +910,18 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return (
       <div style={PANEL_STYLE}>
         <div style={{ fontSize: '11px', color: 'var(--text-faint, #666)', padding: '4px 8px' }}>
-          {selectedIds.length} selected
+          {plural(selectedCount, { one: '# selected', other: '# selected' })}
         </div>
         {bounds !== null && <BoundingBoxRow bounds={bounds} />}
         {multi !== null && (
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
-              <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>
+              <div style={{ ...LABEL_STYLE, marginBottom: 0 }}><Trans>Tags</Trans></div>
               {!addingTag && (
                 <button
                   onClick={() => setAddingTag(true)}
-                  title="Add tag to all selected"
-                  aria-label="Add tag to all selected"
+                  title={t`Add tag to all selected`}
+                  aria-label={t`Add tag to all selected`}
                   style={ADD_TAG_BUTTON_STYLE}
                 >
                   +
@@ -919,24 +930,28 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             </div>
             {multi.tags.length > 0 && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-                {multi.tags.map((path) => (
-                  <TagChip
-                    key={path.join('/')}
-                    path={path}
-                    onRemove={() => handleRemoveTagFromAll(path)}
-                    removeLabel={`Remove tag ${path.join(' / ')} from all selected`}
-                  />
-                ))}
+                {multi.tags.map((path) => {
+                  const tagPath = path.join(' / ')
+                  return (
+                    <TagChip
+                      key={path.join('/')}
+                      path={path}
+                      onRemove={() => handleRemoveTagFromAll(path)}
+                      removeLabel={t`Remove tag ${tagPath} from all selected`}
+                    />
+                  )
+                })}
               </div>
             )}
             {addingTag && (
               <input
                 style={{ ...INPUT_STYLE, marginTop: multi.tags.length > 0 ? '6px' : '2px' }}
                 autoFocus
-                aria-label="New tag for all selected"
+                aria-label={t`New tag for all selected`}
                 value={tagInput}
                 onChange={(e) => setTagInput(e.target.value)}
                 onKeyDown={(e) => {
+                  if (isComposingKey(e)) return
                   if (e.key === 'Enter') {
                     handleAddTag()
                   } else if (e.key === 'Escape') {
@@ -953,7 +968,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                     handleAddTag()
                   }
                 }}
-                placeholder="Structure/Roof"
+                placeholder={t({ comment: 'Example tag path shown as placeholder text', message: 'Structure/Roof' })}
                 spellCheck={false}
               />
             )}
@@ -973,56 +988,59 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
        * own override; the Outliner then shows "Instance (Definition)"). */}
       {nodeInfo.kind !== 'object' && nodeInfo.kind !== 'group' && nodeInfo.kind !== 'instance' ? (
         <div>
-          <div style={LABEL_STYLE}>Name</div>
+          <div style={LABEL_STYLE}><Trans>Name</Trans></div>
           <div style={VALUE_STYLE}>{nodeInfo.defaultLabel}</div>
         </div>
       ) : nodeInfo.kind === 'instance' ? (
         <>
           <div>
-            <div style={LABEL_STYLE}>Definition Name</div>
+            <div style={LABEL_STYLE}><Trans>Definition Name</Trans></div>
             <input
               style={INPUT_STYLE}
-              aria-label="Definition Name"
+              aria-label={t`Definition Name`}
               value={localDefName}
               onChange={(e) => setLocalDefName(e.target.value)}
               onBlur={commitDefName}
               onKeyDown={(e) => {
+                if (isComposingKey(e)) return
                 if (e.key === 'Enter') {
                   e.currentTarget.blur()
                 }
               }}
-              title="Shared by every instance of this component"
+              title={t`Shared by every instance of this component`}
               spellCheck={false}
             />
           </div>
           <div>
-            <div style={LABEL_STYLE}>Instance Name</div>
+            <div style={LABEL_STYLE}><Trans>Instance Name</Trans></div>
             <input
               style={INPUT_STYLE}
-              aria-label="Instance Name"
+              aria-label={t`Instance Name`}
               value={localName}
               onChange={(e) => setLocalName(e.target.value)}
               onBlur={commitName}
               onKeyDown={(e) => {
+                if (isComposingKey(e)) return
                 if (e.key === 'Enter') {
                   e.currentTarget.blur()
                 }
               }}
               placeholder={nodeInfo.defaultLabel}
-              title="This instance only — leave empty to show the definition name"
+              title={t`This instance only — leave empty to show the definition name`}
               spellCheck={false}
             />
           </div>
         </>
       ) : (
         <div>
-          <div style={LABEL_STYLE}>Name</div>
+          <div style={LABEL_STYLE}><Trans>Name</Trans></div>
           <input
             style={INPUT_STYLE}
             value={localName}
             onChange={(e) => setLocalName(e.target.value)}
             onBlur={commitName}
             onKeyDown={(e) => {
+              if (isComposingKey(e)) return
               if (e.key === 'Enter') {
                 e.currentTarget.blur()
               }
@@ -1036,7 +1054,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       {/* Type — an instance also shows how many placements share its
        * definition; the count selects them all (viewport + Outliner). */}
       <div>
-        <div style={LABEL_STYLE}>Type</div>
+        <div style={LABEL_STYLE}><Trans>Type</Trans></div>
         <div style={VALUE_STYLE}>
           <span>{kindLabel(nodeInfo.kind)}</span>
           {nodeInfo.store !== null && (
@@ -1049,7 +1067,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               {' '}
               <button
                 onClick={selectAllInstances}
-                title="Select every instance of this component"
+                title={t`Select every instance of this component`}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -1060,8 +1078,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                   cursor: 'pointer',
                 }}
               >
-                ({nodeInfo.instanceIds.length}{' '}
-                {nodeInfo.instanceIds.length === 1 ? 'instance' : 'instances'})
+                {plural(instanceCount, { one: '(# instance)', other: '(# instances)' })}
               </button>
             </>
           )}
@@ -1070,15 +1087,17 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
               data-testid="object-info-path"
               style={{ ...VALUE_STYLE, color: 'var(--text-faint, #888)', marginTop: '1px' }}
             >
-              in{' '}
-              {pathSegments.map((seg, i) => (
+              {t({ comment: 'Precedes the list of groups and components that contain the selection, e.g. "in Kitchen › Cabinet"', message: 'in' })}{' '}
+              {pathSegments.map((seg, i) => {
+                const segLabel = seg.label
+                return (
                 <span key={nodeKey(seg.node)}>
                   {i > 0 && ' › '}
                   {seg.selectable ? (
                     <button
                       type="button"
                       onClick={() => onSelectMany([seg.node])}
-                      title={`Select ${seg.label}`}
+                      title={t`Select ${segLabel}`}
                       style={{
                         background: 'none',
                         border: 'none',
@@ -1094,7 +1113,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                     seg.label
                   )}
                 </span>
-              ))}
+                )
+              })}
             </div>
           )}
         </div>
@@ -1103,7 +1123,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       {/* Length — a drawn line, or a curve (the sum of its edges). */}
       {drawnLength !== null && (
         <div>
-          <div style={LABEL_STYLE}>Length</div>
+          <div style={LABEL_STYLE}><Trans>Length</Trans></div>
           <div style={VALUE_STYLE} data-testid="object-info-length">{formatLength(drawnLength)}</div>
         </div>
       )}
@@ -1113,7 +1133,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
        * facet density to edit, the rest is the shape as drawn. */}
       {nodeInfo.points !== null && (
         <div>
-          <div style={LABEL_STYLE}>Points</div>
+          <div style={LABEL_STYLE}><Trans>Points</Trans></div>
           <div style={VALUE_STYLE}>{nodeInfo.points}</div>
         </div>
       )}
@@ -1123,10 +1143,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
        * its centre and its radius are unchanged. Commits on Enter or blur, like the name fields. */}
       {nodeInfo.segments !== null && (
         <div>
-          <div style={LABEL_STYLE}>Segments</div>
+          <div style={LABEL_STYLE}><Trans>Segments</Trans></div>
           <input
             style={INPUT_STYLE}
-            aria-label="Segments"
+            aria-label={t`Segments`}
             type="number"
             min={MIN_CIRCLE_SEGMENTS}
             step={1}
@@ -1134,6 +1154,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             onChange={(e) => setLocalSegments(e.target.value)}
             onBlur={commitSegments}
             onKeyDown={(e) => {
+              if (isComposingKey(e)) return
               if (e.key === 'Enter') {
                 e.currentTarget.blur()
               } else if (e.key === 'Escape') {
@@ -1146,7 +1167,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 e.currentTarget.blur()
               }
             }}
-            title={`How many straight facets this circle is drawn with (minimum ${MIN_CIRCLE_SEGMENTS}). Changing it rebuilds the circle.`}
+            title={t`How many straight facets this circle is drawn with (minimum ${MIN_CIRCLE_SEGMENTS}). Changing it rebuilds the circle.`}
             spellCheck={false}
           />
         </div>
@@ -1157,7 +1178,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
        * with a Show link into the Model Health panel. */}
       {nodeInfo.solid !== null && (
         <div>
-          <div style={LABEL_STYLE}>Geometry</div>
+          <div style={LABEL_STYLE}><Trans>Geometry</Trans></div>
           <div
             style={{
               ...VALUE_STYLE,
@@ -1172,7 +1193,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             }}
           >
             <span data-object-verdict>
-              {nodeInfo.solid ? 'Solid' : geometryLine(nodeInfo.health === null ? 'closerLook' : classifyRow(nodeInfo.health), nodeInfo.health?.rims.length ?? 0, nodeInfo.health?.accepted ?? false, nodeInfo.health === null ? undefined : openReason(nodeInfo.health))}
+              {/* oxlint-disable-next-line lingui/no-unlocalized-strings -- 'closerLook' is a health row-class identifier, not copy */}
+              {nodeInfo.solid ? t`Solid` : geometryLine(nodeInfo.health === null ? 'closerLook' : classifyRow(nodeInfo.health), nodeInfo.health?.rims.length ?? 0, nodeInfo.health?.accepted ?? false, nodeInfo.health === null ? undefined : openReason(nodeInfo.health))}
             </span>
             {nodeInfo.health !== null && !nodeInfo.solid && (
               <>
@@ -1246,12 +1268,12 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       {(nodeInfo.kind === 'object' || nodeInfo.kind === 'group' || nodeInfo.kind === 'instance') && (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
-          <div style={{ ...LABEL_STYLE, marginBottom: 0 }}>Tags</div>
+          <div style={{ ...LABEL_STYLE, marginBottom: 0 }}><Trans>Tags</Trans></div>
           {!addingTag && (
             <button
               onClick={() => setAddingTag(true)}
-              title="Add tag"
-              aria-label="Add tag"
+              title={t`Add tag`}
+              aria-label={t`Add tag`}
               style={ADD_TAG_BUTTON_STYLE}
             >
               +
@@ -1280,6 +1302,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
             value={tagInput}
             onChange={(e) => setTagInput(e.target.value)}
             onKeyDown={(e) => {
+              if (isComposingKey(e)) return
               if (e.key === 'Enter') {
                 handleAddTag()
               } else if (e.key === 'Escape') {
@@ -1299,7 +1322,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
                 handleAddTag()
               }
             }}
-            placeholder="Structure/Roof"
+            placeholder={t({ comment: 'Example tag path shown as placeholder text', message: 'Structure/Roof' })}
             spellCheck={false}
           />
         )}
@@ -1320,11 +1343,12 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
 // selection's axis-aligned extents, not e.g. a single object property.
 // ---------------------------------------------------------------------------
 
+/* oxlint-disable lingui/no-unlocalized-strings -- X/Y/Z are axis names, kept as in SketchUp */
 function BoundingBoxRow({ bounds }: { bounds: Bounds }) {
   const [ex, ey, ez] = boundsExtents(bounds)
   return (
     <div>
-      <div style={LABEL_STYLE}>Bounding Box</div>
+      <div style={LABEL_STYLE}><Trans>Bounding Box</Trans></div>
       <div style={VALUE_STYLE}>
         <span style={{ color: 'var(--axis-red)' }}>X</span> {formatLength(ex)}
         <span style={{ color: 'var(--text-faint, #888)' }}> × </span>
@@ -1335,6 +1359,7 @@ function BoundingBoxRow({ bounds }: { bounds: Bounds }) {
     </div>
   )
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 // ---------------------------------------------------------------------------
 // TagChip — a single removable tag chip
@@ -1349,6 +1374,7 @@ function TagChip({
   onRemove: () => void
   removeLabel?: string
 }) {
+  const { t } = useLingui()
   const display = path.join(' / ')
   return (
     <div
@@ -1369,8 +1395,8 @@ function TagChip({
       </span>
       <button
         onClick={onRemove}
-        aria-label={removeLabel ?? `Remove tag ${display}`}
-        title={removeLabel ?? 'Remove tag'}
+        aria-label={removeLabel ?? t`Remove tag ${display}`}
+        title={removeLabel ?? t`Remove tag`}
         style={{
           background: 'none',
           border: 'none',

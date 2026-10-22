@@ -1,4 +1,9 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { i18n } from '@lingui/core'
+import { ph, plural, t } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { historyLabel } from './i18n/historyLabels'
+import { isComposingKey, shortcutLetter } from './input/keyboard'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, {
@@ -155,7 +160,7 @@ import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
-import { TOOLS, type ToolName } from './tools/toolRegistry'
+import { TOOLS, toolLabel, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
@@ -212,6 +217,7 @@ let toastCounter = 0
 /** Tools that create new geometry — picking one clears a lingering
  * top-level selection (the contextual dock should switch to draw context,
  * not stay pinned to the old object). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifiers, not copy
 const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 'Polygon', 'Arc'])
 
 /** Tool name → native menu item id, for the macOS menu's radio checks.
@@ -250,6 +256,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
 }
 
 /** What a report calls each kind of file a user opens or imports. */
+/* oxlint-disable lingui/no-unlocalized-strings -- bug-report bundle text, English for the maintainer (see failedOpen.ts) */
 const OPEN_FILE_LABELS = {
   skp: 'SketchUp model (.skp)',
   gltf: 'glTF model (.glb/.gltf)',
@@ -258,6 +265,7 @@ const OPEN_FILE_LABELS = {
   hew: 'Hew document (.hew)',
   recovered: 'Recovered document (.hew)',
 } as const
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** The user's own `.hew` behind a load, for applyLoadedBytes to keep should
  *  it fail (failedOpen.ts). Loads of Hew's own bytes (a blank document, a
@@ -284,7 +292,9 @@ const KERNEL_MEMORY_NEAR_CEILING = 3 * 1024 * 1024 * 1024
  *  side ever names the cause; this is where the page does, from the memory
  *  the kernel had reached, and hands over to the crash screen with that
  *  explanation instead of letting the next render trip over the borrow. */
+/* oxlint-disable lingui/no-unlocalized-strings -- the open-failure note, log line, and kernel-stop summary go into the bug-report bundle and diagnostic log, English for the maintainer; only the crash-screen headline/detail are wrapped */
 function noteOpenFailure(what: string, err: unknown, file: { name: string; bytes: Uint8Array }): void {
+  const fileName = file.name
   const size = formatBytes(file.bytes.byteLength)
   const memory = kernelMemoryBytes()
   const memoryNote = memory !== null ? `; kernel memory ${formatBytes(memory)}` : ''
@@ -308,19 +318,17 @@ function noteOpenFailure(what: string, err: unknown, file: { name: string; bytes
   if (!trapped) return
   if (outOfMemory) {
     recordKernelStop(`Out of memory opening ${file.name} (${size})${memoryNote}`, {
-      headline: 'This model is too large for Hew to open',
-      detail:
-        `Hew ran out of memory opening ${file.name} (${size}). Hew can use up to 4 GB of memory, and this model needs more. ` +
-        'A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. ' +
-        'Reload to keep working.',
+      headline: t`This model is too large for Hew to open`,
+      detail: t`Hew ran out of memory opening ${fileName} (${size}). Hew can use up to 4 GB of memory, and this model needs more. A lighter copy may open: in SketchUp, run Purge Unused and remove or simplify the heaviest components. Reload to keep working.`,
     })
   } else {
     recordKernelStop(`Kernel trap opening ${file.name} (${size}): ${err.message}${memoryNote}`, {
-      headline: 'Hew stopped while opening the file',
-      detail: `Hew stopped while opening ${file.name} (${size}) and can't continue. Reload to keep working, and use Report this crash to send the file.`,
+      headline: t`Hew stopped while opening the file`,
+      detail: t`Hew stopped while opening ${fileName} (${size}) and can't continue. Reload to keep working, and use Report this crash to send the file.`,
     })
   }
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
 function basenameOf(path: string): string {
@@ -384,11 +392,13 @@ interface SkpWrite {
  * Falls back to the bare verb when there is nothing to undo/redo. */
 function undoRedoMenuLabels(scene: Scene | null): { undo: string; redo: string } {
   const entries = parseHistoryEntries(scene?.history_entries_json())
-  const topUndo = entries.undo[entries.undo.length - 1]?.label
-  const topRedo = entries.redo[0]?.label
+  const topUndo = entries.undo[entries.undo.length - 1]
+  const topRedo = entries.redo[0]
+  const undoWhat = topUndo !== undefined ? historyLabel(topUndo.kind, topUndo.label) : null
+  const redoWhat = topRedo !== undefined ? historyLabel(topRedo.kind, topRedo.label) : null
   return {
-    undo: topUndo !== undefined ? `Undo ${topUndo}` : 'Undo',
-    redo: topRedo !== undefined ? `Redo ${topRedo}` : 'Redo',
+    undo: undoWhat !== null ? t`Undo ${undoWhat}` : t`Undo`,
+    redo: redoWhat !== null ? t`Redo ${redoWhat}` : t`Redo`,
   }
 }
 
@@ -436,8 +446,21 @@ async function focusExistingWindowFor(path: string): Promise<boolean> {
 }
 
 export default function App() {
+  const { t, i18n: activeI18n } = useLingui()
+  /** Tray section titles: the heading text AND the key `toggleSection` uses
+   *  to find a section's body, so every use shares these. */
+  const trayTitle = {
+    objectInfo: t`Object Info`,
+    outliner: t`Outliner`,
+    materials: t`Materials`,
+    components: t`Components`,
+    tags: t`Tags`,
+    scenes: t`Scenes`,
+    changes: t`Changes`,
+  }
   const [state, setState] = useState<AppState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
   const [toolName, setToolName] = useState<string>('Select')
   /** Live stage-aware guidance from the active tool (Tool.statusHint);
    *  null = fall back to the palette's static tool description. */
@@ -463,6 +486,7 @@ export default function App() {
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
   const [activeTool, setActiveTool] = useState<ToolName>('Select')
   /** Bumped on every EXPLICIT camera-tool selection (menu/native
    * menu/keyboard) — see `activateTool` below. Forces Viewport to re-apply
@@ -832,7 +856,7 @@ export default function App() {
   const showTray = useCallback(() => {
     if (!trayCollapsedRef.current) return
     const active = document.activeElement
-    setTrayToggleTakesFocus(active instanceof HTMLElement && active.getAttribute('aria-label') === 'Show tray')
+    setTrayToggleTakesFocus(active instanceof HTMLElement && active.getAttribute('data-tray-show-tab') === 'true')
     setTrayCollapsed(false)
   }, [])
   const toggleTray = useCallback(() => {
@@ -851,7 +875,7 @@ export default function App() {
       showTray()
       setShown(() => true)
     } else {
-      blurFocusWithin(trayRef.current?.querySelector(`[data-tray-section-body="${title}"]`) ?? null)
+      blurFocusWithin(trayRef.current?.querySelector(`[data-tray-section-body="${CSS.escape(title)}"]`) ?? null)
       setShown((shown) => !shown)
     }
   }, [showTray])
@@ -1224,7 +1248,7 @@ export default function App() {
         invoke('set_window_title', { title }).catch(() => { /* ignore */ })
       }).catch(() => { /* ignore */ })
     }
-  }, [docSession])
+  }, [docSession, activeI18n.locale])
   // Tell the shell which file this window has open (`DocumentPaths` in
   // main.rs) so opening the same path again focuses this window instead of
   // minting a second one. A Tauri FileRef handle is the absolute path; a
@@ -1285,6 +1309,7 @@ export default function App() {
     // literally. The "Inserting <name>…" pill already names what's
     // happening; the tool-name label falls back to Select, matching the
     // rail's own `activeTool` state, which armLibraryPlacement never changes.
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifiers
     setToolName(name === 'LibraryPlace' ? 'Select' : name)
     setSnapKind(kind)
   }, [])
@@ -2023,6 +2048,7 @@ export default function App() {
       runOp: (op, args) =>
         liveOpRef.current !== null
           ? liveOpRef.current(op, args)
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English (developer surface)
           : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
@@ -2459,25 +2485,31 @@ export default function App() {
     const indexOf = (kind: NodeRef['kind'], id: bigint) =>
       treeIndex.get(nodeKey({ kind, id })) ?? 0
 
-    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, kindLabel: string) => {
+    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string) => {
       entries.push({
         id: `jump-node:${kind}:${id}`,
-        label: `${kindLabel}: ${label}`,
-        description: `Select it and reveal it in the Outliner.`,
+        label:
+          kind === 'object'
+            ? t({ comment: 'Command palette entry that jumps to a named object', message: `Object: ${label}` })
+            : kind === 'group'
+              ? t({ comment: 'Command palette entry that jumps to a named group', message: `Group: ${label}` })
+              : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
+        description: t`Select it and reveal it in the Outliner.`,
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- palette group ID
         group: 'Model',
         synonyms: [label],
       })
     }
     Array.from(scene.object_ids()).forEach((id) => {
-      pushNode('object', id, resolveLabel(scene.object_name(id), undefined, 'object', indexOf('object', id)), 'Object')
+      pushNode('object', id, resolveLabel(scene.object_name(id), undefined, 'object', indexOf('object', id)))
     })
     Array.from(scene.group_ids()).forEach((id) => {
-      pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)), 'Group')
+      pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)))
     })
     Array.from(scene.instance_ids()).forEach((id) => {
       const def = scene.instance_def(id)
       const defName = def !== undefined ? scene.component_name(def) : undefined
-      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', indexOf('instance', id)), 'Component')
+      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', indexOf('instance', id)))
     })
 
     // Unique tag paths across all nodes (same walk the Tags panel does).
@@ -2494,10 +2526,12 @@ export default function App() {
         const key = tagPathKey(path)
         if (seenTags.has(key)) continue
         seenTags.add(key)
+        const tagLabel = path.join(' / ')
         entries.push({
           id: `jump-tag:${key}`,
-          label: `Tag: ${path.join(' / ')}`,
-          description: 'Reveal this tag in the Tags panel.',
+          label: t({ comment: 'Command palette entry that jumps to a tag; the placeholder is the tag path', message: `Tag: ${tagLabel}` }),
+          description: t`Reveal this tag in the Tags panel.`,
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- palette group ID
           group: 'Model',
           synonyms: path,
         })
@@ -2506,7 +2540,7 @@ export default function App() {
     return entries
     // docRev: names/tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state, sharedTreeIndex])
+  }, [state, sharedTreeIndex, t])
 
   // Model Health's cheap whole-document summary, once per document change —
   // the status badge and the Outliner icons read it (component-definition
@@ -2932,7 +2966,7 @@ export default function App() {
       // A wasm trap mid-import (an out-of-memory abort on a model too big
       // for the browser kernel) hands the page to the crash screen inside
       // noteOpenFailure; the toast below is for ordinary refusals.
-      handleToast(`Import failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
       // The blank-document replace above already committed (applyLoadedBytes
       // mutates the live scene directly, with no rollback), even though the
       // import into it just failed — the live scene really is blank now.
@@ -2978,6 +3012,7 @@ export default function App() {
 
     setImportReport(report)
     const fmt =
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- diagnostic log line, English for the maintainer
       pick.kind === 'gltf' ? 'glTF' : pick.kind === 'skp' ? 'SKP' : pick.kind === 'stl' ? 'STL' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
@@ -3036,7 +3071,7 @@ export default function App() {
       step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(`Open failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
       settle()
       return false
     }
@@ -3068,7 +3103,7 @@ export default function App() {
       clearOpenAttempt()
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(`Open failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
       // The blank load committed even though the open failed: reflect a fresh
       // untitled document so the next Save can never write to a stale file
       // (same reasoning as runImportPick's catch).
@@ -3147,7 +3182,7 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openAny()
       } catch (err: unknown) {
-        handleToast(`Open failed: ${friendlyErrorText(err)}`)
+        handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -3227,6 +3262,7 @@ export default function App() {
     // way `handleGroup`/`handleMakeComponent`'s re-checks do for their own
     // gates.
     if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
@@ -3261,7 +3297,7 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openForImport()
       } catch (err: unknown) {
-        handleToast(`Import failed: ${friendlyErrorText(err)}`)
+        handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -3323,6 +3359,7 @@ export default function App() {
   // success. Ordinary trigger sites (menu, shortcut) call these
   // fire-and-forget and ignore the result, exactly as before.
   /** Why the last `saveToRef` failed — the live API reports it to its client. */
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
   const lastSaveErrorRef = useRef('the document could not be saved')
 
   /** Writes the document to `ref`, in `ref.format`, and commits the post-save
@@ -3383,7 +3420,7 @@ export default function App() {
         return true
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
-        handleToast(`Save failed: ${friendlyErrorText(err)}`)
+        handleToast(t`Save failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     },
@@ -3424,12 +3461,12 @@ export default function App() {
     if (hasNativeSavePanel() && fileHostRef.current.writeTo !== undefined) {
       try {
         const name = nameForFormat(documentName(docSessionRef.current), initial)
-        const pick = await pickSaveTarget('Save As', name, SAVE_PANEL_FORMATS, initial)
+        const pick = await pickSaveTarget(t`Save As`, name, SAVE_PANEL_FORMATS, initial)
         if (pick === null) return false // panel canceled
         format = saveFormatFrom(pick)
         target = pick.path
       } catch (err: unknown) {
-        handleToast(`Save As failed: ${friendlyErrorText(err)}`)
+        handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     } else {
@@ -3482,7 +3519,7 @@ export default function App() {
       noteSkpSimplified(simplified)
       return true
     } catch (err: unknown) {
-      handleToast(`Save As failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return false
     }
   }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified])
@@ -3500,11 +3537,11 @@ export default function App() {
       const copy = await fileHostRef.current.saveAs(bytes, suggestedName, 'hew')
       if (copy !== null) {
         setSkpNotice(null)
-        handleToast('Saved a .hew copy.')
+        handleToast(t`Saved a .hew copy.`)
         LogStore.log.info('app', `Saved a .hew copy: ${copy.name}`)
       }
     } catch (err: unknown) {
-      handleToast(`Save a .hew copy failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Save a .hew copy failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [handleToast, pushCameraStateToScene])
 
@@ -3608,10 +3645,10 @@ export default function App() {
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
         const ok = applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
-        if (ok) setDocSession(afterImport(name ?? 'Library Item', Date.now()))
+        if (ok) setDocSession(afterImport(name ?? t`Library Item`, Date.now()))
       } catch (err) {
         handleToast(
-          `Couldn't open the library item: ${err instanceof Error ? err.message : String(err)}`,
+          t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
         )
       }
     },
@@ -3661,7 +3698,7 @@ export default function App() {
   // "clicking did nothing" is the worst outcome for a welcome-screen row.
   const openRecent = useCallback((path: string) => {
     openPath(path).catch(() => {
-      handleToast(`Couldn't open ${basenameOf(path)} — the file may have been moved or deleted.`)
+      handleToast(t`Couldn't open ${ph({ fileName: basenameOf(path) })} — the file may have been moved or deleted.`)
     })
   }, [openPath, handleToast])
 
@@ -3679,7 +3716,7 @@ export default function App() {
         LogStore.log.info('app', `Opened sample ${sample.file}`)
       }
     } catch (err: unknown) {
-      handleToast(`Couldn't open the sample: ${friendlyErrorText(err)}`)
+      handleToast(t`Couldn't open the sample: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [applyLoadedBytes, handleToast])
   const clearRecent = useCallback(() => {
@@ -3729,7 +3766,8 @@ export default function App() {
     // (an imported "house.skp", a Library item, "Untitled"); only a file
     // extension comes off, so "Plan v1.2" stays whole.
     const stem = snapshot.meta.name.replace(/\.(hew|skp|dae|stl|glb|gltf)$/i, '')
-    const name = `${stem === '' ? 'Untitled' : stem}.hew`
+    const baseName = stem === '' ? t`Untitled` : stem
+    const name = `${baseName}.hew`
     const ok = applyLoadedBytes(snapshot.bytes, { name, label: OPEN_FILE_LABELS.recovered })
     if (!ok) return false
     const scene = sceneRef.current
@@ -3843,34 +3881,34 @@ export default function App() {
   const exportGltf = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     let bytes: Uint8Array | null
     try {
       bytes = await api.exportGlb()
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     if (bytes === null) {
-      handleToast('Nothing to export — the model has no solids.')
+      handleToast(t`Nothing to export — the model has no solids.`)
       return
     }
     // Suggest a name derived from the current document, dropping its file extension.
     const base = documentBaseName(docSessionRef.current)
     try {
       const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
-        description: 'glTF Binary',
+        description: t`glTF Binary`,
         ext: 'glb',
         mime: 'model/gltf-binary',
       })
       if (exportedTo !== null) {
-        handleToast('Exported glTF.')
+        handleToast(t`Exported glTF.`)
         LogStore.log.info('app', `Exported glTF (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -3883,34 +3921,35 @@ export default function App() {
   const exportUsdz = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     let bytes: Uint8Array | null
     try {
       bytes = await api.exportUsdz()
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     if (bytes === null) {
-      handleToast('Nothing to export — the model has no solids.')
+      handleToast(t`Nothing to export — the model has no solids.`)
       return
     }
     // Suggest a name derived from the current document, dropping its file extension.
     const base = documentBaseName(docSessionRef.current)
     try {
       const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- file-format name
         description: 'USDZ',
         ext: 'usdz',
         mime: 'model/vnd.usdz+zip',
       })
       if (exportedTo !== null) {
-        handleToast('Exported USDZ.')
+        handleToast(t`Exported USDZ.`)
         LogStore.log.info('app', `Exported USDZ (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -3932,34 +3971,34 @@ export default function App() {
   const doExportStl = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     let bytes: Uint8Array | null
     try {
       bytes = await api.exportStl(stlSegmentsRef.current)
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     if (bytes === null) {
-      handleToast('Nothing to export — the model has no solids.')
+      handleToast(t`Nothing to export — the model has no solids.`)
       return
     }
     // Suggest a name derived from the current document, dropping its file extension.
     const base = documentBaseName(docSessionRef.current)
     try {
       const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
-        description: 'STL (Binary)',
+        description: t`STL (Binary)`,
         ext: 'stl',
         mime: 'model/stl',
       })
       if (exportedTo !== null) {
-        handleToast('Exported STL.')
+        handleToast(t`Exported STL.`)
         LogStore.log.info('app', `Exported STL (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -3968,34 +4007,35 @@ export default function App() {
   const doExport3mf = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     let bytes: Uint8Array | null
     try {
       bytes = await api.export3mf()
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     if (bytes === null) {
-      handleToast('Nothing to export — the model has no solids.')
+      handleToast(t`Nothing to export — the model has no solids.`)
       return
     }
     // Suggest a name derived from the current document, dropping its file extension.
     const base = documentBaseName(docSessionRef.current)
     try {
       const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, {
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- file-format name
         description: '3MF',
         ext: '3mf',
         mime: 'model/3mf',
       })
       if (exportedTo !== null) {
-        handleToast('Exported 3MF.')
+        handleToast(t`Exported 3MF.`)
         LogStore.log.info('app', `Exported 3MF (${bytes.length} bytes)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -4067,6 +4107,7 @@ export default function App() {
   // menu dispatch route through this one function.
   const openTextDialog = useCallback(() => {
     if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
@@ -4078,7 +4119,7 @@ export default function App() {
     const { text, font, heightMeters, depthMeters } = result
     const contours = layoutGlyphRun(font.font, text, heightMeters)
     if (contours.length === 0 || !contours.some((c) => c.fill)) {
-      handleToast("Nothing to place — the text has no visible strokes at this size.")
+      handleToast(t`Nothing to place — the text has no visible strokes at this size.`)
       return
     }
     const label = text.replace(/\s+/g, ' ').trim()
@@ -4209,18 +4250,20 @@ export default function App() {
     return libraryIndex.map((entry): PaletteEntry => {
       const inModel = entry.sourceId !== null ? (libraryPlacements[entry.sourceId] ?? 0) : 0
       const isMaterial = entry.category === 'material'
+      const displayName = entry.displayName
       const descParts: string[] = [entry.category]
       if (entry.keywords.length > 0) descParts.push(entry.keywords.join(', '))
-      if (inModel > 0) descParts.push(`${inModel} in this model`)
+      if (inModel > 0) descParts.push(plural(inModel, { one: '# in this model', other: '# in this model' }))
       return {
         id: `insert-library:${entry.fileName}`,
-        label: isMaterial ? `Add "${entry.displayName}" to palette` : `Insert "${entry.displayName}"`,
+        label: isMaterial ? t`Add "${displayName}" to palette` : t`Insert "${displayName}"`,
         description: descParts.join(' — '),
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- palette group ID
         group: 'Library',
         synonyms: entry.keywords,
       }
     })
-  }, [libraryIndex, libraryPlacements])
+  }, [libraryIndex, libraryPlacements, t])
 
   const paletteExtraEntries = useMemo(
     () => [...paletteModelEntries, ...paletteLibraryEntries],
@@ -4235,7 +4278,7 @@ export default function App() {
   const librarySelectionDisplayName = useCallback(
     (node: NodeRef): string => {
       const scene = state?.scene
-      if (scene == null) return 'Item'
+      if (scene == null) return t`Item`
       const index = sharedTreeIndex?.get(nodeKey(node)) ?? 0
       if (node.kind === 'object') return resolveLabel(scene.object_name(node.id), undefined, 'object', index)
       if (node.kind === 'group') return resolveLabel(scene.group_name(node.id), undefined, 'group', index)
@@ -4244,9 +4287,9 @@ export default function App() {
         const defName = def !== undefined ? scene.component_name(def) : undefined
         return resolveLabel(scene.instance_name(node.id), defName, 'instance', index)
       }
-      return 'Item'
+      return t`Item`
     },
-    [state, sharedTreeIndex],
+    [state, sharedTreeIndex, t],
   )
 
   /** Fire-and-forget thumbnail render + write, resolving `toastId` from a
@@ -4262,7 +4305,7 @@ export default function App() {
       } catch {
         // Best effort — the item itself already saved successfully.
       } finally {
-        updateToast(toastId, { message: `Saved "${name}" to library`, state: 'done', sticky: false })
+        updateToast(toastId, { message: t`Saved "${name}" to library`, state: 'done', sticky: false })
       }
     })()
   }, [updateToast])
@@ -4311,7 +4354,7 @@ export default function App() {
         try {
           await libraryStore().write(fileName, bytes)
         } catch (err) {
-          handleToast(`Save to Library failed: ${err instanceof Error ? err.message : String(err)}`)
+          handleToast(t`Save to Library failed: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
         // Mark the SOURCE: the model an item was saved FROM contains it, by
@@ -4405,12 +4448,12 @@ export default function App() {
               reconcileRef.current()
               setDocSession((prev) => markNonUndoableDirty(prev, NON_UNDOABLE_REASON.libraryMetadata, Date.now()))
               setDocRev((r) => r + 1)
-              handleToast(`Save failed: ${friendlyErrorText(err)}`)
+              handleToast(t`Save failed: ${ph({ reason: friendlyErrorText(err) })}`)
             }
             // A failed stamp itself only costs the badge.
           }
         }
-        const toastId = pushStickyToast(`Rendering thumbnail for "${name}"…`)
+        const toastId = pushStickyToast(t`Rendering thumbnail for "${name}"…`)
         renderAndWriteThumbnail(toastId, name, bytes)
       })()
     },
@@ -4448,10 +4491,10 @@ export default function App() {
         try {
           await libraryStore().write(fileName, bytes)
         } catch (err) {
-          handleToast(`Save to Library failed: ${err instanceof Error ? err.message : String(err)}`)
+          handleToast(t`Save to Library failed: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
-        handleToast(`Saved "${name}" to library.`)
+        handleToast(t`Saved "${name}" to library.`)
       })()
     },
     [handleToast],
@@ -4465,7 +4508,7 @@ export default function App() {
         try {
           ghost = await buildItemGhost(bytes)
         } catch (err) {
-          handleToast(`Couldn't preview "${item.displayName}": ${err instanceof Error ? err.message : String(err)}`)
+          handleToast(t`Couldn't preview "${ph({ name: item.displayName })}": ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
         const gen = ++insertingGenRef.current
@@ -4511,7 +4554,7 @@ export default function App() {
           return
         }
         const cantRoute = () =>
-          handleToast('Open the Library from an empty window to open this item as its own document.')
+          handleToast(t`Open the Library from an empty window to open this item as its own document.`)
         if (!isTauri) {
           cantRoute()
           return
@@ -4586,7 +4629,7 @@ export default function App() {
       handleDocumentChanged()
       setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
       setDocRev((r) => r + 1)
-      if (ids.length > 0) handleToast(`Added "${item.displayName}" to palette.`)
+      if (ids.length > 0) handleToast(t`Added "${ph({ name: item.displayName })}" to palette.`)
     },
     [handleToast, handleDocumentChanged],
   )
@@ -4622,14 +4665,14 @@ export default function App() {
     const api = viewportApi.current
     const scene = sceneRef.current
     if (api === null || scene === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     const live = api.getPrintView()
     const { dir, up } = printViewDirection(svg.view, live)
     const extent = api.computePrintExtent(dir, up, { includeSketches: true, includeAnnotations: svg.includeDimensions, restrictTo: null })
     if (extent.empty) {
-      handleToast('Nothing to export — the model has nothing visible.')
+      handleToast(t`Nothing to export — the model has nothing visible.`)
       return
     }
     const camera = { kind: 'ortho' as const, center: extent.center, dir, up, rect: extent.rect, depth: extent.depth }
@@ -4643,7 +4686,7 @@ export default function App() {
       includeHidden: svg.hiddenDashed,
     })
     if (res.kind !== 'ok') {
-      handleToast(res.kind === 'too-complex' ? 'Export failed: the model is too complex for a vector line drawing.' : `Export failed: ${res.message}`)
+      handleToast(res.kind === 'too-complex' ? t`Export failed: the model is too complex for a vector line drawing.` : t`Export failed: ${ph({ reason: res.message })}`)
       return
     }
     const annotations = svg.includeDimensions ? projectAnnotationOverlay(api.collectAnnotationDrawing(), camera) : null
@@ -4651,13 +4694,13 @@ export default function App() {
     const bytes = new TextEncoder().encode(text)
     const base = documentBaseName(docSessionRef.current)
     try {
-      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, { description: 'SVG line drawing', ext: 'svg', mime: 'image/svg+xml' })
+      const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, bytes, base, { description: t`SVG line drawing`, ext: 'svg', mime: 'image/svg+xml' })
       if (exportedTo !== null) {
-        handleToast('Exported SVG.')
+        handleToast(t`Exported SVG.`)
         LogStore.log.info('app', `Exported SVG line drawing (${bytes.length} bytes, ${res.drawing.kinds.length} segments)`)
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
@@ -4669,7 +4712,7 @@ export default function App() {
   const exportSkp = useCallback(async (format: 'skp' | 'skp2017') => {
     const scene = sceneRef.current
     if (scene === null) {
-      handleToast('Export failed: viewport not ready.')
+      handleToast(t`Export failed: viewport not ready.`)
       return
     }
     let out: SkpWrite
@@ -4678,23 +4721,23 @@ export default function App() {
       // The dialog's `skp` is the 2026 container (the wasm target's name).
       out = scene.export_skp(format === 'skp2017' ? 'skp2017' : 'skp2026', getLengthUnit()) as SkpWrite
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     const base = documentBaseName(docSessionRef.current)
     try {
       const exportedTo = await writeExport(fileHostRef.current, exportTargetRef, out.bytes, base + '.skp', {
-        description: 'SketchUp model',
+        description: t`SketchUp model`,
         ext: 'skp',
         mime: 'application/vnd.sketchup.skp',
       })
       if (exportedTo !== null) {
-        handleToast('Exported SketchUp file.')
+        handleToast(t`Exported SketchUp file.`)
         LogStore.log.info('app', `Exported ${format} (${out.bytes.length} bytes)`)
         if (out.simplified.length > 0) setSkpNotice({ simplified: out.simplified, offerHewCopy: false })
       }
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [handleToast, pushCameraStateToScene])
 
@@ -4727,7 +4770,7 @@ export default function App() {
     const extension = initial === 'skp2017' ? 'skp' : initial
     const name = `${documentBaseName(docSessionRef.current)}.${extension}`
     try {
-      const pick = await pickSaveTarget('Export', name, exportPanelFormats(unit), initial)
+      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit), initial)
       if (pick === null) return
       const choice = exportChoiceFrom(pick, unit)
       if (choice === null) return
@@ -4735,7 +4778,7 @@ export default function App() {
       exportTargetRef.current = pick.path
       handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg)
     } catch (err: unknown) {
-      handleToast(`Export failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [handleExportFormat, handleToast])
 
@@ -4795,6 +4838,7 @@ export default function App() {
   // creates and routes windows, but only this window knows whether its
   // document has unsaved work and can load a file through the same open
   // path the UI uses.
+  /* oxlint-disable lingui/no-unlocalized-strings -- live-API refusal messages are a developer surface, English */
   useEffect(() => {
     liveOpRef.current = async (op, args): Promise<LiveOpOutcome> => {
       if (op === 'save') {
@@ -4889,6 +4933,7 @@ export default function App() {
       return { ok: false, refusal: 'host_capability_missing', message: `unknown operation ${op}` }
     }
   }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene])
+  /* oxlint-enable lingui/no-unlocalized-strings */
 
   // ---------------------------------------------------------------- native menu-action dispatch
   // The dispatch switch lives in a ref refreshed every render. The listener
@@ -4935,7 +4980,7 @@ export default function App() {
   const isStructuralNode = (n: NodeRef): boolean =>
     n.kind === 'object' || n.kind === 'group' || n.kind === 'instance'
 
-  const SKETCH_COPY_TOAST = "Sketch geometry can't be copied yet — use Move with Option/Alt held"
+  const SKETCH_COPY_TOAST = t`Sketch geometry can't be copied yet — use Move with Option/Alt held`
 
   /** Copy: `extract_item` (unwrapped — a copied plain box stays a plain box,
    *  unlike Save to Library's component wrap) of the selection's structural
@@ -4974,9 +5019,10 @@ export default function App() {
     // state itself. `undefined` (no visible content) falls back to `null`.
     const placement = scene.extract_item_placement(sel.kinds, sel.ids)
     const placementAffine = placement === undefined ? null : Array.from(placement)
+    const copiedCount = structural.length
     void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine).then(() => {
       setClipboardAvailable(true)
-      handleToast(`Copied ${structural.length} object${structural.length === 1 ? '' : 's'}`)
+      handleToast(plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }))
     })
     return structural
   }
@@ -5053,14 +5099,14 @@ export default function App() {
       try {
         ghost = await buildItemGhost(content.bytes)
       } catch (err) {
-        handleToast(`Couldn't preview the paste: ${err instanceof Error ? err.message : String(err)}`)
+        handleToast(t`Couldn't preview the paste: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
         return
       }
       viewportApi.current?.armLibraryPlacement({
         bytes: content.bytes,
         sourceId: content.sourceId,
         contentHash: content.contentHash,
-        displayName: 'Pasted objects',
+        displayName: t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,
         bboxMax: ghost.bboxMax,
@@ -5113,7 +5159,7 @@ export default function App() {
         try {
           bytes = await store.read(fileName)
         } catch (err) {
-          handleToast(`Couldn't read library item: ${err instanceof Error ? err.message : String(err)}`)
+          handleToast(t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
         if (entry?.category === 'material') {
@@ -5132,7 +5178,7 @@ export default function App() {
           // review S10) — same dirty-marking as the dialog's flows.
           reconcileRef.current()
           setDocRev((r) => r + 1)
-          if (ids.length > 0) handleToast(`Added "${entry.displayName}" to palette.`)
+          if (ids.length > 0) handleToast(t`Added "${ph({ name: entry.displayName })}" to palette.`)
           return
         }
         const displayName = entry?.displayName ?? fileName
@@ -5140,7 +5186,7 @@ export default function App() {
         try {
           ghost = await buildItemGhost(bytes)
         } catch (err) {
-          handleToast(`Couldn't preview "${displayName}": ${err instanceof Error ? err.message : String(err)}`)
+          handleToast(t`Couldn't preview "${displayName}": ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
         const contentHash = await sha256Hex(bytes)
@@ -5174,7 +5220,7 @@ export default function App() {
       // save-to-library-doc), so the empty-document gate the web MenuBar
       // enforces via `openOnPhoneDisabled` is enforced here with a toast.
       case 'open-on-phone':
-        if (phoneShareDisabled) handleToast('Nothing to share yet — the document is empty')
+        if (phoneShareDisabled) handleToast(t`Nothing to share yet — the document is empty`)
         else setPhoneShareOpen(true)
         break
       case 'draw-3d-text': openTextDialog(); break
@@ -5189,6 +5235,7 @@ export default function App() {
       // editing command instead of the scene. Paste In Place in a field is
       // simply not ours. See main.rs's Edit menu comment.
       case 'edit-select-all':
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- editing command name
         if (forwardToTextField('selectAll')) break
         viewportApi.current?.selectAll()
         break
@@ -5240,6 +5287,7 @@ export default function App() {
         }).catch(() => { /* ignore */ })
         break
       // Tool activations from native menu
+      /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
       case 'tool-select':    setActiveTool('Select'); break
       case 'tool-rectangle': setActiveTool('Rectangle'); break
       case 'tool-circle':    setActiveTool('Circle'); break
@@ -5269,18 +5317,19 @@ export default function App() {
       case 'tool-walk':      activateTool('Walk'); break
       case 'tool-look-around': activateTool('Look Around'); break
       case 'tool-zoom-window': activateTool('Zoom Window'); break
+      /* oxlint-enable lingui/no-unlocalized-strings */
       case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
       // Camera ▸ Fly (docs/design/fly-navigation.md §10): the LATCHED fly
       // mode for trackpads — a hold of the right button needs no menu.
       case 'toggle-fly':          viewportApi.current?.toggleFlyLatched(); break
       // Window pane toggles — must use functional updaters (StrictMode safe)
-      case 'toggle-model-info':   toggleSection(setShowModelInfo, 'Outliner'); break
-      case 'toggle-materials':    toggleSection(setShowMaterials, 'Materials'); break
-      case 'toggle-components':   toggleSection(setShowComponents, 'Components'); break
-      case 'toggle-tags':         toggleSection(setShowTags, 'Tags'); break
-      case 'toggle-scenes':       toggleSection(setShowScenes, 'Scenes'); break
-      case 'toggle-changes':      toggleSection(setShowChanges, 'Changes'); break
-      case 'toggle-object-info':  toggleSection(setShowObjectInfo, 'Object Info'); break
+      case 'toggle-model-info':   toggleSection(setShowModelInfo, trayTitle.outliner); break
+      case 'toggle-materials':    toggleSection(setShowMaterials, trayTitle.materials); break
+      case 'toggle-components':   toggleSection(setShowComponents, trayTitle.components); break
+      case 'toggle-tags':         toggleSection(setShowTags, trayTitle.tags); break
+      case 'toggle-scenes':       toggleSection(setShowScenes, trayTitle.scenes); break
+      case 'toggle-changes':      toggleSection(setShowChanges, trayTitle.changes); break
+      case 'toggle-object-info':  toggleSection(setShowObjectInfo, trayTitle.objectInfo); break
       case 'toggle-tray':         toggleTray(); break
       case 'toggle-compact-rail': toggleRailNarrow(); break
       case 'toggle-dock':         toggleDock(); break
@@ -5323,6 +5372,7 @@ export default function App() {
         const node = selectedIds[0]
         const sel = structuralSelection([node])
         if (sel === null) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier
           handleToast(kernelErrorMessage('InvalidSelection', ''), 'InvalidSelection')
           break
         }
@@ -5464,7 +5514,7 @@ export default function App() {
             else if (action === 'add-palette') bridge.onLibraryAddToPalette(item, bytes)
           } catch (err) {
             bridge.handleToast(
-              `Couldn't read library item: ${err instanceof Error ? err.message : String(err)}`,
+              t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
             )
           }
         })()
@@ -5769,6 +5819,10 @@ export default function App() {
     const nativeMenuOwnsModCombos = isTauri && isMac
 
     const onKeyDown = (ev: KeyboardEvent) => {
+      // An input method composing (Japanese, Chinese, Korean) owns every
+      // keystroke until it commits; none of them are commands
+      // (docs/LOCALIZATION.md "Keyboard and input methods").
+      if (isComposingKey(ev)) return
       const isMod = ev.metaKey || ev.ctrlKey
 
       // The welcome screen is modal: its overlay blocks pointer events but
@@ -5791,7 +5845,9 @@ export default function App() {
       // takes digits/x/*// but never Space — Space always resets to Select).
       const toolIsTyping = viewportApi.current?.isCapturingInput?.(ev.key) ?? false
 
-      if (!isMod && !isTyping && !toolIsTyping) {
+      // Option/Alt combos are not bare letters: with physical-key dispatch
+      // `ev.code` would still read KeyL under Option+L.
+      if (!isMod && !ev.altKey && !isTyping && !toolIsTyping) {
         // Space → Select (no modifier required; guard against typing contexts).
         if (ev.key === ' ') {
           ev.preventDefault()
@@ -5804,7 +5860,10 @@ export default function App() {
         // (Protractor/Slice/Edit Vertex/camera) keep their existing
         // Ctrl-combo shortcuts below instead — the design spec doesn't cover
         // bare letters for them.
-        const key = ev.key.toLowerCase()
+        // The PHYSICAL key: SketchUp's bare-letter shortcuts are key
+        // positions, so they hold on any layout and with an IME active
+        // (where `ev.key` would be a full-width or composed character).
+        const key = shortcutLetter(ev)
         // Bare ⇧L opens the Library (the design mock's own binding) — safe
         // here specifically because this whole block is already gated on
         // `!isTyping` (a focused input/textarea never reaches it), unlike a
@@ -5814,6 +5873,7 @@ export default function App() {
         // since Shift capitalizes `ev.key` the same way either binding's
         // lowercase comparison would match.
         if (key === 'l' && ev.shiftKey) { ev.preventDefault(); openLibraryEntry(); return }
+        /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
         if (key === 'l' && !ev.shiftKey) { ev.preventDefault(); setActiveTool('Line'); return }
         if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
         if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
@@ -5831,6 +5891,7 @@ export default function App() {
         if (key === 'o') { ev.preventDefault(); activateTool('Orbit'); return }
         if (key === 'h') { ev.preventDefault(); activateTool('Pan'); return }
         if (key === 'z') { ev.preventDefault(); activateTool('Zoom'); return }
+        /* oxlint-enable lingui/no-unlocalized-strings */
         // Scenes: Page Down/Up = Next/Previous (docs/design/scenes.md §5,
         // SketchUp's own default). Unmodified — no native-menu accelerator
         // conflict, so this fires identically on web and desktop.
@@ -5886,27 +5947,27 @@ export default function App() {
       // letter, so compare case-insensitively (else these never fire).
       if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
         ev.preventDefault()
-        toggleSection(setShowModelInfo, 'Outliner')
+        toggleSection(setShowModelInfo, trayTitle.outliner)
         return
       }
       if (ev.key.toLowerCase() === 'c' && ev.shiftKey) {
         ev.preventDefault()
-        toggleSection(setShowMaterials, 'Materials')
+        toggleSection(setShowMaterials, trayTitle.materials)
         return
       }
       if (ev.key.toLowerCase() === 'm' && ev.shiftKey) {
         ev.preventDefault()
-        toggleSection(setShowComponents, 'Components')
+        toggleSection(setShowComponents, trayTitle.components)
         return
       }
       if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
         ev.preventDefault()
-        toggleSection(setShowTags, 'Tags')
+        toggleSection(setShowTags, trayTitle.tags)
         return
       }
       if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
         ev.preventDefault()
-        toggleSection(setShowObjectInfo, 'Object Info')
+        toggleSection(setShowObjectInfo, trayTitle.objectInfo)
         return
       }
       if (ev.key.toLowerCase() === 'l' && ev.shiftKey) {
@@ -5956,6 +6017,7 @@ export default function App() {
   // for the typed buffer.
   useEffect(() => {
     const onDeleteKey = (ev: KeyboardEvent) => {
+      if (isComposingKey(ev)) return
       if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
       const target = ev.target as HTMLElement
       const isTyping =
@@ -5991,6 +6053,7 @@ export default function App() {
   // same typing guard: a focused text field keeps the key.
   useEffect(() => {
     const onSelectAllKey = (ev: KeyboardEvent) => {
+      if (isComposingKey(ev)) return
       if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
       if (ev.key.toLowerCase() !== 'a') return
       // Modal welcome screen: swallow (no scene select-all, no page-wide
@@ -6020,6 +6083,7 @@ export default function App() {
   // here.
   useEffect(() => {
     const onClipboardKey = (ev: KeyboardEvent) => {
+      if (isComposingKey(ev)) return
       if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
       const key = ev.key.toLowerCase()
       if (key !== 'c' && key !== 'x' && key !== 'v') return
@@ -6216,7 +6280,7 @@ export default function App() {
         const handle = dropped !== null && dropped.kind === 'file' ? dropped : null
         await runOpenSkp(scene, { name: file.name, bytes, handle })
       } catch (err: unknown) {
-        handleToast(`Drop open failed: ${friendlyErrorText(err)}`)
+        handleToast(t`Drop open failed: ${ph({ reason: friendlyErrorText(err) })}`)
       }
       return
     }
@@ -6230,7 +6294,7 @@ export default function App() {
         if (discardsUnsaved) void clearRecoverySnapshot()
       }
     }).catch((err: unknown) => {
-      handleToast(`Drop open failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Drop open failed: ${ph({ reason: friendlyErrorText(err) })}`)
     })
   }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp])
 
@@ -6392,7 +6456,7 @@ export default function App() {
     try {
       scene.delete_tag(path.join('/'))
     } catch (err: unknown) {
-      handleToast(`Delete tag failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Delete tag failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     resyncTagVisibility()
@@ -6408,7 +6472,7 @@ export default function App() {
   // Returns the inline error text for the panel, or null on success.
   const handleRenameTag = useCallback((path: string[], newSegment: string): string | null => {
     const scene = sceneRef.current
-    if (scene === null) return 'No document.'
+    if (scene === null) return t`No document.`
     const next = [...path.slice(0, -1), newSegment]
     try {
       scene.rename_tag(path.join('/'), next.join('/'))
@@ -6427,7 +6491,7 @@ export default function App() {
    *  handleRenameTag. */
   const handleRenameMaterial = useCallback((id: bigint, name: string): string | null => {
     const scene = sceneRef.current
-    if (scene === null) return 'No document.'
+    if (scene === null) return t`No document.`
     try {
       scene.set_material_name(id, name)
     } catch (err: unknown) {
@@ -6445,7 +6509,7 @@ export default function App() {
     try {
       scene.delete_material(id)
     } catch (err: unknown) {
-      handleToast(`Delete material failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Delete material failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     // Unpainting a face/object-base is a rendering change, not just
@@ -6453,7 +6517,7 @@ export default function App() {
     refreshAfterPanelMutation()
     // The Paint tool must never keep a deleted material as "current".
     setCurrentMaterialId((cur) => (cur === id ? MATERIAL_SENTINEL : cur))
-    handleToast(`Deleted material "${name}".`)
+    handleToast(t`Deleted material "${name}".`)
   }, [refreshAfterPanelMutation, handleToast])
 
   /** MaterialPalette's × button: an unused material deletes immediately;
@@ -6477,7 +6541,7 @@ export default function App() {
   /** Rename a component definition from the Components panel. */
   const handleRenameComponent = useCallback((id: bigint, name: string): string | null => {
     const scene = sceneRef.current
-    if (scene === null) return 'No document.'
+    if (scene === null) return t`No document.`
     try {
       scene.set_component_name(id, name)
     } catch (err: unknown) {
@@ -6493,12 +6557,12 @@ export default function App() {
     try {
       scene.delete_definition(id)
     } catch (err: unknown) {
-      handleToast(`Delete component failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Delete component failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     // Every instance vanishing from the scene is a rendering change.
     refreshAfterPanelMutation()
-    handleToast(`Deleted component "${name}".`)
+    handleToast(t`Deleted component "${name}".`)
   }, [refreshAfterPanelMutation, handleToast])
 
   /** ComponentsPanel's × button: a definition with no live instances
@@ -6532,16 +6596,16 @@ export default function App() {
     const materialIds = Array.from(scene.unused_materials())
     const definitionIds = Array.from(scene.unused_definitions())
     if (materialIds.length === 0 && definitionIds.length === 0) {
-      handleToast('Nothing to purge.')
+      handleToast(t`Nothing to purge.`)
       return
     }
-    const materialNames = materialIds.map((id) => scene.material_info(id)?.name() ?? 'Material')
+    const materialNames = materialIds.map((id) => scene.material_info(id)?.name() ?? t`Material`)
     const definitionNames = definitionIds.map((id) => {
       const n = scene.component_name(id)
-      return n !== undefined && n.length > 0 ? n : 'Component'
+      return n !== undefined && n.length > 0 ? n : t`Component`
     })
     setPendingPurgePreview({ materialNames, definitionNames })
-  }, [handleToast])
+  }, [handleToast, t])
 
   const confirmPurgeUnused = useCallback(() => {
     const scene = sceneRef.current
@@ -6551,7 +6615,7 @@ export default function App() {
     try {
       report = scene.purge_unused()
     } catch (err: unknown) {
-      handleToast(`Purge failed: ${friendlyErrorText(err)}`)
+      handleToast(t`Purge failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
     }
     // Purged materials/definitions can remove geometry (a purged
@@ -6562,22 +6626,48 @@ export default function App() {
     setCurrentMaterialId((cur) =>
       cur !== MATERIAL_SENTINEL && scene.material_info(cur) === undefined ? MATERIAL_SENTINEL : cur,
     )
-    handleToast(`Purged ${report.definitions()} definitions, ${report.materials()} materials.`)
+    const purgedDefinitions = report.definitions()
+    const purgedMaterials = report.materials()
+    handleToast(
+      t`Purged ${plural(purgedDefinitions, { one: '# definition', other: '# definitions' })}, ${plural(purgedMaterials, { one: '# material', other: '# materials' })}.`,
+    )
   }, [refreshAfterPanelMutation, handleToast])
 
   if (error !== null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem', color: 'var(--danger-base, red)' }}>
-        <h1>Hew — kernel load error</h1>
+        <h1><Trans>Hew — kernel load error</Trans></h1>
         <pre>{error}</pre>
       </main>
     )
   }
 
+  // Confirmation-dialog bodies: whole sentences with the counts pluralized.
+  const matDeleteName = pendingMaterialDelete?.name ?? ''
+  const matDeleteUsage = pendingMaterialDelete?.usage ?? 0
+  const materialDeleteBody = t`"${matDeleteName}" — used on ${plural(matDeleteUsage, { one: '# face', other: '# faces' })} — delete and unpaint them?`
+  const compDeleteName = pendingComponentDelete?.name ?? ''
+  const compDeleteUsage = pendingComponentDelete?.usage ?? 0
+  const componentDeleteBody = t`Delete "${compDeleteName}" and its ${plural(compDeleteUsage, { one: '# instance', other: '# instances' })}?`
+  const purgeDefinitionCount = pendingPurgePreview?.definitionNames.length ?? 0
+  const purgeDefinitionList = pendingPurgePreview?.definitionNames.join(', ') ?? ''
+  const purgeDefinitionsLine =
+    purgeDefinitionCount > 0
+      ? t`${plural(purgeDefinitionCount, { one: '# definition', other: '# definitions' })}: ${purgeDefinitionList}`
+      : null
+  const purgeMaterialCount = pendingPurgePreview?.materialNames.length ?? 0
+  const purgeMaterialList = pendingPurgePreview?.materialNames.join(', ') ?? ''
+  const purgeMaterialsLine =
+    purgeMaterialCount > 0
+      ? t`${plural(purgeMaterialCount, { one: '# material', other: '# materials' })}: ${purgeMaterialList}`
+      : null
+  // Modifier chord shown in the Precision-snap chip: a keyboard shortcut label, not translated.
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label
+  const precisionKeys = isMac ? '⌘⌥' : 'Ctrl+Alt'
   if (state === null) {
     return (
       <main style={{ fontFamily: 'sans-serif', padding: '1rem' }}>
-        <p>Loading kernel…</p>
+        <p><Trans>Loading kernel…</Trans></p>
       </main>
     )
   }
@@ -6799,13 +6889,13 @@ export default function App() {
         onToggleDock={toggleDock}
         showDebugLog={showDebugLog}
         showLibrary={showLibrary}
-        onToggleModelInfo={() => toggleSection(setShowModelInfo, 'Outliner')}
-        onToggleMaterials={() => toggleSection(setShowMaterials, 'Materials')}
-        onToggleComponents={() => toggleSection(setShowComponents, 'Components')}
-        onToggleTags={() => toggleSection(setShowTags, 'Tags')}
-        onToggleScenes={() => toggleSection(setShowScenes, 'Scenes')}
-        onToggleChanges={() => toggleSection(setShowChanges, 'Changes')}
-        onToggleObjectInfo={() => toggleSection(setShowObjectInfo, 'Object Info')}
+        onToggleModelInfo={() => toggleSection(setShowModelInfo, trayTitle.outliner)}
+        onToggleMaterials={() => toggleSection(setShowMaterials, trayTitle.materials)}
+        onToggleComponents={() => toggleSection(setShowComponents, trayTitle.components)}
+        onToggleTags={() => toggleSection(setShowTags, trayTitle.tags)}
+        onToggleScenes={() => toggleSection(setShowScenes, trayTitle.scenes)}
+        onToggleChanges={() => toggleSection(setShowChanges, trayTitle.changes)}
+        onToggleObjectInfo={() => toggleSection(setShowObjectInfo, trayTitle.objectInfo)}
         onToggleDebugLog={() => setShowDebugLog((v) => !v)}
         onToggleLibrary={() => setShowLibrary((v) => !v)}
         onScenesAdd={addSceneFromMenu}
@@ -6879,7 +6969,7 @@ export default function App() {
           }}
         >
           <span style={{ flex: 1 }}>
-            A kernel error occurred — the session is no longer usable. Reload the page to recover.
+            <Trans>A kernel error occurred — the session is no longer usable. Reload the page to recover.</Trans>
           </span>
           {/* Before Reload, which forgets the file an open died on
               (failedOpen.ts) and the steps that led here. */}
@@ -6897,7 +6987,7 @@ export default function App() {
               cursor: 'pointer',
             }}
           >
-            Report Bug…
+            <Trans>Report Bug…</Trans>
           </button>
           <button
             onClick={() => window.location.reload()}
@@ -6913,7 +7003,7 @@ export default function App() {
               cursor: 'pointer',
             }}
           >
-            Reload
+            <Trans>Reload</Trans>
           </button>
         </div>
       )}
@@ -6931,6 +7021,7 @@ export default function App() {
           // everywhere now: Cmd/Ctrl+`/`, dispatched by the global keydown
           // handler above and by the native menu on the macOS desktop.
           onOpenPalette={() => openPalette()}
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not translated
           paletteKbd={isMac ? '⌘/' : 'Ctrl /'}
           // The BROWSE entry point stays visible on every platform — the
           // dialog itself reports the web build's storage honestly
@@ -7025,7 +7116,7 @@ export default function App() {
                 measurement (a Line's length mid-gesture) always wins, since
                 that is the number the gesture is about. */}
             {measurement === '' && fly.mode !== 'off' ? (
-              <MeasurementBox toolName={toolName} value={fly.speedText} label="Fly speed" frozen />
+              <MeasurementBox toolName={toolName} value={fly.speedText} label={t`Fly speed`} frozen />
             ) : (
               <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} />
             )}
@@ -7146,7 +7237,9 @@ export default function App() {
               }}
             >
               <span>
-                Inserting <b style={{ color: 'var(--text-primary)' }}>{insertingItem}</b>
+                <Trans>
+                  Inserting <b style={{ color: 'var(--text-primary)' }}>{insertingItem}</b>
+                </Trans>
               </span>
               <span
                 style={{
@@ -7160,9 +7253,9 @@ export default function App() {
                   color: 'var(--kbd-text)',
                 }}
               >
-                Esc
+                <Trans comment="Escape key cap in the placement pill">Esc</Trans>
               </span>
-              <span style={{ color: 'var(--text-faint)' }}>cancel</span>
+              <span style={{ color: 'var(--text-faint)' }}><Trans>cancel</Trans></span>
             </div>
           )}
 
@@ -7286,7 +7379,7 @@ export default function App() {
         <div
           role="separator"
           aria-orientation="vertical"
-          aria-label="Resize panels"
+          aria-label={t`Resize panels`}
           onPointerDown={(ev) => {
             ev.preventDefault()
             const startX = ev.clientX
@@ -7334,7 +7427,7 @@ export default function App() {
         <div
           ref={trayRef}
           role="complementary"
-          aria-label="Tray"
+          aria-label={t`Tray`}
           style={{
             width: `${trayWidth}px`,
             flexShrink: 0,
@@ -7346,7 +7439,7 @@ export default function App() {
           }}
         >
           <TrayHideRow onClick={hideTray} focusOnMount={trayToggleTakesFocus} />
-          <TraySection title="Object Info" collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
+          <TraySection title={trayTitle.objectInfo} collapsed={!showObjectInfo} onToggle={() => setShowObjectInfo((v) => !v)}>
             <ObjectInfoPanel
               scene={state.scene}
               docRev={docRev}
@@ -7366,7 +7459,7 @@ export default function App() {
               onToast={handleToast}
             />
           </TraySection>
-          <TraySection title="Outliner" collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
+          <TraySection title={trayTitle.outliner} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
             <DocumentTree
               scene={state.scene}
               docRev={docRev}
@@ -7388,7 +7481,7 @@ export default function App() {
               onDropRefused={(reason) => handleToast(reason)}
             />
           </TraySection>
-          <TraySection title="Materials" collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
+          <TraySection title={trayTitle.materials} collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
             <MaterialPalette
               scene={state.scene}
               docRev={docRev}
@@ -7404,7 +7497,7 @@ export default function App() {
             />
           </TraySection>
           <TraySection
-            title="Components"
+            title={trayTitle.components}
             collapsed={!showComponents}
             onToggle={() => setShowComponents((v) => !v)}
             headerRight={<PurgeUnusedButton onClick={requestPurgeUnused} />}
@@ -7418,7 +7511,7 @@ export default function App() {
               onDeleteComponent={handleDeleteComponent}
             />
           </TraySection>
-          <TraySection title="Tags" collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
+          <TraySection title={trayTitle.tags} collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
             <TagsPanel
               scene={state.scene}
               docRev={docRev}
@@ -7431,14 +7524,14 @@ export default function App() {
             />
           </TraySection>
           <TraySection
-            title="Scenes"
+            title={trayTitle.scenes}
             collapsed={!showScenes}
             onToggle={() => setShowScenes((v) => !v)}
             headerRight={<ScenesAddButton rename={scenesRename} />}
           >
             <ScenesPanel scenes={scenes} rename={scenesRename} />
           </TraySection>
-          <TraySection title="Changes" collapsed={!showChanges} onToggle={() => setShowChanges((v) => !v)}>
+          <TraySection title={trayTitle.changes} collapsed={!showChanges} onToggle={() => setShowChanges((v) => !v)}>
             <ChangesPanel scene={state.scene} docRev={docRev} reasons={docSession.nonUndoableReasons} />
           </TraySection>
         </div>
@@ -7469,7 +7562,7 @@ export default function App() {
           flexShrink: 0,
         }}
       >
-        <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }}>{toolName}</span>
+        <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }}>{toolLabel(toolName)}</span>
         {/* While flying (fly-navigation.md §4), the movement keys replace
             the tool's guidance — shown the moment the right button goes
             down, so a right-drag that used to pan explains itself. The
@@ -7477,15 +7570,15 @@ export default function App() {
         {fly.mode !== 'off' ? (
           <>
             <span style={{ color: 'var(--text-section)' }} aria-hidden="true">·</span>
-            <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }} data-testid="fly-hint">Fly</span>
+            <span style={{ color: 'var(--text-tertiary)', fontWeight: 600 }} data-testid="fly-hint"><Trans context="camera mode" comment="Status bar label while flying through the model">Fly</Trans></span>
             <span style={{ color: 'var(--text-faint)' }}>
               {fly.mode === 'hold'
-                ? 'W S forward/back · A D strafe · E Q up/down · wheel speed · Shift fast'
+                ? t`W S forward/back · A D strafe · E Q up/down · wheel speed · Shift fast`
                 : fly.locked
-                  ? 'W S forward/back · A D strafe · E Q up/down · mouse or trackpad looks · wheel or pinch sets speed · Shift fast · Esc exits'
+                  ? t`W S forward/back · A D strafe · E Q up/down · mouse or trackpad looks · wheel or pinch sets speed · Shift fast · Esc exits`
                   : fly.canLock
-                    ? 'click the view to look with the mouse · W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits'
-                    : 'W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits'}
+                    ? t`click the view to look with the mouse · W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits`
+                    : t`W S forward/back · A D strafe · E Q up/down · scroll looks · pinch sets speed · Shift fast · Esc exits`}
             </span>
             {/* The tool keeps working underneath, so its own stage guidance
                 ("Click the next point…") stays visible after the keys —
@@ -7527,7 +7620,7 @@ export default function App() {
                 fontWeight: 600,
               }}
             >
-              Precision snap ({isMac ? '⌘⌥' : 'Ctrl+Alt'})
+              {t`Precision snap (${precisionKeys})`}
             </span>
           </>
         )}
@@ -7554,7 +7647,7 @@ export default function App() {
             type="button"
             data-health-badge="open"
             onClick={() => openModelHealth()}
-            title={BADGE_TOOLTIP_LIST}
+            title={i18n._(BADGE_TOOLTIP_LIST)}
             style={{
               marginLeft: 'auto',
               padding: '2px 8px',
@@ -7669,14 +7762,9 @@ export default function App() {
           immediately with no modal. */}
       {pendingMaterialDelete !== null && (
         <ConfirmDialog
-          heading="Delete material?"
-          body={
-            <>
-              "{pendingMaterialDelete.name}" — used on {pendingMaterialDelete.usage} faces —
-              delete and unpaint them?
-            </>
-          }
-          confirmLabel="Delete"
+          heading={t`Delete material?`}
+          body={materialDeleteBody}
+          confirmLabel={t`Delete`}
           danger
           onConfirm={() => {
             const { id, name } = pendingMaterialDelete
@@ -7691,13 +7779,9 @@ export default function App() {
           live instances; a definition with none deletes immediately. */}
       {pendingComponentDelete !== null && (
         <ConfirmDialog
-          heading="Delete definition?"
-          body={
-            <>
-              Delete "{pendingComponentDelete.name}" and its {pendingComponentDelete.usage} instances?
-            </>
-          }
-          confirmLabel="Delete"
+          heading={t`Delete definition?`}
+          body={componentDeleteBody}
+          confirmLabel={t`Delete`}
           danger
           onConfirm={() => {
             const { id, name } = pendingComponentDelete
@@ -7713,26 +7797,14 @@ export default function App() {
           nothing to purge — requestPurgeUnused toasts that case directly. */}
       {pendingPurgePreview !== null && (
         <ConfirmDialog
-          heading="Purge unused?"
+          heading={t`Purge unused?`}
           body={
             <>
-              {pendingPurgePreview.definitionNames.length > 0 && (
-                <div>
-                  {pendingPurgePreview.definitionNames.length}{' '}
-                  {pendingPurgePreview.definitionNames.length === 1 ? 'definition' : 'definitions'}:{' '}
-                  {pendingPurgePreview.definitionNames.join(', ')}
-                </div>
-              )}
-              {pendingPurgePreview.materialNames.length > 0 && (
-                <div>
-                  {pendingPurgePreview.materialNames.length}{' '}
-                  {pendingPurgePreview.materialNames.length === 1 ? 'material' : 'materials'}:{' '}
-                  {pendingPurgePreview.materialNames.join(', ')}
-                </div>
-              )}
+              {purgeDefinitionsLine !== null && <div>{purgeDefinitionsLine}</div>}
+              {purgeMaterialsLine !== null && <div>{purgeMaterialsLine}</div>}
             </>
           }
-          confirmLabel="Purge"
+          confirmLabel={t`Purge`}
           danger
           onConfirm={confirmPurgeUnused}
           onCancel={() => setPendingPurgePreview(null)}
@@ -7838,6 +7910,7 @@ export default function App() {
                 // has no use for the saved location), so this is the one caller that
                 // adapts back down at the boundary rather than widening its own contract.
                 fileHostRef.current
+                  // oxlint-disable-next-line lingui/no-unlocalized-strings -- file-format name
                   .exportBinary(bytes, name, { description: 'PDF', ext: 'pdf', mime: 'application/pdf' })
                   .then((result) => result !== null)
           }
@@ -7890,6 +7963,7 @@ export default function App() {
       {solidWarning !== null && (
         <StlExportDialog
           offenders={solidWarning.names}
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- file-format names
           formatLabel={solidWarning.format === 'stl' ? 'STL' : '3MF'}
           onExport={() => {
             const format = solidWarning.format
@@ -8030,7 +8104,7 @@ export default function App() {
             {/* Same tabbed Settings UI the desktop's dedicated window shows. */}
             <SettingsWindow />
             <button
-              aria-label="Close settings"
+              aria-label={t`Close settings`}
               onClick={() => setShowSettingsModal(false)}
               style={{
                 position: 'absolute',

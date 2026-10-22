@@ -135,12 +135,14 @@ export function lineArtSvgForTile(
     const maxY = Math.max(c[o + 1], c[o + 3])
     const slack = mm(1)
     if (maxX < r.x - slack || minX > r.x + r.w + slack || maxY < r.y - slack || minY > r.y + r.h + slack) continue
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- SVG markup, not copy
     byKind[kind].push(`M${num(c[o])} ${num(c[o + 1])}L${num(c[o + 2])} ${num(c[o + 3])}`)
   }
   const emit = (kind: number, cls: string, widthMm: number, dash?: string): void => {
     const d = byKind[kind]
     if (d.length === 0) return
     parts.push(
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- SVG markup, not copy
       `<path class="${cls}" stroke-width="${num(mm(widthMm))}"${dash !== undefined ? ` stroke-dasharray="${dash}"` : ''} d="${d.join('')}"/>`,
     )
   }
@@ -241,11 +243,13 @@ export function lineArtSvgDocument(drawing: LineDrawingData, ratio: number, opts
     const kind = drawing.kinds[i]
     if (kind === 4 && !opts.hiddenDashed) continue
     const o = i * 4
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- SVG markup, not copy
     byKind[kind].push(`M${num(c[o] * k)} ${num(-c[o + 1] * k)}L${num(c[o + 2] * k)} ${num(-c[o + 3] * k)}`)
   }
   const emit = (kind: number, cls: string, widthMm: number, dash?: string): void => {
     const d = byKind[kind]
     if (d.length === 0) return
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- SVG markup, not copy
     parts.push(`<path class="${cls}" stroke-width="${num(widthMm)}"${dash !== undefined ? ` stroke-dasharray="${dash}"` : ''} d="${d.join('')}"/>`)
   }
   emit(4, 'hidden', LINE_ART_WEIGHTS_MM.hidden, '1.5 1')

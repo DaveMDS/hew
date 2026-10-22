@@ -14,6 +14,7 @@
  * §1 decision 3).
  */
 
+import { Trans, useLingui } from '@lingui/react/macro'
 import { useEffect, useRef, useState } from 'react'
 import {
   PROP_BIT,
@@ -26,6 +27,7 @@ import {
   type SceneEntry,
 } from '../scenes/scenesModel'
 import type { ScenesController } from '../scenes/useScenesController'
+import { isComposingKey } from '../input/keyboard'
 
 export interface ScenesPanelProps {
   scenes: ScenesController
@@ -111,12 +113,13 @@ export function useSceneRenameState(scenes: ScenesController): SceneRenameState 
 /** The Add Scene header icon button — rendered by App.tsx as `TraySection`'s
  *  `headerRight`, alongside (not inside) the collapse-toggle button. */
 export function ScenesAddButton({ rename }: { rename: SceneRenameState }) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   return (
     <button
       type="button"
-      aria-label="Add Scene"
-      title="Add Scene"
+      aria-label={t`Add Scene`}
+      title={t`Add Scene`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onClick={(e) => {
@@ -198,7 +201,7 @@ export function ScenesPanel({ scenes, rename }: ScenesPanelProps) {
             cursor: 'pointer',
           }}
         >
-          Add Scene
+          <Trans>Add Scene</Trans>
         </button>
       </div>
     )
@@ -328,6 +331,8 @@ function SceneRow({
   onRefreshThumbnail,
   onRequestDelete,
 }: SceneRowProps) {
+  const { t } = useLingui()
+  const sceneName = entry.name
   const [hovered, setHovered] = useState(false)
   const [chevronHovered, setChevronHovered] = useState(false)
   const [updateHovered, setUpdateHovered] = useState(false)
@@ -344,7 +349,7 @@ function SceneRow({
         aria-current={isActive ? 'true' : undefined}
         role="button"
         tabIndex={isEditing ? -1 : 0}
-        aria-label={`Scene ${entry.name}`}
+        aria-label={t`Scene ${sceneName}`}
         onKeyDown={(e) => {
           if (isEditing) return
           if (e.key === 'Enter' || e.key === ' ') {
@@ -401,11 +406,12 @@ function SceneRow({
           <input
             ref={renameInputRef}
             value={editingText}
-            aria-label="Scene name"
+            aria-label={t`Scene name`}
             onChange={(e) => onEditingTextChange(e.target.value)}
             onClick={(e) => e.stopPropagation()}
             onBlur={onCancelRename}
             onKeyDown={(e) => {
+              if (isComposingKey(e)) return
               if (e.key === 'Enter') {
                 e.preventDefault()
                 onCommitRename()
@@ -501,7 +507,7 @@ function SceneRow({
             hover/expanded. */}
         <button
           type="button"
-          aria-label={isExpanded ? 'Collapse Scene details' : 'Expand Scene details'}
+          aria-label={isExpanded ? t`Collapse Scene details` : t`Expand Scene details`}
           aria-expanded={isExpanded}
           onMouseEnter={() => setChevronHovered(true)}
           onMouseLeave={() => setChevronHovered(false)}
@@ -603,6 +609,7 @@ function SceneDetails({
   onRefreshThumbnail: () => void
   onRequestDelete: () => void
 }) {
+  const { t } = useLingui()
   return (
     <div
       style={{
@@ -617,7 +624,7 @@ function SceneDetails({
       <textarea
         value={descDraft}
         placeholder={SCENE_COPY.descriptionPlaceholder}
-        aria-label="Scene description"
+        aria-label={t`Scene description`}
         onChange={(e) => onSetDescDraft(e.target.value)}
         onBlur={onCommitDescription}
         rows={2}
@@ -643,7 +650,7 @@ function SceneDetails({
             marginBottom: 2,
           }}
         >
-          Captured Properties
+          <Trans>Captured Properties</Trans>
         </div>
         {SCENE_PROPS.map((prop) => (
           <label
@@ -669,18 +676,18 @@ function SceneDetails({
       )}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <DetailButton ariaLabel="Move Up" disabled={index === 0} onClick={onMoveUp}>
+        <DetailButton ariaLabel={t`Move Up`} disabled={index === 0} onClick={onMoveUp}>
           ↑
         </DetailButton>
-        <DetailButton ariaLabel="Move Down" disabled={index === count - 1} onClick={onMoveDown}>
+        <DetailButton ariaLabel={t`Move Down`} disabled={index === count - 1} onClick={onMoveDown}>
           ↓
         </DetailButton>
         <div style={{ flex: 1 }} />
-        <DetailButton ariaLabel="Refresh thumbnail" onClick={onRefreshThumbnail}>
-          Refresh thumbnail
+        <DetailButton ariaLabel={t`Refresh thumbnail`} onClick={onRefreshThumbnail}>
+          <Trans>Refresh thumbnail</Trans>
         </DetailButton>
-        <DetailButton ariaLabel="Delete" onClick={onRequestDelete} colorVar="--scene-delete-text">
-          Delete
+        <DetailButton ariaLabel={t`Delete`} onClick={onRequestDelete} colorVar="--scene-delete-text">
+          <Trans>Delete</Trans>
         </DetailButton>
       </div>
     </div>
@@ -746,6 +753,7 @@ function SceneDeleteDialog({
 }) {
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -814,7 +822,7 @@ function SceneDeleteDialog({
               cursor: 'pointer',
             }}
           >
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button
             type="button"
@@ -830,7 +838,7 @@ function SceneDeleteDialog({
               cursor: 'pointer',
             }}
           >
-            Delete
+            <Trans>Delete</Trans>
           </button>
         </div>
       </div>

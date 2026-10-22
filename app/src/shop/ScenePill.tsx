@@ -17,6 +17,7 @@
  * (tapping the name → Views sheet → the same row) snaps back, since
  * activation always re-resolves and clears drift.
  */
+import { useLingui } from '@lingui/react/macro'
 import { ChevronRightIcon } from './icons'
 import type { SceneEntry } from '../scenes/scenesModel'
 
@@ -57,7 +58,9 @@ function ensurePillStyle(): void {
   const style = document.createElement('style')
   style.id = PILL_STYLE_ID
   style.textContent =
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS rules
     '.shop-scene-pill{background:rgba(27,26,23,.88)}' +
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS rules
     '[data-theme="light"] .shop-scene-pill{background:rgba(251,247,240,.92)}'
   document.head.appendChild(style)
 }
@@ -83,6 +86,7 @@ const nameTextStyle: React.CSSProperties = {
 }
 
 export function ScenePill({ entry, drifted, onPrevious, onNext, onOpenName, placement }: ScenePillProps) {
+  const { t } = useLingui()
   ensurePillStyle()
 
   if (entry === null) return null
@@ -108,7 +112,7 @@ export function ScenePill({ entry, drifted, onPrevious, onNext, onOpenName, plac
           boxShadow: '0 6px 18px -8px rgba(27,26,23,.6)', pointerEvents: 'auto',
         }}
       >
-        <button type="button" aria-label="Previous Scene" className="shop-press" onClick={onPrevious} style={chevronButtonStyle}>
+        <button type="button" aria-label={t({ context: 'scene', message: 'Previous Scene' })} className="shop-press" onClick={onPrevious} style={chevronButtonStyle}>
           <ChevronRightIcon size={18} style={{ transform: 'rotate(180deg)' }} />
         </button>
 
@@ -125,7 +129,7 @@ export function ScenePill({ entry, drifted, onPrevious, onNext, onOpenName, plac
           </span>
         </button>
 
-        <button type="button" aria-label="Next Scene" className="shop-press" onClick={onNext} style={chevronButtonStyle}>
+        <button type="button" aria-label={t({ context: 'scene', message: 'Next Scene' })} className="shop-press" onClick={onNext} style={chevronButtonStyle}>
           <ChevronRightIcon size={18} />
         </button>
       </div>

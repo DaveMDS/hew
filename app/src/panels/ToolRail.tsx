@@ -16,8 +16,9 @@
  */
 
 import { useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
-import { RAIL_GROUPS, toolsInGroup, shortcutFor, type ToolName } from '../tools/toolRegistry'
+import { RAIL_GROUPS, TOOL_GROUP_LABELS, toolsInGroup, shortcutFor, toolLabel, type ToolName } from '../tools/toolRegistry'
 import { isMac } from '../platform'
 import { InlineIcon } from './InlineIcon'
 import libraryBooksSvg from '@material-symbols/svg-400/outlined/library_books.svg?raw'
@@ -66,10 +67,11 @@ export interface ToolRailProps {
 /** Resting command-palette field for the top of the rail (all platforms —
  * see `onOpenPalette` above). */
 function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
+  const { t } = useLingui()
   return (
     <button
       onClick={onOpen}
-      aria-label="Search tools, actions, help"
+      aria-label={t`Search tools, actions, help`}
       style={{
         display: 'flex',
         alignItems: 'center',
@@ -86,7 +88,7 @@ function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
     >
       <span aria-hidden="true" style={{ color: 'var(--text-faint, #888)', fontSize: '13px' }}>⌕</span>
       <span style={{ flex: 1, textAlign: 'left', fontSize: '12.5px', color: 'var(--text-faint, #888)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-        Search…
+        <Trans>Search…</Trans>
       </span>
       <span
         style={{
@@ -110,13 +112,14 @@ function RailSearchField({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
 /** The palette field's narrow-rail form: an icon-only row that opens the
  * same palette, its shortcut carried by the tooltip. */
 function RailSearchButton({ onOpen, kbd }: { onOpen: () => void; kbd: string }) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
   return (
     <button
       type="button"
       onClick={onOpen}
-      aria-label="Search tools, actions, help"
-      title={`Search tools, actions, help (${kbd})`}
+      aria-label={t`Search tools, actions, help`}
+      title={t`Search tools, actions, help (${kbd})`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       style={{
@@ -144,8 +147,9 @@ function ToolIcon({ name, size = 16 }: { name: ToolName; size?: number }) {
 }
 
 function RailWidthToggle({ narrow, onToggle }: { narrow: boolean; onToggle: () => void }) {
+  const { t } = useLingui()
   const [hovered, setHovered] = useState(false)
-  const label = narrow ? 'Expand tool rail' : 'Compact tool rail'
+  const label = narrow ? t`Expand tool rail` : t`Compact tool rail`
   return (
     <button
       type="button"
@@ -243,14 +247,15 @@ function ToolRow({
 }) {
   const [hovered, setHovered] = useState(false)
   const shortcut = shortcutFor(name, isMac)
+  const label = toolLabel(name)
 
   return (
     <button
       type="button"
       role="radio"
       aria-checked={active}
-      aria-label={name}
-      title={shortcut === '' ? name : `${name} (${shortcut})`}
+      aria-label={label}
+      title={shortcut === '' ? label : `${label} (${shortcut})`}
       onClick={onSelect}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -275,7 +280,7 @@ function ToolRow({
       <ToolIcon name={name} />
       {!narrow && (
         <>
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{name}</span>
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
           <KbdChip shortcut={shortcut} active={active} />
         </>
       )}
@@ -288,14 +293,19 @@ function ToolRow({
  * `ToolName` — the Library dialog is a viewport-level modal, not a
  * registry-driven tool, so it can't reuse `ToolRow`'s `TOOL_ICON_SVG` lookup
  * or `shortcutFor`. */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not copy
+const LIBRARY_KBD = '⇧L'
+
 function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boolean; onSelect: () => void }) {
+  const { t } = useLingui()
+  const libraryKbd = LIBRARY_KBD
   const [hovered, setHovered] = useState(false)
   return (
     <button
       type="button"
       aria-pressed={active}
-      aria-label="Library"
-      title="Library (⇧L)"
+      aria-label={t`Library`}
+      title={t`Library (${libraryKbd})`}
       onClick={onSelect}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -320,8 +330,10 @@ function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boo
       <InlineIcon svg={libraryBooksSvg} />
       {!narrow && (
         <>
-          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>Library</span>
-          <KbdChip shortcut="⇧L" active={active} />
+          <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            <Trans>Library</Trans>
+          </span>
+          <KbdChip shortcut={LIBRARY_KBD} active={active} />
         </>
       )}
     </button>
@@ -338,10 +350,15 @@ export function ToolRail({
   narrow = false,
   onToggleNarrow,
 }: ToolRailProps) {
+  // Subscribes the rail to locale changes so tool names and headings re-resolve.
+  const { t, i18n } = useLingui()
+  // Fallback chip text when the host gives no palette shortcut label.
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not copy
+  const fallbackKbd = 'Ctrl K'
   return (
     <div
       role="complementary"
-      aria-label="Tool rail"
+      aria-label={t`Tool rail`}
       style={{
         width: `${narrow ? RAIL_NARROW_WIDTH : RAIL_WIDE_WIDTH}px`,
         flexShrink: 0,
@@ -357,21 +374,21 @@ export function ToolRail({
       {onToggleNarrow !== undefined && <RailWidthToggle narrow={narrow} onToggle={onToggleNarrow} />}
       {onOpenPalette !== undefined &&
         (narrow ? (
-          <RailSearchButton onOpen={onOpenPalette} kbd={paletteKbd ?? 'Ctrl K'} />
+          <RailSearchButton onOpen={onOpenPalette} kbd={paletteKbd ?? fallbackKbd} />
         ) : (
-          <RailSearchField onOpen={onOpenPalette} kbd={paletteKbd ?? 'Ctrl K'} />
+          <RailSearchField onOpen={onOpenPalette} kbd={paletteKbd ?? fallbackKbd} />
         ))}
-      <div role="radiogroup" aria-label="Tools" style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+      <div role="radiogroup" aria-label={t`Tools`} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
         {RAIL_GROUPS.map((group) => (
           <div key={group}>
-            <GroupHeading label={group} narrow={narrow} />
-            {toolsInGroup(group).map((t) => (
+            <GroupHeading label={i18n._(TOOL_GROUP_LABELS[group])} narrow={narrow} />
+            {toolsInGroup(group).map((tool) => (
               <ToolRow
-                key={t.name}
-                name={t.name}
-                active={activeTool === t.name}
+                key={tool.name}
+                name={tool.name}
+                active={activeTool === tool.name}
                 narrow={narrow}
-                onSelect={() => onSelectTool(t.name)}
+                onSelect={() => onSelectTool(tool.name)}
               />
             ))}
           </div>
@@ -379,7 +396,7 @@ export function ToolRail({
       </div>
       {onOpenLibrary !== undefined && (
         <div>
-          <GroupHeading label="Library" narrow={narrow} />
+          <GroupHeading label={t`Library`} narrow={narrow} />
           <LibraryRow active={libraryOpen} narrow={narrow} onSelect={onOpenLibrary} />
         </div>
       )}

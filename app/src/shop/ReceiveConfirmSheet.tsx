@@ -25,6 +25,7 @@
  * possible through it either way) and length-capped so a pathologically
  * long name can't stretch the sheet or bloat the DOM.
  */
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { ShopOrientation } from './orientation'
 import { QrIcon } from './icons'
 
@@ -56,6 +57,7 @@ function truncateForDisplay(name: string): string {
 }
 
 export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: ReceiveConfirmSheetProps) {
+  const { t } = useLingui()
   if (name === null) return null
 
   const isLandscape = orientation === 'landscape'
@@ -71,7 +73,7 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
       />
       <div
         role="dialog"
-        aria-label="Open shared model?"
+        aria-label={t`Open shared model?`}
         style={
           isLandscape
             ? {
@@ -96,7 +98,7 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
             <QrIcon size={22} />
           </span>
           <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '17px', fontWeight: 600, color: 'var(--shop-text)' }}>
-            Open shared model?
+            {t`Open shared model?`}
           </span>
         </div>
 
@@ -104,8 +106,10 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
           margin: '8px 14px 4px', fontFamily: 'var(--font-family-ui)', fontSize: '14px', lineHeight: 1.5,
           color: 'var(--shop-text-muted)', overflowWrap: 'anywhere',
         }}>
-          Someone shared <strong style={{ color: 'var(--shop-text)', fontWeight: 600 }}>&ldquo;{displayName}&rdquo;</strong> with you.
-          Only open models from people you trust.
+          <Trans>
+            Someone shared <strong style={{ color: 'var(--shop-text)', fontWeight: 600 }}>“{displayName}”</strong> with you.
+            Only open models from people you trust.
+          </Trans>
         </p>
 
         <div style={{ display: 'flex', gap: '8px', padding: '10px 14px 4px' }}>
@@ -119,7 +123,7 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
               fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
             }}
           >
-            Cancel
+            {t`Cancel`}
           </button>
           <button
             type="button"
@@ -135,7 +139,7 @@ export function ReceiveConfirmSheet({ name, orientation, onCancel, onOpen }: Rec
               fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 600,
             }}
           >
-            Open
+            {t`Open`}
           </button>
         </div>
       </div>

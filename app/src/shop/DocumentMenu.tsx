@@ -26,6 +26,7 @@
  * either side of the tool group dropped it from both bars, and this row is
  * its new and only home.
  */
+import { useLingui } from '@lingui/react/macro'
 import { ArCubeIcon, ClockIcon, FullEditorIcon, HewMark, PrinterIcon, QrIcon, SaveCopyIcon, UploadIcon } from './icons'
 import type { ShopOrientation } from './orientation'
 import { MenuPanel, MenuItem } from './MenuPanel'
@@ -67,6 +68,7 @@ export interface DocumentMenuProps {
 }
 
 export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOpenScanner, onOpenRecents, onSaveCopy, onPrint, showViewInAr, arBusy, onViewInAr, onUseFullEditor }: DocumentMenuProps) {
+  const { t } = useLingui()
   return (
     <MenuPanel open={open} orientation={orientation} anchor="left" onClose={onClose} scrimTestId="shop-document-scrim" panelTestId="shop-document-panel">
       {/* Header: non-interactive title row — where the filename "lives"
@@ -74,17 +76,17 @@ export function DocumentMenu({ open, docName, orientation, onClose, onOpen, onOp
       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '14px 16px', borderBottom: '1px solid var(--shop-hairline-2)' }}>
         <HewMark size={16} />
         <span style={{ fontFamily: 'var(--font-family-ui)', fontSize: '15px', fontWeight: 700, color: 'var(--shop-text)', overflowWrap: 'break-word', wordBreak: 'break-word' }}>
-          {docName ?? 'Shop Mode'}
+          {docName ?? t`Shop Mode`}
         </span>
       </div>
 
-      <MenuItem icon={<UploadIcon size={19} />} label="Open…" onClick={onOpen} />
-      <MenuItem icon={<QrIcon size={19} />} label="Open from desktop…" onClick={onOpenScanner} />
-      <MenuItem icon={<ClockIcon size={19} />} label="Recent models…" onClick={onOpenRecents} />
-      {docName !== null && <MenuItem icon={<SaveCopyIcon size={19} />} label="Save a copy (.hew)" onClick={onSaveCopy} />}
-      {docName !== null && <MenuItem icon={<PrinterIcon size={19} />} label="Print…" onClick={onPrint} />}
-      {showViewInAr && <MenuItem icon={<ArCubeIcon size={19} />} label={arBusy ? 'Preparing…' : 'View in AR…'} onClick={onViewInAr} />}
-      <MenuItem icon={<FullEditorIcon size={19} />} label="Use full editor" onClick={onUseFullEditor} last />
+      <MenuItem icon={<UploadIcon size={19} />} label={t`Open…`} onClick={onOpen} />
+      <MenuItem icon={<QrIcon size={19} />} label={t`Open from desktop…`} onClick={onOpenScanner} />
+      <MenuItem icon={<ClockIcon size={19} />} label={t`Recent models…`} onClick={onOpenRecents} />
+      {docName !== null && <MenuItem icon={<SaveCopyIcon size={19} />} label={t`Save a copy (.hew)`} onClick={onSaveCopy} />}
+      {docName !== null && <MenuItem icon={<PrinterIcon size={19} />} label={t`Print…`} onClick={onPrint} />}
+      {showViewInAr && <MenuItem icon={<ArCubeIcon size={19} />} label={arBusy ? t`Preparing…` : t`View in AR…`} onClick={onViewInAr} />}
+      <MenuItem icon={<FullEditorIcon size={19} />} label={t`Use full editor`} onClick={onUseFullEditor} last />
     </MenuPanel>
   )
 }

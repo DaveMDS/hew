@@ -36,6 +36,7 @@
  * position. A vertex with no incident edges draws only a crosshair.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -87,8 +88,8 @@ export class EditVertexTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     return this.stage.kind === 'idle'
-      ? 'Click a sketch point to pick it up.'
-      : 'Click where the point should go — its lines follow.'
+      ? t`Click a sketch point to pick it up.`
+      : t`Click where the point should go — its lines follow.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -174,7 +175,7 @@ export class EditVertexTool implements Tool {
       }
 
       try {
-        runDraft(this.wasmScene, { kind: 'ctx', ctx }, 'Move vertex', (d) => {
+        runDraft(this.wasmScene, { kind: 'ctx', ctx }, t`Move vertex`, (d) => {
           this.wasmScene.draft_move_vertex(d, base[0], base[1], base[2], dest[0], dest[1], dest[2])
         })
       } catch (err) {

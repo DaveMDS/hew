@@ -8,6 +8,7 @@
  * entirely different and behave identically.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { plural, t } from '@lingui/core/macro'
 import type { ViewportApi } from '../viewport/Viewport'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { lineArtSvgForTile, projectAnnotationOverlay, requestLineDrawing, type AnnotationOverlay, type LineDrawingData } from './lineArt'
@@ -133,10 +134,25 @@ export const PREVIEW_IMAGE_BUDGET = 24
 export const PREVIEW_DPI_MAX = 220
 const CUSTOM_PAPER_MIN_MM = 50
 const CUSTOM_PAPER_MAX_MM = 1200
-export const CUSTOM_PAPER_ERROR = 'Paper must be between 50 mm and 1200 mm.'
-export const CUSTOM_PAPER_PARSE_ERROR = 'Enter sizes like “216 mm” or “11 in”.'
-export const CUSTOM_SCALE_PARSE_ERROR = 'Enter a length like “1 cm”, “1in” or “3/8″”.'
-export const CUSTOM_SCALE_RANGE_ERROR = 'Scale must be between 1:1000 and 20:1.'
+/** The custom-size and custom-scale error texts, resolved when shown. */
+function customPaperError(): string {
+  const min = CUSTOM_PAPER_MIN_MM
+  const max = CUSTOM_PAPER_MAX_MM
+  return t`Paper must be between ${min} mm and ${max} mm.`
+}
+function customPaperParseError(): string {
+  return t`Enter sizes like “216 mm” or “11 in”.`
+}
+function customScaleParseError(): string {
+  return t`Enter a length like “1 cm”, “1in” or “3/8″”.`
+}
+function customScaleRangeError(): string {
+  return t`Scale must be between 1:1000 and 20:1.`
+}
+
+function lineArtBitmapNote(reason: string): string {
+  return t`Line art printed as a bitmap (${reason})`
+}
 
 function prefsToOptions(prefs: PrintPrefs, format: LengthFormat): PrintOptions {
   const base = defaultPrintOptions(format, prefs.paper)
@@ -234,9 +250,16 @@ function renderOptions(opts: PrintOptions, plan: PrintPlan, dpi: number, format:
 
 /** "6 pages (3 × 2) · Letter portrait · 1:1 (1 cm = 1 cm) · print at 100 %". */
 export function summaryText(job: PrintJob, plan: PrintPlan, opts: PrintOptions, extraPages = 0): string {
-  const count = job.plans.length === 1 ? pageCountText(plan.layout) : `${job.totalPages} pages · ${job.plans.length} Scenes`
-  const parts = [extraPages > 0 ? `${count} + ${extraPages} cut list` : count, `${paperLabel(opts.paper)} ${plan.layout.page.orientation}`]
-  if (plan.scaleText !== null) parts.push(plan.scaleText, 'print at 100 %')
+  const pageTotal = job.totalPages
+  const sceneCount = job.plans.length
+  const count =
+    job.plans.length === 1
+      ? pageCountText(plan.layout)
+      : `${plural(pageTotal, { one: '# page', other: '# pages' })} · ${plural(sceneCount, { one: '# Scene', other: '# Scenes' })}`
+  const paper = paperLabel(opts.paper)
+  const sheet = plan.layout.page.orientation === 'portrait' ? t`${paper} portrait` : t`${paper} landscape`
+  const parts = [extraPages > 0 ? t`${count} + ${extraPages} cut list` : count, sheet]
+  if (plan.scaleText !== null) parts.push(plan.scaleText, t`print at 100 %`)
   return parts.join(' · ')
 }
 
@@ -416,7 +439,7 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
         includeHidden: opts.hiddenDashed,
       })
       if (res.kind !== 'ok') {
-        return { svgs: [], drawing: null, annotations: null, fallbackNote: res.kind === 'too-complex' ? 'Line art printed as a bitmap — the model is too complex for vector line work.' : `Line art printed as a bitmap (${res.message})` }
+        return { svgs: [], drawing: null, annotations: null, fallbackNote: res.kind === 'too-complex' ? t`Line art printed as a bitmap — the model is too complex for vector line work.` : lineArtBitmapNote(res.message) }
       }
       const annotations = opts.includeDimensions ? projectAnnotationOverlay(api.collectAnnotationDrawing(), first) : null
       const ratio = scaleRatio(opts.scale)
@@ -451,6 +474,7 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
     const total = job.totalPages + n
     return Array.from({ length: n }, (_, i) => {
       const pageIndex = job.totalPages + i
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- cut-list page id, not shown as copy
       const tile = blankTile(plan.layout, pageIndex, `CL${i + 1}`)
       const furniture = cutListPageFurniture(plan.layout, cutRows, i, {
         documentName: printDocName(documentName),
@@ -735,7 +759,7 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
       if (s === null) {
         // Distinguish "unparseable" from "out of range" for the message.
         const probe = parseCustomScale(paperText, modelText, format, { unbounded: true })
-        return probe === null ? CUSTOM_SCALE_PARSE_ERROR : CUSTOM_SCALE_RANGE_ERROR
+        return probe === null ? customScaleParseError() : customScaleRangeError()
       }
       setOpts((o) => ({ ...o, scale: s }))
       return null
@@ -745,8 +769,8 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
 
   const applyCustomPaper = useCallback(
     (wMm: number, hMm: number): string | null => {
-      if (!isFinite(wMm) || !isFinite(hMm)) return CUSTOM_PAPER_PARSE_ERROR
-      if (wMm < CUSTOM_PAPER_MIN_MM || hMm < CUSTOM_PAPER_MIN_MM || wMm > CUSTOM_PAPER_MAX_MM || hMm > CUSTOM_PAPER_MAX_MM) return CUSTOM_PAPER_ERROR
+      if (!isFinite(wMm) || !isFinite(hMm)) return customPaperParseError()
+      if (wMm < CUSTOM_PAPER_MIN_MM || hMm < CUSTOM_PAPER_MIN_MM || wMm > CUSTOM_PAPER_MAX_MM || hMm > CUSTOM_PAPER_MAX_MM) return customPaperError()
       setOpts((o) => ({ ...o, paper: { w_mm: Math.min(wMm, hMm), h_mm: Math.max(wMm, hMm) } }))
       return null
     },

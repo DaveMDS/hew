@@ -3,6 +3,7 @@
  * on: "Showing 1 object" with a Show everything button. Styled like the
  * "Editing <name>" session chip beside it.
  */
+import { Trans } from '@lingui/react/macro'
 import { isolationBarText } from './isolation'
 
 interface Props {
@@ -55,7 +56,7 @@ export function IsolationBar({ count, onShowEverything, top = '54px', rightInset
           padding: '2px 8px',
         }}
       >
-        Show everything
+        <Trans>Show everything</Trans>
       </button>
     </div>
   )

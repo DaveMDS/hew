@@ -24,7 +24,9 @@ const DEFAULT_SUGGESTIONS = ['tool-select', 'tool-pushpull', 'save', 'undo']
 const RECENCY_BONUS_MAX = 10
 
 function normalize(s: string): string {
-  return s.trim().toLowerCase()
+  // NFKC so full-width and half-width forms match (docs/LOCALIZATION.md).
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- Unicode normalization form name
+  return s.normalize('NFKC').trim().toLowerCase()
 }
 
 /** Score a single entry against a normalized, non-empty query. Higher is
@@ -32,13 +34,18 @@ function normalize(s: string): string {
  * far enough apart (20+) that the recency bonus (max 10) can only break ties
  * within a tier, never promote a worse text match over a better one. */
 function scoreEntry(entry: PaletteEntry, query: string): number {
-  const label = normalize(entry.label)
-  if (label === query) return 100
-  if (label.startsWith(query)) return 90
+  // A tool's id is its English name ("Push/Pull"), so in another locale a
+  // SketchUp user who types the English term still finds it, ranked the
+  // same as the translated label (docs/LOCALIZATION.md).
+  const labels = [entry.label, entry.toolName]
+    .filter((l): l is string => typeof l === 'string')
+    .map(normalize)
+  if (labels.some((label) => label === query)) return 100
+  if (labels.some((label) => label.startsWith(query))) return 90
   // Word-prefix: query prefixes any word-boundary-delimited word in the
   // label (e.g. "pull" -> "Push/Pull", "extents" -> "Zoom Extents").
-  if (label.split(/[^a-z0-9]+/).some((word) => word.startsWith(query))) return 80
-  if (label.includes(query)) return 60
+  if (labels.some((label) => label.split(/[^\p{L}\p{N}]+/u).some((word) => word.startsWith(query)))) return 80
+  if (labels.some((label) => label.includes(query))) return 60
 
   const synonyms = (entry.synonyms ?? []).map(normalize)
   if (synonyms.some((s) => s.startsWith(query))) return 55

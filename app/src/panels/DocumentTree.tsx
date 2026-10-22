@@ -15,6 +15,7 @@
  * icons tinted per type (see NodeIcon).
  */
 
+import { Trans, useLingui } from '@lingui/react/macro'
 import { useMemo, useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
@@ -211,6 +212,7 @@ export function DocumentTree({
   onReparent,
   onDropRefused,
 }: Props) {
+  const { t } = useLingui()
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const topNodes = useMemo(
@@ -581,12 +583,12 @@ export function DocumentTree({
       if (result !== null) {
         onReparent(st.dragged, result.group)
       } else if (sessionOpen) {
-        onDropRefused?.('Close the group you are editing before moving items between groups.')
+        onDropRefused?.(t`Close the group you are editing before moving items between groups.`)
       } else if (resolved !== null) {
         onDropRefused?.(
           resolved.node === 'root'
-            ? 'That is already at the top level.'
-            : 'Drop onto a group row, or onto Model to move to the top level — not into itself or its own member.',
+            ? t`That is already at the top level.`
+            : t`Drop onto a group row, or onto Model to move to the top level — not into itself or its own member.`,
         )
       }
     }
@@ -742,8 +744,8 @@ export function DocumentTree({
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter outliner…"
-          aria-label="Filter outliner"
+          placeholder={t`Filter outliner…`}
+          aria-label={t`Filter outliner`}
           style={{
             flex: 1,
             fontSize: '11px',
@@ -766,7 +768,7 @@ export function DocumentTree({
               // would drop to <body> rather than staying in the filter flow.
               filterInputRef.current?.focus()
             }}
-            aria-label="Clear filter"
+            aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
               right: '4px',
@@ -925,7 +927,7 @@ export function DocumentTree({
               fontStyle: 'italic',
             }}
           >
-            No objects match
+            <Trans>No objects match</Trans>
           </div>
         )}
       </div>
@@ -952,6 +954,7 @@ function ModelRow({
    *  top level) — see `DocumentTree`'s `dropHighlightKey`. */
   isDropTarget?: boolean
 }) {
+  const { t } = useLingui()
   return (
     <div
       data-drop-target="root"
@@ -968,15 +971,15 @@ function ModelRow({
     >
       <ModelIcon />
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', opacity: hidden ? 0.6 : 1 }}>
-        Model
+        {t({ context: 'root', comment: 'Top row of the outliner: the whole document', message: 'Model' })}
       </span>
       <button
         onClick={(e) => {
           e.stopPropagation()
           onToggleAllHidden()
         }}
-        aria-label={anyChildHidden ? 'Show all children' : 'Hide all children'}
-        title={anyChildHidden ? 'Show all children' : 'Hide all children'}
+        aria-label={anyChildHidden ? t`Show all children` : t`Hide all children`}
+        title={anyChildHidden ? t`Show all children` : t`Hide all children`}
         style={{
           background: 'none',
           border: 'none',
@@ -1088,6 +1091,7 @@ const NodeRow = memo(function NodeRowInner({
   /** Begins a row drag (DocumentTree's pointer-based DnD) for `node`. */
   onStartDrag: (node: NodeRef, e: React.PointerEvent<HTMLDivElement>) => void
 }) {
+  const { t } = useLingui()
   const key = nodeKey(node)
   // Auto-expand when this group is an ancestor of the primary selected node,
   // OR (filter active) an ancestor of a filter match — either reason forces
@@ -1187,7 +1191,7 @@ const NodeRow = memo(function NodeRowInner({
           return (
             <Row
               key={refKey}
-              label={drawing.labels.get(refKey) ?? 'Shape'}
+              label={drawing.labels.get(refKey) ?? t({ context: 'drawn shape', message: 'Shape' })}
               icon={<NodeIcon kind="draft-island" />}
               selected={isSelected(ref)}
               isPrimary={primaryKey === refKey}
@@ -1485,6 +1489,7 @@ function Row({
    *  can be dragged. */
   onRowPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void
 }) {
+  const { t } = useLingui()
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
   // selected node is highlighted with accent/tint background + accent text"),
   // not the old hardcoded blue bars that broke on the light theme. Three tiers:
@@ -1549,7 +1554,7 @@ function Row({
       )}
       {icon}
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
-      {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}>editing</span>}
+      {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}><Trans>editing</Trans></span>}
       {onToggleAllHidden !== undefined && (
         <button
           onClick={(e) => {
@@ -1559,8 +1564,8 @@ function Row({
           onPointerDown={(e) => e.stopPropagation()}
           onFocus={() => setAllHiddenFocused(true)}
           onBlur={() => setAllHiddenFocused(false)}
-          aria-label={anyChildHidden === true ? 'Show all children' : 'Hide all children'}
-          title={anyChildHidden === true ? 'Show all children' : 'Hide all children'}
+          aria-label={anyChildHidden === true ? t`Show all children` : t`Hide all children`}
+          title={anyChildHidden === true ? t`Show all children` : t`Hide all children`}
           style={{
             background: 'none',
             border: 'none',

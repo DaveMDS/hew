@@ -39,9 +39,11 @@
  * notify local listeners directly as well.
  */
 
+import { t } from '@lingui/core/macro'
 import type { LibraryFileEntry } from '../library/types'
 import type { LibraryStore } from './libraryStore'
 
+/* oxlint-disable lingui/no-unlocalized-strings -- on-disk folder names and storage keys, identifiers */
 /** The three category subfolders, identical to the desktop store's. */
 const CATEGORY_DIRS = ['Components', 'Materials', 'Models'] as const
 
@@ -54,6 +56,7 @@ const DB_NAME = 'hew-library'
 const CONFIG_STORE = 'config'
 const KEY_MODE = 'mode'
 const KEY_FOLDER_HANDLE = 'folderHandle'
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 const BROADCAST_CHANNEL = 'hew-library'
 
@@ -367,7 +370,7 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
   async function rootOrThrow(): Promise<FileSystemDirectoryHandle> {
     const r = await root()
     if (r === null) {
-      throw new Error('The library folder needs permission again — reconnect it in the Library window.')
+      throw new Error(t`The library folder needs permission again — reconnect it in the Library window.`)
     }
     return r
   }
@@ -452,7 +455,7 @@ export function makeWebLibraryStore(overrides: WebLibraryDeps = {}): LibraryStor
       // A display label, not a filesystem path — the browser has no
       // user-visible absolute path in either mode (LibraryStore.folderInfo).
       if (mode === 'folder' && folderHandle) return { path: folderHandle.name }
-      return { path: 'Browser storage' }
+      return { path: t`Browser storage` }
     },
 
     chooseFolder: async () => {

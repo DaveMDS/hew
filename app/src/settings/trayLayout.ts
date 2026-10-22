@@ -40,6 +40,7 @@ export interface TrayLayout {
 
 const STORAGE_KEY = 'hew.settings.trayLayout'
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- persisted panel ids
 const KEYS = ['modelInfo', 'objectInfo', 'materials', 'components', 'tags', 'scenes', 'changes'] as const
 
 /**  defaults: Object Info + Outliner + Scenes open, Materials + Components +

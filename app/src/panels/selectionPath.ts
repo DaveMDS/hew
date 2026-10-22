@@ -1,3 +1,4 @@
+import { t } from '@lingui/core/macro'
 /**
  * Selection path — the pure crumb builder behind the viewport strip, the
  * Object Info "in A › B › C" line, and the hover tip line
@@ -136,7 +137,7 @@ export function buildSelectionPath(input: SelectionPathInput): PathCrumb[] {
   }
 
   const crumbs: PathCrumb[] = [
-    { key: 'model', label: 'Model', kind: 'model', state: 'above', node: null, frameDepth: null, enterNode: null },
+    { key: 'model', label: t({ context: 'root', comment: 'Selection path strip: the top of the document', message: 'Model' }), kind: 'model', state: 'above', node: null, frameDepth: null, enterNode: null },
   ]
 
   let sel: NodeRef | null = null
@@ -200,6 +201,11 @@ export function buildSelectionPath(input: SelectionPathInput): PathCrumb[] {
   return crumbs
 }
 
+/** Display name for a part of a closed component that has no name of its own. */
+function partFallback(): string {
+  return t({ context: 'unnamed item', comment: 'Name shown for a part inside a component when it has no name', message: 'Part' })
+}
+
 function belowCrumbs(
   input: SelectionPathInput,
   sel: NodeRef,
@@ -235,7 +241,7 @@ function belowCrumbs(
       // The component is not open: the part is a definition member.
       out.push({
         key: `member:${hit.object}`,
-        label: input.memberName(hit.object) ?? 'Part',
+        label: input.memberName(hit.object) ?? partFallback(),
         kind: 'member',
         state: 'member',
         node: null,
@@ -267,15 +273,21 @@ export function hoverLine(
     // Inside an open component the part is an ordinary object: name it by its
     // own label, not the "Part" fallback of a closed definition member.
     if (isOpenInstance(hit.instance)) {
-      return `${labelFor({ kind: 'object', id: hit.object })} · in ${labelFor(inst)}`
+      const partLabel = labelFor({ kind: 'object', id: hit.object })
+      const parentLabel = labelFor(inst)
+      return t({ comment: 'Hover tip: a thing and the container it sits in', message: `${partLabel} · in ${parentLabel}` })
     }
-    return `${memberName(hit.object) ?? 'Part'} · in ${labelFor(inst)}`
+    const partLabel = memberName(hit.object) ?? partFallback()
+    const parentLabel = labelFor(inst)
+    return t({ comment: 'Hover tip: a thing and the container it sits in', message: `${partLabel} · in ${parentLabel}` })
   }
   if (hit.object === undefined) return null
   const leaf: NodeRef = { kind: 'object', id: hit.object }
   const parent = parentOf(leaf)
   const name = labelFor(leaf)
-  return parent === undefined ? name : `${name} · in ${labelFor(parent)}`
+  if (parent === undefined) return name
+  const parentLabel = labelFor(parent)
+  return t({ comment: 'Hover tip: a thing and the container it sits in', message: `${name} · in ${parentLabel}` })
 }
 
 /**

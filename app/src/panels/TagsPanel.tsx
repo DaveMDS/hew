@@ -16,9 +16,11 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { buildTagTree, collectTagDescendantNodes, tagPathKey, type TagTreeNode } from './tagModel'
 import { nodeRefFromJs, nodeKindToNumber, type NodeRef } from './treeModel'
+import { isComposingKey } from '../input/keyboard'
 
 /** A palette "jump to tag" request: which row to reveal (expand ancestors,
  * scroll into view, briefly highlight). `nonce` distinguishes repeat jumps
@@ -237,6 +239,8 @@ function TagRow({
   revealTag: TagReveal | null
   revealExpandKeys: Set<string>
 } & RowInteraction) {
+  const { t } = useLingui()
+  const tagName = node.segment
   const { activeKey, editingKey, editingText, editingError, onClickRow, onStartRename, onEditingTextChange, onCommitRename, onCancelRename, canRename } = rowInteraction
   const [expanded, setExpanded] = useState(true)
   const hasChildren = node.children.length > 0
@@ -319,13 +323,14 @@ function TagRow({
         {isEditing ? (
           <input
             autoFocus
-            aria-label="Tag name"
+            aria-label={t`Tag name`}
             value={editingText}
             onChange={(e) => onEditingTextChange(e.target.value)}
             onFocus={(e) => e.currentTarget.select()}
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
             onKeyDown={(e) => {
+              if (isComposingKey(e)) return
               if (e.key === 'Enter') {
                 e.preventDefault()
                 onCommitRename(node)
@@ -387,7 +392,7 @@ function TagRow({
             onToggleTagPath(node.path)
           }}
           onDoubleClick={(e) => e.stopPropagation()}
-          title={hidden ? 'Show tagged objects' : 'Hide tagged objects'}
+          title={hidden ? t`Show tagged objects` : t`Hide tagged objects`}
           style={{
             background: 'none',
             border: 'none',
@@ -409,8 +414,8 @@ function TagRow({
             onDeleteTag(node.path)
           }}
           onDoubleClick={(e) => e.stopPropagation()}
-          title={hasChildren ? 'Delete tag and sub-tags (objects are kept)' : 'Delete tag (objects are kept)'}
-          aria-label={`Delete tag ${node.segment}`}
+          title={hasChildren ? t`Delete tag and sub-tags (objects are kept)` : t`Delete tag (objects are kept)`}
+          aria-label={t`Delete tag ${tagName}`}
           style={{
             background: 'none',
             border: 'none',

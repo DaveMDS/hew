@@ -18,6 +18,7 @@
  * (the Zoom Window one-shot convention). Esc cancels via `onDone(false)`.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -97,7 +98,8 @@ export class LibraryPlaceTool implements Tool {
   }
 
   statusHint(): string {
-    return `Click to place "${this.placement.displayName}" — full inference snapping, exactly like Move. Esc cancels.`
+    const name = this.placement.displayName
+    return t`Click to place "${name}" — full inference snapping, exactly like Move. Esc cancels.`
   }
 
   /** An armed placement is a live gesture: Escape must cancel IT — not pop

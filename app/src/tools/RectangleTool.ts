@@ -45,6 +45,7 @@
  *   can refresh the scene.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -55,7 +56,7 @@ import { rectangleCorners, faceRectangleCorners, facePlaneBasis, rectangleDimens
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { formatLength, parseDimensionsToMeters, typedReadout } from '../settings/units'
-import { editDimsBuffer, nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { editDimsBuffer, nextIdlePlaneLock, axisLockColorName } from './moveInput'
 import type { SketchTarget } from './sketchGesture'
 import { runDraft, addDraftLoop, refreshAfterDraft, draftTargetFromSketchTarget } from './draftCommit'
 import { pointOnPlane, drawPlaneCue, drawPlaneThrough, isGroundPlane, SketchPickCache, resolveIdleDrawTarget, resolveClickDrawTarget, nextGestureLockPlane, groundNaturalTarget, type DrawPlane } from './drawPlane'
@@ -168,18 +169,19 @@ export class RectangleTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.planeStage.kind !== 'idle' || this.faceStage.kind !== 'idle') {
-      return 'Click the opposite corner — or type exact dimensions.'
+      return t`Click the opposite corner — or type exact dimensions.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click to start; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click to start; same arrow or Esc unlocks.`
     }
     if (this.pin.current !== null) {
-      return 'Pinned to the hovered plane — click to start; Shift again or Esc unpins.'
+      return t`Pinned to the hovered plane — click to start; Shift again or Esc unpins.`
     }
     if (this.retype.isOpen) {
-      return 'Type exact dimensions to resize the rectangle you just drew — or click the first corner of the next one.'
+      return t`Type exact dimensions to resize the rectangle you just drew — or click the first corner of the next one.`
     }
-    return 'Click the first corner — on the ground plane or any face or sketch.'
+    return t`Click the first corner — on the ground plane or any face or sketch.`
   }
 
   private planeStage: PlaneStage = { kind: 'idle' }
@@ -1128,7 +1130,7 @@ export class RectangleTool implements Tool {
       const { result: regionsCreated, report } = runDraft(
         this.wasmScene,
         draftTargetFromSketchTarget(target),
-        'Rectangle',
+        t`Rectangle`,
         (d) => this._addLoop(d, corners),
       )
       refreshAfterDraft(report, {
@@ -1230,7 +1232,7 @@ export class RectangleTool implements Tool {
       const { result: regionsCreated, report } = runDraft(
         this.wasmScene,
         { kind: 'face', object, face, instance: this._activeInstance },
-        'Rectangle',
+        t`Rectangle`,
         (d) => this._addLoop(d, corners),
       )
       refreshAfterDraft(report, {

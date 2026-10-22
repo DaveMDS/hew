@@ -1342,8 +1342,11 @@ export class SceneRenderer {
     orthogonal: boolean,
     backPaint = false,
   ): BucketTag {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- bucket tag codes are identifiers
     if (!watertight) return reflected && backPaint ? 'R' : 'D'
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- bucket tag codes are identifiers
     if (reflected) return 'B'
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- bucket tag codes are identifiers
     return orthogonal ? 'F' : 'G'
   }
 
@@ -3008,6 +3011,7 @@ export class SceneRenderer {
       }
 
       const value = kindWord === 'diameter' ? radius * 2 : radius
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- dimension notation symbols (diameter sign, R), not words
       const prefix = kindWord === 'diameter' ? 'Ø ' : 'R '
       const override = this.wasmScene.annotation_text_override(id)
       const label = override ?? `${prefix}${formatLength(value)}`

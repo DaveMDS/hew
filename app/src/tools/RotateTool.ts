@@ -96,6 +96,8 @@
  * hint toast and stays idle.
  */
 
+import { formatNumber } from '../i18n/format'
+import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { displayedAngleDeg } from './displayedValue'
@@ -176,6 +178,7 @@ type Stage =
     }
 
 const SNAP_DEG = 15
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- axis letters are universal symbols, not copy
 const AXIS_LABEL: Record<0 | 1 | 2, string> = { 0: 'X', 1: 'Y', 2: 'Z' }
 /** Default axis: world +Z, the ground plane's normal (a blue protractor). */
 const WORLD_UP: Vec3 = [0, 0, 1]
@@ -228,27 +231,27 @@ export class RotateTool implements Tool {
     if (this.stage.kind === 'idle') {
       if (this.retype.isOpen) {
         return this.arrayHot !== null
-          ? 'Type an exact angle to redo the copy you just made, or 3x / 3/ for an array — Enter applies.'
-          : 'Type an exact angle to redo the rotation you just made — or click to set the center of another.'
+          ? t`Type an exact angle to redo the copy you just made, or 3x / 3/ for an array — Enter applies.`
+          : t`Type an exact angle to redo the rotation you just made — or click to set the center of another.`
       }
       if (this.arrayHot !== null) {
-        return 'Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies.'
+        return t`Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies.`
       }
       if (this.selection.length === 0) {
-        return 'Click the object you want to rotate.'
+        return t`Click the object you want to rotate.`
       }
       return this.copyMode
-        ? `Copy is on — click to set the center of rotation. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
-        : 'Click to set the center of rotation. The protractor tilts to the face or edge under the cursor — Shift locks that axis, or press → / ← / ↑ to lock X / Y / Z (needed to tip a cylinder onto its side).'
+        ? t`Copy is on — click to set the center of rotation. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
+        : t`Click to set the center of rotation. The protractor tilts to the face or edge under the cursor — Shift locks that axis, or press → / ← / ↑ to lock X / Y / Z (needed to tip a cylinder onto its side).`
     }
     if (this.stage.kind === 'pivot') {
       return this.copyMode
-        ? `Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
-        : 'Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis.'
+        ? t`Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
+        : t`Click a start point for the angle. Shift or → / ← / ↑ lock the rotation axis.`
     }
     return this.copyMode
-      ? `Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
-      : 'Move to set the angle (snaps to 15°), or type exact degrees, then click. Shift or → / ← / ↑ lock the axis.'
+      ? t`Move to set the angle (snaps to 15°), or type exact degrees, then click to place the copy. Shift or → / ← / ↑ lock the axis. Tap ${COPY_MODIFIER_LABEL} to rotate instead.`
+      : t`Move to set the angle (snaps to 15°), or type exact degrees, then click. Shift or → / ← / ↑ lock the axis.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -572,7 +575,7 @@ export class RotateTool implements Tool {
         }
       }
       if (nodes.length === 0) {
-        this.onToast('Click an object to rotate it')
+        this.onToast(t`Click an object to rotate it`)
         return
       }
       // Starting a new gesture ends the ×N / /N refinement window.
@@ -837,7 +840,7 @@ export class RotateTool implements Tool {
   /** Report the angle, prefixed with an axis tag when the axis is world-aligned. */
   private _reportAngle(deltaRad: number): void {
     const deg = (deltaRad * 180) / Math.PI
-    this.onMeasurementCb(this._decorate(`${this._axisTag()}${deg.toFixed(1)}°`))
+    this.onMeasurementCb(this._decorate(`${this._axisTag()}${formatNumber(deg, { fractionDigits: 1 })}°`))
   }
 
   /** Report the in-progress typed-angle buffer (with axis tag). */
@@ -848,7 +851,7 @@ export class RotateTool implements Tool {
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on —
    * MoveTool's identical `_decorate`. */
   private _decorate(text: string): string {
-    return this.copyMode ? `Copy · ${text}` : text
+    return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
   }
 
   /**
@@ -987,7 +990,7 @@ export class RotateTool implements Tool {
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
-        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, 'Rotate')
+        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Rotate' }))
         this.onCommit(committed)
         // Armed with the PRE-commit `nodes`: the window's undo restores the
         // original unit keys (geometry hashes), which the re-resolved
@@ -1158,13 +1161,16 @@ export class RotateTool implements Tool {
 
     const cap = this.wasmScene.max_array_count()
     if (spec.count > cap) {
-      this.onToast(`Array copy is limited to ${cap} copies`)
+      const limit = formatNumber(cap, { grouping: false })
+      this.onToast(
+        plural(cap, { one: `Array copy is limited to ${limit} copy`, other: `Array copy is limited to ${limit} copies` }),
+      )
       return
     }
 
     if (this.wasmScene.history_generation().toString() !== hot.historyGen) {
       this.arrayHot = null
-      this.onToast('Array entry ended — the model changed since the copy')
+      this.onToast(t`Array entry ended — the model changed since the copy`)
       return
     }
 

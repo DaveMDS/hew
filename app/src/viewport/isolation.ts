@@ -14,6 +14,7 @@
  * member shown through one placing instance, that instance's other members
  * stay drawn, faded. A faded thing is still hidden for picking/snapping.
  */
+import { plural } from '@lingui/core/macro'
 import { collectLeafIds, nodeKindToNumber, nodeRefFromJs, type NodeRef } from '../panels/treeModel'
 
 /** What can be isolated: a world object, a group, an instance (all `NodeRef`s),
@@ -285,5 +286,5 @@ export function sameTargets(a: readonly IsolationTarget[], b: readonly Isolation
 
 /** "Showing 1 object" / "Showing 6 objects". */
 export function isolationBarText(count: number): string {
-  return `Showing ${count} ${count === 1 ? 'object' : 'objects'}`
+  return plural(count, { one: 'Showing # object', other: 'Showing # objects' })
 }

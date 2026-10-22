@@ -53,6 +53,7 @@ export class ReportError extends Error {
   }
 }
 
+/* oxlint-disable lingui/no-unlocalized-strings -- ReportError kind identifiers */
 const KINDS: ReadonlySet<string> = new Set<ReportErrorKind>([
   'invalid',
   'tooLarge',
@@ -63,6 +64,7 @@ const KINDS: ReadonlySet<string> = new Set<ReportErrorKind>([
   'status',
   'offline',
 ])
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Turns whatever the Tauri `report_submit` invoke rejected with into a
  *  `ReportError`. Mirrors `relayClient.ts`'s `toRelayError`. */
@@ -128,6 +130,7 @@ const REQUEST_TIMEOUT_MS = 120_000
  *  the web-`fetch` twin of report_client.rs's `ReportError::from_status`.
  *  Falls back to `status` for anything that doesn't match the documented
  *  shape, which includes a piece's 403/404/409. */
+/* oxlint-disable lingui/no-unlocalized-strings -- ReportError.message is developer-facing; ReportBugDialog maps `kind` to its own localized copy */
 function reportErrorFromResponse(status: number, body: unknown): ReportError {
   const error = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined
   switch (`${status} ${typeof error === 'string' ? error : ''}`) {
@@ -144,6 +147,7 @@ function reportErrorFromResponse(status: number, body: unknown): ReportError {
       return new ReportError('status', `unexpected status ${status}`, status)
   }
 }
+/* oxlint-enable lingui/no-unlocalized-strings */
 
 /** Desktop path: the gzip bytes ride the invoke as a RAW body (the same
  *  convention `relayClient.ts`'s `relayPut` uses), never a JSON array — a
@@ -195,6 +199,7 @@ async function fetchWithRetry(url: string, init: RequestInit): Promise<Response>
   const first = await fetchOnce(url, init)
   if (first !== null && first.status < 500) return first
   const second = await fetchOnce(url, init)
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- developer-facing ReportError.message; the dialog localizes by kind
   if (second === null) throw new ReportError('offline', 'could not reach the report service')
   return second
 }
@@ -233,6 +238,7 @@ async function submitWeb(
   const id = typeof startJson === 'object' && startJson !== null ? (startJson as { id?: unknown }).id : undefined
   const token = typeof startJson === 'object' && startJson !== null ? (startJson as { token?: unknown }).token : undefined
   if (typeof id !== 'string' || typeof token !== 'string') {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- developer-facing ReportError.message; the dialog localizes by kind
     throw new ReportError('status', 'malformed response from the report service')
   }
   onProgress?.({ sentBytes: firstEnd, totalBytes: total })

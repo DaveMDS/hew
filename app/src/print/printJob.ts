@@ -5,6 +5,7 @@
  * the three `ViewportPrintSource` reads, so the dialog can re-plan on every
  * option change cheaply and the tests can drive it with a fake source.
  */
+import { plural, t } from '@lingui/core/macro'
 import { LENGTH_SYSTEM_OF, type LengthFormat } from '../settings/units'
 import type { PrintCameraSpec, PrintPageRequest, ViewPlaneExtent } from '../viewport/printPass'
 import { pageFurniture, type FurnitureContext, type FurnitureItem } from './furniture'
@@ -162,15 +163,41 @@ const STANDARD_EYE: Record<Exclude<PrintViewKind, 'current'>, [number, number, n
   iso: [1, -1, 1],
 }
 
+// Getters so each label resolves in the active locale at read time.
 export const VIEW_LABEL: Record<PrintViewKind, string> = {
-  current: 'Current view',
-  top: 'Top',
-  bottom: 'Bottom',
-  front: 'Front',
-  back: 'Back',
-  left: 'Left',
-  right: 'Right',
-  iso: 'Iso',
+  get current() {
+    return t`Current view`
+  },
+  get top() {
+    return t`Top`
+  },
+  get bottom() {
+    return t`Bottom`
+  },
+  get front() {
+    return t`Front`
+  },
+  get back() {
+    return t`Back`
+  },
+  get left() {
+    return t`Left`
+  },
+  get right() {
+    return t`Right`
+  },
+  get iso() {
+    return t`Iso`
+  },
+}
+
+/** "Top view": a standard view's name used as a subtitle. */
+function viewWithSuffix(viewName: string): string {
+  return t`${viewName} view`
+}
+
+function manyPagesWarning(pages: number): string {
+  return plural(pages, { one: '# page — check the scale', other: '# pages — check the scale' })
 }
 
 function norm(v: [number, number, number]): [number, number, number] {
@@ -189,7 +216,7 @@ export function printViewDirection(view: PrintViewKind, live: ReturnType<Viewpor
  * Table", not "Trestle Table.hew"), "Untitled" when empty. */
 export function printDocName(documentName: string): string {
   const stripped = documentName.trim().replace(/\.hew$/i, '')
-  return stripped === '' ? 'Untitled' : stripped
+  return stripped === '' ? t`Untitled` : stripped
 }
 
 export function jobTitleFor(ctx: PrintPlanContext, opts: PrintOptions, viewName: string): string {
@@ -251,7 +278,11 @@ export function planPrint(opts: PrintOptions, source: ViewportPrintSource, ctx: 
     restrictTo = { objects: new Set(sel.objects), instances: new Set(sel.instances) }
   }
 
-  const EXTENT_LABEL: Record<PrintExtentKind, string> = { model: 'Model', selection: 'Selection', view: 'Current view' }
+  const EXTENT_LABEL: Record<PrintExtentKind, string> = {
+    model: t`Model`,
+    selection: t`Selection`,
+    view: t`Current view`,
+  }
   const docName = printDocName(ctx.documentName)
   // Title-block name: "Café table — Tabletop" when the extent is one named
   // selection; second line: the Scene name (Each Scene), "Top view · Model"
@@ -261,10 +292,10 @@ export function planPrint(opts: PrintOptions, source: ViewportPrintSource, ctx: 
     scene !== null
       ? scene.name
       : opts.mode === 'standard'
-        ? (ctx.sceneName ?? (live.projection === 'parallel' ? 'Parallel view' : 'Perspective view'))
+        ? (ctx.sceneName ?? (live.projection === 'parallel' ? t`Parallel view` : t`Perspective view`))
         : opts.extent === 'view' && opts.view === 'current'
           ? VIEW_LABEL.current
-          : `${opts.view === 'current' ? (ctx.sceneName ?? VIEW_LABEL.current) : `${VIEW_LABEL[opts.view]} view`} · ${EXTENT_LABEL[opts.extent]}`
+          : `${opts.view === 'current' ? (ctx.sceneName ?? VIEW_LABEL.current) : viewWithSuffix(VIEW_LABEL[opts.view])} · ${EXTENT_LABEL[opts.extent]}`
   const furnitureBase = (scaleText: string | null): FurnitureContext => ({
     documentName: titleName,
     subtitle,
@@ -384,8 +415,11 @@ export function planPrint(opts: PrintOptions, source: ViewportPrintSource, ctx: 
       furniture: pageFurniture(layout, tile, fc),
     }
   })
-  if (layout.tiles.length > MANY_PAGES_WARNING) warnings.push(`${layout.tiles.length} pages — check the scale`)
-  if (layout.dpi < dpi) warnings.push(`Rendering at ${layout.dpi} dpi for this sheet size`)
+  if (layout.tiles.length > MANY_PAGES_WARNING) warnings.push(manyPagesWarning(layout.tiles.length))
+  if (layout.dpi < dpi) {
+    const renderDpi = layout.dpi
+    warnings.push(t`Rendering at ${renderDpi} dpi for this sheet size`)
+  }
   return {
     layout,
     pages,
@@ -459,7 +493,8 @@ export function planPrintJob(opts: PrintOptions, source: ViewportPrintSource, ct
   const pages: PrintJob['pages'] = []
   plans.forEach((p, i) => p.pages.forEach((page) => pages.push({ plan: i, page })))
   const warnings = [...new Set(plans.flatMap((p) => p.warnings))]
-  if (total > MANY_PAGES_WARNING && !warnings.some((w) => w.includes('pages'))) warnings.push(`${total} pages — check the scale`)
+  // A plan that already warned about its own page count covers the job.
+  if (total > MANY_PAGES_WARNING && !plans.some((p) => p.layout.tiles.length > MANY_PAGES_WARNING)) warnings.push(manyPagesWarning(total))
   return {
     plans,
     pages,

@@ -30,6 +30,21 @@ describe('AnnotationEditor', () => {
     expect(onCancel).not.toHaveBeenCalled()
   })
 
+  it('ignores Enter and Escape that belong to an IME composition', () => {
+    const onCommit = vi.fn()
+    const onCancel = vi.fn()
+    render(<AnnotationEditor screenX={0} screenY={0} initialText="" onCommit={onCommit} onCancel={onCancel} />)
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: 'ノート' } })
+    fireEvent.keyDown(input, { key: 'Enter', isComposing: true })
+    fireEvent.keyDown(input, { key: 'Enter', keyCode: 229 })
+    fireEvent.keyDown(input, { key: 'Escape', isComposing: true })
+    expect(onCommit).not.toHaveBeenCalled()
+    expect(onCancel).not.toHaveBeenCalled()
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(onCommit).toHaveBeenCalledWith('ノート')
+  })
+
   it('Escape cancels and discards the typed text', () => {
     const onCommit = vi.fn()
     const onCancel = vi.fn()

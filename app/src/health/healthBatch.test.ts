@@ -2,6 +2,7 @@
  * healthBatch — frame building (labels, commands, public ids), the
  * refusal-retry loop, and the plans behind the header buttons.
  */
+import { i18n } from '@lingui/core'
 import { describe, expect, it, vi } from 'vitest'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
@@ -129,7 +130,7 @@ describe('runBatch — refusals are never skipped silently', () => {
     const { scene, frames } = fakeScene(() => null, [2n])
     const result = runBatch(scene, () => 'L', rows(['1'], ['2']).map(capOp))
     expect(frames[2].params.commands).toHaveLength(1)
-    expect(result.failed).toEqual([{ object: 2n, method: 'hew.solid.cap', explanation: STALE_OBJECT_EXPLANATION }])
+    expect(result.failed).toEqual([{ object: 2n, method: 'hew.solid.cap', explanation: i18n._(STALE_OBJECT_EXPLANATION) }])
   })
 
   it('an error that is not a per-command refusal throws', () => {

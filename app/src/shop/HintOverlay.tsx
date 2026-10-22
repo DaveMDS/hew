@@ -23,6 +23,7 @@
  * `.shop-hint-*` classes, which already fall back to a static look under
  * `prefers-reduced-motion` — nothing here needs to know about that itself.
  */
+import { useLingui } from '@lingui/react/macro'
 import type { ActiveHint } from './hints'
 
 export interface HintOverlayProps {
@@ -60,6 +61,7 @@ function tagStyle(left: number, top: number): React.CSSProperties {
 }
 
 export function HintOverlay({ hint, dotScreen, containerWidth, containerHeight }: HintOverlayProps) {
+  const { t } = useLingui()
   if (hint.name === 'tap') {
     if (dotScreen === null) return null
     const tagLeft = clamp(dotScreen.x, TAG_MARGIN_PX + TAG_HALF_WIDTH_ESTIMATE_PX, containerWidth - TAG_MARGIN_PX - TAG_HALF_WIDTH_ESTIMATE_PX)
@@ -85,7 +87,7 @@ export function HintOverlay({ hint, dotScreen, containerWidth, containerHeight }
             background: 'var(--shop-accent)', transform: 'translate(-50%, -50%)',
           }}
         />
-        <div style={tagStyle(tagLeft, tagTop)}>Tap a part for its size</div>
+        <div style={tagStyle(tagLeft, tagTop)}>{t`Tap a part for its size`}</div>
       </div>
     )
   }
@@ -121,7 +123,7 @@ export function HintOverlay({ hint, dotScreen, containerWidth, containerHeight }
             borderRadius: '50%', background: 'var(--shop-dock-text)',
           }}
         />
-        <div style={{ ...tagStyle(60, 78) }}>Drag to look around</div>
+        <div style={{ ...tagStyle(60, 78) }}>{t`Drag to look around`}</div>
       </div>
     </div>
   )

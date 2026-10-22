@@ -10,10 +10,18 @@
  * crossed once, in App.tsx, via `scene.history_entries_json()`.
  */
 
+import { plural, t } from '@lingui/core/macro'
+import { isHistoryKind, type HistoryKind } from '../i18n/historyLabels'
+
 /** One undo/redo entry: a human-readable label the kernel derives from the
- * action itself, and who authored it. */
+ * action itself, what it did as data, and who authored it. */
 export interface HistoryEntry {
+  /** The kernel's English rendering — the API's `expected_label`; the UI
+   * shows `historyLabel(kind, label)` (src/i18n/historyLabels.ts). */
   label: string
+  /** Structured description (`{ id, args }`); absent only on a payload
+   * from an older kernel. */
+  kind?: HistoryKind
   /** `'user'` for a UI-authored edit; `{ connection: id }` for an API
    * envelope, `id` being the connection's own identity string. */
   origin: 'user' | { connection: string }
@@ -62,9 +70,13 @@ export function parseHistoryEntries(json: string | undefined | null): HistoryEnt
     const parsed: unknown = JSON.parse(json)
     if (typeof parsed !== 'object' || parsed === null) return EMPTY_ENTRIES
     const obj = parsed as Record<string, unknown>
+    const entries = (v: unknown): HistoryEntry[] =>
+      Array.isArray(v)
+        ? (v as HistoryEntry[]).map((e) => (isHistoryKind(e.kind) ? e : { ...e, kind: undefined }))
+        : []
     return {
-      undo: Array.isArray(obj.undo) ? (obj.undo as HistoryEntry[]) : [],
-      redo: Array.isArray(obj.redo) ? (obj.redo as HistoryEntry[]) : [],
+      undo: entries(obj.undo),
+      redo: entries(obj.redo),
       savedDepth: typeof obj.savedDepth === 'number' ? obj.savedDepth : null,
     }
   } catch {
@@ -162,7 +174,14 @@ export function entriesSinceSaved(entries: HistoryEntries, limit = 12): EntriesS
  * wording; the unsaved-changes dialog's intro line is phrased around the
  * same `undone` distinction so the two surfaces never disagree. */
 export function describeChangeCount(count: number, undone: boolean): string {
-  if (count === 0) return 'No changes since last save.'
-  const noun = count === 1 ? 'change' : 'changes'
-  return undone ? `${count} ${noun} undone since last save.` : `${count} ${noun} since last save.`
+  if (count === 0) return t`No changes since last save.`
+  return undone
+    ? plural(count, {
+        one: `${count} change undone since last save.`,
+        other: `${count} changes undone since last save.`,
+      })
+    : plural(count, {
+        one: `${count} change since last save.`,
+        other: `${count} changes since last save.`,
+      })
 }

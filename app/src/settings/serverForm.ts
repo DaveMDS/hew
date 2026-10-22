@@ -17,7 +17,9 @@
  * setting and words the results.
  */
 
+import { t } from '@lingui/core/macro'
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { formatNumber } from '../i18n/format'
 import { RelayError, relayIdentity, toRelayError, type RelayIdentity } from '../io/relayClient'
 import {
   CLOUD_ORIGIN,
@@ -65,15 +67,16 @@ export function describeTestFailure(err: unknown, origin: string): string {
   })()
   switch (e.kind) {
     case 'unreachable':
-      return `Could not reach ${host} — check the address, your connection, and that the server is up.`
+      return t`Could not reach ${host} — check the address, your connection, and that the server is up.`
     case 'tls':
-      return `Reachable, but the server's certificate isn't trusted by this computer — install its certificate authority in the system keychain.`
+      return t`Reachable, but the server's certificate isn't trusted by this computer — install its certificate authority in the system keychain.`
     case 'notARelay':
-      return `Reachable, but ${host} isn't serving a Hew relay at /relay/.`
+      return t`Reachable, but ${host} isn't serving a Hew relay at /relay/.`
     case 'unauthorized':
-      return 'The server rejected the upload key.'
+      return t`The server rejected the upload key.`
     case 'status':
-      return `Unexpected answer from ${host} (status ${e.status ?? '?'}).`
+      const status = e.status ?? '?'
+      return t`Unexpected answer from ${host} (status ${status}).`
     case 'invalidOrigin':
     case 'io':
     case 'full':
@@ -84,9 +87,12 @@ export function describeTestFailure(err: unknown, origin: string): string {
 
 /** Words a successful probe for the pane. */
 export function describeIdentity(identity: RelayIdentity): string {
-  const cap = `${Math.floor(identity.maxBytes / (1024 * 1024))} MB max`
-  const ttl = `${Math.round(identity.ttlMs / 60_000)} min TTL`
-  const auth = identity.auth === 'bearer' ? 'upload key required' : 'open uploads'
+  const maxMb = formatNumber(Math.floor(identity.maxBytes / (1024 * 1024)))
+  const ttlMin = formatNumber(Math.round(identity.ttlMs / 60_000))
+  const cap = t`${maxMb} MB max`
+  const ttl = t`${ttlMin} min TTL`
+  const auth = identity.auth === 'bearer' ? t`upload key required` : t`open uploads`
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- service name and contract version are identifiers, joined with separators
   return `${identity.service} v${identity.contract} · ${cap} · ${ttl} · ${auth}`
 }
 
@@ -194,11 +200,11 @@ export function useServerSettingForm(): ServerSettingForm {
     try {
       const identity = await relayIdentity()
       if (identity.keyAccepted === false) {
-        setTest({ kind: 'fail', message: 'Reachable, but the server rejected the upload key.' })
+        setTest({ kind: 'fail', message: t`Reachable, but the server rejected the upload key.` })
         return
       }
       if (identity.auth === 'bearer' && draft.mode === 'self-hosted' && draft.uploadKey.trim() === '') {
-        setTest({ kind: 'fail', message: 'Reachable, but this server requires an upload key — enter the one its admin gave you.' })
+        setTest({ kind: 'fail', message: t`Reachable, but this server requires an upload key — enter the one its admin gave you.` })
         return
       }
       setTest({ kind: 'ok', identity })

@@ -19,6 +19,7 @@
  * crumbs change, in a layout effect so there is no visible jump.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { NodeIcon } from './DocumentTree'
 import type { PathCrumb } from './selectionPath'
 import type { NodeRef } from './treeModel'
@@ -51,6 +52,7 @@ const SECOND_ROW_TOP_PX = 54
 const SECOND_ROW_GUTTER_PX = 16
 
 export function SelectionPathStrip({ crumbs, onSelect, onModel, onFrame, onEnter }: Props) {
+  const { t } = useLingui()
   const boxRef = useRef<HTMLDivElement>(null)
   const rootRef = useRef<HTMLDivElement>(null)
   const [row, setRow] = useState<'band' | 'second'>('band')
@@ -206,22 +208,23 @@ export function SelectionPathStrip({ crumbs, onSelect, onModel, onFrame, onEnter
             </span>
             {member && (
               <span style={{ color: 'var(--text-faint)', fontStyle: 'normal', fontSize: '10.5px', marginLeft: '2px' }}>
-                part of the component
+                <Trans>part of the component</Trans>
               </span>
             )}
             {c.frameDepth !== null && (
               <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)', marginLeft: '3px', fontWeight: 'normal' }}>
-                editing
+                <Trans>editing</Trans>
               </span>
             )}
           </>
         )
+        const crumbLabel = c.label
         const common = {
           'data-testid': 'selection-path-crumb',
           'data-kind': c.kind,
           'data-state': c.state,
           'data-editing': c.frameDepth !== null ? 'true' : undefined,
-          title: member ? `${c.label} (part of the component)` : c.label,
+          title: member ? t`${crumbLabel} (part of the component)` : c.label,
         } as const
         return (
           <span key={c.key} style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>

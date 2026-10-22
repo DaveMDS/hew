@@ -373,6 +373,17 @@ whatever tool is active.
   (), handling an error is just clearing the tool's preview state — there
   is never partial state to unwind.
 
+**UI text is localized.** Every string a person reads goes through a
+Lingui macro (`t`, `<Trans>`, `msg`) and into the gettext catalogs under
+`app/src/locales/`; `pnpm --dir app i18n:extract` regenerates them and the
+verify gate fails if they are stale or if a shipped locale is incomplete.
+`pnpm --dir app lint` (Oxlint with the Lingui plugin) rejects an unwrapped
+string. Numbers a person reads go through `app/src/i18n/format.ts`, never
+`toFixed`. Strings in `crates/` stay English: the kernel speaks in typed
+error codes and structured history kinds, and the app owns the words.
+`docs/LOCALIZATION.md` is the full contract, for contributors and
+translators both.
+
 **Testing the UI:** component-level behavior is covered with component
 tests (Vitest + Testing Library) alongside the components they exercise.
 For behavior that spans the kernel, inference, and the tool layer together,

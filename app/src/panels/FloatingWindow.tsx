@@ -17,6 +17,7 @@
  * isolation in the viewport. The window closes with its ✕ or from the menu.
  */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import type { ReactNode } from 'react'
 
 export interface Rect {
@@ -147,6 +148,7 @@ export function FloatingWindow({
   ...rest
 }: FloatingWindowProps): React.ReactElement {
   const rootRef = useRef<HTMLDivElement>(null)
+  const { t } = useLingui()
   const titleId = useId()
   const [size, setSize] = useState<ContainerSize>({ width: 0, height: 0 })
   const [rect, setRect] = useState<Rect | null>(null)
@@ -298,8 +300,8 @@ export function FloatingWindow({
         </h2>
         <button
           type="button"
-          aria-label="Close"
-          title="Close"
+          aria-label={t`Close`}
+          title={t`Close`}
           onClick={onClose}
           style={{
             background: 'none',
@@ -319,7 +321,7 @@ export function FloatingWindow({
       </div>
       <div
         role="separator"
-        aria-label="Resize"
+        aria-label={t`Resize`}
         data-floating-window-grip
         onPointerDown={begin('resize')}
         onPointerMove={onGestureMove}

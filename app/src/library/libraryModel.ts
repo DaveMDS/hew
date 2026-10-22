@@ -13,6 +13,8 @@
  * metadata for that field", never a thrown exception.
  */
 
+import { plural, t } from '@lingui/core/macro'
+import { formatNumber, intlLocale } from '../i18n/format'
 import type {
   LibraryCategory,
   LibraryFileEntry,
@@ -330,17 +332,18 @@ export function collectionsOf(items: LibraryItem[]): CollectionNode[] {
 // List view — sorting (finding #3: a real Name/Type/Size list, sortable)
 // ---------------------------------------------------------------------------
 
-const CATEGORY_TYPE_LABEL: Record<LibraryCategory, string> = {
-  component: 'Component',
-  material: 'Material',
-  model: 'Model',
-}
-
 /** The List view's Type column text — shared with the sort key below so the
  * two can never drift (sorting "by what's displayed", not some internal
  * enum ordering). */
 export function categoryTypeLabel(category: LibraryCategory): string {
-  return CATEGORY_TYPE_LABEL[category]
+  switch (category) {
+    case 'component':
+      return t`Component`
+    case 'material':
+      return t`Material`
+    case 'model':
+      return t({ context: 'library item type', message: 'Model' })
+  }
 }
 
 export type ListSortColumn = 'name' | 'type' | 'size'
@@ -376,18 +379,18 @@ export function sortListItems(items: LibraryItem[], column: ListSortColumn, dire
 /** Byte count as a short, human-scale string: bytes under 1 KB, otherwise
  * KB/MB with one decimal place. */
 export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024) return t`${bytes} B`
   const kb = bytes / 1024
-  if (kb < 1024) return `${round1(kb)} KB`
-  return `${round1(kb / 1024)} MB`
+  if (kb < 1024) {
+    const size = round1(kb)
+    return t`${size} KB`
+  }
+  const size = round1(kb / 1024)
+  return t`${size} MB`
 }
 
 function round1(n: number): string {
-  return (Math.round(n * 10) / 10).toFixed(1)
-}
-
-function pluralize(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? '' : 's'}`
+  return formatNumber(Math.round(n * 10) / 10, { fractionDigits: 1 })
 }
 
 /** The detail pane's mono metadata line, e.g. `4 solids · 2 materials · 1.2
@@ -395,8 +398,8 @@ function pluralize(n: number, word: string): string {
  * solids), and the file size is always shown last. */
 export function metadataLine(item: LibraryItem): string {
   const parts: string[] = []
-  if (item.summary.objects > 0) parts.push(pluralize(item.summary.objects, 'solid'))
-  if (item.summary.materials > 0) parts.push(pluralize(item.summary.materials, 'material'))
+  if (item.summary.objects > 0) parts.push(plural(item.summary.objects, { one: '# solid', other: '# solids' }))
+  if (item.summary.materials > 0) parts.push(plural(item.summary.materials, { one: '# material', other: '# materials' }))
   parts.push(formatBytes(item.file.size))
   return parts.join(' · ')
 }
@@ -404,8 +407,8 @@ export function metadataLine(item: LibraryItem): string {
 /** Meters formatted to at most 2 decimal places, trailing zeros trimmed
  * (`0.60` → `0.6`, `1.00` → `1`). */
 function formatMeters(m: number): string {
-  const rounded = Math.round(m * 100) / 100
-  return `${rounded} m`
+  const rounded = formatNumber(Math.round(m * 100) / 100, { maxFractionDigits: 2 })
+  return t`${rounded} m`
 }
 
 /** A material tile/detail sub-line: `texture · 0.6 m tile`, `color`, or
@@ -414,22 +417,24 @@ function formatMeters(m: number): string {
 export function materialSubline(entry: LibraryMaterialSummary): string {
   const parts: string[] = []
   if (entry.texture_asset !== null) {
-    parts.push('texture')
+    parts.push(t`texture`)
     if (entry.texture_world_size !== null) {
-      parts.push(`${formatMeters(entry.texture_world_size[0])} tile`)
+      const size = formatMeters(entry.texture_world_size[0])
+      parts.push(t`${size} tile`)
     }
   } else {
-    parts.push('color')
+    parts.push(t`color`)
   }
   const alpha = entry.color[3]
   if (alpha !== 255) {
-    parts.push(`opacity ${Math.round((alpha / 255) * 100)}%`)
+    const percent = Math.round((alpha / 255) * 100)
+    parts.push(t`opacity ${percent}%`)
   }
   return parts.join(' · ')
 }
 
 function formatAbsoluteDate(ms: number): string {
-  return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+  return new Date(ms).toLocaleDateString(intlLocale(), { year: 'numeric', month: 'short', day: 'numeric' })
 }
 
 /** A relative "Saved …" line for the detail pane: minutes/hours ago for the
@@ -437,16 +442,17 @@ function formatAbsoluteDate(ms: number): string {
  * date. Falls back to a neutral "unknown" line when no timestamp is
  * available at all (mtimeMs 0, no savedAt — a backend that can't say). */
 export function savedLine(item: LibraryItem, nowMs: number): string {
-  const t = itemTimestamp(item)
-  if (t <= 0) return 'Saved date unknown'
-  const diffMs = Math.max(0, nowMs - t)
+  const ts = itemTimestamp(item)
+  if (ts <= 0) return t`Saved date unknown`
+  const diffMs = Math.max(0, nowMs - ts)
   const diffMinutes = Math.floor(diffMs / (60 * 1000))
   const diffHours = Math.floor(diffMs / (60 * 60 * 1000))
   const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000))
-  if (diffMinutes < 1) return 'Saved just now'
-  if (diffHours < 1) return `Saved ${pluralize(diffMinutes, 'minute')} ago`
-  if (diffDays < 1) return `Saved ${pluralize(diffHours, 'hour')} ago`
-  if (diffDays === 1) return 'Saved yesterday'
-  if (diffDays <= 30) return `Saved ${pluralize(diffDays, 'day')} ago`
-  return `Saved ${formatAbsoluteDate(t)}`
+  if (diffMinutes < 1) return t`Saved just now`
+  if (diffHours < 1) return plural(diffMinutes, { one: 'Saved # minute ago', other: 'Saved # minutes ago' })
+  if (diffDays < 1) return plural(diffHours, { one: 'Saved # hour ago', other: 'Saved # hours ago' })
+  if (diffDays === 1) return t`Saved yesterday`
+  if (diffDays <= 30) return plural(diffDays, { one: 'Saved # day ago', other: 'Saved # days ago' })
+  const date = formatAbsoluteDate(ts)
+  return t`Saved ${date}`
 }

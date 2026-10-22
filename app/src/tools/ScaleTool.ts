@@ -60,6 +60,8 @@
  * zoom on any model, from a few-centimeter part to a house.
  */
 
+import { formatNumber } from '../i18n/format'
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { displayedFactor, isFreePick } from './displayedValue'
@@ -259,15 +261,15 @@ export class ScaleTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'dragging') {
-      return 'Move to scale, click to commit, or type an exact factor/dimension — Ctrl anchors at the center.'
+      return t`Move to scale, click to commit, or type an exact factor/dimension — Ctrl anchors at the center.`
     }
     if (this.retype.isOpen) {
-      return 'Type an exact factor or dimension to redo the scale you just made — or drag a grip.'
+      return t`Type an exact factor or dimension to redo the scale you just made — or drag a grip.`
     }
     if (this.selection.length === 0) {
-      return 'Click the object you want to scale.'
+      return t`Click the object you want to scale.`
     }
-    return 'Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center.'
+    return t`Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -410,7 +412,7 @@ export class ScaleTool implements Tool {
         }
       }
       if (nodes.length === 0) {
-        this.onToast('Click an object to scale it')
+        this.onToast(t`Click an object to scale it`)
         return
       }
 
@@ -1115,17 +1117,18 @@ export class ScaleTool implements Tool {
     if (this.stage.kind !== 'dragging') return
     const { axisIndex, axisIndex2 } = this.stage
     if (axisIndex === null) {
-      this.onMeasurementCb(`×${factors[0].toFixed(2)}`)
+      this.onMeasurementCb(`×${formatNumber(factors[0], { fractionDigits: 2 })}`)
       return
     }
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- axis letters are universal symbols, not copy
     const label = ['X', 'Y', 'Z']
     if (axisIndex2 === null) {
-      this.onMeasurementCb(`${label[axisIndex]} ×${factors[axisIndex].toFixed(2)}`)
+      this.onMeasurementCb(`${label[axisIndex]} ×${formatNumber(factors[axisIndex], { fractionDigits: 2 })}`)
       return
     }
     // Edge grip: two independently-driven axes, so show both factors.
     this.onMeasurementCb(
-      `${label[axisIndex]} ×${factors[axisIndex].toFixed(2)}  ${label[axisIndex2]} ×${factors[axisIndex2].toFixed(2)}`,
+      `${label[axisIndex]} ×${formatNumber(factors[axisIndex], { fractionDigits: 2 })}  ${label[axisIndex2]} ×${formatNumber(factors[axisIndex2], { fractionDigits: 2 })}`,
     )
   }
 
@@ -1217,7 +1220,7 @@ export class ScaleTool implements Tool {
       try {
         const affine = nonUniformScaleAboutPivot(factors[0], factors[1], factors[2], pivot)
         const affineF64 = affineToFloat64(affine)
-        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance, 'Scale')
+        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Scale' }))
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)

@@ -192,6 +192,7 @@ async function hashBytes(bytes: Uint8Array): Promise<string | undefined> {
     // reasoning, as `library/itemFiles.ts`'s own `sha256Hex` (a different
     // module, since this one needs to stay wasm-free — module doc). The
     // bytes are never mutated here, so the assertion is safe.
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- WebCrypto algorithm name
     const digest = await crypto.subtle.digest('SHA-256', bytes as BufferSource)
     return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('')
   } catch {

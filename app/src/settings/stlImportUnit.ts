@@ -12,20 +12,23 @@
  * be more likely to silently mis-scale a later import than to help.
  */
 
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+
 /** One STL import unit choice: label + meters-per-STL-unit conversion. */
 export interface StlUnitOption {
   value: 'mm' | 'cm' | 'in' | 'm'
-  label: string
+  label: MessageDescriptor
   /** Meters per one STL file unit. */
   unitScale: number
 }
 
 /** Offered in this order — millimeters first and marked default (DESIGN §5). */
 export const STL_UNIT_OPTIONS: StlUnitOption[] = [
-  { value: 'mm', label: 'Millimeters', unitScale: 0.001 },
-  { value: 'cm', label: 'Centimeters', unitScale: 0.01 },
-  { value: 'in', label: 'Inches', unitScale: 0.0254 },
-  { value: 'm', label: 'Meters', unitScale: 1.0 },
+  { value: 'mm', label: msg`Millimeters`, unitScale: 0.001 },
+  { value: 'cm', label: msg`Centimeters`, unitScale: 0.01 },
+  { value: 'in', label: msg`Inches`, unitScale: 0.0254 },
+  { value: 'm', label: msg`Meters`, unitScale: 1.0 },
 ]
 
 const DEFAULT_UNIT: StlUnitOption['value'] = 'mm'

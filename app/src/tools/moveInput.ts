@@ -6,6 +6,8 @@
  * so it doesn't pull in any runtime dependency.)
  */
 
+import { i18n, type MessageDescriptor } from '@lingui/core'
+import { msg, t } from '@lingui/core/macro'
 import type { LengthFormat } from '../settings/units'
 
 /**
@@ -25,7 +27,40 @@ export function arrowToAxis(key: string): 0 | 1 | 2 | null {
  *  2=Z) — the same mapping `arrowToAxis` encodes as key→axis. Shared by
  *  every tool's arrow-lock status hint (MoveTool's mid-gesture lock, the
  *  draw tools' idle plane lock — the sketch-planes design §5.2). */
-export const AXIS_LOCK_COLOR_NAMES: readonly [string, string, string] = ['red', 'green', 'blue']
+export const AXIS_LOCK_COLOR_NAMES: readonly [MessageDescriptor, MessageDescriptor, MessageDescriptor] = [
+  msg({ comment: 'Color of the X axis in a status-bar hint, lowercase', message: 'red' }),
+  msg({ comment: 'Color of the Y axis in a status-bar hint, lowercase', message: 'green' }),
+  msg({ comment: 'Color of the Z axis in a status-bar hint, lowercase', message: 'blue' }),
+]
+
+/** The same color names at the start of a sentence. A separate message
+ *  rather than code capitalization: a translator decides the sentence-initial
+ *  form (and some languages have none). */
+const AXIS_LOCK_COLOR_NAMES_CAPITALIZED: readonly [MessageDescriptor, MessageDescriptor, MessageDescriptor] = [
+  msg({ comment: 'Color of the X axis at the start of a status-bar sentence', message: 'Red' }),
+  msg({ comment: 'Color of the Y axis at the start of a status-bar sentence', message: 'Green' }),
+  msg({ comment: 'Color of the Z axis at the start of a status-bar sentence', message: 'Blue' }),
+]
+
+/** `axisLockColorName` for a sentence start: "Red", "Green", "Blue". */
+export function axisLockColorNameCapitalized(axis: 0 | 1 | 2): string {
+  return i18n._(AXIS_LOCK_COLOR_NAMES_CAPITALIZED[axis])
+}
+
+/** Measurements-box readout for a radius: "R" then the formatted length. */
+export function radiusReadout(length: string): string {
+  return t({ comment: 'Measurements box readout; R is short for radius, followed by a length', message: `R ${length}` })
+}
+
+/** Measurements-box readout for a diameter: the diameter sign then the length. */
+export function diameterReadout(length: string): string {
+  return t({ comment: 'Measurements box readout; the diameter sign followed by a length', message: `Ø ${length}` })
+}
+
+/** The axis-lock color name for world axis `axis`, in the active language. */
+export function axisLockColorName(axis: 0 | 1 | 2): string {
+  return i18n._(AXIS_LOCK_COLOR_NAMES[axis])
+}
 
 /**
  * Next idle-lock axis given the arrow key just pressed and the CURRENTLY
@@ -317,6 +352,7 @@ export function editDimsBuffer(buf: string, key: string): string {
     const lastBoundary = Math.max(
       buf.lastIndexOf(','),
       buf.lastIndexOf('x'),
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- the dims separator character, not copy
       buf.lastIndexOf('X'),
       buf.lastIndexOf("'"),
       buf.lastIndexOf('"'),

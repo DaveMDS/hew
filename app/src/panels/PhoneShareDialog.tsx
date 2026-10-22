@@ -51,7 +51,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { encrypt, generateKey, toBase64Url } from '../io/shareCrypto'
 import { receiveUrlFor } from '../io/shareRelay'
 import { RelayError, relayDelete, relayIdentity, relayPeek, relayPut } from '../io/relayClient'
+import { t } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { effectiveOrigin, getServerSetting } from '../settings/server'
+import { isComposingKey } from '../input/keyboard'
 
 export interface PhoneShareDocument {
   bytes: Uint8Array
@@ -227,26 +230,28 @@ const CLOSE_BUTTON_STYLE: React.CSSProperties = {
  *  Hew cloud, else the self-hosted host the messages can name. */
 export function describeUploadError(err: unknown, serverHost: string | null, maxBytes: number): string {
   if (err instanceof RelayError) {
-    const where = serverHost === null ? 'the share server' : serverHost
+    const where = serverHost === null ? t`the share server` : serverHost
+    const maxMegabytes = Math.floor(maxBytes / (1024 * 1024))
+    const status = err.status ?? '?'
     switch (err.kind) {
       case 'unreachable':
         return serverHost === null
-          ? 'Could not reach the share server — check your internet connection and try again.'
-          : `Could not reach ${where} — check your connection and the server address in Settings ▸ Advanced.`
+          ? t`Could not reach the share server — check your internet connection and try again.`
+          : t`Could not reach ${where} — check your connection and the server address in Settings ▸ Advanced.`
       case 'tls':
-        return `The server's certificate isn't trusted by this computer — install its certificate authority in the system keychain, then try again.`
+        return t`The server's certificate isn't trusted by this computer — install its certificate authority in the system keychain, then try again.`
       case 'unauthorized':
-        return 'The server rejected the upload key — check Settings ▸ Advanced.'
+        return t`The server rejected the upload key — check Settings ▸ Advanced.`
       case 'full':
-        return 'The relay is full — try again in a minute, or ask its admin to raise the memory cap.'
+        return t`The relay is full — try again in a minute, or ask its admin to raise the memory cap.`
       case 'tooLarge':
-        return `This document is too large to share this way (${Math.floor(maxBytes / (1024 * 1024))} MB max).`
+        return t`This document is too large to share this way (${maxMegabytes} MB max).`
       case 'notARelay':
         return serverHost === null
-          ? 'The share server isn’t answering as a Hew relay — try again later.'
-          : `Reachable, but ${where} isn’t serving a Hew relay at /relay/ — check Settings ▸ Advanced.`
+          ? t`The share server isn’t answering as a Hew relay — try again later.`
+          : t`Reachable, but ${where} isn’t serving a Hew relay at /relay/ — check Settings ▸ Advanced.`
       case 'status':
-        return `Could not reach ${where} (status ${err.status ?? '?'}).`
+        return t`Could not reach ${where} (status ${status}).`
       case 'invalidOrigin':
       case 'io':
         return err.message
@@ -266,6 +271,7 @@ function hostForDisplay(origin: string, isCloud: boolean): string | null {
 }
 
 export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps) {
+  const { t } = useLingui()
   const [state, setState] = useState<PhoneShareState>({ kind: 'starting' })
 
   // Encrypts and uploads on mount; best-effort invalidates the drop on
@@ -278,7 +284,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
     let uploadedToken: string | null = null
     const doc = getDocument()
     if (doc === null) {
-      setState({ kind: 'error', message: 'Nothing to share yet — the document is empty.' })
+      setState({ kind: 'error', message: t`Nothing to share yet — the document is empty.` })
       return
     }
     // Resolved before anything else so the error wording can name the
@@ -294,6 +300,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
         // Fast fail against the contract's cap before encrypting anything;
         // the relay's own (possibly smaller) cap is checked again below.
         if (doc.bytes.byteLength > MAX_UPLOAD_BYTES) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal Error message; the dialog shows describeUploadError()'s per-kind copy
           throw new RelayError('tooLarge', 'too large')
         }
 
@@ -319,9 +326,11 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
         const ttlMs = identity?.ttlMs ?? DROP_TTL_MS
 
         if (doc.bytes.byteLength > maxBytes) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal Error message; the dialog shows describeUploadError()'s per-kind copy
           throw new RelayError('tooLarge', 'too large')
         }
         if (identity?.auth === 'bearer' && setting.mode === 'self-hosted' && setting.uploadKey === '') {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal Error message; the dialog shows describeUploadError()'s per-kind copy
           throw new RelayError('unauthorized', 'key required')
         }
 
@@ -334,6 +343,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
         // See shareCrypto.ts's module doc for this grammar, including why
         // the name segment (last, urlencoded) must never be re-split on
         // its own embedded "." characters.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- URL fragment, not copy
         const fragment = `recv=${token}.${toBase64Url(key)}.${encodeURIComponent(doc.name)}`
         const url = receiveUrlFor(appOrigin, fragment)
 
@@ -369,6 +379,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
   // this effect's own cleanup clears the interval) the moment the dialog
   // leaves `ready` — either because a poll tick found the token gone, or
   // because the component is unmounting.
+  const readyServerHost = state.kind === 'ready' ? state.serverHost : null
   const readyToken = state.kind === 'ready' ? state.token : null
   const readyUploadedAt = state.kind === 'ready' ? state.uploadedAt : null
   const readyTtlMs = state.kind === 'ready' ? state.ttlMs : DROP_TTL_MS
@@ -432,6 +443,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -453,11 +465,11 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Open on Phone"
+        aria-label={t`Open on Phone`}
       >
-        <div style={HEADING_STYLE}>Open on Phone</div>
+        <div style={HEADING_STYLE}><Trans>Open on Phone</Trans></div>
 
-        {state.kind === 'starting' && <div style={STATUS_STYLE}>Starting…</div>}
+        {state.kind === 'starting' && <div style={STATUS_STYLE}><Trans>Starting…</Trans></div>}
 
         {state.kind === 'error' && (
           <div style={ERROR_STYLE} role="alert">
@@ -470,13 +482,13 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
             <div style={CHECKMARK_STYLE} aria-hidden="true">
               ✓
             </div>
-            Opened on your phone
+            <Trans>Opened on your phone</Trans>
           </div>
         )}
 
         {state.kind === 'expired' && (
           <div style={ERROR_STYLE} role="alert">
-            This code expired — reopen to try again.
+            <Trans>This code expired — reopen to try again.</Trans>
           </div>
         )}
 
@@ -491,7 +503,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
                   (qr.rs's `qr_svg`), never from anything user-typed. */}
               <img
                 src={`data:image/svg+xml;utf8,${encodeURIComponent(state.qrSvg)}`}
-                alt="QR code to open this model on your phone"
+                alt={t`QR code to open this model on your phone`}
                 width={220}
                 height={220}
               />
@@ -501,14 +513,14 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
               value={state.url}
               onFocus={(e) => e.currentTarget.select()}
               style={URL_INPUT_STYLE}
-              aria-label="Handoff URL"
+              aria-label={t`Handoff URL`}
             />
             <p style={HINT_STYLE}>
-              Scan from Shop Mode on your phone (From your desktop…), or with your camera.
+              <Trans>Scan from Shop Mode on your phone (From your desktop…), or with your camera.</Trans>
             </p>
-            {state.serverHost !== null && (
+            {readyServerHost !== null && (
               <p style={HINT_STYLE} data-testid="phone-share-server">
-                Server: {state.serverHost} — your phone must be able to reach it too.
+                <Trans>Server: {readyServerHost} — your phone must be able to reach it too.</Trans>
               </p>
             )}
           </>
@@ -516,7 +528,7 @@ export function PhoneShareDialog({ getDocument, onClose }: PhoneShareDialogProps
 
         <div style={BUTTON_ROW_STYLE}>
           <button style={CLOSE_BUTTON_STYLE} onClick={onClose}>
-            Close
+            <Trans>Close</Trans>
           </button>
         </div>
       </div>

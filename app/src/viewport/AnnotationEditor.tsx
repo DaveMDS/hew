@@ -16,6 +16,7 @@
  * simplified SketchUp `<>` semantics).
  */
 import { useEffect, useRef, useState } from 'react'
+import { isComposingKey } from '../input/keyboard'
 
 export interface AnnotationEditorProps {
   /** Container-relative CSS px, top-left origin (matches InferenceTooltip). */
@@ -73,6 +74,7 @@ export function AnnotationEditor({ screenX, screenY, initialText, placeholder, o
       placeholder={placeholder}
       onChange={(ev) => setText(ev.target.value)}
       onKeyDown={(ev) => {
+        if (isComposingKey(ev)) return
         // Stop every key from reaching the viewport's global shortcut/tool
         // routing while this field owns keyboard focus (mirrors how a tool's
         // `capturingInput()` shields VCB entry, but for a real DOM input).

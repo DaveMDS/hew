@@ -17,6 +17,7 @@
  * (close every opening), then flat panels (add thickness). Curved sheets and
  * "can't be closed" items never produce a command.
  */
+import { i18n } from '@lingui/core'
 import { classifyRow, openReason, rowClass, rowDisplayName, rowPlacements, splitFamilySet, type HealthReport, type HealthRow } from './healthReport'
 import {
   capOp,
@@ -46,6 +47,7 @@ export interface FixItem {
 }
 
 /** The wizard's pages, in order (the overview and the ready/done pages aside). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
 export const PAGE_ORDER: KindKey[] = ['openings', 'split', 'flatPanels', 'curvedSheets', 'closerLook']
 
 export interface FixPlan {
@@ -193,6 +195,7 @@ const acting = (plan: FixPlan, choices: FixChoices, kind: KindKey): FixItem[] =>
   plan.items[kind].filter((i) => itemActs(i, choices))
 
 /** The pages whose items the person chooses for (the rest can't be made solid). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
 const CHOOSABLE: KindKey[] = ['openings', 'split', 'flatPanels']
 
 /** How many items the person's choices leave as they are (openings, split shapes, flat panels). */
@@ -260,6 +263,7 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
 
   for (const item of acting(plan, choices, 'openings')) ops.push(capOp(item.rows[0]))
 
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
   const panels = acting(plan, choices, 'flatPanels')
   if (panels.length > 0) {
     const parsed = parseThickness(choices.thickness.text, choices.thickness.side)
@@ -273,7 +277,7 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
       const family = capFamily.get(failed)
       if (family === undefined) return null
       const walls = remaining.filter((op) => wallFamily.get(op) === family)
-      return walls.length === 0 ? null : { ops: walls, explanation: SPLIT_PIECE_LEFT }
+      return walls.length === 0 ? null : { ops: walls, explanation: i18n._(SPLIT_PIECE_LEFT) }
     },
   }
   return { ok: true, ops, options }
@@ -287,6 +291,7 @@ export function readySentences(plan: FixPlan, choices: FixChoices): string[] {
   const out: string[] = []
   const split = acting(plan, choices, 'split')
   const openings = acting(plan, choices, 'openings')
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
   const panels = acting(plan, choices, 'flatPanels')
   if (split.length > 0) out.push(WIZARD.ready.rejoin(split.length, choices.split === 'keepWalls'))
   if (openings.length > 0) out.push(WIZARD.ready.close(openings.length))

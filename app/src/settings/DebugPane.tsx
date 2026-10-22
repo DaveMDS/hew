@@ -12,6 +12,7 @@
  */
 
 import { useEffect, useState } from 'react'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { getDebugMode, setDebugMode, subscribe } from './debugMode'
 import { isTauri } from '../io/fileHost'
 import { downloadDiagnosticLog } from '../log/diagnosticLog'
@@ -40,6 +41,7 @@ const buttonStyle: React.CSSProperties = {
 }
 
 export function DebugPane() {
+  const { t } = useLingui()
   const [on, setOn] = useState<boolean>(() => getDebugMode())
 
   // Keep in sync with external changes (the other window, or another
@@ -48,7 +50,7 @@ export function DebugPane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="Debug Mode" alignTop>
+      <SettingsRow label={t`Debug Mode`} alignTop>
         <label style={checkboxLabelStyle}>
           <input
             type="checkbox"
@@ -56,27 +58,29 @@ export function DebugPane() {
             onChange={(e) => setDebugMode(e.target.checked)}
             style={{ accentColor: 'var(--accent-base, #5b8cff)', margin: 0 }}
           />
-          Enable Debug Mode
+          <Trans>Enable Debug Mode</Trans>
         </label>
       </SettingsRow>
 
       <SettingsNote>
-        Debug Mode enables the rolling diagnostic log <strong>file</strong>, low-level
-        input recording, and kernel <strong>torture mode</strong> (extra validation
-        and a re-tessellation self-check after every op — slower, but surfaces
-        flakes at the exact op).
+        <Trans>
+          Debug Mode enables the rolling diagnostic log <strong>file</strong>, low-level
+          input recording, and kernel <strong>torture mode</strong> (extra validation
+          and a re-tessellation self-check after every op — slower, but surfaces
+          flakes at the exact op).
+        </Trans>
       </SettingsNote>
 
       <SettingsSeparator />
 
       {isTauri ? (
         <SettingsNote>
-          Written to the app log directory as <code>diagnostic.log</code>.
+          <Trans>Written to the app log directory as <code>diagnostic.log</code>.</Trans>
         </SettingsNote>
       ) : (
-        <SettingsRow label="Diagnostics">
+        <SettingsRow label={t`Diagnostics`}>
           <button style={buttonStyle} onClick={() => downloadDiagnosticLog()}>
-            Download Diagnostic Log…
+            <Trans>Download Diagnostic Log…</Trans>
           </button>
         </SettingsRow>
       )}

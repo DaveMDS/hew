@@ -26,6 +26,7 @@
  */
 import * as THREE from 'three'
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- GLSL source, not copy
 const VERTEX_SHADER = `
   varying vec3 vWorldPos;
   void main() {
@@ -35,6 +36,7 @@ const VERTEX_SHADER = `
   }
 `
 
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- GLSL source, not copy
 const FRAGMENT_SHADER = `
   precision highp float;
   varying vec3 vWorldPos;

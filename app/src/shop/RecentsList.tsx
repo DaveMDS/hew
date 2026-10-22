@@ -7,6 +7,7 @@
  * a recent model used to be killing the PWA and relaunching into the empty
  * state; the Document menu's "Recent models…" now opens this list in place).
  */
+import { plural } from '@lingui/core/macro'
 import type React from 'react'
 import { ChevronRightIcon } from './icons'
 import { formatRelativeTime } from '../io/relativeTime'
@@ -59,7 +60,7 @@ export function RecentsList({ entries, onOpen, limit }: RecentsListProps) {
             <span style={{ fontSize: '12px', color: 'var(--shop-text-muted)' }}>
               {formatRelativeTime(entry.timestamp, Date.now())}
               {entry.partCount !== undefined
-                ? ` · ${entry.partCount} ${entry.partCount === 1 ? 'part' : 'parts'}`
+                ? ` · ${plural(entry.partCount, { one: '# part', other: '# parts' })}`
                 : ''}
             </span>
           </span>

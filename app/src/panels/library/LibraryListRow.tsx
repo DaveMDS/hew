@@ -8,6 +8,7 @@
  * horizontal row instead of a card.
  */
 
+import { useLingui } from '@lingui/react/macro'
 import { categoryTypeLabel, formatBytes } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import type { LibraryListColWidths } from './LibraryListHead'
@@ -43,8 +44,11 @@ export function LibraryListRow({
   onActivateDefault,
   onOpenMenu,
 }: LibraryListRowProps) {
+  const { t } = useLingui()
+  const displayName = item.displayName
+  const failure = item.error
   const isMaterial = item.category === 'material'
-  const title = item.error ? `${item.displayName} — ${item.error}` : item.displayName
+  const title = item.error ? t`${displayName} — ${failure}` : item.displayName
 
   return (
     <div
@@ -84,7 +88,7 @@ export function LibraryListRow({
         <span className="hwlib__row-name">{item.displayName}</span>
       </div>
       <div className="hwlib__row-cell hwlib__row-cell--type" style={{ flex: `0 0 ${widths.type}px`, width: widths.type }}>
-        {item.error ? 'Failed to load' : categoryTypeLabel(item.category)}
+        {item.error ? t`Failed to load` : categoryTypeLabel(item.category)}
       </div>
       <div className="hwlib__row-cell hwlib__row-cell--size" style={{ flex: '1 1 0', minWidth: 70 }}>
         {formatBytes(item.file.size)}
@@ -92,7 +96,7 @@ export function LibraryListRow({
       <button
         type="button"
         className="hwlib__row-menu-btn"
-        aria-label={`${item.displayName} actions`}
+        aria-label={t`${displayName} actions`}
         onClick={(e) => {
           e.stopPropagation()
           onSelect()

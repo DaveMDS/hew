@@ -53,6 +53,7 @@ export async function pasteTextIntoFocusedField(
   // meantime (Escape closed the dialog, a click landed elsewhere) the text
   // must not go wherever the selection is now.
   if (document.activeElement !== target) return true
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- DOM command name
   document.execCommand('insertText', false, text)
   return true
 }
@@ -71,6 +72,7 @@ export function handleTextFieldMenuAction(
   switch (action) {
     case 'edit-copy': return forwardToTextField('copy')
     case 'edit-cut': return forwardToTextField('cut')
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- DOM command name
     case 'edit-select-all': return forwardToTextField('selectAll')
     case 'edit-paste':
       if (!isTextFieldFocused()) return false

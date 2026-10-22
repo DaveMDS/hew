@@ -17,6 +17,8 @@
  * delta time, clamped so a stalled frame never teleports the camera.
  */
 
+import { t } from '@lingui/core/macro'
+import { formatNumber } from '../i18n/format'
 import { forwardFromYawPitch, horizontalBasis, type V3 } from '../tools/cameraWalkMath'
 
 /** The six movement intents. Arrow keys alias the WASD cluster (§3.3). */
@@ -175,13 +177,11 @@ export function speedAfterScale(baseSpeedMps: number, scaleRatio: number): numbe
  */
 export function formatFlySpeed(mps: number, system: 'metric' | 'imperial'): string {
   if (system === 'imperial') {
-    return `${trimDecimals((mps / 0.3048).toFixed(1))} ft/s`
+    const speed = formatNumber(mps / 0.3048, { maxFractionDigits: 1, grouping: false })
+    return t({ comment: 'Fly speed in feet per second', message: `${speed} ft/s` })
   }
-  return `${trimDecimals(mps.toFixed(2))} m/s`
-}
-
-function trimDecimals(fixed: string): string {
-  return fixed.includes('.') ? fixed.replace(/0+$/, '').replace(/\.$/, '') : fixed
+  const speed = formatNumber(mps, { maxFractionDigits: 2, grouping: false })
+  return t({ comment: 'Fly speed in meters per second', message: `${speed} m/s` })
 }
 
 /**

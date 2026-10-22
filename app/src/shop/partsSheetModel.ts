@@ -55,6 +55,7 @@
  * solids; a sketch has no `objectBounds` dimensions to show.
  */
 
+import { t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { unionHiddenLeafIds } from '../io/documentLoad'
 import { isolateHiddenFor } from './isolate'
@@ -250,7 +251,7 @@ export function buildPartsSheetSections(
   if (catchAllRows.length > 0) {
     sections.push({
       key: CATCH_ALL_KEY,
-      label: sections.length === 0 ? 'Parts' : 'Unfiled',
+      label: sections.length === 0 ? t`Parts` : t`Unfiled`,
       path: null,
       hidden: false,
       rows: catchAllRows,

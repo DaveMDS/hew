@@ -98,6 +98,8 @@
  * the maintainer's call, not this tool's.
  */
 
+import { t } from '@lingui/core/macro'
+import { formatNumber } from '../i18n/format'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -361,8 +363,8 @@ export class PositionTextureTool implements Tool {
   }
 
   private _ineligibleFaceHint(instance: bigint | undefined): string {
-    if (instance !== undefined) return 'Enter the component to position its texture.'
-    return 'Position Texture is scoped to what you are editing — press Esc to step out first'
+    if (instance !== undefined) return t`Enter the component to position its texture.`
+    return t`Position Texture is scoped to what you are editing — press Esc to step out first`
   }
 
   constructor(
@@ -384,23 +386,24 @@ export class PositionTextureTool implements Tool {
   statusHint(): string {
     const s = this.session
     if (s === null) {
-      return 'Click a textured face to position its texture.'
+      return t`Click a textured face to position its texture.`
     }
     if (s.grab !== null && s.grab.kind === 'scaleRotate') {
       return this.typedMode === 'rotate'
-        ? 'Drag the corner, or type the absolute angle in degrees (Tab for scale) — Enter sets it, Esc clears.'
-        : 'Drag the corner, or type an absolute scale factor (Tab for degrees) — Enter sets it, Esc clears.'
+        ? t`Drag the corner, or type the absolute angle in degrees (Tab for scale) — Enter sets it, Esc clears.`
+        : t`Drag the corner, or type an absolute scale factor (Tab for degrees) — Enter sets it, Esc clears.`
     }
     if (s.grab !== null && s.grab.kind === 'shear') {
       return this.typedMode === 'rotate'
-        ? 'Drag the corner to shear, or type the absolute skew in degrees (Tab for V-scale) — Enter sets it, Esc clears.'
-        : 'Drag the corner to shear, or type an absolute V-scale factor (Tab for degrees) — Enter sets it, Esc clears.'
+        ? t`Drag the corner to shear, or type the absolute skew in degrees (Tab for V-scale) — Enter sets it, Esc clears.`
+        : t`Drag the corner to shear, or type an absolute V-scale factor (Tab for degrees) — Enter sets it, Esc clears.`
     }
     if (s.grab !== null && s.grab.kind === 'translate') {
-      return 'Drag to move (snaps apply), or type an exact length — Enter sets it, Esc clears.'
+      return t`Drag to move (snaps apply), or type an exact length — Enter sets it, Esc clears.`
     }
-    const target = s.typedTarget === 'blue' ? 'skew/V-scale (blue)' : 'angle/scale (green)'
-    return `Drag a corner pin, or type the absolute ${target}: degrees, or 2x for scale. Enter commits, Esc cancels.`
+    return s.typedTarget === 'blue'
+      ? t`Drag a corner pin, or type the absolute skew/V-scale (blue): degrees, or 2x for scale. Enter commits, Esc cancels.`
+      : t`Drag a corner pin, or type the absolute angle/scale (green): degrees, or 2x for scale. Enter commits, Esc cancels.`
   }
 
   /**
@@ -581,6 +584,7 @@ export class PositionTextureTool implements Tool {
     const s = this.session
     if (s !== null && s.grab !== null && s.grab.kind === 'shear') return 'shear'
     if (s !== null && s.grab === null && s.typedTarget === 'blue') return 'shear'
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal grab-kind identifier, not copy
     return 'scaleRotate'
   }
 
@@ -613,7 +617,7 @@ export class PositionTextureTool implements Tool {
 
       const texture = this._effectiveTexture(object, face)
       if (texture === null) {
-        this.onToast('Select a textured face to position its texture')
+        this.onToast(t`Select a textured face to position its texture`)
         return
       }
       const planeArr = this.wasmScene.face_plane(object, face)
@@ -719,6 +723,7 @@ export class PositionTextureTool implements Tool {
 
       if (rayPointDistance(ray, greenWorld) <= this._pickToleranceAt(ray, greenWorld)) {
         s.typedTarget = 'green'
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- internal grab-kind identifier, not copy
         this._grabHandle('scaleRotate', pin, green, ray)
         return
       }
@@ -917,7 +922,7 @@ export class PositionTextureTool implements Tool {
       const revert = local2DToFrame(s.originalLocal, s.anchor, s.uAx, s.vAx)
       this.previewFaceUv(s.object, s.face, revert)
     }
-    this.onToast('Position Texture ended — the model changed since positioning started')
+    this.onToast(t`Position Texture ended — the model changed since positioning started`)
     this._resetTyped()
     this.onMeasurementCb('')
     this._clearGizmo()
@@ -1278,11 +1283,11 @@ export class PositionTextureTool implements Tool {
     if (this._abortIfHistoryMoved()) return // toasts + closes the session itself
     const parsed = parseScaleOrRotate(this.typed, this.typedMode)
     if (parsed === null) {
-      this._refuseTyped('Could not read that value — type degrees, or a scale like 2x')
+      this._refuseTyped(t`Could not read that value — type degrees, or a scale like 2x`)
       return
     }
     if (parsed.mode === 'scale' && !(parsed.value > 0)) {
-      this._refuseTyped('Scale must be greater than zero')
+      this._refuseTyped(t`Scale must be greater than zero`)
       return
     }
 
@@ -1290,7 +1295,7 @@ export class PositionTextureTool implements Tool {
     const corners = this._cornersLocal(local)
     const abs = frameAbsolute(local, s.worldW, s.worldH)
     if (corners === null || abs === null) {
-      this._refuseTyped('The texture frame is degenerate — drag a pin to rebuild it first')
+      this._refuseTyped(t`The texture frame is degenerate — drag a pin to rebuild it first`)
       return
     }
     const { pin, green } = corners
@@ -1308,7 +1313,7 @@ export class PositionTextureTool implements Tool {
       const eu: [number, number] = [green[0] - pin[0], green[1] - pin[1]]
       const euLen = Math.hypot(eu[0], eu[1])
       if (euLen < 1e-12) {
-        this._refuseTyped('The texture frame is degenerate — drag a pin to rebuild it first')
+        this._refuseTyped(t`The texture frame is degenerate — drag a pin to rebuild it first`)
         return
       }
       const uDir: [number, number] = [eu[0] / euLen, eu[1] / euLen]
@@ -1324,7 +1329,7 @@ export class PositionTextureTool implements Tool {
       result = shearScaleLocal(local, pin, newHandle)
     }
     if (result === null) {
-      this._refuseTyped('That value would collapse the texture tile')
+      this._refuseTyped(t`That value would collapse the texture tile`)
       return
     }
 
@@ -1346,12 +1351,12 @@ export class PositionTextureTool implements Tool {
     if (this._abortIfHistoryMoved()) return // toasts + closes the session itself
     const meters = parseLengthToMeters(this.typed)
     if (meters === null) {
-      this._refuseTyped('Could not read that length')
+      this._refuseTyped(t`Could not read that length`)
       return
     }
     const dirWorldLen = this._worldLen(grab.lastDelta)
     if (dirWorldLen < 1e-9) {
-      this._refuseTyped('Drag first to set a direction — a typed length moves along it')
+      this._refuseTyped(t`Drag first to set a direction — a typed length moves along it`)
       return
     }
 
@@ -1394,9 +1399,13 @@ export class PositionTextureTool implements Tool {
       return
     }
     if (kind === 'shear') {
-      this.onMeasurementCb(`×${abs.scaleV.toFixed(2)}  ${(abs.skew * DEG).toFixed(1)}° skew`)
+      const scaleV = formatNumber(abs.scaleV, { fractionDigits: 2 })
+      const skew = formatNumber(abs.skew * DEG, { fractionDigits: 1 })
+      this.onMeasurementCb(t`×${scaleV}  ${skew}° skew`)
     } else {
-      this.onMeasurementCb(`×${abs.scaleU.toFixed(2)}  ${(abs.angle * DEG).toFixed(1)}°`)
+      this.onMeasurementCb(
+        `×${formatNumber(abs.scaleU, { fractionDigits: 2 })}  ${formatNumber(abs.angle * DEG, { fractionDigits: 1 })}°`,
+      )
     }
   }
 

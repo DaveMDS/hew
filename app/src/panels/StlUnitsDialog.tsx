@@ -18,8 +18,11 @@
  * same as cancelling the file picker).
  */
 
+import { i18n } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { useCallback, useEffect, useState } from 'react'
 import { STL_UNIT_OPTIONS, getLastStlImportUnit, type StlUnitOption } from '../settings/stlImportUnit'
+import { isComposingKey } from '../input/keyboard'
 
 interface StlUnitsDialogProps {
   /** Display name of the file being imported. */
@@ -113,10 +116,12 @@ const IMPORT_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function StlUnitsDialog({ fileName, onChoose, onCancel }: StlUnitsDialogProps) {
+  const { t } = useLingui()
   const [selected, setSelected] = useState<StlUnitOption['value']>(getLastStlImportUnit())
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -143,31 +148,37 @@ export function StlUnitsDialog({ fileName, onChoose, onCancel }: StlUnitsDialogP
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="STL import units"
+        aria-label={t`STL import units`}
       >
-        <div style={HEADING_STYLE}>Import &ldquo;{fileName}&rdquo;</div>
-        <div style={BODY_STYLE}>STL files don&rsquo;t record their units. Import as:</div>
-        <div style={OPTIONS_STYLE} role="radiogroup" aria-label="Units">
-          {STL_UNIT_OPTIONS.map((option) => (
-            <label key={option.value} style={OPTION_LABEL_STYLE}>
-              <input
-                type="radio"
-                name="stl-import-unit"
-                value={option.value}
-                checked={selected === option.value}
-                onChange={() => setSelected(option.value)}
-              />
-              {option.label}
-              {option.value === 'mm' ? ' (default)' : ''}
-            </label>
-          ))}
+        <div style={HEADING_STYLE}>
+          <Trans>Import &ldquo;{fileName}&rdquo;</Trans>
+        </div>
+        <div style={BODY_STYLE}>
+          <Trans>STL files don&rsquo;t record their units. Import as:</Trans>
+        </div>
+        <div style={OPTIONS_STYLE} role="radiogroup" aria-label={t`Units`}>
+          {STL_UNIT_OPTIONS.map((option) => {
+            const unitLabel = i18n._(option.label)
+            return (
+              <label key={option.value} style={OPTION_LABEL_STYLE}>
+                <input
+                  type="radio"
+                  name="stl-import-unit"
+                  value={option.value}
+                  checked={selected === option.value}
+                  onChange={() => setSelected(option.value)}
+                />
+                {option.value === 'mm' ? t`${unitLabel} (default)` : unitLabel}
+              </label>
+            )
+          })}
         </div>
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button style={IMPORT_BUTTON_STYLE} onClick={commit} autoFocus>
-            Import
+            <Trans>Import</Trans>
           </button>
         </div>
       </div>

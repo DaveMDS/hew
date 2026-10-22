@@ -12,6 +12,7 @@
  * #1a1a1a for rules and marks, #444/#555 for secondary text, #8c8c8c for
  * the lightest table rules.
  */
+import { t } from '@lingui/core/macro'
 import type { PrintLayout, TileSpec } from './layout'
 
 export type FurnitureItem =
@@ -228,11 +229,13 @@ export function titleBlockItems(layout: PrintLayout, content: TitleBlockContent)
   if (content.tileId !== null) {
     items.push(text(right, top + F.tileIdMm * 0.78, content.tileId, F.tileIdMm, 'right', 'title-tile', INK.text, true))
     const lineBase = baseline(top + F.tileIdMm + 0.9, F.pageLineMm)
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- the product name
     items.push(text(right, lineBase, 'HEW', F.pageLineMm, 'right', 'title-brand', INK.rule, true))
     items.push(text(right - brandW - 0.6, lineBase, `${dated([content.pageText])} ·`, F.pageLineMm, 'right', 'title-page', INK.secondary))
   } else {
     items.push(text(right, baseline(top, F.pageLineSingleMm), content.pageText, F.pageLineSingleMm, 'right', 'title-page', INK.secondary))
     const lineBase = baseline(top + F.pageLineSingleMm * 1.2 + 0.8, F.pageLineMm)
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- the product name
     items.push(text(right, lineBase, 'HEW', F.pageLineMm, 'right', 'title-brand', INK.rule, true))
     if (content.dateText !== '') items.push(text(right - brandW - 0.6, lineBase, `${content.dateText} ·`, F.pageLineMm, 'right', 'title-date', INK.secondary))
   }
@@ -293,15 +296,16 @@ export function pageFurniture(layout: PrintLayout, tile: TileSpec, ctx: Furnitur
     // Trim lines at the drawing edge on sides with a neighbour, spanning the
     // drawing plus the band; "✂ trim" at each line's start.
     const n = tile.neighbors
+    const trimCaption = t`✂ trim`
     if (n.right !== undefined) {
       items.push({ kind: 'line', x1: X2, y1: d.y, x2: X2, y2: Y2 + bandB, widthMm: F.trimWidthMm, gray: INK.rule, dash: [...F.trimDash], role: 'trim-line' })
       // Rotated 90° the baseline runs down x = anchor and glyph tops point
       // right, so the run's box starts ~0.25 em left of the anchor.
-      items.push({ ...text(X2 + 0.8 + F.trimCaptionMm * 0.25, d.y + 1.3, '✂ trim', F.trimCaptionMm, 'left', 'trim-caption', INK.secondary), rotate: 90 })
+      items.push({ ...text(X2 + 0.8 + F.trimCaptionMm * 0.25, d.y + 1.3, trimCaption, F.trimCaptionMm, 'left', 'trim-caption', INK.secondary), rotate: 90 })
     }
     if (n.down !== undefined) {
       items.push({ kind: 'line', x1: d.x, y1: Y2, x2: X2 + bandR, y2: Y2, widthMm: F.trimWidthMm, gray: INK.rule, dash: [...F.trimDash], role: 'trim-line' })
-      items.push(text(d.x + 1.3, baseline(Y2 + 0.8, F.trimCaptionMm), '✂ trim', F.trimCaptionMm, 'left', 'trim-caption', INK.secondary))
+      items.push(text(d.x + 1.3, baseline(Y2 + 0.8, F.trimCaptionMm), trimCaption, F.trimCaptionMm, 'left', 'trim-caption', INK.secondary))
     }
     // Neighbour labels 2 mm inside the drawing edge, mid-edge — they survive
     // trimming the band.
@@ -315,7 +319,8 @@ export function pageFurniture(layout: PrintLayout, tile: TileSpec, ctx: Furnitur
   }
 
   if (titleOn) {
-    const pageText = tiled ? `Page ${pageNumber} of ${total} · Tile ${tile.id}` : total > 1 ? `Page ${pageNumber} of ${total}` : 'Page 1 of 1'
+    const tileId = tile.id
+    const pageText = tiled ? t`Page ${pageNumber} of ${total} · Tile ${tileId}` : total > 1 ? t`Page ${pageNumber} of ${total}` : t`Page 1 of 1`
     const scaled = layout.mode === 'scaled'
     items.push(
       ...titleBlockItems(layout, {

@@ -17,6 +17,7 @@
  * store and the wasm item readers are window-independent.
  */
 
+import { t } from '@lingui/core/macro'
 import { useEffect, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { emit, listen } from '@tauri-apps/api/event'
@@ -62,9 +63,9 @@ function dispatch(action: LibraryActionPayload['action'], item: LibraryItem, foc
         // All document windows are closed — say so natively rather than
         // silently doing nothing (adversarial review S4).
         void invoke('library_confirm', {
-          title: 'Library',
-          message: 'Open a document window first — library items are placed into a model.',
-          actionLabel: 'OK',
+          title: t`Library`,
+          message: t`Open a document window first — library items are placed into a model.`,
+          actionLabel: t`OK`,
         })
       }
     })

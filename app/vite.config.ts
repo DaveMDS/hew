@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { lingui } from '@lingui/vite-plugin'
 import { VitePWA } from 'vite-plugin-pwa'
 import { readFileSync } from 'node:fs'
 
@@ -53,6 +54,9 @@ export default defineConfig(({ command }) => ({
   },
   plugins: [
     react(),
+    // Lingui: the native macro transform (t``/<Trans>) and on-the-fly .po
+    // catalog compilation (docs/LOCALIZATION.md). No Babel/SWC plugin needed.
+    lingui({ macroTransform: true }),
     VitePWA({
       // We register the SW manually in main.tsx (Tauri-guarded).
       registerType: 'autoUpdate',

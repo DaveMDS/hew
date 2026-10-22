@@ -80,6 +80,7 @@ export function subscribe(cb: (setting: ThemeSetting) => void): () => void {
 export function resolveTheme(setting: ThemeSetting): ResolvedTheme {
   if (setting !== 'auto') return setting
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 'dark'
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS media query
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }
 

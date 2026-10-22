@@ -13,6 +13,9 @@
  */
 
 import { useEffect, useState } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import { getThemeSetting, setThemeSetting, subscribe, type ThemeSetting } from './theme'
 import {
   SettingsForm,
@@ -22,13 +25,14 @@ import {
   settingsOptionStyle,
 } from './SettingsForm'
 
-const THEME_OPTIONS: { value: ThemeSetting; label: string }[] = [
-  { value: 'auto', label: 'Auto' },
-  { value: 'light', label: 'Light' },
-  { value: 'dark', label: 'Dark' },
+const THEME_OPTIONS: { value: ThemeSetting; label: MessageDescriptor }[] = [
+  { value: 'auto', label: msg`Auto` },
+  { value: 'light', label: msg`Light` },
+  { value: 'dark', label: msg`Dark` },
 ]
 
 export function ThemePane() {
+  const { t, i18n } = useLingui()
   const [setting, setSetting] = useState<ThemeSetting>(() => getThemeSetting())
 
   // Keep in sync with external changes (the other window, or another
@@ -37,7 +41,7 @@ export function ThemePane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="Appearance" htmlFor="settings-theme-appearance">
+      <SettingsRow label={t`Appearance`} htmlFor="settings-theme-appearance">
         <select
           id="settings-theme-appearance"
           value={setting}
@@ -46,13 +50,15 @@ export function ThemePane() {
         >
           {THEME_OPTIONS.map((opt) => (
             <option key={opt.value} value={opt.value} style={settingsOptionStyle}>
-              {opt.label}
+              {i18n._(opt.label)}
             </option>
           ))}
         </select>
       </SettingsRow>
 
-      <SettingsNote>Auto follows your OS's light/dark appearance setting.</SettingsNote>
+      <SettingsNote>
+        <Trans>Auto follows your OS's light/dark appearance setting.</Trans>
+      </SettingsNote>
     </SettingsForm>
   )
 }

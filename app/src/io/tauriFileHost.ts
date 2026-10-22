@@ -15,6 +15,7 @@
  * FileRef.handle is the absolute file path string.
  */
 
+import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 
@@ -135,6 +136,7 @@ export async function resolveImportPickFromPath(filePath: string, fileBytes: Uin
     // Includes the SketchUp-style "<stem>/" sibling folder (named after the
     // .dae file without extension), "<stem>_textures", "textures", "Textures".
     const stem = basename(filePath).replace(/\.dae$/i, '')
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- directory names probed on disk
     const textureDirs = [`${dir}/${stem}`, `${dir}/${stem}_textures`, `${dir}/textures`, `${dir}/Textures`]
     for (const texDir of textureDirs) {
       let subList: string[]
@@ -173,7 +175,7 @@ export class TauriFileHost implements FileHost {
     const { invoke } = await import('@tauri-apps/api/core')
     // write: true — Save writes back to the opened path without a new dialog.
     const path = await invoke<string | null>('pick_open_path', {
-      filters: [{ name: 'Hew model', extensions: ['hew'] }],
+      filters: [{ name: t`Hew model`, extensions: ['hew'] }],
       write: true,
       approveDir: false,
     })
@@ -192,6 +194,7 @@ export class TauriFileHost implements FileHost {
 
   async save(bytes: Uint8Array, ref: FileRef | null): Promise<FileRef | null> {
     if (ref === null) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- default file name, not copy
       return this.saveAs(bytes, 'Untitled.hew')
     }
     const path = ref.handle as string
@@ -242,13 +245,13 @@ export class TauriFileHost implements FileHost {
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
         {
-          name: 'Model files (COLLADA, SketchUp, glTF, STL)',
+          name: t`Model files (COLLADA, SketchUp, glTF, STL)`,
           extensions: ['dae', 'skp', 'glb', 'gltf', 'stl'],
         },
-        { name: 'COLLADA model', extensions: ['dae'] },
-        { name: 'SketchUp Model', extensions: ['skp'] },
-        { name: 'glTF model', extensions: ['glb', 'gltf'] },
-        { name: 'STL model', extensions: ['stl'] },
+        { name: t`COLLADA model`, extensions: ['dae'] },
+        { name: t`SketchUp Model`, extensions: ['skp'] },
+        { name: t`glTF model`, extensions: ['glb', 'gltf'] },
+        { name: t`STL model`, extensions: ['stl'] },
       ],
       write: false,
       approveDir: true,
@@ -282,14 +285,14 @@ export class TauriFileHost implements FileHost {
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
         {
-          name: 'All supported files',
+          name: t`All supported files`,
           extensions: ['hew', 'dae', 'skp', 'glb', 'gltf', 'stl'],
         },
-        { name: 'Hew model', extensions: ['hew'] },
-        { name: 'COLLADA model', extensions: ['dae'] },
-        { name: 'SketchUp Model', extensions: ['skp'] },
-        { name: 'glTF model', extensions: ['glb', 'gltf'] },
-        { name: 'STL model', extensions: ['stl'] },
+        { name: t`Hew model`, extensions: ['hew'] },
+        { name: t`COLLADA model`, extensions: ['dae'] },
+        { name: t`SketchUp Model`, extensions: ['skp'] },
+        { name: t`glTF model`, extensions: ['glb', 'gltf'] },
+        { name: t`STL model`, extensions: ['stl'] },
       ],
       write: true,
       approveDir: true,

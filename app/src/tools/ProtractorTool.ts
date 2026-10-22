@@ -85,6 +85,8 @@
  * a genuine conflict noted in the Phase 4 report.
  */
 
+import { formatNumber } from '../i18n/format'
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -176,11 +178,11 @@ export class ProtractorTool implements Tool {
   statusHint(): string {
     switch (this.stage.kind) {
       case 'awaiting-baseline':
-        return 'Click a point to set the baseline direction.'
+        return t`Click a point to set the baseline direction.`
       case 'sweeping':
-        return 'Click to drop an angular guide at the measured angle — or type exact degrees.'
+        return t`Click to drop an angular guide at the measured angle — or type exact degrees.`
       default:
-        return "Click to place the protractor's apex — on a face to measure in its plane."
+        return t`Click to place the protractor's apex — on a face to measure in its plane.`
     }
   }
 
@@ -502,7 +504,7 @@ export class ProtractorTool implements Tool {
       this.onGuideCreated()
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err)
-      this.onToast(`Couldn't create guide line: ${raw}`)
+      this.onToast(t`Couldn't create guide line: ${raw}`)
     }
     this._resetToIdle()
   }
@@ -559,7 +561,7 @@ export class ProtractorTool implements Tool {
       return
     }
     const deg = (angleRad * 180) / Math.PI
-    this.onMeasurementCb(`${deg.toFixed(1)}°`)
+    this.onMeasurementCb(`${formatNumber(deg, { fractionDigits: 1 })}°`)
   }
 
   /**

@@ -51,6 +51,7 @@ export function initThemeSync(): () => void {
 
   let unsubscribeMedia = () => {}
   if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- media query
     const media = window.matchMedia('(prefers-color-scheme: dark)')
     // Recomputing on every change is a no-op when the setting is explicit
     // (not 'auto') — cheaper than tracking whether 'auto' is active.

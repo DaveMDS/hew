@@ -15,7 +15,9 @@
  */
 
 import { useEffect, useCallback } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import { EXPORT_NOT_SOLID } from '../health/healthCopy'
+import { isComposingKey } from '../input/keyboard'
 
 interface StlExportDialogProps {
   /** Display names of the non-solid objects that would be exported. */
@@ -110,10 +112,13 @@ export function StlExportDialog({
   onExport,
   onMakeSolid,
   onCancel,
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- file format name, not copy
   formatLabel = 'STL',
 }: StlExportDialogProps) {
+  const { t } = useLingui()
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape') {
         e.preventDefault()
         e.stopPropagation()
@@ -135,7 +140,7 @@ export function StlExportDialog({
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label={`Export ${formatLabel} warning`}
+        aria-label={t`Export ${formatLabel} warning`}
       >
         <div style={HEADING_STYLE}>{EXPORT_NOT_SOLID.title(formatLabel)}</div>
         <div style={BODY_STYLE}>{EXPORT_NOT_SOLID.body(formatLabel)}</div>

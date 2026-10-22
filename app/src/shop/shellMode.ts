@@ -193,8 +193,10 @@ export function parseRecvParams(hashOrUrl: string): RecvParams | null {
   const hashStart = hashOrUrl.indexOf('#')
   if (hashStart === -1) return null
   const rawFragment = hashOrUrl.slice(hashStart + 1)
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- URL fragment syntax
   const fragment = rawFragment.startsWith('shop&') ? rawFragment.slice('shop&'.length) : rawFragment
   if (!fragment.startsWith('recv=')) return null
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- URL fragment syntax
   const payload = fragment.slice('recv='.length)
 
   const firstDot = payload.indexOf('.')

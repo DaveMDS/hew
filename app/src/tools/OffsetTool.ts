@@ -29,6 +29,7 @@
  * is a single draft. Typed kernel errors surface as toasts.
  */
 
+import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
@@ -119,11 +120,11 @@ export class OffsetTool implements Tool {
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle' && this.retype.isOpen) {
-      return 'Type an exact distance to redo the offset you just made — or click another face or profile.'
+      return t`Type an exact distance to redo the offset you just made — or click another face or profile.`
     }
     return this.stage.kind === 'idle'
-      ? 'Click a face or a closed profile to offset its boundary.'
-      : 'Drag inward or outward, click to commit — or type an exact distance.'
+      ? t`Click a face or a closed profile to offset its boundary.`
+      : t`Drag inward or outward, click to commit — or type an exact distance.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -355,7 +356,7 @@ export class OffsetTool implements Tool {
         // (PushPullTool's `_ineligibleFaceHint` is the precedent).
         if (instanceHandle !== undefined) {
           this.onToast(
-            'Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.',
+            t`Offset can’t cut a component’s member face yet — try a sketch region instead, or explode the instance.`,
           )
           return
         }
@@ -363,7 +364,7 @@ export class OffsetTool implements Tool {
         // group (not entered) or outside the editing scope refuses with the
         // same hint, never a silent no-op.
         if (!this._isEligible(objectHandle, instanceHandle)) {
-          this.onToast(ineligibleFaceHint('Offset', this._editContext.kind !== 'top', instanceHandle))
+          this.onToast(ineligibleFaceHint(t({ context: 'tool', message: 'Offset' }), this._editContext.kind !== 'top', instanceHandle))
           return
         }
         if (this._activeContext === null || objectHandle === this._activeContext) {
@@ -581,7 +582,7 @@ export class OffsetTool implements Tool {
     const { target } = this.stage
 
     if (Math.abs(distance) < 1e-6) {
-      this.onToast('Move more before committing the offset')
+      this.onToast(t`Move more before committing the offset`)
       return
     }
 
@@ -605,7 +606,7 @@ export class OffsetTool implements Tool {
     const spec = this.retype.spec
     if (spec === null) return
     if (Math.abs(d) < 1e-6) {
-      this.onToast('Move more before committing the offset')
+      this.onToast(t`Move more before committing the offset`)
       return
     }
     const signed = (spec.distance < 0 ? -1 : 1) * d
@@ -621,7 +622,7 @@ export class OffsetTool implements Tool {
    *  region's context. True when accepted (false = refused, toasted). */
   private _commitTarget(target: OffsetTarget, distance: number): boolean {
     try {
-      const { report } = runDraft(this.wasmScene, { kind: 'ctx', ctx: target.ctx }, 'Offset', (d) => {
+      const { report } = runDraft(this.wasmScene, { kind: 'ctx', ctx: target.ctx }, t({ context: 'tool', message: 'Offset' }), (d) => {
         this.wasmScene.draft_offset_region(d, keyToId(target.regionKey), distance)
       })
       refreshAfterDraft(report, {

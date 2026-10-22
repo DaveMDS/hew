@@ -31,7 +31,10 @@
  * the new vocabulary.
  */
 
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
 import { isTauri } from '../io/fileHost'
+import { formatNumber } from '../i18n/format'
 
 /** The unit/format a length is displayed and parsed in. */
 export type LengthFormat = 'm' | 'cm' | 'mm' | 'arch' | 'frac_in' | 'dec_in'
@@ -44,17 +47,17 @@ type LegacyLengthUnit = 'm' | 'cm' | 'mm' | 'ft' | 'in'
 
 export interface LengthFormatOption {
   value: LengthFormat
-  label: string
+  label: MessageDescriptor
 }
 
 /** Length formats offered, grouped by system. */
 export const LENGTH_FORMAT_OPTIONS: LengthFormatOption[] = [
-  { value: 'm', label: 'Meters' },
-  { value: 'cm', label: 'Centimeters' },
-  { value: 'mm', label: 'Millimeters' },
-  { value: 'arch', label: 'Architectural (5\' 3-1/8")' },
-  { value: 'frac_in', label: 'Fractional inches (60-1/8")' },
-  { value: 'dec_in', label: 'Decimal inches (60.125")' },
+  { value: 'm', label: msg`Meters` },
+  { value: 'cm', label: msg`Centimeters` },
+  { value: 'mm', label: msg`Millimeters` },
+  { value: 'arch', label: msg`Architectural (5' 3-1/8")` },
+  { value: 'frac_in', label: msg`Fractional inches (60-1/8")` },
+  { value: 'dec_in', label: msg`Decimal inches (60.125")` },
 ]
 
 /** Bare display name per format — no parenthetical example, unlike
@@ -63,13 +66,13 @@ export const LENGTH_FORMAT_OPTIONS: LengthFormatOption[] = [
  * redundant). Shop Mode's unit picker and its Settings "Units" row
  * (design_handoff_shop_mode/README.md §7/§6) show just the name — the
  * picker already renders a live preview next to it. */
-export const LENGTH_FORMAT_NAME: Record<LengthFormat, string> = {
-  m: 'Meters',
-  cm: 'Centimeters',
-  mm: 'Millimeters',
-  arch: 'Architectural',
-  frac_in: 'Fractional inches',
-  dec_in: 'Decimal inches',
+export const LENGTH_FORMAT_NAME: Record<LengthFormat, MessageDescriptor> = {
+  m: msg`Meters`,
+  cm: msg`Centimeters`,
+  mm: msg`Millimeters`,
+  arch: msg`Architectural`,
+  frac_in: msg`Fractional inches`,
+  dec_in: msg`Decimal inches`,
 }
 
 /** Short mono label for a compact chip (Shop Mode's cutlist header unit
@@ -302,10 +305,8 @@ export function formatLengthIn(meters: number, format: LengthFormat): string {
   if (format === 'm' || format === 'cm' || format === 'mm') {
     const converted = meters / METERS_PER_UNIT[format]
     const decimals = format === 'm' ? 3 : format === 'cm' ? 2 : 1
-    const rounded = converted.toFixed(decimals)
-    const trimmed = rounded.includes('.')
-      ? rounded.replace(/0+$/, '').replace(/\.$/, '')
-      : rounded
+    // Grouping off: a length reads "1234.5 m", never "1,234.5 m".
+    const trimmed = formatNumber(converted, { maxFractionDigits: decimals, grouping: false })
     return `${trimmed} ${UNIT_SUFFIX[format]}`
   }
 
@@ -313,10 +314,7 @@ export function formatLengthIn(meters: number, format: LengthFormat): string {
   const totalInches = Math.abs(meters) / METERS_PER_INCH
 
   if (format === 'dec_in') {
-    const rounded = totalInches.toFixed(3)
-    const trimmed = rounded.includes('.')
-      ? rounded.replace(/0+$/, '').replace(/\.$/, '')
-      : rounded
+    const trimmed = formatNumber(totalInches, { maxFractionDigits: 3, grouping: false })
     return `${sign}${trimmed}"`
   }
 
@@ -420,6 +418,7 @@ function parseBareNumber(text: string): number | null {
 export function typedReadout(buf: string, format: LengthFormat = getLengthUnit()): string {
   const suffix = getLengthUnitSuffix(format)
   if (suffix === '' || buf === '') return buf
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- dims separator characters typed by the user
   const lastSep = Math.max(buf.lastIndexOf(','), buf.lastIndexOf('x'), buf.lastIndexOf('X'))
   const component = buf.slice(lastSep + 1).trim()
   if (parseBareNumber(component) === null) return buf

@@ -22,8 +22,12 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import type React from 'react'
+import { plural } from '@lingui/core/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
+import { historyLabel } from '../i18n/historyLabels'
 import type { Scene } from '../wasm/loader'
 import { parseContentHistoryEntries, entriesSinceSaved, describeChangeCount } from './changesModel'
+import { isComposingKey } from '../input/keyboard'
 
 export type UnsavedChangesDecision = 'save' | 'dont-save' | 'cancel'
 
@@ -122,6 +126,7 @@ const SAVE_BUTTON_STYLE: React.CSSProperties = {
 }
 
 export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCancel }: UnsavedChangesDialogProps) {
+  const { t } = useLingui()
   const [saving, setSaving] = useState(false)
 
   const handleSave = useCallback(() => {
@@ -139,6 +144,7 @@ export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCan
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
+      if (isComposingKey(e)) return
       if (e.key === 'Escape' && !saving) {
         e.preventDefault()
         e.stopPropagation()
@@ -166,7 +172,7 @@ export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCan
   const totalCount = shown.length + more
   const reasonList = Array.from(reasons)
   const hasList = shown.length > 0 || more > 0 || reasonList.length > 0
-  const introText = totalCount > 0 ? describeChangeCount(totalCount, undone) : 'This document has unsaved changes.'
+  const introText = totalCount > 0 ? describeChangeCount(totalCount, undone) : t`This document has unsaved changes.`
 
   return (
     <div style={OVERLAY_STYLE} onClick={saving ? undefined : onCancel}>
@@ -175,9 +181,11 @@ export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCan
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
-        aria-label="Unsaved changes"
+        aria-label={t`Unsaved changes`}
       >
-        <div style={HEADING_STYLE}>Unsaved changes</div>
+        <div style={HEADING_STYLE}>
+          <Trans>Unsaved changes</Trans>
+        </div>
         <div style={BODY_STYLE}>{introText}</div>
         {hasList && (
           <ul style={LIST_STYLE}>
@@ -188,12 +196,14 @@ export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCan
               // own doc comment). Struck through, like ChangesPanel's own
               // undone-entry treatment.
               <li key={`e${i}`} style={undone ? { textDecoration: 'line-through' } : undefined}>
-                {undone ? `↺ ${entry.label}` : entry.label}
+                {undone ? `↺ ${historyLabel(entry.kind, entry.label)}` : historyLabel(entry.kind, entry.label)}
               </li>
             ))}
             {more > 0 && (
               <li style={{ fontStyle: 'italic', opacity: 0.8, textDecoration: undone ? 'line-through' : 'none' }}>
-                and {more} more{undone ? ' (undone)' : ''}
+                {undone
+                  ? plural(more, { one: 'and # more (undone)', other: 'and # more (undone)' })
+                  : plural(more, { one: 'and # more', other: 'and # more' })}
               </li>
             )}
             {reasonList.map((reason) => (
@@ -203,13 +213,13 @@ export function UnsavedChangesDialog({ scene, reasons, onSave, onDontSave, onCan
         )}
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel} disabled={saving}>
-            Cancel
+            <Trans>Cancel</Trans>
           </button>
           <button style={DONT_SAVE_BUTTON_STYLE} onClick={onDontSave} disabled={saving}>
-            Don&rsquo;t Save
+            <Trans>Don&rsquo;t Save</Trans>
           </button>
           <button style={SAVE_BUTTON_STYLE} onClick={handleSave} disabled={saving} autoFocus>
-            {saving ? 'Saving…' : 'Save'}
+            {saving ? t`Saving…` : t`Save`}
           </button>
         </div>
       </div>

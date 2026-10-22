@@ -80,6 +80,7 @@
  *
  * Esc cancels the current stage; a fresh click always starts over.
  */
+import { t } from '@lingui/core/macro'
 import { shownAnnotationIds } from '../viewport/shownAnnotations'
 import * as THREE from 'three'
 import type { Tool, Snap } from './types'
@@ -106,7 +107,7 @@ import {
   findAlignmentSnap,
   type DimensionLineCandidate,
 } from '../viewport/annotationLayout'
-import { nextIdlePlaneLock, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { nextIdlePlaneLock, axisLockColorName, radiusReadout, diameterReadout } from './moveInput'
 import { worldFaceNormal } from './faceDraw'
 import { ctxGround, ctxOfFace, ctxOfSketch, planeOfCtx, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 import { projectPointOntoPlane } from './tapeOffset'
@@ -549,21 +550,22 @@ export class DimensionTool implements Tool {
   readonly name = 'Dimension'
 
   statusHint(): string {
-    const lockNote =
-      this.planeLock !== null
-        ? ` Locked to the ${AXIS_LOCK_COLOR_NAMES[this.planeLock]} plane — same arrow or ArrowDown unlocks.`
-        : ''
+    const lockedAxis = this.planeLock !== null ? axisLockColorName(this.planeLock) : null
+    const lockNote = lockedAxis !== null ? t`Locked to the ${lockedAxis} plane — same arrow or ArrowDown unlocks.` : ''
+    const withLock = (sentence: string): string => (lockNote === '' ? sentence : `${sentence} ${lockNote}`)
     switch (this.stage.kind) {
       case 'have-a':
-        return `Click the second point.${lockNote}`
+        return withLock(t`Click the second point.`)
       case 'have-b':
-        return `Drag out the dimension line, then click to place it — arrows lock the plane.${lockNote}`
+        return withLock(t`Drag out the dimension line, then click to place it — arrows lock the plane.`)
       case 'have-curve': {
         const kind = this.stage.preferredKind ?? this._defaultRadialKind(this.stage)
-        return `Drag out the leader, then click to place — Tab for ${kind === 'radius' ? 'diameter' : 'radius'}.`
+        return kind === 'radius'
+          ? t`Drag out the leader, then click to place — Tab for diameter.`
+          : t`Drag out the leader, then click to place — Tab for radius.`
       }
       default:
-        return `Click a point to dimension from, or click a drawn circle/arc for a radius dimension.${lockNote}`
+        return withLock(t`Click a point to dimension from, or click a drawn circle/arc for a radius dimension.`)
     }
   }
 
@@ -764,8 +766,9 @@ export class DimensionTool implements Tool {
       const cls = this._classify(this.stage, snap, cursor)
       if (cls.kind === 'radius' || cls.kind === 'diameter') {
         const value = cls.kind === 'diameter' ? this.stage.curve.radius * 2 : this.stage.curve.radius
-        const prefix = cls.kind === 'diameter' ? 'Ø ' : 'R '
-        this.onMeasurementCb(`${prefix}${formatLength(value)}`)
+        this.onMeasurementCb(
+          cls.kind === 'diameter' ? diameterReadout(formatLength(value)) : radiusReadout(formatLength(value)),
+        )
       } else if (cls.kind === 'linear') {
         const dist = length(sub(cls.bPoint, cls.aPoint))
         this.onMeasurementCb(formatLength(dist))
@@ -928,8 +931,9 @@ export class DimensionTool implements Tool {
       this.stage.preferredKind = current === 'radius' ? 'diameter' : 'radius'
       this._updatePreview()
       const value = this.stage.preferredKind === 'diameter' ? this.stage.curve.radius * 2 : this.stage.curve.radius
-      const prefix = this.stage.preferredKind === 'diameter' ? 'Ø ' : 'R '
-      this.onMeasurementCb(`${prefix}${formatLength(value)}`)
+      this.onMeasurementCb(
+        this.stage.preferredKind === 'diameter' ? diameterReadout(formatLength(value)) : radiusReadout(formatLength(value)),
+      )
     }
   }
 
@@ -1288,7 +1292,7 @@ export class DimensionTool implements Tool {
   private _commitLinear(stage: Extract<LinearStage, { kind: 'have-b' }>): void {
     const plane = planeFromLineAndOffset(stage.aPoint, stage.bPoint, stage.offset)
     if (plane === null) {
-      this.onToast("Drag away from the line to set the dimension's offset")
+      this.onToast(t`Drag away from the line to set the dimension's offset`)
       return
     }
     try {
@@ -1305,7 +1309,8 @@ export class DimensionTool implements Tool {
       )
       this.onCreated()
     } catch (err) {
-      this.onToast(`Couldn't create dimension: ${friendlyErrorText(err)}`)
+      const reason = friendlyErrorText(err)
+      this.onToast(t`Couldn't create dimension: ${reason}`)
     }
     this.cancel()
   }
@@ -1328,7 +1333,8 @@ export class DimensionTool implements Tool {
       )
       this.onCreated()
     } catch (err) {
-      this.onToast(`Couldn't create radial dimension: ${friendlyErrorText(err)}`)
+      const reason = friendlyErrorText(err)
+      this.onToast(t`Couldn't create radial dimension: ${reason}`)
     }
     this.cancel()
   }
