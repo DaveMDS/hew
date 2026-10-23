@@ -176,7 +176,9 @@ enum RidePart {
 }
 
 /// Whether a face of `obj` coplanar and same-facing with `plane` holds `p`
-/// strictly inside its region (inside the outer loop, outside every hole).
+/// in its region: inside the outer loop and outside every hole, or on one
+/// of its loops. A point on a loop lies on the face, and the inside test
+/// alone would answer it by which edge it sits on.
 fn face_under(obj: &Object, plane: &crate::math::Plane, p: Point3) -> bool {
     obj.faces().values().any(|f| {
         let n = f.plane.normal();
@@ -190,11 +192,12 @@ fn face_under(obj: &Object, plane: &crate::math::Plane, p: Point3) -> bool {
         {
             return false;
         }
-        crate::geom2d::point_inside_polygon(p, &outer, n)
-            && !f.inner_loops.iter().any(|&l| {
-                let h: Vec<Point3> = obj.loop_positions(l).collect();
-                crate::geom2d::point_inside_polygon(p, &h, n)
-            })
+        let holes: Vec<Vec<Point3>> = f
+            .inner_loops
+            .iter()
+            .map(|&l| obj.loop_positions(l).collect())
+            .collect();
+        crate::geom2d::point_on_region(p, &outer, &holes, n)
     })
 }
 
@@ -11733,12 +11736,9 @@ impl Document {
             .iter()
             .map(|&l| obj.loop_positions(l).collect())
             .collect();
-        let inside = |p: Point3| {
-            crate::geom2d::point_inside_polygon(p, &outer, normal)
-                && !holes
-                    .iter()
-                    .any(|h| crate::geom2d::point_inside_polygon(p, h, normal))
-        };
+        // On a loop counts as on the face: an edge along the face's edge
+        // rides with it, whichever edge that is.
+        let inside = |p: Point3| crate::geom2d::point_on_region(p, &outer, &holes, normal);
         let forward = Transform::translation(normal * distance);
         let mut sketches = Vec::new();
         for sid in owned {

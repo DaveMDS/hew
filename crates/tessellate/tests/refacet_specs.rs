@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use kernel::{CurveGeom, Object, Plane, Point3, Sketch};
+use kernel::{CurveGeom, Document, KernelOp, Object, ObjectId, Plane, Point3, Sketch};
 use tessellate::export_triangles;
 
 fn ground() -> Plane {
@@ -859,4 +859,148 @@ fn open_arc_sweep_rows_demote_rather_than_orphan_their_seam() {
         stored, refined,
         "stacked open-arc rows demote; nothing may orphan the shared seam"
     );
+}
+
+// ------------------------------------------- tangent and touching circles
+
+/// A 4 m square box, 1 m tall, with each `(cx, cy, phase)` circle of radius
+/// 0.5 drawn on its top (24 segments, vertex 0 at `phase`) and the first
+/// circle pushed by `distance`: up for a boss, down for a pocket.
+fn box_with_circles(circles: &[(f64, f64, f64)], distance: f64) -> (Document, ObjectId) {
+    use std::f64::consts::TAU;
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    let c = [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)];
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for i in 0..4 {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+                .unwrap();
+        }
+    }
+    let r = doc.extrudable_regions(s).unwrap()[0];
+    let (id, _) = doc.extrude_region(s, r, 1.0).unwrap();
+    let top = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ])
+    .unwrap();
+    let (radius, n) = (0.5, 24);
+    for &(cx, cy, phase) in circles {
+        let pts: Vec<Point3> = (0..n)
+            .map(|i| {
+                let a = phase + TAU * i as f64 / n as f64;
+                Point3::new(cx + radius * a.cos(), cy + radius * a.sin(), 1.0)
+            })
+            .collect();
+        doc.draft(top, None, &[id], "Circle", |sk| {
+            sk.begin_curve_with(CurveGeom {
+                center: Point3::new(cx, cy, 1.0),
+                radius,
+            })?;
+            for i in 0..n {
+                sk.add_segment(pts[i], pts[(i + 1) % n])?;
+            }
+            sk.end_curve();
+            Ok(())
+        })
+        .expect("the circle draws");
+    }
+    if let Some(&(cx, cy, _)) = circles.first() {
+        let obj = doc.object(id).unwrap();
+        let disc = obj
+            .faces()
+            .iter()
+            .find(|(_, f)| {
+                f.plane.normal().z > 0.999
+                    && f.inner_loops.is_empty()
+                    && obj.loop_positions(f.outer_loop).count() == n
+                    && obj
+                        .loop_positions(f.outer_loop)
+                        .all(|p| ((p.x - cx).powi(2) + (p.y - cy).powi(2)).sqrt() < 0.5 + 1e-9)
+            })
+            .map(|(k, _)| k)
+            .expect("the circle's disc");
+        doc.apply_object_op(
+            id,
+            KernelOp::PushPull {
+                face: disc,
+                distance,
+            },
+        )
+        .expect("the disc pushes");
+    }
+    (doc, id)
+}
+
+/// A circle tangent to an edge of the top leaves the top with a hole that
+/// touches its outer loop at one vertex. The cylinder band re-facets
+/// whichever edge the circle touches, boss or pocket, and the export stays
+/// manifold with exactly the refined volume. The inside test answers a
+/// point on a ring by which edge it sits on, so the shared vertex used to
+/// read outside on two of the four edges and demote the band.
+#[test]
+fn a_band_tangent_to_any_edge_of_its_face_refacets() {
+    use std::f64::consts::PI;
+    let edges = [
+        ("left", 0.5, 2.0, PI),
+        ("right", 3.5, 2.0, 0.0),
+        ("front", 2.0, 0.5, -PI / 2.0),
+        ("back", 2.0, 3.5, PI / 2.0),
+    ];
+    for distance in [0.5, -0.5] {
+        for (edge, cx, cy, phase) in edges {
+            let (doc, id) = box_with_circles(&[(cx, cy, phase)], distance);
+            let obj = doc.object(id).unwrap();
+            let refined = export_triangles(obj, 96).unwrap();
+            assert_ne!(
+                refined,
+                export_triangles(obj, 0).unwrap(),
+                "{edge} edge, push {distance}: the band re-facets"
+            );
+            assert_manifold(&refined);
+            let expected = 16.0 + distance.signum() * prism_volume(96, 0.5, 0.5);
+            assert!(
+                (soup_volume(&refined) - expected).abs() < 1e-9,
+                "{edge} edge, push {distance}: volume {} vs {expected}",
+                soup_volume(&refined)
+            );
+        }
+    }
+}
+
+/// Two circles touching inside the top, one pushed into a band and the other
+/// left drawn, leave the top with two holes sharing a vertex. The band
+/// re-facets beside the drawn circle on any side. (Pushing both is refused:
+/// their walls would meet along a line.)
+#[test]
+fn a_band_touching_a_drawn_circle_refacets_on_any_side() {
+    use std::f64::consts::PI;
+    let pairs = [
+        ("left of", [(1.5, 2.0, 0.0), (2.5, 2.0, PI)]),
+        ("right of", [(2.5, 2.0, PI), (1.5, 2.0, 0.0)]),
+        ("in front of", [(2.0, 1.5, PI / 2.0), (2.0, 2.5, -PI / 2.0)]),
+        ("behind", [(2.0, 2.5, -PI / 2.0), (2.0, 1.5, PI / 2.0)]),
+    ];
+    for distance in [0.5, -0.5] {
+        for (side, circles) in pairs {
+            let (doc, id) = box_with_circles(&circles, distance);
+            let obj = doc.object(id).unwrap();
+            let refined = export_triangles(obj, 96).unwrap();
+            assert_ne!(
+                refined,
+                export_triangles(obj, 0).unwrap(),
+                "band {side} the drawn circle, push {distance}: it re-facets"
+            );
+            assert_manifold(&refined);
+            let expected = 16.0 + distance.signum() * prism_volume(96, 0.5, 0.5);
+            assert!(
+                (soup_volume(&refined) - expected).abs() < 1e-9,
+                "band {side} the drawn circle, push {distance}: volume {} vs {expected}",
+                soup_volume(&refined)
+            );
+        }
+    }
 }

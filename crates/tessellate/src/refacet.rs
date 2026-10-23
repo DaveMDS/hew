@@ -1163,7 +1163,12 @@ fn rewrite_caps(
 // ──────────────────────────────────────────────────── 2-D validity checks
 
 /// Simple + disjoint check for a rewritten cap: every loop simple, holes
-/// strictly inside the outer loop, holes pairwise non-overlapping.
+/// inside the outer loop, holes pairwise non-overlapping. Loops of one face
+/// may touch at isolated points (a circle tangent to the face's edge, two
+/// circles touching) but never along an edge, so a hole vertex lying on
+/// another ring is no evidence either way: the even-odd test answers such a
+/// point by which edge it sits on, which would demote a tangent rim on some
+/// edges and not others. An edge running along another ring is invalid.
 fn loops_valid(normal: Vec3, loops: &[Vec<Point3>]) -> bool {
     let (u, v) = crate::plane_basis(normal);
     let project = |l: &Vec<Point3>| -> Vec<[f64; 2]> {
@@ -1180,7 +1185,11 @@ fn loops_valid(normal: Vec3, loops: &[Vec<Point3>]) -> bool {
     }
     let outer = &loops2d[0];
     for hole in &loops2d[1..] {
-        if hole.iter().any(|&p| !point_in_polygon_2d(p, outer)) {
+        if runs_along(hole, outer) {
+            return false;
+        }
+        let mut probes = ring_probes_off(hole, outer).peekable();
+        if probes.peek().is_none() || probes.any(|p| !point_in_polygon_2d(p, outer)) {
             return false;
         }
         if rings_cross(hole, outer) {
@@ -1189,19 +1198,61 @@ fn loops_valid(normal: Vec3, loops: &[Vec<Point3>]) -> bool {
     }
     for i in 1..loops2d.len() {
         for j in (i + 1)..loops2d.len() {
-            if rings_cross(&loops2d[i], &loops2d[j])
-                || loops2d[j]
-                    .iter()
-                    .any(|&p| point_in_polygon_2d(p, &loops2d[i]))
-                || loops2d[i]
-                    .iter()
-                    .any(|&p| point_in_polygon_2d(p, &loops2d[j]))
+            let (a, b) = (&loops2d[i], &loops2d[j]);
+            if rings_cross(a, b)
+                || runs_along(a, b)
+                || runs_along(b, a)
+                || ring_probes_off(b, a).any(|p| point_in_polygon_2d(p, a))
+                || ring_probes_off(a, b).any(|p| point_in_polygon_2d(p, b))
             {
                 return false;
             }
         }
     }
     true
+}
+
+/// The vertices and edge midpoints of `ring` that are not on `other`
+/// (within `POINT_MERGE`): the points whose inside/outside answer against
+/// `other` means something.
+fn ring_probes_off<'a>(
+    ring: &'a [[f64; 2]],
+    other: &'a [[f64; 2]],
+) -> impl Iterator<Item = [f64; 2]> + 'a {
+    let n = ring.len();
+    (0..n)
+        .flat_map(move |i| {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            [a, [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]]
+        })
+        .filter(move |&p| !on_ring_2d(p, other))
+}
+
+/// Whether some edge of `ring` runs along `other`: its midpoint lies on
+/// `other`.
+fn runs_along(ring: &[[f64; 2]], other: &[[f64; 2]]) -> bool {
+    let n = ring.len();
+    (0..n).any(|i| {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        on_ring_2d([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], other)
+    })
+}
+
+/// Whether `p` lies within `POINT_MERGE` of some edge of `ring`.
+fn on_ring_2d(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
+    let n = ring.len();
+    (0..n).any(|i| {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 {
+            (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let (ex, ey) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
+        (ex * ex + ey * ey).sqrt() <= kernel::tol::POINT_MERGE
+    })
 }
 
 fn seg_cross(p: [f64; 2], q: [f64; 2], r: [f64; 2], s: [f64; 2]) -> bool {
@@ -1249,8 +1300,8 @@ fn rings_cross(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
     false
 }
 
-/// Even-odd point-in-polygon (strict interior not required here — rim
-/// points touching a boundary exactly are pathological enough to demote).
+/// Even-odd point-in-polygon. A point on the ring gets either answer,
+/// depending on which edge it sits on; callers exclude such points.
 fn point_in_polygon_2d(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
     let n = ring.len();
     let mut inside = false;
@@ -1265,4 +1316,72 @@ fn point_in_polygon_2d(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
         j = i;
     }
     inside
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ring(pts: &[(f64, f64)]) -> Vec<Point3> {
+        pts.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect()
+    }
+
+    const UP: Vec3 = Vec3 {
+        x: 0.0,
+        y: 0.0,
+        z: 1.0,
+    };
+
+    fn square(x0: f64, y0: f64, s: f64) -> Vec<Point3> {
+        ring(&[(x0, y0), (x0 + s, y0), (x0 + s, y0 + s), (x0, y0 + s)])
+    }
+
+    /// A diamond whose corner `(cx - r, cy)` is its leftmost point.
+    fn diamond(cx: f64, cy: f64, r: f64) -> Vec<Point3> {
+        ring(&[(cx - r, cy), (cx, cy - r), (cx + r, cy), (cx, cy + r)])
+    }
+
+    #[test]
+    fn a_hole_touching_the_outer_at_a_vertex_is_valid_on_every_side() {
+        let outer = square(0.0, 0.0, 4.0);
+        for hole in [
+            diamond(1.0, 2.0, 1.0),
+            diamond(3.0, 2.0, 1.0),
+            diamond(2.0, 1.0, 1.0),
+            diamond(2.0, 3.0, 1.0),
+        ] {
+            assert!(loops_valid(UP, &[outer.clone(), hole]));
+        }
+    }
+
+    #[test]
+    fn holes_touching_at_a_vertex_are_valid_either_way_round() {
+        let outer = square(0.0, 0.0, 6.0);
+        let (a, b) = (diamond(2.0, 3.0, 1.0), diamond(4.0, 3.0, 1.0));
+        assert!(loops_valid(UP, &[outer.clone(), a.clone(), b.clone()]));
+        assert!(loops_valid(UP, &[outer, b, a]));
+    }
+
+    #[test]
+    fn a_hole_running_along_the_outer_is_invalid() {
+        let outer = square(0.0, 0.0, 4.0);
+        assert!(!loops_valid(UP, &[outer, square(0.0, 0.0, 2.0)]));
+    }
+
+    #[test]
+    fn holes_sharing_an_edge_or_coinciding_are_invalid() {
+        let outer = square(0.0, 0.0, 6.0);
+        let a = square(1.0, 1.0, 2.0);
+        assert!(!loops_valid(
+            UP,
+            &[outer.clone(), a.clone(), square(3.0, 1.0, 2.0)]
+        ));
+        assert!(!loops_valid(UP, &[outer, a.clone(), a]));
+    }
+
+    #[test]
+    fn a_hole_outside_the_outer_is_invalid() {
+        let outer = square(0.0, 0.0, 4.0);
+        assert!(!loops_valid(UP, &[outer, square(5.0, 1.0, 1.0)]));
+    }
 }

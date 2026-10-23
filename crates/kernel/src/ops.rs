@@ -8927,14 +8927,10 @@ fn apply_split_restore(
 /// touches still has points to decide by. The answer depends only on the
 /// geometry, never on which way the cut ran (a redo replays it reversed).
 fn hole_side(hole: &[Point3], ring: &[Point3], normal: Vec3) -> Option<bool> {
-    let on_ring = |p: Point3| {
-        (0..ring.len())
-            .any(|i| point_near_segment(p, ring[i], ring[(i + 1) % ring.len()], tol::POINT_MERGE))
-    };
     let n = hole.len();
     let probes: Vec<Point3> = (0..n)
         .flat_map(|k| [hole[k], hole[k] + (hole[(k + 1) % n] - hole[k]) * 0.5])
-        .filter(|&p| !on_ring(p))
+        .filter(|&p| !crate::geom2d::point_on_ring(p, ring))
         .collect();
     let inside = probes
         .iter()

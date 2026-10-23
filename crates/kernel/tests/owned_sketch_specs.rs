@@ -681,6 +681,83 @@ fn subtract_keeps_the_surviving_edges_and_frees_the_cut_away_ones() {
     assert_eq!(doc.save(), after);
 }
 
+/// A drawn edge lying exactly along an edge the subtract leaves on the
+/// result's top stays drawn on the result, whichever side the cut comes
+/// from, and rides when that top is pushed. Its midpoint is on the face's
+/// boundary, which the inside test alone answers by the edge's direction:
+/// on two of these four sides the subtract used to free the edge into a
+/// loose sketch.
+#[test]
+fn an_edge_along_a_new_boundary_stays_with_the_result_from_any_side() {
+    let cases = [
+        (
+            "front",
+            (p(1.0, 1.0, 1.0), p(2.0, 1.0, 1.0)),
+            (0.5, 1.0, 3.5, 5.0),
+        ),
+        (
+            "back",
+            (p(1.0, 3.0, 1.0), p(2.0, 3.0, 1.0)),
+            (0.5, -1.0, 3.5, 3.0),
+        ),
+        (
+            "left",
+            (p(1.0, 1.0, 1.0), p(1.0, 2.0, 1.0)),
+            (1.0, 0.5, 5.0, 3.5),
+        ),
+        (
+            "right",
+            (p(3.0, 1.0, 1.0), p(3.0, 2.0, 1.0)),
+            (-1.0, 0.5, 3.0, 3.5),
+        ),
+    ];
+    for (side, seg, (x0, y0, x1, y1)) in cases {
+        let mut doc = Document::new();
+        let a = make_box(&mut doc, 0.0, 0.0, 4.0, 4.0, 0.0, 1.0);
+        let cutter = make_box(&mut doc, x0, y0, x1, y1, 0.5, 2.0);
+        let s = owned_sketch(&mut doc, a, 1.0, &[seg]);
+        let sketches_before = live_sketches(&doc);
+
+        let (r, _) = doc
+            .boolean(BooleanOp::Subtract, a, cutter)
+            .expect("subtract");
+        assert!(
+            same_points(&owned_verts(&doc, r), &[seg.0, seg.1]),
+            "{side}: the edge stays drawn on the result"
+        );
+        assert!(
+            live_sketches(&doc)
+                .into_iter()
+                .filter(|id| !sketches_before.contains(id))
+                .all(|id| doc.sketch_owner_object(id).is_some()),
+            "{side}: nothing is freed"
+        );
+
+        doc.undo().expect("undo subtract");
+        assert_eq!(doc.sketch_owner_object(s), Some(a), "{side}");
+        doc.redo().expect("redo subtract");
+        assert!(
+            same_points(&owned_verts(&doc, r), &[seg.0, seg.1]),
+            "{side}"
+        );
+
+        let top = face_at(&doc, r, Vec3::new(0.0, 0.0, 1.0), p(0.25, 0.25, 1.0));
+        doc.apply_object_op(
+            r,
+            KernelOp::PushPull {
+                face: top,
+                distance: 0.5,
+            },
+        )
+        .expect("push the top");
+        let up = Vec3::new(0.0, 0.0, 0.5);
+        assert!(
+            same_points(&owned_verts(&doc, r), &[seg.0 + up, seg.1 + up]),
+            "{side}: the edge rides with the pushed top"
+        );
+    }
+}
+
 #[test]
 fn slicing_gives_each_half_its_part_of_the_drawing() {
     let mut doc = Document::new();

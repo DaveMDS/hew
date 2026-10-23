@@ -240,6 +240,30 @@ fn grow_expansion(e: &mut Vec<f64>, b: f64) {
     e.push(q);
 }
 
+/// True if `p` lies within [`tol::POINT_MERGE`] of some edge of the closed
+/// ring `ring`: a boundary point, which [`point_inside_polygon`] answers
+/// either way.
+pub(crate) fn point_on_ring(p: Point3, ring: &[Point3]) -> bool {
+    let n = ring.len();
+    (0..n).any(|i| point_near_segment(p, ring[i], ring[(i + 1) % n], tol::POINT_MERGE))
+}
+
+/// True if `p` lies on the face region bounded by `outer` and `holes`
+/// (all on one plane with normal `normal`, and `p` on that plane): inside
+/// `outer` and outside every hole, or on one of the loops. A point on a loop lies on the face;
+/// the inside test alone would answer it by which edge it sits on.
+pub(crate) fn point_on_region(
+    p: Point3,
+    outer: &[Point3],
+    holes: &[Vec<Point3>],
+    normal: Vec3,
+) -> bool {
+    point_on_ring(p, outer)
+        || holes.iter().any(|h| point_on_ring(p, h))
+        || (point_inside_polygon(p, outer, normal)
+            && !holes.iter().any(|h| point_inside_polygon(p, h, normal)))
+}
+
 /// True if `p` lies within `tol` of the closed segment `[a, b]`.
 pub(crate) fn point_near_segment(p: Point3, a: Point3, b: Point3, tol: f64) -> bool {
     let ab = b - a;
@@ -608,6 +632,40 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use std::f64::consts::PI;
+
+    /// A point on an edge or at a corner of either loop is on the region,
+    /// whichever edge it is: the inside test alone answers those by edge.
+    #[test]
+    fn point_on_region_counts_every_loop_edge_and_corner() {
+        let outer = xy(&[(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)]);
+        let hole = xy(&[(1.0, 1.0), (1.0, 3.0), (3.0, 3.0), (3.0, 1.0)]);
+        let holes = vec![hole];
+        let on = |x: f64, y: f64| point_on_region(Point3::new(x, y, 0.0), &outer, &holes, UP);
+        for (x, y) in [
+            (2.0, 0.0),
+            (4.0, 2.0),
+            (2.0, 4.0),
+            (0.0, 2.0),
+            (0.0, 0.0),
+            (4.0, 4.0),
+            (2.0, 1.0),
+            (3.0, 2.0),
+            (2.0, 3.0),
+            (1.0, 2.0),
+            (1.0, 1.0),
+            (3.0, 3.0),
+        ] {
+            assert!(on(x, y), "({x}, {y}) is on a loop");
+            assert!(
+                point_on_ring(Point3::new(x, y, 0.0), &outer)
+                    || point_on_ring(Point3::new(x, y, 0.0), &holes[0])
+            );
+        }
+        assert!(on(0.5, 0.5), "inside the outer, outside the hole");
+        assert!(!on(2.0, 2.0), "inside the hole");
+        assert!(!on(5.0, 2.0), "outside the outer");
+        assert!(!point_on_ring(Point3::new(0.5, 0.5, 0.0), &outer));
+    }
 
     fn xy(pts: &[(f64, f64)]) -> Vec<Point3> {
         pts.iter().map(|&(x, y)| Point3::new(x, y, 0.0)).collect()
