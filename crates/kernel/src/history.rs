@@ -875,13 +875,51 @@ impl StateProof {
 /// [`tol::POINT_MERGE`], so fingerprints match positionally at that tolerance.
 #[derive(Debug, Clone)]
 enum Anchor {
-    /// A face: its outer-loop vertex positions (order-independent) and its
-    /// plane normal. The normal disambiguates coincident opposite-side faces;
-    /// the full vertex set disambiguates coplanar faces sharing a centroid
-    /// (e.g. a parent face and a concentric imprinted sub-face).
-    Face { verts: Vec<Point3>, normal: Vec3 },
+    /// A face, by [`FaceAnchor`].
+    Face(FaceAnchor),
     /// An edge: its two endpoint positions (order-independent).
     Edge { a: Point3, b: Point3 },
+}
+
+/// A face's geometric fingerprint: its outer-loop vertex positions
+/// (order-independent) and its plane normal. The normal disambiguates
+/// coincident opposite-side faces; the full vertex set disambiguates coplanar
+/// faces sharing a centroid (e.g. a parent face and a concentric imprinted
+/// sub-face).
+///
+/// Shared with the document undo log, whose face-attribute actions record
+/// a `FaceId` that a structural undo or redo in between can re-mint (undoing
+/// a split keeps neither original id; redoing one mints fresh children).
+#[derive(Debug, Clone)]
+pub(crate) struct FaceAnchor {
+    verts: Vec<Point3>,
+    normal: Vec3,
+}
+
+impl FaceAnchor {
+    /// The fingerprint of `face`, which must be live in `object`.
+    pub(crate) fn of(object: &Object, face: FaceId) -> Self {
+        let f = &object.faces()[face];
+        Self {
+            verts: object.loop_positions(f.outer_loop).collect(),
+            normal: f.plane.normal(),
+        }
+    }
+
+    /// True if `face` is live in `object` and has this fingerprint.
+    pub(crate) fn matches(&self, object: &Object, face: FaceId) -> bool {
+        object.faces().get(face).is_some_and(|f| {
+            f.plane.normal().dot(self.normal) >= 1.0 - tol::POINT_MERGE && {
+                let fverts: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
+                same_position_set(&fverts, &self.verts)
+            }
+        })
+    }
+
+    /// The live face of `object` with this fingerprint, if any.
+    pub(crate) fn resolve(&self, object: &Object) -> Option<FaceId> {
+        object.faces().keys().find(|&fid| self.matches(object, fid))
+    }
 }
 
 /// Captures the [`Anchor`] for `op`'s target handle, which must be live in
@@ -896,13 +934,7 @@ fn anchor_of(object: &Object, op: &KernelOp) -> Anchor {
         | KernelOp::ExtrudeSubFace { sub_face: face, .. }
         | KernelOp::CollapseSubFace { sub_face: face }
         | KernelOp::TransformSubFace { sub_face: face, .. }
-        | KernelOp::RetraceFace { face, .. } => {
-            let f = &object.faces()[*face];
-            Anchor::Face {
-                verts: object.loop_positions(f.outer_loop).collect(),
-                normal: f.plane.normal(),
-            }
-        }
+        | KernelOp::RetraceFace { face, .. } => Anchor::Face(FaceAnchor::of(object, *face)),
         KernelOp::MergeFaces { edge } => {
             let (a, b) = object
                 .edge_endpoints(*edge)
@@ -935,17 +967,6 @@ fn same_position_set(a: &[Point3], b: &[Point3]) -> bool {
     true
 }
 
-/// Finds the live face matching a [`Anchor::Face`] fingerprint.
-fn resolve_face(object: &Object, verts: &[Point3], normal: Vec3) -> Option<FaceId> {
-    object.faces().iter().find_map(|(fid, f)| {
-        if f.plane.normal().dot(normal) < 1.0 - tol::POINT_MERGE {
-            return None;
-        }
-        let fverts: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
-        same_position_set(&fverts, verts).then_some(fid)
-    })
-}
-
 /// Finds the live edge matching a [`Anchor::Edge`] fingerprint.
 fn resolve_edge(object: &Object, a: Point3, b: Point3) -> Option<EdgeId> {
     object.edges().keys().find(|&eid| {
@@ -962,7 +983,7 @@ fn resolve_edge(object: &Object, a: Point3, b: Point3) -> Option<EdgeId> {
 fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp, KernelOpError> {
     let face = |unknown: KernelOpError| -> Result<FaceId, KernelOpError> {
         match anchor {
-            Anchor::Face { verts, normal } => resolve_face(object, verts, *normal).ok_or(unknown),
+            Anchor::Face(fa) => fa.resolve(object).ok_or(unknown),
             Anchor::Edge { .. } => Err(unknown),
         }
     };
@@ -1035,7 +1056,7 @@ fn re_anchor(object: &Object, op: &KernelOp, anchor: &Anchor) -> Result<KernelOp
             Anchor::Edge { a, b } => resolve_edge(object, *a, *b)
                 .map(|edge| KernelOp::MergeFaces { edge })
                 .ok_or(KernelOpError::Sticky(StickyError::UnknownEdge)),
-            Anchor::Face { .. } => Err(KernelOpError::Sticky(StickyError::UnknownEdge)),
+            Anchor::Face(_) => Err(KernelOpError::Sticky(StickyError::UnknownEdge)),
         },
     }
 }

@@ -46,7 +46,7 @@ use crate::annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 use crate::axes::{AxesFrame, AxesFrameError};
 use crate::camera::{CameraProjection, CameraState};
 use crate::guide::Guide;
-use crate::history::{History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
+use crate::history::{FaceAnchor, History, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 use crate::ids::{
     AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, InstanceId, MaterialId, ObjectId,
     SketchId,
@@ -1707,10 +1707,11 @@ enum DocAction {
     },
     /// `paint_face` reassigned a face's material. Non-topological, so it
     /// touches no [`History`]; undo restores `prev` exactly, redo re-applies
-    /// `next`. Handle-stable (the `ObjectId`/`FaceId` are untouched).
+    /// `next`. The face is found again through its [`FaceRef`], since a
+    /// structural undo or redo in between can re-mint its handle.
     PaintFace {
         object: ObjectId,
-        face: FaceId,
+        face: FaceRef,
         prev: Option<MaterialId>,
         next: Option<MaterialId>,
     },
@@ -1726,11 +1727,11 @@ enum DocAction {
     /// (paint-tool design §3 — SketchUp's fixed-pin Position Texture).
     /// Non-topological, so it touches no [`History`]; undo restores `prev`
     /// exactly (including `Some -> None` and `None -> Some`), redo re-applies
-    /// `next`. Handle-stable (the `ObjectId`/`FaceId` are untouched), same
-    /// posture as [`DocAction::PaintFace`].
+    /// `next`. The face is found again through its [`FaceRef`], as for
+    /// [`DocAction::PaintFace`].
     SetFaceUvFrame {
         object: ObjectId,
-        face: FaceId,
+        face: FaceRef,
         prev: Option<UvFrame>,
         next: Option<UvFrame>,
     },
@@ -1744,15 +1745,14 @@ enum DocAction {
     /// recomputation needed at replay time.
     ///
     /// The op itself never creates, hides, or deletes anything, but a
-    /// *later* structural op sandwiched between this recording and its own
-    /// undo/redo can still consume one of the recorded `(object, face)`
-    /// pairs and mint a fresh slotmap generation for the replacement (the
-    /// same drift `document_fuzz.rs`'s `doc_fingerprint` doc comment
-    /// describes for `PaintFace`). Replay (undo and redo alike) validates
-    /// every recorded face and default-object target resolves live BEFORE
+    /// structural op undone or redone between this recording and its own
+    /// undo/redo can re-mint a recorded face's handle, so each face is
+    /// found again through its [`FaceRef`]. Replay (undo and redo alike)
+    /// resolves every recorded face and default-object target BEFORE
     /// mutating anything, and refuses the WHOLE batch typed
     /// ([`DocumentError::ReplaceMaterialReplayStale`], action re-pushed,
-    /// document untouched) if even one has gone stale — never a partial
+    /// document untouched) if even one does not resolve — a kernel bug,
+    /// since linear undo restores the recorded geometry — never a partial
     /// pre/post mix behind one atomic-looking step (rule 9, ARCHITECTURE.md
     /// §5.7).
     ///
@@ -1767,9 +1767,9 @@ enum DocAction {
         to: Option<MaterialId>,
         /// Explicit face overrides touched (object, face) — all previously
         /// equal to `from`.
-        faces: Vec<(ObjectId, FaceId)>,
+        faces: Vec<(ObjectId, FaceRef)>,
         /// Faces whose back paint was `from` and is now `to`.
-        back_faces: Vec<(ObjectId, FaceId)>,
+        back_faces: Vec<(ObjectId, FaceRef)>,
         /// Object base materials touched — all previously equal to `from`.
         defaults: Vec<ObjectId>,
     },
@@ -1796,13 +1796,13 @@ enum DocAction {
     /// Undo restores each reference and un-tombstones the material; redo
     /// re-clears and re-tombstones. All-or-nothing on replay, refused
     /// [`DocumentError::ReplaceMaterialReplayStale`] if a recorded face
-    /// row no longer exists — the same rule-9 posture as
-    /// [`DocAction::ReplaceMaterial`].
+    /// does not resolve through its [`FaceRef`] — the same rule-9 posture
+    /// as [`DocAction::ReplaceMaterial`].
     MaterialDeleted {
         material: MaterialId,
-        faces: Vec<(ObjectId, FaceId)>,
+        faces: Vec<(ObjectId, FaceRef)>,
         /// The face rows whose back paint was the deleted material.
-        back_faces: Vec<(ObjectId, FaceId)>,
+        back_faces: Vec<(ObjectId, FaceRef)>,
         defaults: Vec<ObjectId>,
     },
     /// [`Document::delete_definition`] hid a component definition (its
@@ -2608,11 +2608,6 @@ fn merge_doc_change(into: &mut DocChange, from: DocChange) {
     merge_unique(&mut into.guides_touched, from.guides_touched);
 }
 
-/// Whether `node` (in `doc`) is hidden from what the user visually sees —
-/// its own user-hidden flag, or any ancestor group's. Shared by
-/// [`Document::extract_item`]'s re-origin step and
-/// [`visible_world_bottom_center`]: an anchor/shift derived from invisible
-/// geometry would float the VISIBLE part off the cursor (round-3 review).
 /// The face rows of a material action, front references then back ones
 /// (a face can appear in both).
 fn with_backs(
@@ -2622,6 +2617,46 @@ fn with_backs(
     faces.iter().chain(back_faces).copied().collect()
 }
 
+/// A face target on the document undo log: the handle the face had when the
+/// action was recorded, plus its [`FaceAnchor`]. A structural undo or redo
+/// between the recording and its replay can re-mint the handle (undoing a
+/// split keeps neither original id; redoing one mints fresh children), and a
+/// handle that survives can come back naming a different piece, so replay
+/// goes through [`FaceRef::resolve`] rather than trusting the id.
+#[derive(Debug, Clone)]
+struct FaceRef {
+    id: FaceId,
+    anchor: FaceAnchor,
+}
+
+impl FaceRef {
+    /// Records `id`, which must be live in `object`.
+    fn of(object: &Object, id: FaceId) -> Self {
+        Self {
+            id,
+            anchor: FaceAnchor::of(object, id),
+        }
+    }
+
+    /// The live face of `object` this ref names: the recorded handle while it
+    /// still carries the recorded geometry, else the face that does. Linear
+    /// undo puts the geometry back exactly as it was when the action was
+    /// recorded, so `None` is a kernel bug, and callers refuse typed rather
+    /// than skip.
+    fn resolve(&self, object: &Object) -> Option<FaceId> {
+        if self.anchor.matches(object, self.id) {
+            Some(self.id)
+        } else {
+            self.anchor.resolve(object)
+        }
+    }
+}
+
+/// Whether `node` (in `doc`) is hidden from what the user visually sees —
+/// its own user-hidden flag, or any ancestor group's. Shared by
+/// [`Document::extract_item`]'s re-origin step and
+/// [`visible_world_bottom_center`]: an anchor/shift derived from invisible
+/// geometry would float the VISIBLE part off the cursor (round-3 review).
 fn visibly_hidden(doc: &Document, node: NodeId) -> bool {
     if doc.node_user_hidden(node) {
         return true;
@@ -2924,13 +2959,14 @@ pub enum DocumentError {
     /// Nothing is silently renormalized or reoriented (DEVELOPMENT.md rule
     /// 4); the document is untouched.
     InvalidAxesFrame(AxesFrameError),
-    /// A [`DocAction::ReplaceMaterial`] undo/redo replay found a recorded
-    /// face or object-default target that no longer resolves live: a later
-    /// structural op (a split/merge, most concretely) consumed its slotmap
-    /// slot and minted a fresh generation before the replay ran. Refused
-    /// typed and WHOLE (rule 9, ARCHITECTURE.md §5.7) rather than silently
-    /// dropping just that entry and partially applying the rest — the
-    /// document is untouched, and the action stays on its stack.
+    /// A [`DocAction::ReplaceMaterial`] or [`DocAction::MaterialDeleted`]
+    /// undo/redo replay found a recorded face or object-default target that
+    /// does not resolve: no live face carries the geometry the face had when
+    /// the action was recorded. Linear undo restores that geometry, so this
+    /// is a kernel bug. Refused typed and WHOLE (rule 9, ARCHITECTURE.md
+    /// §5.7) rather than silently dropping just that entry and partially
+    /// applying the rest — the document is untouched, and the action stays
+    /// on its stack.
     ReplaceMaterialReplayStale,
     /// `set_face_uv_frame` was given a frame with a non-finite component, a
     /// (near-)zero-length gradient, or (near-)parallel `s`/`t` gradients —
@@ -7527,8 +7563,8 @@ impl Document {
         let change = self.material_delete_change(&with_backs(&faces, &back_faces), &defaults);
         self.undo.push(DocAction::MaterialDeleted {
             material: id,
-            faces,
-            back_faces,
+            faces: self.face_refs(&faces),
+            back_faces: self.face_refs(&back_faces),
             defaults,
         });
         self.redo.clear();
@@ -7590,30 +7626,52 @@ impl Document {
         self.replace_material_change(&live_faces, &live_defaults)
     }
 
-    /// Every recorded row of a [`DocAction::MaterialDeleted`] still exists
-    /// (tombstoned or not — a hidden row keeps its faces). A row a later
-    /// structural op consumed refuses the whole replay typed, mirroring
-    /// [`Document::replace_material_targets_live`].
-    fn material_delete_targets_exist(
+    /// Resolves every recorded face of a [`DocAction::MaterialDeleted`]
+    /// (tombstoned rows included — a hidden row keeps its faces) to its live
+    /// handle, refusing the whole replay typed if one does not resolve or a
+    /// recorded row is gone, mirroring
+    /// [`Document::resolve_replace_material_targets`].
+    #[allow(clippy::type_complexity)]
+    fn resolve_material_delete_targets(
         &self,
-        faces: &[(ObjectId, FaceId)],
+        faces: &[(ObjectId, FaceRef)],
+        back_faces: &[(ObjectId, FaceRef)],
         defaults: &[ObjectId],
-    ) -> Result<(), DocumentError> {
-        for &(oid, fid) in faces {
-            if !self
-                .objects
-                .get(oid)
-                .is_some_and(|r| r.object.faces.contains_key(fid))
-            {
-                return Err(DocumentError::ReplaceMaterialReplayStale);
-            }
+    ) -> Result<(Vec<(ObjectId, FaceId)>, Vec<(ObjectId, FaceId)>), DocumentError> {
+        let stale = DocumentError::ReplaceMaterialReplayStale;
+        let faces = self.resolve_face_refs(faces, false).ok_or(stale)?;
+        let back_faces = self.resolve_face_refs(back_faces, false).ok_or(stale)?;
+        if defaults.iter().any(|&oid| !self.objects.contains_key(oid)) {
+            return Err(stale);
         }
-        for &oid in defaults {
-            if !self.objects.contains_key(oid) {
-                return Err(DocumentError::ReplaceMaterialReplayStale);
-            }
-        }
-        Ok(())
+        Ok((faces, back_faces))
+    }
+
+    /// `faces`, all live, as [`FaceRef`]s for the undo log.
+    fn face_refs(&self, faces: &[(ObjectId, FaceId)]) -> Vec<(ObjectId, FaceRef)> {
+        faces
+            .iter()
+            .map(|&(oid, fid)| (oid, FaceRef::of(&self.objects[oid].object, fid)))
+            .collect()
+    }
+
+    /// Each recorded face resolved to its live handle through
+    /// [`FaceRef::resolve`]; `None` if any one does not resolve, its object
+    /// row is gone, or (with `visible_only`) that row is hidden.
+    fn resolve_face_refs(
+        &self,
+        refs: &[(ObjectId, FaceRef)],
+        visible_only: bool,
+    ) -> Option<Vec<(ObjectId, FaceId)>> {
+        refs.iter()
+            .map(|(oid, face)| {
+                let rec = self
+                    .objects
+                    .get(*oid)
+                    .filter(|r| !(visible_only && r.hidden))?;
+                Some((*oid, face.resolve(&rec.object)?))
+            })
+            .collect()
     }
 
     /// How many LIVE faces and object bases carry `id` — the count a
@@ -7728,15 +7786,16 @@ impl Document {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
         };
-        let f = match rec.object.faces.get_mut(face) {
-            Some(f) => f,
-            None => return Err(DocumentError::UnknownFace),
-        };
+        if !rec.object.faces.contains_key(face) {
+            return Err(DocumentError::UnknownFace);
+        }
+        let face_ref = FaceRef::of(&rec.object, face);
+        let f = &mut rec.object.faces[face];
         let prev = f.material;
         f.material = material;
         self.undo.push(DocAction::PaintFace {
             object,
-            face,
+            face: face_ref,
             prev,
             next: material,
         });
@@ -7836,15 +7895,16 @@ impl Document {
             Some(rec) if !rec.hidden => rec,
             _ => return Err(DocumentError::UnknownObject),
         };
-        let f = match rec.object.faces.get_mut(face) {
-            Some(f) => f,
-            None => return Err(DocumentError::UnknownFace),
-        };
+        if !rec.object.faces.contains_key(face) {
+            return Err(DocumentError::UnknownFace);
+        }
+        let face_ref = FaceRef::of(&rec.object, face);
+        let f = &mut rec.object.faces[face];
         let prev = f.uv_frame;
         f.uv_frame = frame;
         self.undo.push(DocAction::SetFaceUvFrame {
             object,
-            face,
+            face: face_ref,
             prev,
             next: frame,
         });
@@ -7963,8 +8023,8 @@ impl Document {
         self.undo.push(DocAction::ReplaceMaterial {
             from,
             to,
-            faces,
-            back_faces,
+            faces: self.face_refs(&faces),
+            back_faces: self.face_refs(&back_faces),
             defaults,
         });
         self.commit_new_action();
@@ -8002,36 +8062,30 @@ impl Document {
         change
     }
 
-    /// Whether every recorded [`DocAction::ReplaceMaterial`] target still
-    /// resolves live — checked before undo OR redo mutates anything, so the
-    /// batch can be refused whole rather than partially applied (rule 9,
-    /// ARCHITECTURE.md §5.7). A face is live if its object is present and
-    /// visible AND the object still carries that exact `FaceId` (a later
-    /// split/merge — or any op that frees and re-inserts the face's slotmap
-    /// slot — can consume it, minting a fresh generation the recorded id
-    /// predates); a default target is live if its object is present and
-    /// visible (an `ObjectId` itself is never re-minted, only hidden, so
-    /// this arm is defensive rather than a known-reachable gap).
-    fn replace_material_targets_live(
+    /// Resolves every recorded [`DocAction::ReplaceMaterial`] face to its
+    /// live handle — before undo OR redo mutates anything, so the batch can
+    /// be refused whole rather than partially applied (rule 9,
+    /// ARCHITECTURE.md §5.7). A face resolves through its [`FaceRef`] on a
+    /// present, visible object; a default target needs its object present
+    /// and visible (an `ObjectId` itself is never re-minted, only hidden, so
+    /// that arm is defensive rather than a known-reachable gap).
+    #[allow(clippy::type_complexity)]
+    fn resolve_replace_material_targets(
         &self,
-        faces: &[(ObjectId, FaceId)],
+        faces: &[(ObjectId, FaceRef)],
+        back_faces: &[(ObjectId, FaceRef)],
         defaults: &[ObjectId],
-    ) -> Result<(), DocumentError> {
-        for &(oid, fid) in faces {
-            let live = self
-                .objects
-                .get(oid)
-                .is_some_and(|r| !r.hidden && r.object.faces.contains_key(fid));
-            if !live {
-                return Err(DocumentError::ReplaceMaterialReplayStale);
-            }
+    ) -> Result<(Vec<(ObjectId, FaceId)>, Vec<(ObjectId, FaceId)>), DocumentError> {
+        let stale = DocumentError::ReplaceMaterialReplayStale;
+        let faces = self.resolve_face_refs(faces, true).ok_or(stale)?;
+        let back_faces = self.resolve_face_refs(back_faces, true).ok_or(stale)?;
+        if defaults
+            .iter()
+            .any(|&oid| self.objects.get(oid).is_none_or(|r| r.hidden))
+        {
+            return Err(stale);
         }
-        for &oid in defaults {
-            if self.objects.get(oid).is_none_or(|r| r.hidden) {
-                return Err(DocumentError::ReplaceMaterialReplayStale);
-            }
-        }
-        Ok(())
+        Ok((faces, back_faces))
     }
 
     /// The [`DocChange`] for a paint of `object`: the object itself, plus — if it
@@ -20693,16 +20747,19 @@ impl Document {
                 }));
                 group_change(group, None, members)
             }
-            &DocAction::PaintFace {
+            DocAction::PaintFace {
                 object, face, prev, ..
             } => {
-                if let Some(f) = self
+                let (object, prev) = (*object, *prev);
+                let Some(fid) = self
                     .objects
-                    .get_mut(object)
-                    .and_then(|r| r.object.faces.get_mut(face))
-                {
-                    f.material = prev;
-                }
+                    .get(object)
+                    .and_then(|r| face.resolve(&r.object))
+                else {
+                    self.undo.push(action);
+                    return Err(DocumentError::UnknownFace);
+                };
+                self.objects[object].object.faces[fid].material = prev;
                 self.paint_change(object)
             }
             &DocAction::SetObjectMaterial { object, prev, .. } => {
@@ -20711,16 +20768,19 @@ impl Document {
                 }
                 self.paint_change(object)
             }
-            &DocAction::SetFaceUvFrame {
+            DocAction::SetFaceUvFrame {
                 object, face, prev, ..
             } => {
-                if let Some(f) = self
+                let (object, prev) = (*object, *prev);
+                let Some(fid) = self
                     .objects
-                    .get_mut(object)
-                    .and_then(|r| r.object.faces.get_mut(face))
-                {
-                    f.uv_frame = prev;
-                }
+                    .get(object)
+                    .and_then(|r| face.resolve(&r.object))
+                else {
+                    self.undo.push(action);
+                    return Err(DocumentError::UnknownFace);
+                };
+                self.objects[object].object.faces[fid].uv_frame = prev;
                 self.paint_change(object)
             }
             DocAction::ReplaceMaterial {
@@ -20731,17 +20791,20 @@ impl Document {
                 ..
             } => {
                 let from = *from;
-                let (faces, back_faces, defaults) =
-                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let defaults = defaults.clone();
+                // All-or-nothing (rule 9): a face that does not resolve
+                // refuses the WHOLE batch typed rather than silently dropping
+                // just that entry and partially restoring the rest — see
+                // `DocAction::ReplaceMaterial`'s doc comment.
+                let (faces, back_faces) =
+                    match self.resolve_replace_material_targets(faces, back_faces, &defaults) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            self.undo.push(action);
+                            return Err(e);
+                        }
+                    };
                 let all = with_backs(&faces, &back_faces);
-                // All-or-nothing (rule 9): a face/default a later structural
-                // op consumed refuses the WHOLE batch typed rather than
-                // silently dropping just that entry and partially restoring
-                // the rest — see `DocAction::ReplaceMaterial`'s doc comment.
-                if let Err(e) = self.replace_material_targets_live(&all, &defaults) {
-                    self.undo.push(action);
-                    return Err(e);
-                }
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = from;
                 }
@@ -20772,13 +20835,16 @@ impl Document {
                 defaults,
             } => {
                 let material = *material;
-                let (faces, back_faces, defaults) =
-                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let defaults = defaults.clone();
+                let (faces, back_faces) =
+                    match self.resolve_material_delete_targets(faces, back_faces, &defaults) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            self.undo.push(action);
+                            return Err(e);
+                        }
+                    };
                 let all = with_backs(&faces, &back_faces);
-                if let Err(e) = self.material_delete_targets_exist(&all, &defaults) {
-                    self.undo.push(action);
-                    return Err(e);
-                }
                 self.deleted_materials.remove(&material);
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = Some(material);
@@ -22089,16 +22155,19 @@ impl Document {
                 let (change, _fresh_action) = self.exit_group_session();
                 change
             }
-            &DocAction::PaintFace {
+            DocAction::PaintFace {
                 object, face, next, ..
             } => {
-                if let Some(f) = self
+                let (object, next) = (*object, *next);
+                let Some(fid) = self
                     .objects
-                    .get_mut(object)
-                    .and_then(|r| r.object.faces.get_mut(face))
-                {
-                    f.material = next;
-                }
+                    .get(object)
+                    .and_then(|r| face.resolve(&r.object))
+                else {
+                    self.redo.push(action);
+                    return Err(DocumentError::UnknownFace);
+                };
+                self.objects[object].object.faces[fid].material = next;
                 self.paint_change(object)
             }
             &DocAction::SetObjectMaterial { object, next, .. } => {
@@ -22107,16 +22176,19 @@ impl Document {
                 }
                 self.paint_change(object)
             }
-            &DocAction::SetFaceUvFrame {
+            DocAction::SetFaceUvFrame {
                 object, face, next, ..
             } => {
-                if let Some(f) = self
+                let (object, next) = (*object, *next);
+                let Some(fid) = self
                     .objects
-                    .get_mut(object)
-                    .and_then(|r| r.object.faces.get_mut(face))
-                {
-                    f.uv_frame = next;
-                }
+                    .get(object)
+                    .and_then(|r| face.resolve(&r.object))
+                else {
+                    self.redo.push(action);
+                    return Err(DocumentError::UnknownFace);
+                };
+                self.objects[object].object.faces[fid].uv_frame = next;
                 self.paint_change(object)
             }
             DocAction::ReplaceMaterial {
@@ -22127,14 +22199,17 @@ impl Document {
                 ..
             } => {
                 let to = *to;
-                let (faces, back_faces, defaults) =
-                    (faces.clone(), back_faces.clone(), defaults.clone());
-                let all = with_backs(&faces, &back_faces);
+                let defaults = defaults.clone();
                 // All-or-nothing (rule 9) — same posture as undo above.
-                if let Err(e) = self.replace_material_targets_live(&all, &defaults) {
-                    self.redo.push(action);
-                    return Err(e);
-                }
+                let (faces, back_faces) =
+                    match self.resolve_replace_material_targets(faces, back_faces, &defaults) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            self.redo.push(action);
+                            return Err(e);
+                        }
+                    };
+                let all = with_backs(&faces, &back_faces);
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = to;
                 }
@@ -22165,13 +22240,16 @@ impl Document {
                 defaults,
             } => {
                 let material = *material;
-                let (faces, back_faces, defaults) =
-                    (faces.clone(), back_faces.clone(), defaults.clone());
+                let defaults = defaults.clone();
+                let (faces, back_faces) =
+                    match self.resolve_material_delete_targets(faces, back_faces, &defaults) {
+                        Ok(resolved) => resolved,
+                        Err(e) => {
+                            self.redo.push(action);
+                            return Err(e);
+                        }
+                    };
                 let all = with_backs(&faces, &back_faces);
-                if let Err(e) = self.material_delete_targets_exist(&all, &defaults) {
-                    self.redo.push(action);
-                    return Err(e);
-                }
                 for &(oid, fid) in &faces {
                     self.objects[oid].object.faces[fid].material = None;
                 }

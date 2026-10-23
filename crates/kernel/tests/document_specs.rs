@@ -3485,14 +3485,205 @@ fn replace_material_noop_does_not_record_undo() {
     );
 }
 
-/// A batched `replace_material` undo/redo refuses WHOLE and typed — never a
-/// partial pre/post mix — if a *later* structural op consumes one of its
-/// recorded `(object, face)` targets before the replay runs (rule 9,
-/// ARCHITECTURE.md §5.7). Also pins the ordinary, non-stale case still
-/// restores/reproduces exactly, so the new validation adds no cost to the
-/// common path.
+/// The faces of `obj` facing +Z, by centroid x — the pieces of a box top
+/// split along x = 0.5 come out left half first.
+fn top_faces(doc: &Document, obj: ObjectId) -> Vec<FaceId> {
+    let object = doc.object(obj).expect("live object");
+    let mut tops: Vec<(f64, FaceId)> = object
+        .faces()
+        .iter()
+        .filter(|(_, f)| f.plane.normal().z > 1.0 - 1e-9)
+        .map(|(id, f)| {
+            let ring: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
+            let cx = ring.iter().map(|p| p.x).sum::<f64>() / ring.len() as f64;
+            (cx, id)
+        })
+        .collect();
+    tops.sort_by(|a, b| a.0.total_cmp(&b.0));
+    tops.into_iter().map(|(_, id)| id).collect()
+}
+
+/// Splits the unit box top of `obj` along x = 0.5.
+fn split_box_top(doc: &mut Document, obj: ObjectId) {
+    let top = face_with_normal(doc, obj, Vec3::new(0.0, 0.0, 1.0));
+    doc.apply_object_op(
+        obj,
+        KernelOp::SplitFace {
+            face: top,
+            path: vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)],
+            restore: None,
+            curves: Vec::new(),
+        },
+    )
+    .expect("split applies");
+}
+
+/// Undoing a split keeps neither original face id, so a paint recorded
+/// before the split must find the rebuilt face by its geometry: paint the
+/// top, split it, undo both, and the top comes back unpainted. Redo puts
+/// the paint back, then the split, whose halves inherit it.
 #[test]
-fn replace_material_undo_refuses_whole_batch_when_a_recorded_face_goes_stale() {
+fn undoing_a_paint_after_a_split_and_its_undo_unpaints_the_face() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(o, top, Some(red)).unwrap();
+    split_box_top(&mut doc, o);
+    doc.undo().expect("undo the split");
+    assert!(
+        !top_faces(&doc, o).contains(&top),
+        "the merge rebuilt the top under a fresh id"
+    );
+
+    doc.undo().expect("undo the paint");
+    let tops = top_faces(&doc, o);
+    assert_eq!(tops.len(), 1);
+    assert_eq!(doc.face_material(o, tops[0]), None, "the paint is undone");
+
+    doc.redo().expect("redo the paint");
+    assert_eq!(doc.face_material(o, top_faces(&doc, o)[0]), Some(red));
+    doc.redo().expect("redo the split");
+    for half in top_faces(&doc, o) {
+        assert_eq!(doc.face_material(o, half), Some(red), "both halves inherit");
+    }
+}
+
+/// Redoing a split mints fresh halves, so a paint on one half must find its
+/// half again by geometry: split, paint the left half, undo both, redo
+/// both, and the left half (only) is painted. Run twice, so the second
+/// round replays against ids the first round re-minted.
+#[test]
+fn redoing_a_paint_on_half_a_split_paints_the_same_half() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    split_box_top(&mut doc, o);
+    let left = top_faces(&doc, o)[0];
+    doc.paint_face(o, left, Some(red)).unwrap();
+
+    for round in 0..2 {
+        doc.undo().expect("undo the paint");
+        doc.undo().expect("undo the split");
+        let tops = top_faces(&doc, o);
+        assert_eq!(tops.len(), 1);
+        assert_eq!(doc.face_material(o, tops[0]), None, "round {round}");
+
+        doc.redo().expect("redo the split");
+        doc.redo().expect("redo the paint");
+        let halves = top_faces(&doc, o);
+        assert_eq!(halves.len(), 2);
+        assert_eq!(
+            doc.face_material(o, halves[0]),
+            Some(red),
+            "round {round}: left"
+        );
+        assert_eq!(
+            doc.face_material(o, halves[1]),
+            None,
+            "round {round}: right"
+        );
+    }
+}
+
+/// Position Texture records its face the same way as paint: set a frame on
+/// the top, split it, undo both, and the top has no frame; redo restores it.
+#[test]
+fn undoing_a_texture_frame_after_a_split_and_its_undo_clears_it() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    let frame = UvFrame::new(
+        Vec3::new(2.0, 0.0, 0.0),
+        Vec3::new(0.0, 2.0, 0.0),
+        0.25,
+        0.5,
+    );
+    doc.set_face_uv_frame(o, top, Some(frame)).unwrap();
+    split_box_top(&mut doc, o);
+    doc.undo().expect("undo the split");
+
+    doc.undo().expect("undo the frame");
+    let rebuilt = top_faces(&doc, o)[0];
+    assert_eq!(
+        doc.face_uv_frame(o, rebuilt),
+        Some(None),
+        "the frame is undone"
+    );
+
+    doc.redo().expect("redo the frame");
+    assert_eq!(
+        doc.face_uv_frame(o, top_faces(&doc, o)[0]),
+        Some(Some(frame))
+    );
+}
+
+/// The half-split case for Position Texture: split, set a frame on the left
+/// half, undo both, redo both, and the left half (only) has the frame.
+#[test]
+fn redoing_a_texture_frame_on_half_a_split_sets_the_same_half() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    split_box_top(&mut doc, o);
+    let left = top_faces(&doc, o)[0];
+    let frame = UvFrame::new(
+        Vec3::new(2.0, 0.0, 0.0),
+        Vec3::new(0.0, 2.0, 0.0),
+        0.25,
+        0.5,
+    );
+    doc.set_face_uv_frame(o, left, Some(frame)).unwrap();
+
+    for round in 0..2 {
+        doc.undo().expect("undo the frame");
+        doc.undo().expect("undo the split");
+        doc.redo().expect("redo the split");
+        doc.redo().expect("redo the frame");
+        let halves = top_faces(&doc, o);
+        assert_eq!(halves.len(), 2);
+        assert_eq!(
+            doc.face_uv_frame(o, halves[0]),
+            Some(Some(frame)),
+            "round {round}: left"
+        );
+        assert_eq!(
+            doc.face_uv_frame(o, halves[1]),
+            Some(None),
+            "round {round}: right"
+        );
+    }
+}
+
+/// Deleting a material clears the faces that used it; undoing the delete
+/// after a split and its undo re-minted one of those faces finds the face by
+/// geometry and restores its paint, and redo clears it again.
+#[test]
+fn undoing_a_material_delete_restores_a_face_a_split_undo_re_minted() {
+    let mut doc = Document::new();
+    let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let red = doc.add_material(Material::solid("Red", Rgba8::rgb(220, 30, 30)));
+    let top = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
+    doc.paint_face(o, top, Some(red)).unwrap();
+    doc.delete_material(red).unwrap();
+    split_box_top(&mut doc, o);
+    doc.undo().expect("undo the split");
+    assert!(!top_faces(&doc, o).contains(&top));
+
+    doc.undo().expect("undo the delete");
+    assert!(doc.material(red).is_some(), "the material is back");
+    assert_eq!(doc.face_material(o, top_faces(&doc, o)[0]), Some(red));
+
+    doc.redo().expect("redo the delete");
+    assert!(doc.material(red).is_none());
+    assert_eq!(doc.face_material(o, top_faces(&doc, o)[0]), None);
+}
+
+/// A batched `replace_material` undo/redo finds each recorded face again by
+/// geometry when a structural undo in between re-minted it, and still
+/// restores and reproduces the whole batch exactly. Also pins the ordinary,
+/// immediate undo/redo, where every recorded id is still live.
+#[test]
+fn replace_material_undo_finds_a_face_a_split_undo_re_minted() {
     let mut doc = Document::new();
     let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let f0 = face_with_normal(&doc, o, Vec3::new(0.0, 0.0, 1.0));
@@ -3509,63 +3700,31 @@ fn replace_material_undo_refuses_whole_batch_when_a_recorded_face_goes_stale() {
     assert_eq!(doc.face_material(o, f0), Some(blue));
     assert_eq!(doc.face_material(b, fb0), Some(blue));
 
-    // The non-stale case: undo/redo bracketing THIS call, immediately,
-    // restores/reproduces exactly (the common path the fix must not
-    // regress).
-    doc.undo().expect("non-stale undo restores exactly");
+    doc.undo().expect("immediate undo restores exactly");
     assert_eq!(doc.face_material(o, f0), Some(red));
     assert_eq!(doc.face_material(b, fb0), Some(red));
-    doc.redo().expect("non-stale redo reproduces exactly");
+    doc.redo().expect("immediate redo reproduces exactly");
     assert_eq!(doc.face_material(o, f0), Some(blue));
     assert_eq!(doc.face_material(b, fb0), Some(blue));
 
-    // Now a LATER, independent structural op consumes `f0`: split it in
-    // two, then undo the split. `merge_faces` (the split's inverse) keeps
-    // one child and drops the other — empirically the ORIGINAL id, `f0`,
-    // is the one dropped, minting a fresh survivor in its place. `f0` is
-    // now permanently stale: the exact "creating structural op undone /
-    // redone" drift `document_fuzz.rs`'s `doc_fingerprint` doc comment
-    // describes for `PaintFace` — but never silently tolerated here.
-    let path = vec![Point3::new(0.5, 0.0, 1.0), Point3::new(0.5, 1.0, 1.0)];
-    doc.apply_object_op(
-        o,
-        KernelOp::SplitFace {
-            face: f0,
-            path,
-            restore: None,
-            curves: Vec::new(),
-        },
-    )
-    .expect("split applies");
+    // A later split of `f0`, undone: the merge drops `f0` and mints a fresh
+    // survivor with the same geometry.
+    split_box_top(&mut doc, o);
     doc.undo().expect("undo the split (merge)");
     assert!(
-        doc.object(o).unwrap().faces().keys().all(|f| f != f0),
+        !top_faces(&doc, o).contains(&f0),
         "f0 must be gone — the merge minted a fresh survivor, not f0"
     );
 
-    // Undoing `replace_material` now must refuse WHOLE and typed rather
-    // than silently reverting only `b` (the still-live target) while
-    // leaving `o`'s stale-recorded face at `blue` — an atomic-looking undo
-    // that actually mixed pre/post state.
-    let fingerprint_before = doc.save();
-    let err = doc
-        .undo()
-        .expect_err("a stale recorded face refuses the whole undo");
-    assert_eq!(err, DocumentError::ReplaceMaterialReplayStale);
-    assert_eq!(
-        doc.save(),
-        fingerprint_before,
-        "the document is byte-identical/untouched after the refusal"
-    );
-    assert_eq!(
-        doc.face_material(b, fb0),
-        Some(blue),
-        "the still-live target is NOT partially reverted"
-    );
-    assert!(
-        doc.can_undo(),
-        "the action stays on the undo stack rather than being dropped"
-    );
+    doc.undo()
+        .expect("the replace undoes onto the rebuilt face");
+    let rebuilt = top_faces(&doc, o)[0];
+    assert_eq!(doc.face_material(o, rebuilt), Some(red));
+    assert_eq!(doc.face_material(b, fb0), Some(red));
+
+    doc.redo().expect("and redoes onto it");
+    assert_eq!(doc.face_material(o, rebuilt), Some(blue));
+    assert_eq!(doc.face_material(b, fb0), Some(blue));
 }
 
 // -------------------------------- extrusion deletes the scaffolding

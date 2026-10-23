@@ -7,10 +7,10 @@
 use std::collections::BTreeMap;
 
 use kernel::{
-    AttrValue, CurveAnalytic, CurveGeom, DefRecipe, DisplayState, Document, EntityRef,
+    AttrValue, CurveAnalytic, CurveGeom, DefRecipe, DisplayState, Document, EntityRef, FaceId,
     ImportAttrTarget, ImportNode, ImportScene, ImportSceneRecipe, ImportSketch, ImportTag,
-    Material, MeshExtra, MeshRecipe, NodeId, Plane, Point3, Rgba8, SketchCurveKind, SurfaceRef,
-    Transform, Vec3,
+    KernelOp, Material, MaterialScope, MeshExtra, MeshRecipe, NodeId, Plane, Point3, Rgba8,
+    SketchCurveKind, SurfaceRef, Transform, Vec3,
 };
 
 const N: usize = 12;
@@ -671,6 +671,66 @@ fn a_hidden_member_is_hidden_in_every_placement() {
             ("post".to_string(), false),
         ]
     );
+}
+
+/// Replace Material repaints a face's back too. Undoing it after a split
+/// of that face and the split's undo (which rebuilds the face under a new
+/// handle) finds the face by its geometry and restores the back; redo
+/// repaints it again.
+#[test]
+fn replace_material_undo_restores_a_back_on_a_face_a_split_undo_re_minted() {
+    let no = kernel::NO_MATERIAL;
+    let recipe = split_top_box(MeshExtra {
+        face_back_materials: vec![0, no, no, no, no, no, no],
+        ..Default::default()
+    });
+    let mut s = scene(vec![ImportNode::Mesh(recipe)]);
+    s.materials = vec![Material::solid("Blue", Rgba8::rgba(0, 0, 255, 255))];
+    let mut doc = Document::new();
+    doc.ingest(s, Vec::new()).unwrap();
+    let oid = doc.visible_object_ids()[0];
+    let bottom = |doc: &Document| {
+        let faces: Vec<FaceId> = doc
+            .object(oid)
+            .unwrap()
+            .faces()
+            .iter()
+            .filter(|(_, f)| f.plane.normal().z < -1.0 + 1e-9)
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(faces.len(), 1);
+        faces[0]
+    };
+    let back = |doc: &Document| doc.object(oid).unwrap().faces()[bottom(doc)].back_material;
+    let blue = back(&doc).expect("the import painted the bottom's back");
+    let green = doc.add_material(Material::solid("Green", Rgba8::rgba(0, 255, 0, 255)));
+
+    doc.replace_material(MaterialScope::Document, Some(blue), Some(green))
+        .unwrap();
+    assert_eq!(back(&doc), Some(green));
+    let f = bottom(&doc);
+    doc.apply_object_op(
+        oid,
+        KernelOp::SplitFace {
+            face: f,
+            path: vec![Point3::new(0.5, 0.0, 0.0), Point3::new(0.5, 1.0, 0.0)],
+            restore: None,
+            curves: Vec::new(),
+        },
+    )
+    .expect("split the bottom");
+    doc.undo().expect("undo the split");
+    assert_ne!(
+        bottom(&doc),
+        f,
+        "the merge rebuilt the bottom under a fresh id"
+    );
+
+    doc.undo()
+        .expect("the replace undoes onto the rebuilt bottom");
+    assert_eq!(back(&doc), Some(blue));
+    doc.redo().expect("and redoes onto it");
+    assert_eq!(back(&doc), Some(green));
 }
 
 #[test]

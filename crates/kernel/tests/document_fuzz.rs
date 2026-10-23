@@ -1128,14 +1128,11 @@ fn add_box(doc: &mut Document, x: f64, y: f64, dx: f64, dy: f64, h: f64) -> Obje
 ///   never fire again. If it ever does, that is a regression, not a
 ///   tolerated gap — letting it fail loudly here is the correct trap
 ///   posture, so `PlaceTextCompound` is not matched below.
-/// - `DocumentError::ReplaceMaterialReplayStale`: this harness's own
-///   full-log unwind-and-replay (twice) is exactly the shape that can churn
-///   a `replace_material` batch's recorded face stale — split/merge one of
-///   its target faces via an unrelated later op, then unwind past both —
-///   the same drift `doc_fingerprint`'s doc comment describes for
-///   `PaintFace`. The error is unambiguous (only this one replay path
-///   produces it), so no `peek` is needed to confirm which action is
-///   pending, unlike the `UnbuildPushPull` signature below.
+///
+/// Material replays are deliberately not tolerated: a face-attribute action
+/// finds its face again by geometry when a structural undo or redo in
+/// between re-mints the handle, so `ReplaceMaterialReplayStale` (and
+/// `UnknownFace` from a paint or Position Texture replay) means a kernel bug.
 fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> bool {
     if matches!(e, DocumentError::Sketch(SketchError::RestoreConflicts)) {
         let pending = if redo {
@@ -1144,9 +1141,6 @@ fn is_known_inverse_guard_gap(doc: &Document, e: &DocumentError, redo: bool) -> 
             doc.peek_undo_action_kind()
         };
         return matches!(pending, Some(PendingActionKind::CreatedObject));
-    }
-    if matches!(e, DocumentError::ReplaceMaterialReplayStale) {
-        return true;
     }
     let signature = matches!(
         e,
@@ -1281,32 +1275,15 @@ fn check_save_and_sketch_owners(doc: &Document, what: &str) -> Result<(), TestCa
 /// Canonical, slot-order-independent document fingerprint: per visible
 /// object, its sorted vertex positions (rounded well below any op tolerance)
 /// and sorted face sizes; plus node/instance/component counts. Two documents
-/// with equal fingerprints are the same model up to handle renaming.
+/// with equal fingerprints are the same model up to object and face handle
+/// renaming (material handles print as they are; they never change within a
+/// document).
 ///
-/// Deliberately does NOT include face/object material state. A scratch
-/// repro (split a face, paint one child, then unwind-and-replay the WHOLE
-/// document log twice) pinned down a pre-existing, orthogonal gap: a
-/// face-level attribute recorded against a `FaceId` survives its own
-/// immediate undo/redo perfectly, but if an EARLIER structural op that
-/// created that face is *itself* undone and redone in a later cycle, the
-/// redo mints a fresh slotmap generation for the face — the paint action's
-/// recorded handle goes stale and its restore silently no-ops (`if let
-/// Some(f) = ...get_mut(face)`, the same guard `PaintFace`'s undo/redo has
-/// always used). This affects `PaintFace` identically; it is not introduced
-/// by `replace_material`. `replace_material`'s OWN batched undo/redo replay
-/// no longer shares the silent-no-op half of this gap — a stale recorded
-/// face now refuses the WHOLE batch typed
-/// (`DocumentError::ReplaceMaterialReplayStale`, tolerated by
-/// `is_known_inverse_guard_gap` below) rather than partially applying the
-/// rest, so this harness's full double-unwind/replay can hit that typed
-/// refusal and abandon the round-trip for the case instead of silently
-/// drifting — see `document_specs.rs` for the exact repro and the local
-/// round-trip check below for the immediate-bracketing (never-stale) case.
-/// It is still not a safe place to assert material fidelity across the full
-/// unwind/replay, since `PaintFace`'s own silent-no-op half of the gap is
-/// unaffected and unaddressed here — a face-handle stability question that
-/// reaches split/boolean/push-through undo broadly, well past paint-tool
-/// Phase 1's scope.
+/// Each face's front and back material and texture frame are part of it,
+/// keyed by the face's outer-loop positions, so a paint, Replace Material,
+/// Delete Material or Position Texture that a full unwind and replay fails to
+/// restore shows up as a mismatch. Those actions find their face again by
+/// geometry when a structural undo or redo in between re-mints its handle.
 fn doc_fingerprint(doc: &Document) -> String {
     let q = |c: f64| (c * 1e7).round() as i64;
     let object_print = |oid: ObjectId| {
@@ -1316,7 +1293,24 @@ fn doc_fingerprint(doc: &Document) -> String {
         vs.sort_unstable();
         let mut sizes: Vec<usize> = faces.iter().map(Vec::len).collect();
         sizes.sort_unstable();
-        format!("{vs:?}|{sizes:?}")
+        let mut paint: Vec<String> = obj
+            .faces()
+            .values()
+            .map(|f| {
+                let mut ring: Vec<(i64, i64, i64)> = obj
+                    .loop_positions(f.outer_loop)
+                    .map(|p| (q(p.x), q(p.y), q(p.z)))
+                    .collect();
+                ring.sort_unstable();
+                // A Move maps the frame, so its undo carries float noise.
+                let frame = f
+                    .uv_frame
+                    .map(|u| [u.s.x, u.s.y, u.s.z, u.t.x, u.t.y, u.t.z, u.u0, u.v0].map(q));
+                format!("{ring:?}:{:?}/{:?}/{frame:?}", f.material, f.back_material)
+            })
+            .collect();
+        paint.sort_unstable();
+        format!("{vs:?}|{sizes:?}|{paint:?}")
     };
     let mut objects: Vec<String> = doc
         .visible_object_ids()
@@ -3821,8 +3815,10 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
 
     check_persistence(&doc, "post-sequence")?;
 
-    // Unwind the whole document log, replay it, and do both again; both
-    // ends must reproduce the same canonical fingerprint, and every
+    // Unwind the whole document log, replay it, and do both again; the
+    // first replay must reproduce what redoing just the steps the ops left
+    // undone gives, both ends of the second cycle must reproduce the
+    // first's, and every
     // undo/redo must succeed (rule 9), with the single tolerated
     // exception of the `UnbuildPushPull` gap — `Ok(false)` means it fired
     // and the round-trip is abandoned for this case (the document stays
@@ -3863,6 +3859,17 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         Ok(true)
     };
 
+    // The ops interleave undo and redo, so the state they leave can have
+    // steps pending on the redo stack; a full replay redoes those too.
+    // Redoing them on a copy gives the state the full cycle must match,
+    // without going through a full unwind.
+    let mut built = doc.clone();
+    if !replay(&mut built, "pending redo")? {
+        return Ok(());
+    }
+    let built_print = doc_fingerprint(&built);
+    drop(built);
+
     if !unwind(&mut doc, "first unwind")? {
         return Ok(());
     }
@@ -3872,6 +3879,11 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         return Ok(());
     }
     let maximal_print = doc_fingerprint(&doc);
+    prop_assert_eq!(
+        &maximal_print,
+        &built_print,
+        "the first full redo did not reproduce the state the ops built"
+    );
     check_persistence(&doc, "maximal")?;
 
     if !unwind(&mut doc, "second unwind")? {
