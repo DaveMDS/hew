@@ -12,6 +12,7 @@
 # seriously if you touched the render path.
 #
 #   verify.sh            fmt, clippy, cargo test, wasm (web), vitest, builds, tauri
+#   cargo-deny           advisories (incl. yanked crates) for both cargo trees
 #   replay gate          node-target wasm + golden state-hash fixtures
 #   web E2E (chromium)   Playwright — the blocking functional browser lane
 #   relay contract       scripts/relay-contract.sh — the share-relay Worker's
@@ -53,6 +54,30 @@ else
   echo "=== scripts/verify.sh (standard gate) ==="
   scripts/verify.sh
 fi
+
+# Dependency advisories — mirrors audit.yml's cargo-deny matrix, advisories
+# section only (the job also runs bans, licenses and sources, which are not
+# gated here). Advisories include yanked crates, and a yank can land on a lock
+# that was green last week, so this must run before push, not only in the
+# daily Audit workflow.
+#
+# cargo-deny reads yank status from cargo's sparse-index cache and never
+# revalidates it, so a cached entry from before a yank passes locally while
+# CI fails. There is no cargo-deny flag to force a refresh. Removing the index
+# cache makes cargo refetch the entries the check needs: slower, but correct.
+# The cache is only a cache, and cargo rebuilds it.
+echo "=== cargo-deny (advisories, both trees) ==="
+DENY_VERSION="0.20.2"
+HAVE_DENY="$(cargo-deny --version 2>/dev/null | awk '{print $2}' || true)"
+if [ "$HAVE_DENY" != "$DENY_VERSION" ]; then
+  echo "verify-full: FAILED — cargo-deny is '${HAVE_DENY:-not installed}', pinned is '$DENY_VERSION'."
+  echo "Install the pinned version with:"
+  echo "  cargo install cargo-deny --version $DENY_VERSION --locked"
+  exit 1
+fi
+rm -rf "${CARGO_HOME:-$HOME/.cargo}"/registry/index/*/.cache
+cargo deny --config deny.toml --all-features check advisories
+cargo deny --manifest-path shells/tauri/src-tauri/Cargo.toml --config deny.toml --all-features check advisories
 
 # Replay gate — mirrors ci.yml. The runner consumes `--target nodejs`
 # (CommonJS) bindings, a build distinct from verify.sh's `--target web` app
