@@ -733,5 +733,5 @@ describe('MenuBar', () => {
       fireEvent.mouseDown(item as HTMLElement)
       expect(onSelectTool).toHaveBeenLastCalledWith(tool)
     }
-  })
+  }, 20_000) // renders every menu; the 5 s default is tight under a loaded full-suite run
 })

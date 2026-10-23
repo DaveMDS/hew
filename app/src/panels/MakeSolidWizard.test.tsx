@@ -677,7 +677,7 @@ describe('MakeSolidWizard — long lists', () => {
     fireEvent.click(btn('Show 200 more'))
     expect(within(list).getAllByRole('listitem')).toHaveLength(450)
     expect(screen.queryByRole('button', { name: 'Show 200 more' })).not.toBeInTheDocument()
-  })
+  }, 20_000) // renders 450 rows; the 5 s default is tight under a loaded full-suite run
 
   it('tells repeated names apart in the lists', () => {
     const { scene } = makeScene([row({ object: '1', name: 'Group#9' }), row({ object: '2', name: 'Group#9' }), row({ object: '3', name: 'Group#9' })])

@@ -137,7 +137,7 @@ test('Purge Unused previews what would go, then removes it as one undo step and 
 
   await page.getByRole('button', { name: 'Purge', exact: true }).click()
   await expect(page.getByRole('dialog')).toHaveCount(0)
-  await expect(page.getByText('Purged 1 definitions, 1 materials.')).toBeVisible()
+  await expect(page.getByText('Purged 1 definition, 1 material.')).toBeVisible()
 
   expect(await page.evaluate(() => window.__hew_test!.getComponentIds())).toEqual([])
   expect(await page.evaluate(() => window.__hew_test!.unusedMaterials())).toEqual([])

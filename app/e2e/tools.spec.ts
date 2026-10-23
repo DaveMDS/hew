@@ -1253,7 +1253,7 @@ test('Guides (Tape Measure): Ctrl/Cmd held completes the measurement without cre
   await page.mouse.move(a.x, a.y)
   await page.mouse.down() // first point
   await page.mouse.up()
-  await expect(page.getByText('measuring only, no guide will be created', { exact: false })).toBeVisible()
+  await expect(page.getByText('Measuring only; no guide will be created', { exact: false })).toBeVisible()
   await page.mouse.move(b.x, b.y, { steps: 8 }) // hover the second point live
   await page.mouse.down() // second point — would normally drop a guide point + line
   await page.mouse.up()
