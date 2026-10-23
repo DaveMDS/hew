@@ -40,7 +40,9 @@ import { rayPlaneIntersect } from '../viewport/geoHelpers'
 import { axisDrawPlane } from './drawPlane'
 import { getDrawingAxes } from './drawingAxes'
 import { FacePickCache, worldFacePlane, snapOnObjectBoundary } from './faceDraw'
-import { nextIdlePlaneLock, editLengthBuffer, isLengthInputKey, AXIS_LOCK_COLOR_NAMES } from './moveInput'
+import { t } from '@lingui/core/macro'
+import { formatNumber } from '../i18n/format'
+import { nextIdlePlaneLock, editLengthBuffer, isLengthInputKey, axisLockColorName } from './moveInput'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
@@ -99,7 +101,7 @@ export const PICTURE_MAX_SIDE_M = 1e6
  *  does not print 300 digits). */
 function metersText(m: number): string {
   if (m >= 1e15) return m.toExponential(2).replace('e+', 'e')
-  return m.toLocaleString('en-US', { maximumFractionDigits: 3 })
+  return formatNumber(m, { maxFractionDigits: 3 })
 }
 
 /** The plane a picture lies on, with the picture's own axes: `u` along its
@@ -221,12 +223,14 @@ export class PlaceImageTool implements Tool {
 
   statusHint(): string {
     if (this.stage.kind === 'anchored') {
-      return 'Click the opposite corner — or type the width and press Enter.'
+      return t`Click the opposite corner — or type the width and press Enter.`
     }
     if (this.idlePlaneLock !== null) {
-      return `Locked to the ${AXIS_LOCK_COLOR_NAMES[this.idlePlaneLock]} plane — click the first corner; same arrow or Esc unlocks.`
+      const axis = axisLockColorName(this.idlePlaneLock)
+      return t`Locked to the ${axis} plane — click the first corner; same arrow or Esc unlocks.`
     }
-    return `Click the first corner of "${this.placement.name}" — on the ground or any face. Esc cancels.`
+    const name = this.placement.name
+    return t`Click the first corner of "${name}" — on the ground or any face. Esc cancels.`
   }
 
   /** Armed until it places or is cancelled: Escape belongs to the
@@ -334,13 +338,18 @@ export class PlaceImageTool implements Tool {
   private refuseBadSize(width: number): boolean {
     const height = width / this.aspect
     if (width > PICTURE_MAX_SIDE_M || height > PICTURE_MAX_SIDE_M) {
+      const w = metersText(width)
+      const h = metersText(height)
+      const max = metersText(PICTURE_MAX_SIDE_M)
       this.onToast(
-        `The picture would be ${metersText(width)} \u00d7 ${metersText(height)} m, and each side must be at most ${metersText(PICTURE_MAX_SIDE_M)} m. Drag it out smaller or type a smaller width.`,
+        t`The picture would be ${w} × ${h} m, and each side must be at most ${max} m. Drag it out smaller or type a smaller width.`,
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
         'ImageTooBig',
       )
       return true
     }
     if (width >= PICTURE_MIN_SIDE_M && height >= PICTURE_MIN_SIDE_M) return false
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
     this.onToast(kernelErrorMessage('ImageTooSmall', ''), 'ImageTooSmall')
     return true
   }

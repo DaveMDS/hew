@@ -1388,14 +1388,15 @@ function MaterialsRow({
   scene: WasmScene
   onSelect?: (id: bigint) => void
 }) {
+  const { t } = useLingui()
   const [expanded, setExpanded] = useState(false)
   const shown = expanded ? ids : ids.slice(0, MAX_MATERIAL_SWATCHES)
   const hidden = ids.length - shown.length
   return (
     <div data-testid="object-info-materials">
-      <div style={LABEL_STYLE}>Materials</div>
+      <div style={LABEL_STYLE}><Trans>Materials</Trans></div>
       {ids.length === 0 ? (
-        <div style={{ ...VALUE_STYLE, color: 'var(--text-secondary, #ccc)' }}>None</div>
+        <div style={{ ...VALUE_STYLE, color: 'var(--text-secondary, #ccc)' }}><Trans>None</Trans></div>
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
           {shown.map((id) => {
@@ -1407,7 +1408,7 @@ function MaterialsRow({
               <button
                 key={id.toString()}
                 data-testid="material-entry"
-                title="Show in Materials pane"
+                title={t`Show in Materials pane`}
                 onClick={() => onSelect?.(id)}
                 style={{
                   display: 'flex',
@@ -1451,7 +1452,7 @@ function MaterialsRow({
                 fontFamily: 'var(--font-family-ui)',
               }}
             >
-              +{hidden} more
+              <Trans>+{hidden} more</Trans>
             </button>
           )}
         </div>

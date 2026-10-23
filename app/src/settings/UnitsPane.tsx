@@ -106,7 +106,7 @@ export function UnitsPane() {
         </select>
       </SettingsRow>
 
-      <SettingsRow label="Precision" htmlFor="settings-units-precision">
+      <SettingsRow label={t`Precision`} htmlFor="settings-units-precision">
         <select
           id="settings-units-precision"
           value={String(getPrecision(format))}

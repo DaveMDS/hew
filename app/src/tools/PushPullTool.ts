@@ -439,6 +439,7 @@ export class PushPullTool implements Tool {
     const over = hit?.region.over ?? null
     if (over === null || over.object !== object) return face
     if (over.face !== null) return over.face
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel refusal codes, not copy
     return { refuse: over.why === 'sliver' ? 'RegionSliver' : 'RegionNotPushable' }
   }
 

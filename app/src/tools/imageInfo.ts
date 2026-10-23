@@ -130,5 +130,6 @@ export function isPictureFileName(name: string): boolean {
 export function pictureName(fileName: string): string {
   const base = (fileName.split(/[/\\]/).pop() ?? fileName).trim()
   const stem = base.replace(/\.(png|jpe?g)$/i, '').trim()
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- stored default name, matches the Rust side
   return stem === '' ? 'Image' : stem
 }

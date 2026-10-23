@@ -3162,7 +3162,7 @@ fn main() {
                 handle,
                 &mut gated,
                 "file-revert",
-                "Revert to Saved",
+                lbl!("file-revert"),
                 None,
                 None,
             )?;
@@ -3538,12 +3538,19 @@ fn main() {
             )?;
             // Whole-model render modes: independent checkable toggles, no
             // accelerators (SketchUp binds none), per window, never saved.
-            let view_xray = check_item(handle, &mut checks, "view-xray", "X-ray", None, None)?;
+            let view_xray = check_item(
+                handle,
+                &mut checks,
+                "view-xray",
+                lbl!("view-xray"),
+                None,
+                None,
+            )?;
             let view_wireframe = check_item(
                 handle,
                 &mut checks,
                 "view-wireframe",
-                "Wireframe",
+                lbl!("view-wireframe"),
                 None,
                 None,
             )?;

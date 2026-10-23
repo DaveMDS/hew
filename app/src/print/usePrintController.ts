@@ -442,7 +442,7 @@ export function usePrintController({ getViewportApi, getScene, getScenes, docume
       // nothing of X-ray or Wireframe, so those modes print as a bitmap of
       // what is on screen.
       if (modeForcesBitmap(api)) {
-        return { svgs: [], drawing: null, annotations: null, fallbackNote: 'Line art printed as a bitmap — X-ray and Wireframe print as shown on screen.' }
+        return { svgs: [], drawing: null, annotations: null, fallbackNote: t`Line art printed as a bitmap — X-ray and Wireframe print as shown on screen.` }
       }
       const res = requestLineDrawing({
         scene,

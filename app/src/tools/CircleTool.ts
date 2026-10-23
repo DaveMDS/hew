@@ -114,8 +114,8 @@ export type OnToast = (message: string, code?: string) => void
  *  leaves a sliver too thin for a face, so that part stays as drawing. (A
  *  circle touching the face's edge or another shape at one point is a face
  *  and never reaches this.) */
-export const CIRCLE_KEPT_AS_DRAWING_MESSAGE =
-  'Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger.'
+export const circleKeptAsDrawingMessage = (): string =>
+  t`Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger.`
 
 export type OnMeasurement = (text: string) => void
 
@@ -1107,7 +1107,7 @@ export class CircleTool implements Tool {
       // An island the face could not hold (a sliver) stays as drawing; say
       // so now rather than leave the circle silently loose.
       if (target.kind === 'face' && report.keptAsSketch.length > 0) {
-        this.onToast(CIRCLE_KEPT_AS_DRAWING_MESSAGE)
+        this.onToast(circleKeptAsDrawingMessage())
       }
       return true
     } catch (err) {

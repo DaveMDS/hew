@@ -213,7 +213,7 @@ describe('Revert to Saved menu item parity', () => {
   const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
 
   it('file-revert is a gated native item, attached right after Save As, dispatching to revert-to-saved', () => {
-    const binding = /let\s+(\w+)\s*=\s*gated_item\(\s*handle,\s*&mut \w+,\s*"file-revert",\s*"Revert to Saved"/.exec(source)
+    const binding = /let\s+(\w+)\s*=\s*gated_item\(\s*handle,\s*&mut \w+,\s*"file-revert",\s*lbl!\("file-revert"\)/.exec(source)
     expect(binding, 'no gated_item binding found for file-revert').not.toBeNull()
     const variable = (binding as RegExpExecArray)[1]
     expect(

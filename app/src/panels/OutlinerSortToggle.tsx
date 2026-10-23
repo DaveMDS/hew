@@ -6,6 +6,7 @@
  * never makes the row taller.
  */
 import { useRef } from 'react'
+import { useLingui } from '@lingui/react/macro'
 import { OUTLINER_SORT_LABELS, type OutlinerSort } from '../settings/view'
 
 const MODES: OutlinerSort[] = ['document', 'name', 'kind']
@@ -75,6 +76,7 @@ export function OutlinerSortToggle({
   value: OutlinerSort
   onChange: (next: OutlinerSort) => void
 }) {
+  const { t, i18n } = useLingui()
   const refs = useRef<Partial<Record<OutlinerSort, HTMLButtonElement | null>>>({})
 
   function onKeyDown(e: React.KeyboardEvent, mode: OutlinerSort): void {
@@ -92,8 +94,8 @@ export function OutlinerSortToggle({
   return (
     <div
       role="radiogroup"
-      aria-label="Sort outliner"
-      title="Sort outliner"
+      aria-label={t`Sort outliner`}
+      title={t`Sort outliner`}
       data-testid="outliner-sort"
       style={{
         display: 'flex',
@@ -118,8 +120,8 @@ export function OutlinerSortToggle({
             type="button"
             role="radio"
             aria-checked={on}
-            aria-label={OUTLINER_SORT_LABELS[mode]}
-            title={OUTLINER_SORT_LABELS[mode]}
+            aria-label={i18n._(OUTLINER_SORT_LABELS[mode])}
+            title={i18n._(OUTLINER_SORT_LABELS[mode])}
             tabIndex={on ? 0 : -1}
             onClick={() => onChange(mode)}
             onKeyDown={(e) => onKeyDown(e, mode)}

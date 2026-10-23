@@ -142,7 +142,7 @@ function flatBulgeHint(): string {
 
 /** Toast for a typed chord length with no direction to apply it in: the
  *  cursor is still on A (`_commitTypedPlaneChord`/`_commitTypedFaceChord`). */
-const ARC_NO_DIRECTION_MESSAGE = 'Move the cursor to point the arc, then type the length.'
+const arcNoDirectionMessage = (): string => t`Move the cursor to point the arc, then type the length.`
 
 /** The same refusal when the cursor IS pointing, but straight off the arc's
  *  plane, so dropped onto the plane it lands on A: a snap straight off a
@@ -153,8 +153,8 @@ const ARC_NO_DIRECTION_MESSAGE = 'Move the cursor to point the arc, then type th
  *  never does: a cursor straight over it re-homes the arc (`_planeCursor`).
  *  A click there gets the same toast (`_onPointerDownPlane`). An arrow key
  *  re-locks the plane through A (chord stage only). */
-const ARC_OFF_PLANE_MESSAGE =
-  'An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length.'
+const arcOffPlaneMessage = (): string =>
+  t`An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length.`
 
 /** How far (metres) a snap may sit from straight over a ground A and still
  *  count as on the Blue axis through it (`_isStraightOverA`) — the same
@@ -1035,7 +1035,7 @@ export class ArcTool implements Tool {
     const cursor = this._lastPlaneCursor
     const dir = cursor === null ? null : directionBetween(a, cursor)
     if (cursor === null || dir === null) {
-      this.onToast(cursor !== null && this._snapProjected ? ARC_OFF_PLANE_MESSAGE : ARC_NO_DIRECTION_MESSAGE)
+      this.onToast(cursor !== null && this._snapProjected ? arcOffPlaneMessage() : arcNoDirectionMessage())
       return
     }
     const endpoint = pointAlong(a, dir, distance)
@@ -1079,7 +1079,7 @@ export class ArcTool implements Tool {
     const { a } = this.faceStage
     const dir = cursor === null ? null : directionBetween(a, cursor)
     if (cursor === null || dir === null) {
-      this.onToast(ARC_NO_DIRECTION_MESSAGE)
+      this.onToast(arcNoDirectionMessage())
       return
     }
     const endpoint = pointAlong(a, dir, distance)
@@ -1323,7 +1323,7 @@ export class ArcTool implements Tool {
       // A snap dropped onto the plane right at A (straight over it, on a
       // plane that holds) is refused aloud, not dropped as a zero chord.
       if (this._snapProjected && segmentLength(this.planeStage.a, cursor) < ARC_MIN_CHORD_M) {
-        this.onToast(ARC_OFF_PLANE_MESSAGE)
+        this.onToast(arcOffPlaneMessage())
         return
       }
       this._placePlaneB(cursor, this._cursorStraightOver)

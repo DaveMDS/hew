@@ -21,6 +21,7 @@ export class FileReadError extends Error {
   readonly fileName: string
   readonly reason: unknown
   constructor(fileName: string, reason: unknown) {
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- log text; the toast wording is chosen by the caller
     super(`Couldn't read ${fileName}`)
     this.name = 'FileReadError'
     this.fileName = fileName

@@ -6630,6 +6630,7 @@ export default function Viewport({
           (text: string) => { onMeasurementRef.current?.(text) },
         )
         toolController.setTool(tool)
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
         renderer.domElement.style.cursor = cursorFor('Rectangle')
         if (at !== undefined) {
           const [ndcX, ndcY] = pointerToNDC({ clientX: at.clientX, clientY: at.clientY } as MouseEvent, renderer.domElement)
@@ -7408,6 +7409,7 @@ export default function Viewport({
     // Switch tool by name
     // The tool whose cursor the canvas currently shows — re-applied when the
     // Show tool pointer setting flips (Settings ▸ View).
+    // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
     let lastToolCursorName = 'Select'
     switchToolRef.current = (toolName: string) => {
       // Shop Mode's read-only contract (shop-mode adversarial review,

@@ -310,7 +310,7 @@ export class WebFileHost implements FileHost {
       try {
         handles = await showOpenFilePicker({
           multiple: false,
-          types: [{ description: 'Pictures (PNG, JPEG)', accept: { 'image/png': ['.png'], 'image/jpeg': ['.jpg', '.jpeg'] } }],
+          types: [{ description: t`Pictures (PNG, JPEG)`, accept: { 'image/png': ['.png'], 'image/jpeg': ['.jpg', '.jpeg'] } }],
           excludeAcceptAllOption: false,
         })
       } catch (err) {

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import * as THREE from 'three'
-import { CircleTool, CIRCLE_KEPT_AS_DRAWING_MESSAGE } from './CircleTool'
+import { CircleTool, circleKeptAsDrawingMessage } from './CircleTool'
 import { draftMock } from './draftMock'
 import { segmentsPerTurn } from './arcMath'
 import type { Snap } from './types'
@@ -743,7 +743,7 @@ describe('CircleTool — a circle touching or crossing the face edge (#43)', () 
     )
     expect(scene.draft_end).toHaveBeenCalledTimes(1)
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast).toHaveBeenCalledWith(CIRCLE_KEPT_AS_DRAWING_MESSAGE)
+    expect(onToast).toHaveBeenCalledWith(circleKeptAsDrawingMessage())
     // Still a commit: the drawing landed in the object's owned sketch.
     expect(onFaceImprint).not.toHaveBeenCalled()
     expect(onCommit).toHaveBeenCalledTimes(1)

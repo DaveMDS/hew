@@ -3394,6 +3394,7 @@ export default function App() {
     // The kernel refuses an import while a component is open
     // (ExplodeSessionScope); say so now rather than after two clicks.
     if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
@@ -3416,6 +3417,7 @@ export default function App() {
 
   const importImage = useCallback(async () => {
     if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
       handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
       return
     }
@@ -3423,14 +3425,15 @@ export default function App() {
     try {
       picked = (await fileHostRef.current.openImage?.()) ?? null
     } catch (err: unknown) {
+      const reason = friendlyErrorText(err)
       handleToast(err instanceof FileReadError
-        ? "Couldn't read that picture. Check that the file is still there, then pick it again."
-        : `Couldn't open the picture: ${friendlyErrorText(err)}`)
+        ? t`Couldn't read that picture. Check that the file is still there, then pick it again.`
+        : t`Couldn't open the picture: ${reason}`)
       return
     }
     if (picked === null) return
     startImagePlacement(picked.name, picked.bytes)
-  }, [componentFrameOpen, handleToast, startImagePlacement])
+  }, [componentFrameOpen, handleToast, startImagePlacement, t])
 
   // Scene thumbnail cache (docs/design/scenes.md §5 "Add"): persist the
   // controller's CURRENT thumbnail map under the just-written bytes' own
@@ -3738,7 +3741,7 @@ export default function App() {
     const ref = session.currentRef
     const scene = sceneRef.current
     if (!canRevertToSaved(session) || ref === null || scene === null) {
-      return { ok: false, message: 'There is nothing to revert.' }
+      return { ok: false, message: t`There is nothing to revert.` }
     }
     // The kernel's undo depth moves with every edit: an edit made while the
     // read or a permission prompt is pending changes it, though neither the
@@ -3764,7 +3767,7 @@ export default function App() {
       }
     } catch (err: unknown) {
       const message = friendlyErrorText(err)
-      handleToast(`Revert failed: ${message}`)
+      handleToast(t`Revert failed: ${message}`)
       return { ok: false, message, shown: true }
     }
     // The read (or a permission prompt) took time. If the person saved
@@ -3772,26 +3775,26 @@ export default function App() {
     // for a document that is gone; and if the document was saved or undone
     // back to clean, there is nothing left to throw away.
     if (docSessionRef.current.currentRef !== ref || sceneRef.current !== scene || scene.undo_depth() !== depthAtStart) {
-      const message = 'Revert canceled: the document changed while the file was being read.'
+      const message = t`Revert canceled: the document changed while the file was being read.`
       handleToast(message)
       return { ok: false, message, shown: true }
     }
     if (!docSessionRef.current.dirty) {
-      const message = 'Nothing to revert: the document is already at its saved state.'
+      const message = t`Nothing to revert: the document is already at its saved state.`
       handleToast(message)
       return { ok: false, message, shown: true }
     }
     let landed: boolean
     if (isSkpFormat(ref.format)) {
       if (skpOpenStepsRef.current) {
-        return { ok: false, message: 'Another file is still opening; try again in a moment.' }
+        return { ok: false, message: t`Another file is still opening; try again in a moment.` }
       }
       landed = await runOpenSkp(scene, { name: ref.name, bytes, handle: ref.handle }, { keepCamera: true, silentReport: true })
     } else {
       landed = applyLoadedBytes(bytes, { name: ref.name, label: OPEN_FILE_LABELS.hew }, { keepCamera: true })
       if (landed) setDocSession(afterOpen(ref, Date.now()))
     }
-    if (!landed) return { ok: false, message: 'the saved file could not be loaded', shown: true }
+    if (!landed) return { ok: false, message: t`The saved file could not be loaded.`, shown: true }
     // The unsaved work this replaced is gone: so is its crash snapshot.
     void clearRecoverySnapshot()
     if (isTauri && typeof ref.handle === 'string') {
@@ -3802,9 +3805,9 @@ export default function App() {
     } else if (!isTauri && !isSkpFormat(ref.format)) {
       void recordRecent(bytes, ref.name)
     }
-    handleToast('Reverted to the saved file.')
+    handleToast(t`Reverted to the saved file.`)
     return { ok: true }
-  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast])
+  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, t])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -6029,7 +6032,10 @@ export default function App() {
                   const name = picture.split(/[/\\]/).pop() ?? picture
                   startImagePlacementRef.current(name, new Uint8Array(buf), { clientX: x / dpr, clientY: y / dpr })
                 })
-                .catch((err: unknown) => handleToastRef.current(`Couldn't open the picture: ${friendlyErrorText(err)}`))
+                .catch((err: unknown) => {
+                  const reason = friendlyErrorText(err)
+                  handleToastRef.current(t`Couldn't open the picture: ${reason}`)
+                })
             }
           }
         }),
@@ -6511,7 +6517,8 @@ export default function App() {
       try {
         startImagePlacement(file.name, new Uint8Array(await file.arrayBuffer()), at)
       } catch (err: unknown) {
-        handleToast(`Couldn't open the picture: ${friendlyErrorText(err)}`)
+        const reason = friendlyErrorText(err)
+        handleToast(t`Couldn't open the picture: ${reason}`)
       }
       return
     }
@@ -6549,7 +6556,7 @@ export default function App() {
     }).catch((err: unknown) => {
       handleToast(t`Drop open failed: ${ph({ reason: friendlyErrorText(err) })}`)
     })
-  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp, startImagePlacement])
+  }, [confirmDiscard, applyLoadedBytes, handleToast, clearRecoverySnapshot, runOpenSkp, startImagePlacement, t])
 
   // ── Hide/Show + Tags (must be declared BEFORE the early returns below so the
   // hook count is stable across the loading and loaded renders — Rules of Hooks).
@@ -8030,9 +8037,9 @@ export default function App() {
       {/* File ▸ Revert to Saved: one confirmation, Cancel the default. */}
       {revertPromptOpen && (
         <ConfirmDialog
-          heading="Revert to Saved?"
-          body="This throws away everything you changed since the last save."
-          confirmLabel="Revert"
+          heading={t`Revert to Saved?`}
+          body={t`This throws away everything you changed since the last save.`}
+          confirmLabel={t`Revert`}
           danger
           cancelDefault
           onConfirm={() => {

@@ -394,6 +394,10 @@ msgstr "{openings, plural, one {# opening} other {# openings}}"
 msgid "{openings, plural, one {Open: # opening} other {Open: # openings}}"
 msgstr "{openings, plural, one {Open: # opening} other {Open: # openings}}"
 
+#: src/settings/units.ts
+msgid "{p, plural, one {# decimal} other {# decimals}}"
+msgstr "{p, plural, one {# decimal} other {# decimals}}"
+
 #: src/print/printJob.ts
 msgid "{pages, plural, one {# page — check the scale} other {# pages — check the scale}}"
 msgstr "{pages, plural, one {# page — check the scale} other {# pages — check the scale}}"
@@ -666,6 +670,10 @@ msgstr "+ New collection…"
 msgid "+{count} more"
 msgstr "+{count} more"
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "+{hidden} more"
+msgstr "+{hidden} more"
+
 #: src/tools/PositionTextureTool.ts
 msgid "×{scaleV}  {skew}° skew"
 msgstr "×{scaleV}  {skew}° skew"
@@ -761,6 +769,10 @@ msgstr "A group can't be moved into itself or into one of its own members. Pick 
 #: src/App.tsx
 msgid "A kernel error occurred — the session is no longer usable. Reload the page to recover."
 msgstr "A kernel error occurred — the session is no longer usable. Reload the page to recover."
+
+#: src/tools/LineTool.ts
+msgid "A line needs a length. Type a length other than 0."
+msgstr "A line needs a length. Type a length other than 0."
 
 #: src/kernelErrors.ts
 msgid "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
@@ -960,6 +972,10 @@ msgstr "Also open a public GitHub issue"
 msgid "Alt-click a face to sample its material."
 msgstr "Alt-click a face to sample its material."
 
+#: src/tools/ArcTool.ts
+msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
+msgstr "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
+
 #: src/palette/registry.ts
 msgid "angle"
 msgstr "angle"
@@ -987,6 +1003,10 @@ msgstr "Annotation"
 #: src/kernelErrors.ts
 msgid "Another drawing step is still in progress. Finish or cancel it first."
 msgstr "Another drawing step is still in progress. Finish or cancel it first."
+
+#: src/App.tsx
+msgid "Another file is still opening; try again in a moment."
+msgstr "Another file is still opening; try again in a moment."
 
 #: src/panels/ChangesPanel.tsx
 msgid "API"
@@ -1064,6 +1084,10 @@ msgstr "As shown"
 #: src/panels/TextDialog.tsx
 msgid "Ask again…"
 msgstr "Ask again…"
+
+#: src/settings/ViewPane.tsx
+msgid "At the cursor"
+msgstr "At the cursor"
 
 #: src/i18n/historyLabels.ts
 msgid "Attach sketch"
@@ -1145,6 +1169,10 @@ msgctxt "view"
 msgid "Bottom"
 msgstr "Bottom"
 
+#: src/settings/ViewPane.tsx
+msgid "Bottom right"
+msgstr "Bottom right"
+
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Bounding Box"
 msgstr "Bounding Box"
@@ -1184,6 +1212,7 @@ msgstr "Café Table"
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 #: src/scenes/scenesModel.ts
+#: src/settings/ViewPane.tsx
 msgid "Camera"
 msgstr "Camera"
 
@@ -1340,6 +1369,7 @@ msgstr "Clear"
 #: src/panels/ComponentsPanel.tsx
 #: src/panels/DocumentTree.tsx
 #: src/panels/MaterialPalette.tsx
+#: src/panels/TagsPanel.tsx
 msgid "Clear filter"
 msgstr "Clear filter"
 
@@ -1468,6 +1498,10 @@ msgstr "Click the destination — type an exact distance, arrow keys lock an axi
 msgid "Click the first corner — on the ground plane or any face or sketch."
 msgstr "Click the first corner — on the ground plane or any face or sketch."
 
+#: src/tools/PlaceImageTool.ts
+msgid "Click the first corner of \"{name}\" — on the ground or any face. Esc cancels."
+msgstr "Click the first corner of \"{name}\" — on the ground or any face. Esc cancels."
+
 #: src/tools/FollowMeTool.ts
 msgid "Click the flat face to run the profile around it — or a drawn line or curve to follow."
 msgstr "Click the flat face to run the profile around it — or a drawn line or curve to follow."
@@ -1491,6 +1525,10 @@ msgstr "Click the object you want to scale."
 #: src/tools/RectangleTool.ts
 msgid "Click the opposite corner — or type exact dimensions."
 msgstr "Click the opposite corner — or type exact dimensions."
+
+#: src/tools/PlaceImageTool.ts
+msgid "Click the opposite corner — or type the width and press Enter."
+msgstr "Click the opposite corner — or type the width and press Enter."
 
 #: src/tools/FollowMeTool.ts
 msgid "Click the path to follow — a drawn line or curve, or a solid face to run around."
@@ -1535,6 +1573,10 @@ msgstr "Click this face to use it as the profile."
 #: src/tools/ProtractorTool.ts
 msgid "Click to drop an angular guide at the measured angle — or type exact degrees."
 msgstr "Click to drop an angular guide at the measured angle — or type exact degrees."
+
+#: src/tools/TapeMeasureTool.ts
+msgid "Click to measure from the crossing."
+msgstr "Click to measure from the crossing."
 
 #: src/tools/TextPlaceTool.ts
 msgid "Click to place — 3D Text places at the top level while editing a component."
@@ -1737,8 +1779,10 @@ msgstr "component"
 msgid "Component"
 msgstr "Component"
 
+#. Default label for an unnamed component whose position is unknown
 #. Name shown for a component with no name
 #: src/health/healthReport.ts
+#: src/panels/treeModel.ts
 msgctxt "unnamed item"
 msgid "Component"
 msgstr "Component"
@@ -1787,8 +1831,12 @@ msgid "Continue"
 msgstr "Continue"
 
 #: src/settings/UnitsPane.tsx
-msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
-msgstr "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
+#~ msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
+#~ msgstr "Controls how lengths are displayed (e.g. the Move tool's live measurement). Model geometry is always stored in meters internally."
+
+#: src/settings/UnitsPane.tsx
+msgid "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
+msgstr "Controls how lengths are displayed (e.g. the Move tool's live measurement). Precision sets how far readouts are rounded: a number of decimals, or a fraction of an inch. A rounded readout is marked with ~, and Exact shows every digit a length needs. Each format remembers its own choice. Model geometry is always stored in meters internally."
 
 #: src/ErrorBoundary.tsx
 #: src/log/LogPanel.tsx
@@ -1948,6 +1996,10 @@ msgid "Couldn't open the library item: {reason}"
 msgstr "Couldn't open the library item: {reason}"
 
 #: src/App.tsx
+msgid "Couldn't open the picture: {reason}"
+msgstr "Couldn't open the picture: {reason}"
+
+#: src/App.tsx
 msgid "Couldn't open the sample: {reason}"
 msgstr "Couldn't open the sample: {reason}"
 
@@ -1974,6 +2026,10 @@ msgstr "Couldn't print: {errorText}"
 #: src/App.tsx
 msgid "Couldn't read library item: {reason}"
 msgstr "Couldn't read library item: {reason}"
+
+#: src/App.tsx
+msgid "Couldn't read that picture. Check that the file is still there, then pick it again."
+msgstr "Couldn't read that picture. Check that the file is still there, then pick it again."
 
 #: src/panels/LibraryDialog.tsx
 msgid "Couldn’t read the library: {loadError}"
@@ -2405,6 +2461,10 @@ msgstr "Discard"
 msgid "Discard All"
 msgstr "Discard All"
 
+#: src/palette/registry.ts
+msgid "discard changes"
+msgstr "discard changes"
+
 #: src/panels/SkpLossNotice.tsx
 #: src/viewport/Viewport.tsx
 msgid "Dismiss"
@@ -2445,6 +2505,10 @@ msgstr "docs"
 #: src/shop/ShopApp.tsx
 msgid "Document menu — {documentMenuName}"
 msgstr "Document menu — {documentMenuName}"
+
+#: src/settings/view.ts
+msgid "Document order"
+msgstr "Document order"
 
 #: src/palette/registry.ts
 msgid "documentation"
@@ -2656,6 +2720,10 @@ msgctxt "drawn shape"
 msgid "Edge shape"
 msgstr "Edge shape"
 
+#: src/palette/registry.ts
+msgid "edges only"
+msgstr "edges only"
+
 #: src/i18n/historyLabels.ts
 #: src/i18n/nativeMenu.ts
 #: src/panels/dockLogic.ts
@@ -2762,6 +2830,10 @@ msgstr "Every object here is solid."
 #: src/health/healthCopy.ts
 msgid "Every object in the model is solid."
 msgstr "Every object in the model is solid."
+
+#: src/settings/units.ts
+msgid "Exact"
+msgstr "Exact"
 
 #: src/panels/PrintDialog.tsx
 msgid "Exactly what the viewport frames right now (sets View: Current view)"
@@ -2896,6 +2968,15 @@ msgstr "Factor"
 msgid "Failed to load"
 msgstr "Failed to load"
 
+#: src/settings/view.ts
+#: src/settings/ViewPane.tsx
+msgid "Fast"
+msgstr "Fast"
+
+#: src/settings/view.ts
+msgid "Faster"
+msgstr "Faster"
+
 #: src/viewport/MeasurementBox.tsx
 msgid "Field of View"
 msgstr "Field of View"
@@ -2944,6 +3025,14 @@ msgstr "Filter outliner"
 #: src/panels/DocumentTree.tsx
 msgid "Filter outliner…"
 msgstr "Filter outliner…"
+
+#: src/panels/TagsPanel.tsx
+msgid "Filter tags"
+msgstr "Filter tags"
+
+#: src/panels/TagsPanel.tsx
+msgid "Filter tags…"
+msgstr "Filter tags…"
 
 #: src/io/savePanel.ts
 msgid "Fine (96 segments per turn)"
@@ -3225,6 +3314,12 @@ msgstr "Ground"
 msgid "Group"
 msgstr "Group"
 
+#. Default label for an unnamed group whose position is unknown
+#: src/panels/treeModel.ts
+msgctxt "unnamed item"
+msgid "Group"
+msgstr "Group"
+
 #. Short uppercase chip on the contextual dock naming what is selected
 #: src/panels/dockLogic.ts
 msgid "GROUP"
@@ -3313,6 +3408,10 @@ msgstr "health"
 msgid "Height ({unit})"
 msgstr "Height ({unit})"
 
+#: src/panels/TagsPanel.tsx
+msgid "Held open while filtering"
+msgstr "Held open while filtering"
+
 #: src/palette/registry.ts
 msgid "help"
 msgstr "help"
@@ -3349,6 +3448,10 @@ msgstr "Hew can't add thickness to curved sheets yet"
 #: src/health/healthCopy.ts
 msgid "Hew can't close these with flat faces. Most are open on purpose, like a pipe fitting or an electrical box, and work as they are. Click one to see its open edges and why."
 msgstr "Hew can't close these with flat faces. Most are open on purpose, like a pipe fitting or an electrical box, and work as they are. Click one to see its open edges and why."
+
+#: src/kernelErrors.ts
+msgid "Hew can't read that picture. Save it as a PNG or JPEG and place it again."
+msgstr "Hew can't read that picture. Save it as a PNG or JPEG and place it again."
 
 #: src/viewport/gpuCapability.ts
 msgid "Hew can't show the 3D view"
@@ -3507,6 +3610,10 @@ msgstr "Hew's own request to the model kernel named an image format it doesn't r
 msgid "Hew's own request to the model kernel named an object kind it doesn't recognize. If this keeps happening, use Report Bug."
 msgstr "Hew's own request to the model kernel named an object kind it doesn't recognize. If this keeps happening, use Report Bug."
 
+#: src/kernelErrors.ts
+msgid "Hew's own request to the model kernel placed a picture on a plane it can't hold. If this keeps happening, use Report Bug."
+msgstr "Hew's own request to the model kernel placed a picture on a plane it can't hold. If this keeps happening, use Report Bug."
+
 #: src/palette/registry.ts
 msgid "hex"
 msgstr "hex"
@@ -3514,6 +3621,10 @@ msgstr "hex"
 #: src/palette/registry.ts
 msgid "hexagon"
 msgstr "hexagon"
+
+#: src/palette/registry.ts
+msgid "hidden line"
+msgstr "hidden line"
 
 #: src/io/savePanel.ts
 #: src/panels/ExportDialog.tsx
@@ -3573,6 +3684,10 @@ msgstr "hide tray"
 msgid "Hide tray"
 msgstr "Hide tray"
 
+#: src/settings/ViewPane.tsx
+msgid "Hints are the small labels that follow the pointer, like Endpoint or On Edge. The tool pointer is the cursor shaped like your current tool; off, you get the plain arrow."
+msgstr "Hints are the small labels that follow the pointer, like Endpoint or On Edge. The tool pointer is the cursor shaped like your current tool; off, you get the plain arrow."
+
 #: src/palette/registry.ts
 msgid "history"
 msgstr "history"
@@ -3580,6 +3695,10 @@ msgstr "history"
 #: src/tools/SliceTool.ts
 msgid "Hover a solid's face before slicing"
 msgstr "Hover a solid's face before slicing"
+
+#: src/settings/ViewPane.tsx
+msgid "How far one turn of the mouse wheel moves the camera. The middle stop is the usual speed."
+msgstr "How far one turn of the mouse wheel moves the camera. The middle stop is the usual speed."
 
 #: src/settings/FluentSettingsPage.tsx
 msgid "How lengths are displayed — e.g. the Move tool's live measurement."
@@ -3600,6 +3719,10 @@ msgstr "idle"
 #: src/viewport/gpuCapability.ts
 msgid "If this is a company-managed computer, ask IT to enable the EnableUnsafeSwiftShader policy for your browser. On your own computer, you can launch the browser with the --enable-unsafe-swiftshader flag."
 msgstr "If this is a company-managed computer, ask IT to enable the EnableUnsafeSwiftShader policy for your browser. On your own computer, you can launch the browser with the --enable-unsafe-swiftshader flag."
+
+#: src/palette/registry.ts
+msgid "image"
+msgstr "image"
 
 #: src/settings/FluentSettingsPage.tsx
 #: src/settings/UnitsPane.tsx
@@ -3629,6 +3752,12 @@ msgstr "Import Complete"
 #: src/App.tsx
 msgid "Import failed: {reason}"
 msgstr "Import failed: {reason}"
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Import Image…"
+msgstr "Import Image…"
 
 #: src/panels/ImportReportDialog.tsx
 msgid "Import report"
@@ -3826,6 +3955,14 @@ msgstr "Items are stored by this browser on this device. This browser doesn’t 
 msgid "join"
 msgstr "join"
 
+#: src/palette/registry.ts
+msgid "jpeg"
+msgstr "jpeg"
+
+#: src/palette/registry.ts
+msgid "jpg"
+msgstr "jpg"
+
 #: src/i18n/format.ts
 msgid "just now"
 msgstr "just now"
@@ -3853,6 +3990,10 @@ msgstr "Keeps everything Hew stores."
 #: src/panels/library/LibraryDetailPane.tsx
 msgid "Keywords"
 msgstr "Keywords"
+
+#: src/settings/view.ts
+msgid "Kind"
+msgstr "Kind"
 
 #. One-letter label for the length of a part
 #. One-letter label for the length of a part
@@ -4059,12 +4200,20 @@ msgid "Line art printed as a bitmap — the model is too complex for vector line
 msgstr "Line art printed as a bitmap — the model is too complex for vector line work."
 
 #: src/print/usePrintController.ts
+msgid "Line art printed as a bitmap — X-ray and Wireframe print as shown on screen."
+msgstr "Line art printed as a bitmap — X-ray and Wireframe print as shown on screen."
+
+#: src/print/usePrintController.ts
 msgid "Line art printed as a bitmap ({reason})"
 msgstr "Line art printed as a bitmap ({reason})"
 
 #: src/palette/registry.ts
 msgid "line drawing"
 msgstr "line drawing"
+
+#: src/palette/registry.ts
+msgid "lines only"
+msgstr "lines only"
 
 #: src/health/healthCopy.ts
 msgid "List the objects that are selected now"
@@ -4102,6 +4251,10 @@ msgstr "Loading system fonts…"
 #: src/settings/FluentSettingsPage.tsx
 msgid "Loading…"
 msgstr "Loading…"
+
+#: src/tools/PlaceImageTool.ts
+msgid "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
+msgstr "Locked to the {axis} plane — click the first corner; same arrow or Esc unlocks."
 
 #: src/tools/TextPlaceTool.ts
 msgid "Locked to the {axis} plane — click to place; same arrow or Esc unlocks."
@@ -4241,6 +4394,7 @@ msgstr "materials"
 #: src/i18n/nativeMenu.ts
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
+#: src/panels/ObjectInfoPanel.tsx
 msgid "Materials"
 msgstr "Materials"
 
@@ -4275,6 +4429,14 @@ msgstr "Measurement locked to {axis} while Shift is held — release Shift, or p
 #: src/settings/FluentSettingsPage.tsx
 msgid "Measurement system"
 msgstr "Measurement system"
+
+#: src/settings/ViewPane.tsx
+msgid "Measurements box"
+msgstr "Measurements box"
+
+#: src/settings/ViewPane.tsx
+msgid "Measurements box position"
+msgstr "Measurements box position"
 
 #: src/tools/TapeMeasureTool.ts
 msgid "Measuring only; no guide will be created."
@@ -4465,6 +4627,14 @@ msgstr "Move the camera closer to or farther from the model."
 msgid "Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance."
 msgstr "Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance."
 
+#: src/tools/ArcTool.ts
+msgid "Move the cursor to point the arc, then type the length."
+msgstr "Move the cursor to point the arc, then type the length."
+
+#: src/tools/LineTool.ts
+msgid "Move the cursor to point the line, then type the length."
+msgstr "Move the cursor to point the line, then type the length."
+
 #: src/tools/TapeMeasureTool.ts
 msgid "Move the cursor to the side the guide should go, then type the distance."
 msgstr "Move the cursor to the side the guide should go, then type the distance."
@@ -4521,6 +4691,7 @@ msgstr "n-gon"
 #. Library list column header
 #: src/panels/library/LibraryListHead.tsx
 #: src/panels/ObjectInfoPanel.tsx
+#: src/settings/view.ts
 msgid "Name"
 msgstr "Name"
 
@@ -4535,6 +4706,18 @@ msgstr "named view"
 #: src/panels/PrintDialog.tsx
 msgid "Narrow"
 msgstr "Narrow"
+
+#: src/settings/units.ts
+msgid "Nearest 1'"
+msgstr "Nearest 1'"
+
+#: src/settings/units.ts
+msgid "Nearest 1\""
+msgstr "Nearest 1\""
+
+#: src/settings/units.ts
+msgid "Nearest 1/{p}\""
+msgstr "Nearest 1/{p}\""
 
 #: src/palette/CommandPalette.tsx
 msgid "needs a selection"
@@ -4702,6 +4885,10 @@ msgstr "No system fonts were found — your browser may have blocked access with
 msgid "No system fonts were found on this system."
 msgstr "No system fonts were found on this system."
 
+#: src/panels/TagsPanel.tsx
+msgid "No tags match"
+msgstr "No tags match"
+
 #: src/palette/registry.ts
 msgid "noclip"
 msgstr "noclip"
@@ -4712,10 +4899,12 @@ msgid "none"
 msgstr "none"
 
 #: src/panels/library/LibraryDetailPane.tsx
+#: src/panels/ObjectInfoPanel.tsx
 msgid "None"
 msgstr "None"
 
 #: src/panels/PrintDialog.tsx
+#: src/settings/view.ts
 msgid "Normal"
 msgstr "Normal"
 
@@ -4768,6 +4957,10 @@ msgstr "Nothing to purge."
 #: src/kernelErrors.ts
 msgid "Nothing to redo."
 msgstr "Nothing to redo."
+
+#: src/App.tsx
+msgid "Nothing to revert: the document is already at its saved state."
+msgstr "Nothing to revert: the document is already at its saved state."
 
 #: src/App.tsx
 msgid "Nothing to share yet — the document is empty"
@@ -4829,8 +5022,10 @@ msgstr "Ø {length}"
 msgid "Object"
 msgstr "Object"
 
+#. Default label for an unnamed object whose position is unknown
 #. Name shown for an object with no name
 #: src/health/healthReport.ts
+#: src/panels/treeModel.ts
 msgctxt "unnamed item"
 msgid "Object"
 msgstr "Object"
@@ -5355,6 +5550,10 @@ msgstr "Part"
 msgid "PART"
 msgstr "PART"
 
+#: src/tools/CircleTool.ts
+msgid "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
+msgstr "Part of the circle is too thin to make a face, so it stays as drawing. Move it a little so it sits clear, or draw it larger."
+
 #: src/panels/SelectionPathStrip.tsx
 msgid "part of the component"
 msgstr "part of the component"
@@ -5420,8 +5619,20 @@ msgid "Perspective view"
 msgstr "Perspective view"
 
 #: src/palette/registry.ts
+msgid "photo"
+msgstr "photo"
+
+#: src/palette/registry.ts
 msgid "Pick faces, edges, and objects in the model."
 msgstr "Pick faces, edges, and objects in the model."
+
+#: src/palette/registry.ts
+msgid "picture"
+msgstr "picture"
+
+#: src/io/webFileHost.ts
+msgid "Pictures (PNG, JPEG)"
+msgstr "Pictures (PNG, JPEG)"
 
 #: src/tools/ArcTool.ts
 msgctxt "arc completion"
@@ -5457,6 +5668,10 @@ msgid "Place a linear or radius/diameter dimension between snap points."
 msgstr "Place a linear or radius/diameter dimension between snap points."
 
 #: src/palette/registry.ts
+msgid "Place a PNG or JPEG picture on a face or the ground."
+msgstr "Place a PNG or JPEG picture on a face or the ground."
+
+#: src/palette/registry.ts
 msgid "Place another instance of the selected component."
 msgstr "Place another instance of the selected component."
 
@@ -5470,6 +5685,10 @@ msgstr "Place Copy"
 msgid "Place extruded, watertight text on a face or the ground."
 msgstr "Place extruded, watertight text on a face or the ground."
 
+#: src/palette/registry.ts
+msgid "place image"
+msgstr "place image"
+
 #: src/i18n/historyLabels.ts
 msgid "Place instance"
 msgstr "Place instance"
@@ -5481,6 +5700,10 @@ msgstr "Placing that instance here would make a component contain itself, direct
 #: src/palette/registry.ts
 msgid "plot"
 msgstr "plot"
+
+#: src/palette/registry.ts
+msgid "png"
+msgstr "png"
 
 #: src/shop/ScanSheet.tsx
 msgid "Point the camera at the QR code on the desktop."
@@ -5530,6 +5753,10 @@ msgstr "Position Texture ended — the model changed since positioning started"
 #: src/tools/PositionTextureTool.ts
 msgid "Position Texture is scoped to what you are editing — press Esc to step out first"
 msgstr "Position Texture is scoped to what you are editing — press Esc to step out first"
+
+#: src/settings/UnitsPane.tsx
+msgid "Precision"
+msgstr "Precision"
 
 #: src/App.tsx
 msgid "Precision snap ({precisionKeys})"
@@ -5867,6 +6094,10 @@ msgid "Redo the last undone change."
 msgstr "Redo the last undone change."
 
 #: src/palette/registry.ts
+msgid "reference"
+msgstr "reference"
+
+#: src/palette/registry.ts
 msgid "refresh scene"
 msgstr "refresh scene"
 
@@ -5894,6 +6125,10 @@ msgstr "Rejoin the pieces and keep the inside walls"
 #: src/health/healthCopy.ts
 msgid "Rejoin the pieces and remove the inside walls"
 msgstr "Rejoin the pieces and remove the inside walls"
+
+#: src/palette/registry.ts
+msgid "reload"
+msgstr "reload"
 
 #: src/App.tsx
 #: src/ErrorBoundary.tsx
@@ -6135,6 +6370,36 @@ msgstr "Reveal in Finder"
 #: src/App.tsx
 msgid "Reveal this tag in the Tags panel."
 msgstr "Reveal this tag in the Tags panel."
+
+#: src/palette/registry.ts
+msgid "revert"
+msgstr "revert"
+
+#: src/App.tsx
+msgid "Revert"
+msgstr "Revert"
+
+#: src/App.tsx
+msgid "Revert canceled: the document changed while the file was being read."
+msgstr "Revert canceled: the document changed while the file was being read."
+
+#: src/App.tsx
+msgid "Revert failed: {message}"
+msgstr "Revert failed: {message}"
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Revert to Saved"
+msgstr "Revert to Saved"
+
+#: src/App.tsx
+msgid "Revert to Saved?"
+msgstr "Revert to Saved?"
+
+#: src/App.tsx
+msgid "Reverted to the saved file."
+msgstr "Reverted to the saved file."
 
 #: src/palette/registry.ts
 msgid "Review and send a bug report, or save it to a file."
@@ -6506,6 +6771,14 @@ msgstr "Section plane"
 msgid "Section Plane"
 msgstr "Section Plane"
 
+#: src/palette/registry.ts
+msgid "see through"
+msgstr "see through"
+
+#: src/palette/registry.ts
+msgid "See through every face, so hidden edges show and can be snapped to. Turns Wireframe off."
+msgstr "See through every face, so hidden edges show and can be snapped to. Turns Wireframe off."
+
 #: src/tools/ArcTool.ts
 msgctxt "arc completion"
 msgid "Segment"
@@ -6742,6 +7015,14 @@ msgstr "Show in folder"
 msgid "Show in list"
 msgstr "Show in list"
 
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Show in Materials pane"
+msgstr "Show in Materials pane"
+
+#: src/panels/ObjectInfoPanel.tsx
+msgid "Show in Tags pane"
+msgstr "Show in Tags pane"
+
 #: src/health/healthCopy.ts
 msgid "Show kept panels and sheets"
 msgstr "Show kept panels and sheets"
@@ -6749,6 +7030,10 @@ msgstr "Show kept panels and sheets"
 #: src/panels/WelcomeScreen.tsx
 msgid "Show on startup"
 msgstr "Show on startup"
+
+#: src/palette/registry.ts
+msgid "Show only the edges. Faces are not drawn and cannot be clicked. Turns X-ray off."
+msgstr "Show only the edges. Faces are not drawn and cannot be clicked. Turns X-ray off."
 
 #: src/palette/registry.ts
 msgid "Show or hide construction guides."
@@ -6806,6 +7091,14 @@ msgstr "Show or hide the world axes."
 msgid "Show tagged objects"
 msgstr "Show tagged objects"
 
+#: src/settings/ViewPane.tsx
+msgid "Show tool hints"
+msgstr "Show tool hints"
+
+#: src/settings/ViewPane.tsx
+msgid "Show tool pointer"
+msgstr "Show tool pointer"
+
 #: src/palette/registry.ts
 msgid "show tray"
 msgstr "show tray"
@@ -6832,6 +7125,12 @@ msgid "Size"
 msgstr "Size"
 
 #: src/panels/ObjectInfoPanel.tsx
+msgid "Sketch"
+msgstr "Sketch"
+
+#. Default label for an unnamed sketch whose position is unknown
+#: src/panels/treeModel.ts
+msgctxt "unnamed item"
 msgid "Sketch"
 msgstr "Sketch"
 
@@ -6907,6 +7206,19 @@ msgstr "slicer"
 msgid "Slide the camera parallel to the view plane."
 msgstr "Slide the camera parallel to the view plane."
 
+#: src/settings/view.ts
+#: src/settings/ViewPane.tsx
+msgid "Slow"
+msgstr "Slow"
+
+#: src/settings/view.ts
+msgid "Slower"
+msgstr "Slower"
+
+#: src/settings/ViewPane.tsx
+msgid "Smooth camera moves"
+msgstr "Smooth camera moves"
+
 #: src/palette/registry.ts
 msgid "solid"
 msgstr "solid"
@@ -6938,6 +7250,10 @@ msgstr "Something in that selection isn't solid, so it can't be combined. To mak
 #: src/kernelErrors.ts
 msgid "Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first."
 msgstr "Something inside this shape has already been pushed or pulled, so the shape cannot move. Undo that push/pull or flatten it first."
+
+#: src/panels/OutlinerSortToggle.tsx
+msgid "Sort outliner"
+msgstr "Sort outliner"
 
 #: src/palette/registry.ts
 msgid "spectator"
@@ -7212,6 +7528,10 @@ msgstr "That attribute doesn't exist on this item, so there was nothing to remov
 msgid "That circle or arc is too small to keep. Drag a larger radius, or type an exact one."
 msgstr "That circle or arc is too small to keep. Drag a larger radius, or type an exact one."
 
+#: src/tools/LineTool.ts
+msgid "That click landed on the last point. Move the cursor off it and click again, or press Enter to finish."
+msgstr "That click landed on the last point. Move the cursor off it and click again, or press Enter to finish."
+
 #: src/shop/ShopApp.tsx
 msgid "That code could not be decrypted — ask for a fresh one from the desktop."
 msgstr "That code could not be decrypted — ask for a fresh one from the desktop."
@@ -7369,12 +7689,24 @@ msgid "That path line is no longer there — the model changed since it was pick
 msgstr "That path line is no longer there — the model changed since it was picked. Click it again."
 
 #: src/kernelErrors.ts
+msgid "That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead."
+msgstr "That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead."
+
+#: src/kernelErrors.ts
+msgid "That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width."
+msgstr "That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width."
+
+#: src/kernelErrors.ts
+msgid "That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width."
+msgstr "That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width."
+
+#: src/kernelErrors.ts
 msgid "That point is no longer there — the model changed since it was picked. Click it again."
 msgstr "That point is no longer there — the model changed since it was picked. Click it again."
 
 #: src/tools/LineTool.ts
-msgid "That point is the same as the last one — move the cursor before clicking"
-msgstr "That point is the same as the last one — move the cursor before clicking"
+#~ msgid "That point is the same as the last one — move the cursor before clicking"
+#~ msgstr "That point is the same as the last one — move the cursor before clicking"
 
 #: src/kernelErrors.ts
 msgid "That point isn't on the drawing surface. Draw on the highlighted face or the ground plane."
@@ -7401,8 +7733,8 @@ msgid "That selection has no solids to combine. Pick a solid object or a group o
 msgstr "That selection has no solids to combine. Pick a solid object or a group of solids."
 
 #: src/kernelErrors.ts
-msgid "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
-msgstr "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
+#~ msgid "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
+#~ msgstr "That shape can't be pushed or pulled: it touches another shape, itself, or the face's edge at a single point, so the face would pinch there. Make it touch along a whole edge, or not at all."
 
 #: src/kernelErrors.ts
 msgid "That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead."
@@ -7423,6 +7755,10 @@ msgstr "That sketch is no longer there — the model changed since it was picked
 #: src/kernelErrors.ts
 msgid "That tag doesn't exist in this model. Check the tag name and try again."
 msgstr "That tag doesn't exist in this model. Check the tag name and try again."
+
+#: src/tools/LineTool.ts
+msgid "That tap landed on the last point. Tap somewhere else to continue, or tap it again to finish."
+msgstr "That tap landed on the last point. Tap somewhere else to continue, or tap it again to finish."
 
 #: src/kernelErrors.ts
 msgid "That texture position couldn't be read. Press Escape and start the positioning again."
@@ -7455,6 +7791,10 @@ msgstr "That would multiply past a million rendered component parts. Reduce how 
 #: src/kernelErrors.ts
 msgid "That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one."
 msgstr "That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one."
+
+#: src/kernelErrors.ts
+msgid "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
+msgstr "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
 
 #: src/ErrorBoundary.tsx
 msgid "The app stopped to avoid a blank window. Reload to recover — your most recent autosave will be offered."
@@ -7593,6 +7933,10 @@ msgstr "The path is in separate pieces. Select one connected run of lines."
 msgid "The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns."
 msgstr "The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns."
 
+#: src/tools/PlaceImageTool.ts
+msgid "The picture would be {w} × {h} m, and each side must be at most {max} m. Drag it out smaller or type a smaller width."
+msgstr "The picture would be {w} × {h} m, and each side must be at most {max} m. Drag it out smaller or type a smaller width."
+
 #: src/tools/FollowMeTool.ts
 msgid "The profile only touches the solid at an edge or corner — left as a separate object."
 msgstr "The profile only touches the solid at an edge or corner — left as a separate object."
@@ -7632,6 +7976,10 @@ msgstr "The same face is on both sides of this edge, so dissolving it would punc
 #: src/kernelErrors.ts
 msgid "The same object is in the selection twice. Reselect and try again."
 msgstr "The same object is in the selection twice. Reselect and try again."
+
+#: src/App.tsx
+msgid "The saved file could not be loaded."
+msgstr "The saved file could not be loaded."
 
 #: src/kernelErrors.ts
 msgid "The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible."
@@ -7705,6 +8053,10 @@ msgstr "The update could not be installed.\n"
 msgid "The update has been installed. Restart Hew now to use it?"
 msgstr "The update has been installed. Restart Hew now to use it?"
 
+#: src/kernelErrors.ts
+msgid "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
+msgstr "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
+
 #: src/panels/PrintDialog.tsx
 msgid "The viewport’s own framing"
 msgstr "The viewport’s own framing"
@@ -7721,6 +8073,10 @@ msgstr "Theme"
 #: src/kernelErrors.ts
 msgid "There is no drawing step in progress to finish."
 msgstr "There is no drawing step in progress to finish."
+
+#: src/App.tsx
+msgid "There is nothing to revert."
+msgstr "There is nothing to revert."
 
 #: src/health/healthCopy.ts
 msgid "These are single curved sheets, such as terrain or fabric. Hew can't add thickness to curved sheets yet, so they stay as they are."
@@ -7955,12 +8311,20 @@ msgid "This shape has no circle behind it, so there's nothing to re-build. Only 
 msgstr "This shape has no circle behind it, so there's nothing to re-build. Only a circle drawn with the Circle tool has a segment count."
 
 #: src/kernelErrors.ts
+msgid "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
+msgstr "This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart."
+
+#: src/kernelErrors.ts
 msgid "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 msgstr "This step couldn't be undone or redone safely, so the model was left unchanged. If this keeps happening, use Report Bug to capture the session."
 
 #: src/log/reportBundle.ts
 msgid "This system can’t compress reports, so it can’t send them. Save the report to a file instead."
 msgstr "This system can’t compress reports, so it can’t send them. Save the report to a file instead."
+
+#: src/App.tsx
+msgid "This throws away everything you changed since the last save."
+msgstr "This throws away everything you changed since the last save."
 
 #: src/kernelErrors.ts
 msgid "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
@@ -7973,6 +8337,10 @@ msgstr "Those points don't define a plane. Pick three points that aren't in a li
 #: src/log/RenderStatsReadout.tsx
 msgid "three.js renderer.info for the most recent frame. \"cpu ms\" is the CPU-side renderer.render() duration (GPU work is async). fps is smoothed over the current burst of renders; \"idle\" means the on-demand render loop is at rest."
 msgstr "three.js renderer.info for the most recent frame. \"cpu ms\" is the CPU-side renderer.render() duration (GPU work is async). fps is smoothed over the current burst of renders; \"idle\" means the on-demand render loop is at rest."
+
+#: src/palette/registry.ts
+msgid "Throw away every change since the last save and read the file back in."
+msgstr "Throw away every change since the last save and read the file back in."
 
 #: src/panels/PrintDialog.tsx
 msgid "Title block"
@@ -8101,6 +8469,10 @@ msgctxt "view"
 msgid "Top"
 msgstr "Top"
 
+#: src/settings/ViewPane.tsx
+msgid "Top right"
+msgstr "Top right"
+
 #: src/i18n/historyLabels.ts
 msgctxt "undo verb"
 msgid "Transform"
@@ -8109,6 +8481,14 @@ msgstr "Transform"
 #: src/palette/registry.ts
 msgid "Translate the selection, with inference snapping."
 msgstr "Translate the selection, with inference snapping."
+
+#: src/palette/registry.ts
+msgid "translucent"
+msgstr "translucent"
+
+#: src/palette/registry.ts
+msgid "transparent"
+msgstr "transparent"
 
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
@@ -8165,6 +8545,10 @@ msgstr "Type a distance and press Enter to resize the model to it — or click a
 #: src/tools/TapeMeasureTool.ts
 msgid "Type a length greater than zero to resize the model."
 msgstr "Type a length greater than zero to resize the model."
+
+#: src/tools/LineTool.ts
+msgid "Type a length to resize the line you just drew, or click to start a new one."
+msgstr "Type a length to resize the line you just drew, or click to start a new one."
 
 #: src/tools/LineTool.ts
 msgid "Type a length to resize the segment you just drew, or move to start the next one — double-click or Esc to finish."
@@ -8439,6 +8823,7 @@ msgstr "vertex"
 #: src/panels/LibraryDialog.tsx
 #: src/panels/MenuBar.tsx
 #: src/panels/PrintDialog.tsx
+#: src/settings/SettingsWindow.tsx
 msgid "View"
 msgstr "View"
 
@@ -8450,6 +8835,10 @@ msgstr "View in AR…"
 #: src/shop/ViewsSheet.tsx
 msgid "Views"
 msgstr "Views"
+
+#: src/settings/ViewPane.tsx
+msgid "Views, scenes, and zoom fly into place, and orbiting coasts to a stop. Turn this off and the camera jumps straight there and stops the moment you let go."
+msgstr "Views, scenes, and zoom fly into place, and orbiting coasts to a stop. Turn this off and the camera jumps straight there and stops the moment you let go."
 
 #: src/scenes/scenesModel.ts
 msgid "Visible tags"
@@ -8532,18 +8921,48 @@ msgstr "What happened?"
 msgid "What’s included"
 msgstr "What’s included"
 
+#: src/settings/ViewPane.tsx
+msgid "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
+msgstr "Where the box that shows the number you are typing sits. The fly speed readout moves with it."
+
 #: src/settings/FluentSettingsPage.tsx
 msgid "Where the desktop uploads and where the QR code points your phone. A self-hosted server must serve the Hew web app with the relay under /relay/ (see the self-hosting guide)."
 msgstr "Where the desktop uploads and where the QR code points your phone. A self-hosted server must serve the Hew web app with the relay under /relay/ (see the self-hosting guide)."
+
+#: src/settings/units.ts
+msgid "Whole centimeters"
+msgstr "Whole centimeters"
+
+#: src/settings/units.ts
+msgid "Whole inches"
+msgstr "Whole inches"
+
+#: src/settings/units.ts
+msgid "Whole meters"
+msgstr "Whole meters"
+
+#: src/settings/units.ts
+msgid "Whole millimeters"
+msgstr "Whole millimeters"
 
 #: src/health/healthCopy.ts
 msgid "Whole model"
 msgstr "Whole model"
 
+#: src/settings/units.ts
+msgid "Whole units"
+msgstr "Whole units"
+
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx
 msgid "Window"
 msgstr "Window"
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "Wireframe"
+msgstr "Wireframe"
 
 #: src/health/healthCopy.ts
 msgid "Working…"
@@ -8556,6 +8975,16 @@ msgstr "World size must be positive numbers."
 #: src/settings/DebugPane.tsx
 msgid "Written to the app log directory as <0>diagnostic.log</0>."
 msgstr "Written to the app log directory as <0>diagnostic.log</0>."
+
+#: src/palette/registry.ts
+msgid "x ray"
+msgstr "x ray"
+
+#: src/i18n/nativeMenu.ts
+#: src/palette/registry.ts
+#: src/panels/MenuBar.tsx
+msgid "X-ray"
+msgstr "X-ray"
 
 #: src/io/savePanel.ts
 msgid "Y-up, meters"
@@ -8597,6 +9026,10 @@ msgstr "Zoom Extents"
 #: src/palette/registry.ts
 msgid "zoom to fit"
 msgstr "zoom to fit"
+
+#: src/settings/ViewPane.tsx
+msgid "Zoom wheel speed"
+msgstr "Zoom wheel speed"
 
 #: src/i18n/nativeMenu.ts
 #: src/tools/toolRegistry.ts

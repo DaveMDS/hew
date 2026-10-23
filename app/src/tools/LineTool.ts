@@ -163,7 +163,7 @@ const DEGENERATE_SEGMENT_EPS = 1e-9
 
 /** Toast for a typed length with no direction to apply it in: the cursor
  *  is still on the chain's last point (`_commitTyped`). */
-const NO_DIRECTION_MESSAGE = 'Move the cursor to point the line, then type the length.'
+const noDirectionMessage = (): string => t`Move the cursor to point the line, then type the length.`
 
 /** Toast for a click that resolved onto the chain's last point while the
  *  cursor was somewhere else (a snap that collapsed back onto it). A click
@@ -1712,7 +1712,7 @@ export class LineTool implements Tool {
       const cursor = this._lastPlaneCursor ?? anchor
       const dir = directionBetween(anchor, cursor)
       if (dir === null) {
-        this.onToast(NO_DIRECTION_MESSAGE)
+        this.onToast(noDirectionMessage())
         return
       }
       const endpoint = pointAlong(anchor, dir, distance)
@@ -1723,7 +1723,7 @@ export class LineTool implements Tool {
       const cursor = this._lastFaceCursor ?? last
       const dir = directionBetween(last, cursor)
       if (dir === null) {
-        this.onToast(NO_DIRECTION_MESSAGE)
+        this.onToast(noDirectionMessage())
         return
       }
       const endpoint = pointAlong(last, dir, distance)

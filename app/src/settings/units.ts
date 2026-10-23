@@ -38,7 +38,7 @@
  * the new vocabulary.
  */
 
-import { msg } from '@lingui/core/macro'
+import { msg, plural, t } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { isTauri } from '../io/fileHost'
 import { formatNumber } from '../i18n/format'
@@ -357,21 +357,28 @@ export function setPrecision(precision: Precision, format: LengthFormat = getLen
   broadcastTauri({ precision: currentPrecision })
 }
 
-const WHOLE_UNIT_LABEL: Partial<Record<LengthFormat, string>> = {
-  m: 'Whole meters',
-  cm: 'Whole centimeters',
-  mm: 'Whole millimeters',
-  dec_in: 'Whole inches',
-}
-
 /** Label for a precision choice in the Units pane. */
 export function precisionLabel(format: LengthFormat, p: Precision): string {
-  if (p === 'exact') return 'Exact'
-  if (p === 'foot') return 'Nearest 1\''
+  if (p === 'exact') return t`Exact`
+  if (p === 'foot') return t`Nearest 1'`
   if (LENGTH_SYSTEM_OF[format] === 'metric' || format === 'dec_in') {
-    return p === 0 ? (WHOLE_UNIT_LABEL[format] ?? 'Whole units') : `${p} decimal${p === 1 ? '' : 's'}`
+    if (p === 0) {
+      switch (format) {
+        case 'm':
+          return t`Whole meters`
+        case 'cm':
+          return t`Whole centimeters`
+        case 'mm':
+          return t`Whole millimeters`
+        case 'dec_in':
+          return t`Whole inches`
+        default:
+          return t`Whole units`
+      }
+    }
+    return plural(p, { one: '# decimal', other: '# decimals' })
   }
-  return p === 1 ? 'Nearest 1"' : `Nearest 1/${p}"`
+  return p === 1 ? t`Nearest 1"` : t`Nearest 1/${p}"`
 }
 
 /**

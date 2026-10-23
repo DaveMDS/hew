@@ -20,6 +20,8 @@
  *   - The browser 'storage' event covers same-origin web tabs.
  */
 
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
 import { isTauri } from '../io/fileHost'
 
 interface ViewSetting<T> {
@@ -122,7 +124,7 @@ function parseBool(raw: unknown): boolean | undefined {
 export const ZOOM_WHEEL_FACTORS = [0.5, 0.71, 1, 1.41, 2] as const
 /** Index of the default (today's speed) stop. */
 export const DEFAULT_ZOOM_WHEEL_STOP = 2
-export const ZOOM_WHEEL_LABELS = ['Slow', 'Slower', 'Normal', 'Faster', 'Fast'] as const
+export const ZOOM_WHEEL_LABELS: readonly MessageDescriptor[] = [msg`Slow`, msg`Slower`, msg`Normal`, msg`Faster`, msg`Fast`]
 
 function parseStop(raw: unknown): number | undefined {
   if (raw === null || raw === undefined || raw === '') return undefined
@@ -244,10 +246,10 @@ export const subscribeMeasurementsPosition = measurementsPosition.subscribe
 /** How the Outliner orders the rows at each level. */
 export type OutlinerSort = 'document' | 'name' | 'kind'
 
-export const OUTLINER_SORT_LABELS: Record<OutlinerSort, string> = {
-  document: 'Document order',
-  name: 'Name',
-  kind: 'Kind',
+export const OUTLINER_SORT_LABELS: Record<OutlinerSort, MessageDescriptor> = {
+  document: msg`Document order`,
+  name: msg`Name`,
+  kind: msg`Kind`,
 }
 
 function parseOutlinerSort(raw: unknown): OutlinerSort | undefined {

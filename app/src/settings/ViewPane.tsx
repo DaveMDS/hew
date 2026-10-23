@@ -10,6 +10,9 @@
  */
 
 import type { CSSProperties } from 'react'
+import { msg } from '@lingui/core/macro'
+import type { MessageDescriptor } from '@lingui/core'
+import { Trans, useLingui } from '@lingui/react/macro'
 import {
   getZoomWheelStop,
   setZoomWheelStop,
@@ -53,12 +56,13 @@ const sliderScaleStyle: CSSProperties = {
   color: 'var(--text-faint, #888)',
 }
 
-const POSITION_OPTIONS: { value: MeasurementsPosition; label: string }[] = [
-  { value: 'top-right', label: 'Top right' },
-  { value: 'bottom-right', label: 'Bottom right' },
+const POSITION_OPTIONS: { value: MeasurementsPosition; label: MessageDescriptor }[] = [
+  { value: 'top-right', label: msg`Top right` },
+  { value: 'bottom-right', label: msg`Bottom right` },
 ]
 
 export function ViewPane() {
+  const { t, i18n } = useLingui()
   const stop = useViewSetting(getZoomWheelStop, subscribeZoomWheelStop)
   const smooth = useViewSetting(getSmoothCamera, subscribeSmoothCamera)
   const hints = useViewSetting(getShowToolHints, subscribeShowToolHints)
@@ -67,7 +71,7 @@ export function ViewPane() {
 
   return (
     <SettingsForm>
-      <SettingsRow label="Zoom wheel speed" htmlFor="settings-view-zoom-speed" alignTop>
+      <SettingsRow label={t`Zoom wheel speed`} htmlFor="settings-view-zoom-speed" alignTop>
         <div style={{ width: '220px' }}>
           <input
             id="settings-view-zoom-speed"
@@ -76,52 +80,56 @@ export function ViewPane() {
             max={ZOOM_WHEEL_FACTORS.length - 1}
             step={1}
             value={stop}
-            aria-valuetext={ZOOM_WHEEL_LABELS[stop]}
+            aria-valuetext={i18n._(ZOOM_WHEEL_LABELS[stop])}
             onChange={(e) => setZoomWheelStop(Number(e.target.value))}
             style={{ width: '100%', margin: 0 }}
           />
           <div style={sliderScaleStyle} aria-hidden="true">
-            <span>Slow</span>
-            <span>Fast</span>
+            <span><Trans>Slow</Trans></span>
+            <span><Trans>Fast</Trans></span>
           </div>
         </div>
       </SettingsRow>
-      <SettingsNote>How far one turn of the mouse wheel moves the camera. The middle stop is the usual speed.</SettingsNote>
+      <SettingsNote><Trans>How far one turn of the mouse wheel moves the camera. The middle stop is the usual speed.</Trans></SettingsNote>
 
-      <SettingsRow label="Camera" alignTop>
+      <SettingsRow label={t`Camera`} alignTop>
         <label style={choiceLabelStyle}>
           <input type="checkbox" checked={smooth} onChange={(e) => setSmoothCamera(e.target.checked)} />
-          <span>Smooth camera moves</span>
+          <span><Trans>Smooth camera moves</Trans></span>
         </label>
       </SettingsRow>
       <SettingsNote>
-        Views, scenes, and zoom fly into place, and orbiting coasts to a stop. Turn this off and the camera
-        jumps straight there and stops the moment you let go.
+        <Trans>
+          Views, scenes, and zoom fly into place, and orbiting coasts to a stop. Turn this off and the camera
+          jumps straight there and stops the moment you let go.
+        </Trans>
       </SettingsNote>
 
       <SettingsSeparator />
 
-      <SettingsRow label="At the cursor" alignTop>
+      <SettingsRow label={t`At the cursor`} alignTop>
         <div style={choiceColumnStyle}>
           <label style={choiceLabelStyle}>
             <input type="checkbox" checked={hints} onChange={(e) => setShowToolHints(e.target.checked)} />
-            <span>Show tool hints</span>
+            <span><Trans>Show tool hints</Trans></span>
           </label>
           <label style={choiceLabelStyle}>
             <input type="checkbox" checked={pointer} onChange={(e) => setShowToolPointer(e.target.checked)} />
-            <span>Show tool pointer</span>
+            <span><Trans>Show tool pointer</Trans></span>
           </label>
         </div>
       </SettingsRow>
       <SettingsNote>
-        Hints are the small labels that follow the pointer, like Endpoint or On Edge. The tool pointer is the
-        cursor shaped like your current tool; off, you get the plain arrow.
+        <Trans>
+          Hints are the small labels that follow the pointer, like Endpoint or On Edge. The tool pointer is the
+          cursor shaped like your current tool; off, you get the plain arrow.
+        </Trans>
       </SettingsNote>
 
       <SettingsSeparator />
 
-      <SettingsRow label="Measurements box" alignTop>
-        <div role="radiogroup" aria-label="Measurements box position" style={choiceColumnStyle}>
+      <SettingsRow label={t`Measurements box`} alignTop>
+        <div role="radiogroup" aria-label={t`Measurements box position`} style={choiceColumnStyle}>
           {POSITION_OPTIONS.map((opt) => (
             <label key={opt.value} style={choiceLabelStyle}>
               <input
@@ -131,13 +139,13 @@ export function ViewPane() {
                 checked={position === opt.value}
                 onChange={() => setMeasurementsPosition(opt.value)}
               />
-              <span>{opt.label}</span>
+              <span>{i18n._(opt.label)}</span>
             </label>
           ))}
         </div>
       </SettingsRow>
       <SettingsNote>
-        Where the box that shows the number you are typing sits. The fly speed readout moves with it.
+        <Trans>Where the box that shows the number you are typing sits. The fly speed readout moves with it.</Trans>
       </SettingsNote>
     </SettingsForm>
   )

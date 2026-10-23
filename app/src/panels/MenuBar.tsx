@@ -1133,12 +1133,12 @@ export function MenuBar({
               onClick={withClose(() => onToggleSectionActive?.())}
             />
             <CheckMenuItem
-              label="X-ray"
+              label={t`X-ray`}
               checked={xray}
               onClick={withClose(() => onToggleXray?.())}
             />
             <CheckMenuItem
-              label="Wireframe"
+              label={t`Wireframe`}
               checked={wireframe}
               onClick={withClose(() => onToggleWireframe?.())}
             />

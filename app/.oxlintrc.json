@@ -16,6 +16,7 @@
         "ignore": [
           "^[^A-Za-z]*$",
           "^[a-z0-9_.:/#@\\-]+$",
+          "^[a-z]+[A-Z][A-Za-z0-9]*$",
           "^hew[.:]",
           "^settings-",
           "^(var|calc|color-mix|rgba?|hsla?|url|env|min|max|clamp|translate[XYZ]?|rotate|scale|linear-gradient|radial-gradient|cubic-bezier|repeat|minmax)\\(",

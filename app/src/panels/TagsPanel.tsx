@@ -16,7 +16,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useLingui } from '@lingui/react/macro'
+import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { buildTagTree, collectTagDescendantNodes, filterTagKeys, tagPathKey, type TagTreeNode } from './tagModel'
 import { nodeRefFromJs, nodeKindToNumber, type NodeRef } from './treeModel'
@@ -77,6 +77,7 @@ const ROW_BASE: React.CSSProperties = {
 }
 
 export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDeleteTag, revealTag, onSelectNodes, onRenameTag }: Props) {
+  const { t } = useLingui()
   // The row last clicked (highlighted); a later click on it opens rename.
   const [activeKey, setActiveKey] = useState<string | null>(null)
   const [editingKey, setEditingKey] = useState<string | null>(null)
@@ -235,8 +236,8 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
           type="text"
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
-          placeholder="Filter tags…"
-          aria-label="Filter tags"
+          placeholder={t`Filter tags…`}
+          aria-label={t`Filter tags`}
           style={{
             flex: 1,
             fontSize: '11px',
@@ -256,7 +257,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
               setFilter('')
               filterInputRef.current?.focus()
             }}
-            aria-label="Clear filter"
+            aria-label={t`Clear filter`}
             style={{
               position: 'absolute',
               right: '4px',
@@ -284,7 +285,7 @@ export function TagsPanel({ scene, docRev, hiddenTagPaths, onToggleTagPath, onDe
               fontStyle: 'italic',
             }}
           >
-            No tags match
+            <Trans>No tags match</Trans>
           </div>
         )}
         {tagTree.filter((node) => isShownByFilter(node, filterResult)).map((node) => (
@@ -423,7 +424,7 @@ function TagRow({
             }}
             onDoubleClick={(e) => e.stopPropagation()}
             aria-disabled={chevronLocked ? 'true' : undefined}
-            title={chevronLocked ? 'Held open while filtering' : undefined}
+            title={chevronLocked ? t`Held open while filtering` : undefined}
             style={{
               background: 'none',
               border: 'none',
