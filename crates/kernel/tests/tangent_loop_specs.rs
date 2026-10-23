@@ -38,6 +38,9 @@
 //!    bytes do not depend on the order the drawing was made in.
 //! 7. **Other ops.** Transform, slice, boolean union and subtract, Make
 //!    Component, explode: each succeeds and validates or refuses typed.
+//! 8. **Split.** A cut across the parent, or around a hole that another
+//!    hole touches, gives each touching hole to the face it lies in,
+//!    whichever way the cut runs.
 //!
 //! (6, tessellation, lives in `crates/tessellate`; `.skp` write and read in
 //! `crates/skp-export`; STL export in `crates/mesh-export`.)
@@ -697,6 +700,185 @@ fn the_bytes_do_not_depend_on_the_drawing_order() {
         oy.object(iy).expect("y obj").encode(&|_| 0),
     );
     assert_eq!(gx, gy, "the geometry encodes the same either way");
+}
+
+// ------------------------------------------------------------- 8. split
+
+/// Splits `face` along `path` through the document, as the Line tool's cut
+/// does, and checks the result validates with exact history.
+fn split_and_check(w: &mut Wall, face: FaceId, path: Vec<Point3>) {
+    let bytes0 = w.doc.save();
+    w.doc
+        .apply_object_op(
+            w.id,
+            KernelOp::SplitFace {
+                face,
+                path,
+                restore: None,
+                curves: Vec::new(),
+            },
+        )
+        .unwrap_or_else(|e| panic!("the cut refused: {e:?}"));
+    w.obj().validate().expect("the split validates");
+    assert_exact_history(&mut w.doc, &bytes0);
+}
+
+#[test]
+fn a_cut_across_the_parent_keeps_the_touching_hole_whichever_way_it_runs() {
+    // A circle tangent to each edge of the top, and a cut edge to edge
+    // clear of it. The hole touches the outer loop of the result face that
+    // holds it at the rim, and a strict inside test reads that one vertex
+    // either way depending on the edge; the hole's side cannot depend on
+    // the edge or on the cut's direction (a redo replays the cut reversed).
+    // (center, rim, cut ends, a point beside the circle, a point across the
+    // cut)
+    type Case = (
+        (f64, f64),
+        (f64, f64),
+        [(f64, f64); 2],
+        (f64, f64),
+        (f64, f64),
+    );
+    let cases: [Case; 4] = [
+        (
+            (1.0, 0.5),
+            (1.0, 0.0),
+            [(0.0, 1.5), (2.0, 1.5)],
+            (0.2, 0.2),
+            (0.2, 1.8),
+        ),
+        (
+            (0.5, 1.0),
+            (0.0, 1.0),
+            [(1.5, 0.0), (1.5, 2.0)],
+            (0.2, 0.2),
+            (1.8, 1.8),
+        ),
+        (
+            (1.0, 1.5),
+            (1.0, 2.0),
+            [(0.0, 0.5), (2.0, 0.5)],
+            (0.2, 1.8),
+            (0.2, 0.2),
+        ),
+        (
+            (1.5, 1.0),
+            (2.0, 1.0),
+            [(0.5, 0.0), (0.5, 2.0)],
+            (1.8, 0.2),
+            (0.2, 0.2),
+        ),
+    ];
+    for ((cx, cy), (rx, ry), [p, q], beside, across) in cases {
+        for forward in [true, false] {
+            let what = format!("rim ({rx}, {ry}), forward {forward}");
+            let mut w = top_2x2();
+            let (ring, g) = tool_circle(&w, cx, cy, rx, ry);
+            let seed = w.face;
+            let disc = draw_and_check(&mut w, seed, ring.clone(), Some(g));
+            let parent = parent_of(&w, disc);
+            let (a, b) = (w.at(p.0, p.1), w.at(q.0, q.1));
+            split_and_check(
+                &mut w,
+                parent,
+                if forward { vec![a, b] } else { vec![b, a] },
+            );
+            let obj = w.obj();
+            let holder = face_at(&w, beside.0, beside.1);
+            let other = face_at(&w, across.0, across.1);
+            assert_ne!(holder, other, "the cut split the parent: {what}");
+            let holes: Vec<Vec<Point3>> = obj.faces()[holder]
+                .inner_loops
+                .iter()
+                .map(|&h| ring_of(obj, h))
+                .collect();
+            assert_eq!(
+                holes.len(),
+                1,
+                "the face beside the circle keeps the hole: {what}"
+            );
+            assert!(
+                cyclic_match(&holes[0], &ring, true),
+                "the hole is the circle: {what}"
+            );
+            assert!(
+                ring_of(obj, obj.faces()[holder].outer_loop).contains(&w.at(rx, ry)),
+                "still touching at the rim: {what}"
+            );
+            assert!(obj.faces()[other].inner_loops.is_empty(), "{what}");
+        }
+    }
+}
+
+#[test]
+fn a_cut_around_a_hole_takes_a_second_hole_touching_it() {
+    // Two circles touching at a point, then a cut from the first circle
+    // back to it around the second: the region between the cut and the
+    // first circle takes the second hole, which touches that region's
+    // outer loop at the shared vertex. The layout is turned through each
+    // quarter about the top's center, so the shared vertex meets the cut
+    // region's boundary from every side.
+    let r = 0.3;
+    let a2 = (-r + r * (PI / 6.0).cos(), r * (PI / 6.0).sin());
+    for quarter in 0..4 {
+        let turn = quarter as f64 * PI / 2.0;
+        // Local frame: the first circle about (-r, 0), the second about
+        // (r, 0), touching at the origin.
+        let at = |x: f64, y: f64| {
+            (
+                1.0 + x * turn.cos() - y * turn.sin(),
+                1.0 + x * turn.sin() + y * turn.cos(),
+            )
+        };
+        for forward in [true, false] {
+            let what = format!("quarter {quarter}, forward {forward}");
+            let mut w = top_2x2();
+            let (ca, cb) = (at(-r, 0.0), at(r, 0.0));
+            let a = w.ring(ca.0, ca.1, r, 24, turn);
+            let mut b = w.ring(cb.0, cb.1, r, 24, turn);
+            assert!((b[12] - a[0]).length() < 1e-12, "{what}");
+            b[12] = a[0];
+            for (ring, g) in [
+                (a.clone(), w.circle_geom(ca.0, ca.1, r)),
+                (b.clone(), w.circle_geom(cb.0, cb.1, r)),
+            ] {
+                let (x, y) = at(-0.8, -0.8);
+                let seed = face_at(&w, x, y);
+                w.draw_loop(seed, &ring, Some(g)).expect("draws");
+            }
+            let (rx, ry) = at(-0.8, -0.8);
+            let top = face_at(&w, rx, ry);
+            assert_eq!(
+                w.obj().faces()[top].inner_loops.len(),
+                2,
+                "two holes: {what}"
+            );
+            let mut path = vec![a[2]];
+            for (x, y) in [(a2.0, 0.45), (0.65, 0.45), (0.65, -0.45), (a2.0, -0.45)] {
+                let (u, v) = at(x, y);
+                path.push(w.at(u, v));
+            }
+            path.push(a[22]);
+            if !forward {
+                path.reverse();
+            }
+            split_and_check(&mut w, top, path);
+            let obj = w.obj();
+            let (lx, ly) = at(r, 0.4);
+            let lune = face_at(&w, lx, ly);
+            let rest = face_at(&w, rx, ry);
+            assert_ne!(lune, rest, "the cut split the top: {what}");
+            let held: Vec<Vec<Point3>> = obj.faces()[lune]
+                .inner_loops
+                .iter()
+                .map(|&h| ring_of(obj, h))
+                .collect();
+            assert_eq!(held.len(), 1, "the lune holds the second hole: {what}");
+            assert!(cyclic_match(&held[0], &b, true), "{what}");
+            // The rest keeps the first circle, rerouted along the cut.
+            assert_eq!(obj.faces()[rest].inner_loops.len(), 1, "{what}");
+        }
+    }
 }
 
 /// A point strictly inside the region of `outer` less `holes`: the support

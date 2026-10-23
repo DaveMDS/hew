@@ -3983,6 +3983,77 @@ fn kb22_save_after_redoing_a_definition_delete() {
     run_doc_case(seeds, ops).expect("KB-22 replay holds every invariant");
 }
 
+/// KB-30: two coincident unit boxes intersected, then a sketch owned on the
+/// result, a crossing loop, Make Component and a member transform. The
+/// validator reported an object-owned sketch lying on no face of its owner
+/// (I8).
+#[test]
+fn kb30_sketch_on_face_after_coincident_intersect() {
+    let seeds: Vec<BoxSeed> = vec![((0.0, 0.0), (1.0, 1.0), 0.5), ((0.0, 0.0), (1.0, 1.0), 0.5)];
+    let ops = vec![
+        DocOp::Boolean {
+            kind: 2,
+            a_sel: 0,
+            b_sel: 0,
+        },
+        DocOp::OwnSketch {
+            obj_sel: 0,
+            face_sel: 7825113691772547323,
+            turn: 0.0,
+        },
+        DocOp::CrossingLoop {
+            obj_sel: 0,
+            face_sel: 3933536894228226167,
+            side: 0,
+            ts: (0.0, 0.7176536165147582),
+            frac: 0.1,
+            circle: false,
+            from_inside: false,
+        },
+        DocOp::MakeComponent { node_sel: 0 },
+        DocOp::TransformDefMember {
+            inst_sel: 0,
+            member_sel: 0,
+            axis: (0.0, 0.0, -0.7628613740878377),
+            angle: 0.0,
+            scale: Vec3::new(0.3, 0.3, 0.3),
+            offset: (-2.3523967960678642, 0.0, 0.0),
+        },
+    ];
+    run_doc_case(seeds, ops).expect("KB-30 replay holds every invariant");
+}
+
+/// KB-34: a circle tangent to a box's edge, then a face split. Redoing the
+/// split after a full unwind refused with "cut path crosses itself or
+/// grazes the boundary".
+#[test]
+fn kb34_redo_split_after_tangent_circle() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 1.0), 2.7131479042599187),
+    ];
+    let ops = vec![
+        DocOp::TangentCircle {
+            obj_sel: 3078489218597910833,
+            face_sel: 15043238798366512228,
+            side: 15568592410549646645,
+            t: 0.6808869321157451,
+            frac: 0.2,
+            twin: false,
+        },
+        DocOp::SplitFace {
+            obj_sel: 2386591658481364397,
+            face_sel: 11787325478549280132,
+            edge_a: 3815206797068229728,
+            edge_b: 8241556265330311875,
+            ta: 0.6801022240073851,
+            tb: 0.3464279946365581,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("KB-34 replay holds every invariant");
+}
+
 proptest! {
     /// Random document-op sequences keep every visible object valid, survive
     /// save/load, and the document log unwinds and replays reproducibly.

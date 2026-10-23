@@ -48,9 +48,12 @@ pub(crate) fn signed_area_on_plane(pts: &[Point3], normal: Vec3) -> f64 {
 }
 
 /// Point-in-polygon test using the ray-casting method projected onto the
-/// plane spanned by `normal`. Returns `true` only for strictly interior
-/// points; boundary points return `false` (strict interior required for
-/// `HoleOutsideOuter`).
+/// plane spanned by `normal`. Returns `true` for strictly interior points
+/// and `false` for strictly exterior ones. A point ON the boundary gets
+/// either answer: the ray's half-open edge convention reads some boundary
+/// edges and corners as inside and others as outside, and which ones depends
+/// on the axes [`plane_axes`] picks for `normal`. A caller that can meet a
+/// boundary point must exclude it first.
 pub(crate) fn point_inside_polygon(pt: Point3, poly: &[Point3], normal: Vec3) -> bool {
     let (u, v) = plane_axes(normal);
     let px = pt.to_vec().dot(u);

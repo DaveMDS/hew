@@ -8914,6 +8914,40 @@ fn apply_split_restore(
     }
 }
 
+/// Which side of a split result's outer ring `hole` lies on: `Some(true)`
+/// inside it, `Some(false)` outside, `None` when the hole straddles it (or
+/// offers nothing to decide by).
+///
+/// Points of the hole that lie ON the ring are no evidence either way.
+/// Loops of one face may share isolated points (ARCHITECTURE §2.4), so a
+/// hole can touch the outer loop of the face that holds it at a vertex, or
+/// put a vertex on one of its edges, and the strict inside test reads such
+/// a point by the accident of where it sits on the ring. The hole's edge
+/// midpoints join its vertices as probes, so a hole whose every vertex
+/// touches still has points to decide by. The answer depends only on the
+/// geometry, never on which way the cut ran (a redo replays it reversed).
+fn hole_side(hole: &[Point3], ring: &[Point3], normal: Vec3) -> Option<bool> {
+    let on_ring = |p: Point3| {
+        (0..ring.len())
+            .any(|i| point_near_segment(p, ring[i], ring[(i + 1) % ring.len()], tol::POINT_MERGE))
+    };
+    let n = hole.len();
+    let probes: Vec<Point3> = (0..n)
+        .flat_map(|k| [hole[k], hole[k] + (hole[(k + 1) % n] - hole[k]) * 0.5])
+        .filter(|&p| !on_ring(p))
+        .collect();
+    let inside = probes
+        .iter()
+        .filter(|&&p| point_inside_polygon(p, ring, normal))
+        .count();
+    match inside {
+        _ if probes.is_empty() => None,
+        0 => Some(false),
+        k if k == probes.len() => Some(true),
+        _ => None,
+    }
+}
+
 /// Core split surgery on a cloned object.
 ///
 /// Preconditions:
@@ -9098,32 +9132,31 @@ fn do_split_face(
         let outer_a_pts: Vec<Point3> = obj.loop_positions(outer_loop).collect();
 
         // Decide by testing the hole RING itself: the cut path is validated
-        // to stay clear of every hole, so all of a hole's vertices lie
-        // strictly on one side of the cut and inside exactly one result
-        // face. A vertex-average "centroid" is NOT a usable proxy — for a
-        // concave hole it can fall outside the hole entirely (and inside the
-        // other result face), silently assigning the hole to a face whose
-        // outer boundary does not contain it; loop-ownership checks alone
-        // cannot catch that downstream (rule 4: decide correctly here, never
-        // repair later).
-        let inside_a = hole_pts
-            .iter()
-            .filter(|&&hp| point_inside_polygon(hp, &outer_a_pts, normal))
-            .count();
-        if inside_a == hole_pts.len() {
-            // Assign to face A.
-            obj.faces[face].inner_loops.push(*il);
-            obj.loops[*il].face = face;
-        } else if inside_a == 0 {
-            // Assign to face B.
-            obj.faces[face_b_id].inner_loops.push(*il);
-            obj.loops[*il].face = face_b_id;
-        } else {
-            // A hole straddling both result faces means the cut path crosses
-            // hole territory in a way the up-front point/midpoint validation
-            // did not see. No valid assignment exists — refuse rather than
-            // guess (rule 4).
-            return Err(StickyError::PathNotSimple);
+        // to stay clear of every hole, so the hole lies on one side of the
+        // cut, inside exactly one result face. A vertex-average "centroid"
+        // is NOT a usable proxy — for a concave hole it can fall outside the
+        // hole entirely (and inside the other result face), silently
+        // assigning the hole to a face whose outer boundary does not contain
+        // it; loop-ownership checks alone cannot catch that downstream
+        // (rule 4: decide correctly here, never repair later).
+        match hole_side(&hole_pts, &outer_a_pts, normal) {
+            Some(true) => {
+                // Assign to face A.
+                obj.faces[face].inner_loops.push(*il);
+                obj.loops[*il].face = face;
+            }
+            Some(false) => {
+                // Assign to face B.
+                obj.faces[face_b_id].inner_loops.push(*il);
+                obj.loops[*il].face = face_b_id;
+            }
+            None => {
+                // A hole straddling both result faces means the cut path
+                // crosses hole territory in a way the up-front point/midpoint
+                // validation did not see. No valid assignment exists —
+                // refuse rather than guess (rule 4).
+                return Err(StickyError::PathNotSimple);
+            }
         }
     }
 
@@ -9269,16 +9302,14 @@ fn do_split_face_hole(
         .collect();
     for il in others {
         let pts: Vec<Point3> = obj.loop_positions(il).collect();
-        let inside = pts
-            .iter()
-            .filter(|&&p| point_inside_polygon(p, &lune_pts, normal))
-            .count();
-        if inside == pts.len() {
-            obj.faces[face].inner_loops.retain(|&l| l != il);
-            obj.faces[lune].inner_loops.push(il);
-            obj.loops[il].face = lune;
-        } else if inside != 0 {
-            return Err(StickyError::PathNotSimple);
+        match hole_side(&pts, &lune_pts, normal) {
+            Some(true) => {
+                obj.faces[face].inner_loops.retain(|&l| l != il);
+                obj.faces[lune].inner_loops.push(il);
+                obj.loops[il].face = lune;
+            }
+            Some(false) => {}
+            None => return Err(StickyError::PathNotSimple),
         }
     }
 
