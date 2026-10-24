@@ -21,6 +21,13 @@ mostly the same shortcuts. Follow Me sweeps profiles into moldings,
 spheres, and goblets. Offset, Slice, through-cuts, and Move/Rotate/Scale
 with copy and `3x` arrays.
 
+**Click or drag.** Every tool with a start and an end takes either
+click, move, click or press, drag, release, as in SketchUp. Standard
+views keep your zoom, X-ray and Wireframe on the View menu let you
+snap to and select hidden geometry, and a strip along the top of the
+viewport shows the path from Model down to what you clicked, so you can
+see which group or component it lives in without opening anything.
+
 **Solids that stay solid.** Every extrusion is a discrete, watertight
 object. Nothing welds to a neighbor by accident, nothing goes hollow;
 Union, Subtract, and Intersect run only when you ask. Model Health
@@ -33,6 +40,12 @@ at any smoothness.
 feet-and-inches. Tape measure, protractor, guides, linear and radial
 dimensions, leader text, and solid 3D text. Measure an edge, type what
 it should be, and the model — or just one part — rescales to match.
+Settings ▸ Units has a Precision choice, and a readout that has been
+rounded shows a `~` so you can tell it from an exact value.
+
+**Reference pictures.** Drop a floor plan or photo onto the viewport
+(or File ▸ Import Image…), size it by dragging, typing a width, or with
+the Tape Measure, and trace over it.
 
 **Organization.** Nested groups, components that edit once and update
 everywhere, tags with per-tag visibility, saved Scenes, an outliner on
@@ -53,6 +66,7 @@ check the parts list, view it in AR on an iPhone or iPad.
 **Files that are yours.** The native `.hew` format is an open,
 documented container. A SketchUp `.skp` opens as a document and saves
 back in the format it came in, scenes and tags included.
+File ▸ Revert to Saved goes back to the last saved state.
 
 | Format | Import | Export |
 |---|---|---|

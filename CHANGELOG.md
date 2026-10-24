@@ -8,6 +8,67 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [1.3.0] (2026-10-24) - The "Second Nature" Release
+
+More tools now do what a SketchUp hand expects without thinking about it.  Every
+two-point tool takes click-drag-release as well as click-click, a typed length
+goes straight up the blue axis, Standard views keep your zoom, an arrow key
+after the first click still locks the plane, and two objects' edges snap where
+they cross. And a model can start from a picture: drop a floor plan or a photo
+on the viewport, size it by drag, by a typed width, or with the Tape Measure,
+and trace over it.
+
+Also new: tools for examining a model. X-ray and Wireframe lets you see inside a
+model and a new selection path "breadcrumb" shows you exactly what nested object
+you are interacting with.
+
+And more: Revert to Saved, a Precision setting that marks a rounded readout, a
+View pane in Settings, sorted and filtered panels, and an interface that is
+ready to be translated. Eight user-reported bugs are fixed, along with three
+kernel faults found by fuzzing.
+
+### Added
+
+- **Import Image:** File ▸ Import Image…, or a PNG or JPEG dropped on the viewport, places a reference picture on the ground or on any face. A click sets one corner, and dragging or typing a width sets its size with the proportions kept; the Tape Measure resizes it afterward like any part.
+- **Selection:** A strip at the top of the viewport reads the path from Model down to what the click landed on (Model › Kitchen › Base Cabinets › Door). Click a crumb to select that level, double-click to open it. With the Select tool idle, the hover hint names the object under the cursor and its parent, and Object Info shows the same path.
+- **Draw:** Click-drag-release works for every tool with a start point and an end point, alongside click-click. A press and a release on the same spot is still a click. [#52]
+- **View:** X-ray and Wireframe, on the View menu and in the command palette. X-ray draws every face see-through, and everything behind a face can be snapped to and selected; Wireframe draws edges only. The mode is per window and not saved in the file, as in SketchUp. [#51]
+- **Snapping:** Where one object's edge crosses another's, the crossing is a snap point. Line starts from it, and the Tape Measure measures from it instead of starting a guide. [#51]
+- **Units:** A Precision choice, kept per display format. Meters, centimeters, millimeters, and decimal inches offer zero to six decimals; fractional and architectural inches offer 1' down to 1/64"; every format also offers Exact. A readout that was rounded carries a leading `~`, and one that was not shows no mark. The defaults are the rounding each format always had.
+- **Settings:** A View pane: zoom wheel speed, smooth camera moves on or off, the inference hint and the tool pointer at the cursor, and the Measurements box at the top or the bottom of the viewport. [#26]
+- **Settings:** A Language setting. Every string in the interface, the desktop menus included, now comes from a translation catalog, so Hew can be translated without touching code. English is the only language offered so far; a Japanese catalog is in the repository waiting for a translator, and `docs/LOCALIZATION.md` says how to add one. [#54]
+- **File:** Revert to Saved, after Save As, re-reads the saved file into the same window after one confirmation. The API gains `hew.doc.revert`.
+- **Panels:** The Materials palette and the Components panel list by name. The Outliner has a sort control (document order, name, kind) next to its filter, and the Tags pane gets the same filter box the other panels have.
+- **Object Info:** Clicking a tag chip selects that tag in the Tags pane. A new Materials row lists every material on the selection, a group's or component's contents included; clicking one selects it in the Materials pane.
+- **Push/Pull:** The preview is tinted by mode: orange for a plain pull, blue for extrude-as-new, red for a cut. Toggling the mode mid-gesture changes the color. [#41]
+- **Keyboard:** Tool shortcuts follow the letter a key produces, so AZERTY, Dvorak, and other layouts keep their key caps; a key that produces no letter falls back to its physical position.
+
+### Changed
+
+- **Camera:** Top, Bottom, Front, Back, Left, and Right keep the current zoom and orbit target, so switching views no longer changes the on-screen scale. Iso still frames the whole model. [#52]
+- **Draw:** A circle touching a face's edge at exactly one point now makes a face, like a circle that crosses the edge. The face keeps its hole where the circle touches. [#43]
+- **Line:** Clicking the last placed point again finishes the chain whatever the pace. It used to be refused as the same point unless the click came fast enough to count as a double-click. [#36]
+- **Dimensions:** Arrowheads are a fixed size on screen, tied to the label text, and never cover more than about 60 percent of the line. A 2 cm dimension used to carry two heads that crossed over each other. Label ink is the color the theme intends; the light theme's text had read mid-gray. [#36]
+
+### Fixed
+
+- **Draw:** A typed length with the cursor straight above or below the first point did nothing, for Line and for the Arc chord, and a click there was refused or ignored. Both now go up the blue axis. [#51]
+- **Draw:** An arrow key pressed after the first click on a corner where faces meet was dropped, so a shape on a box at the origin could not be moved to the ground. It now moves the shape onto the locked plane, as pressing the arrow before the click does, and holding an arrow no longer toggles the lock on every repeat. [#51]
+- **Library:** Typing a name with digits in Save to Library retyped the last rectangle. Keys that land in a text field or a dialog no longer reach the active tool. [#36]
+- **Groups:** Opening any unnamed group showed "Editing Group 1". The label now matches the Outliner's numbering, and the selection path follows it.
+- **Command palette:** After a click on the window's title bar or a scrollbar, the arrow keys and Enter went dead and bare-letter tool shortcuts fired instead. [#38]
+- **Undo:** Saving after undoing and redoing the deletion of a component crashed when a sketch had been drawn into the component between the two. A definition's sketches now follow the definition's own hidden flag.
+- **Undo:** Undoing a paint after a split and its undo left the paint in place; redoing a paint on half of a split after both were undone left that half bare; and a Position Texture, Replace Material, or Delete Material whose face had been rebuilt refused every undo. Each recorded face is now found again by its geometry.
+- **Kernel:** A cut through a face whose hole touches the outer edge at one point was accepted or refused depending on which edge the hole touched and which way the cut was drawn, and a cut that went through could fail to redo. A hole's side is now decided from its own points.
+- **Export:** A cylinder band beside a tangent circle exported to STL at its stored facets instead of re-faceted, and a loose line lying along an edge of a face was freed by a boolean or left behind by a push on two of the face's four sides.
+- **Materials:** An imported textured face slid its texture when it was moved, rotated, or opened, and a resized picture tiled its image instead of stretching it.
+- **Desktop:** On Linux, the first click after moving, resizing, or refocusing the window by its title bar was ignored.
+
+### Security
+
+- **Desktop:** Updated rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.10 for RUSTSEC-2026-0382 and -0383, and replaced the yanked clipboard-win 5.4.1 with 5.4.3.
+- **All:** Updated tokio to 1.53.3 for RUSTSEC-2026-0386, Vite to 8.2.4, and Astro to 7.3.3.
+
 ## [1.2.3] (2026-10-19) - The "Room to Spare" Release
 
 Big SketchUp files now open. v1.2.2 made Hew say clearly when a model ran it

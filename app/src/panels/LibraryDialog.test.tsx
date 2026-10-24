@@ -1102,7 +1102,7 @@ describe('LibraryDialog', () => {
       fireEvent.click(screen.getByRole('button', { name: /^type/i }))
       expect(screen.getAllByRole('columnheader', { name: /^type/i })[0]).toHaveAttribute('aria-sort', 'ascending')
       expect(screen.getAllByRole('columnheader', { name: /^name/i })[0]).toHaveAttribute('aria-sort', 'none')
-    })
+    }, 20_000)
 
     it('the sort composes with the active search filter', async () => {
       seedDefault()

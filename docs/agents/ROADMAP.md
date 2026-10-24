@@ -454,6 +454,48 @@ below.
 - Movable drawing axes: place and orient a document-level frame that axis
   locks, draw planes, inference snapping, axis colors, and the rendered
   triad all follow, with Reset Drawing Axes to return to the world frame
+- A face's texture UV frame moves with the face under an object transform
+  and a session pose (instance pose, shear, direct session pose, two
+  placements of one component), so an imported textured face no longer
+  slides when moved, rotated, or opened and a resized picture stretches
+  instead of tiling. A transform that would squash a frame past what it can
+  hold is refused before anything moves; a frame that was already invalid
+  does not block a move
+- Loops of a face may share isolated vertices (never an edge, and each loop
+  stays simple), so a circle tangent to a face's edge at exactly one point,
+  two circles touching at a point, or a circle touching an imprint's corner
+  commit as a disc plus a parent face whose hole touches its outer loop. The
+  validator reports a non-simple loop and an edge with the same face on both
+  sides as typed errors and checks holes edge by edge (each hole edge cut at
+  every outer vertex lying on it, every piece inside the outer ring); an
+  imported object may graze its ring within the import tolerance. Inside
+  tests treat a point on any of a face's loops the same on every edge, so
+  cut-side hole assignment, STL cylinder re-facing, and loose lines carried
+  through a boolean, slice, or push no longer depend on the cut direction or
+  the plane's projection axes
+- Click-drag-release as well as click-click for every tool with a start
+  and an end point (Line, Rectangle, Circle, Polygon, Arc, Push/Pull, Move,
+  Rotate, Scale, Offset, Tape Measure, Dimension, Protractor): a press that
+  takes a participating tool from idle to mid-gesture, released past the
+  Select tool's drag threshold, is delivered as the tool's second click
+  through the ordinary click path at the release snap, so commits, typed
+  values, inference, and locks behave as after a click; a release inside the
+  threshold stays a plain click. A typed Enter or Escape spends an armed
+  release, other pointers are ignored while a drag is armed, and a drawing
+  one-finger touch drag no longer also orbits. A dragged Line is one segment
+  and ends the chain
+- Clicking a line chain's last placed point again finishes the chain at any
+  pace, with no toast, when the click lands within a few screen pixels of
+  the point; a snap that collapses onto it while the cursor is elsewhere is
+  still refused with a message that says what to do. A trailing browser
+  double-click after the finish is consumed rather than entering the object
+- Keys typed into a text field or a modal dialog never reach the active tool
+  (one predicate gates tool capture, bare-key shortcuts, and the final key
+  forward; a dialog counts as modal unless it says `aria-modal="false"`)
+- Push/pull's preview is tinted per mode through two theme tokens, orange
+  for a plain pull, blue for extrude-as-new, red for a cut, in light and
+  dark; toggling Ctrl mid-gesture changes the hue, and the bare arrow drawn
+  with no swept prism follows the mode
 
 ### Inference & precision
 
@@ -553,6 +595,67 @@ below.
   opacity slider updates the renderer's already-built material opacities
   in place — the same mechanism isolation dimming uses — with no
   re-tessellation at all
+- Blue-axis lengths: with a line anchored on the ground and no arrow lock,
+  a snap straight above or below the anchor keeps its height as an implicit
+  blue lock and the segment re-homes onto a vertical plane through the
+  anchor (the path the arrow lock uses), so hover, click, and typed length
+  agree. The Arc tool's chord stage anchors at its first point when no
+  arrow lock or Shift pin holds the plane, offering the same red, green, and
+  blue inferences Line does; a chord straight up or down moves the gesture
+  onto the vertical plane through the chord, and Esc from the bulge returns
+  to the chord on the ground
+- Arrow keys after a face-anchored first click: with Rectangle, Circle,
+  Polygon, or Arc anchored on a face, an arrow moves the gesture onto the
+  locked plane through the anchor (the same result as pressing it before the
+  click), the same arrow again or Down returns it to the face it started on,
+  and a held arrow no longer toggles the lock on every autorepeat
+- A crossing outranks a midpoint and reaches as far as other named points;
+  Tape Measure treats a crossing as a point (the first click measures from
+  it, and the hover hint says so) while edges, sketch edges, axes, and
+  guides still start parallel guides, and a crossing never anchors a resize
+  scoped to an open group or component, since the snap names only one of its
+  two edges
+- X-ray and Wireframe render modes (View menu on the web and native menus,
+  and the command palette; one mode at a time, choosing the active one
+  returns to Shaded) with the pick policy set once on the inference scene
+  as a face policy, so every tool obeys it without a per-call flag. Shaded:
+  faces occlude, only visible geometry snaps or picks. X-ray (faces at 0.4
+  opacity, depth writes off): every edge, endpoint, midpoint, crossing,
+  center, and quadrant is snappable and selectable, faces stay targets with
+  the nearest along the ray winning off an edge or point. Wireframe (no
+  faces, every edge): no On Face snaps, face hover, selection, push/pull, or
+  paint; drawing lands on the ground, a locked plane, or an edge or point.
+  The orbit pivot and in-session sketch selection use geometry-only picks
+  (`pick_face_geometry`, `pick_sketch_region_geometry`). The five draw tools
+  that drop an off-plane snap onto their plane opt in to hidden points
+  (`see_through_points` on the snap call): a hidden edge or corner adopts
+  the face it lies on in X-ray, any other hidden point is dropped onto the
+  clicked face's plane with a projected cue. The mode is per window, not
+  saved in the file, reset by New and kept by Revert; `set_render_mode`
+  refuses a bad string as `BadRenderMode`. A mode switch re-resolves the cue
+  at the parked pointer, window guide/axis/render-mode switches survive a
+  document load, and edges draw light gray on the dark theme in the
+  see-through modes. The raster print follows the mode; the scaled line-art
+  print falls back to a bitmap with a note while a mode is on
+- Standard views (Top, Bottom, Front, Back, Left, Right) only turn the
+  camera about the current orbit target: target, distance, and orthographic
+  zoom stay, so the on-screen scale is unchanged; the view limits still
+  resync from the model's extents. Iso still frames the model. The live
+  API's standard-view directive follows, and a standard view cancels a
+  running scene-transition glide
+- A Precision choice under Units, per person and per display format: zero
+  to six decimals for meters, centimeters, millimeters, and decimal inches;
+  1', 1", 1/2" down to 1/64" for fractional and architectural inches; and
+  Exact for every format (the fewest decimals within a micrometer for
+  metric, the smallest power-of-two fraction up to 1/64 otherwise, decimal
+  inches to five places when no fraction is exact). Defaults are each
+  format's historical rounding. A readout rounded to the chosen grid carries
+  a leading `~` only when rounding changed the value; typed input accepts and
+  ignores a leading `~`. The Measurements box, Tape Measure, Protractor,
+  Object Info sizes, printed pages, and placed Dimension text all follow it
+  (an overridden dimension text stays as typed), editable fields seed at
+  Exact so a rounded display never becomes a rounded value, and the SketchUp
+  writer and reader drop the prefix from dimension text
 
 ### Objects & organization
 
@@ -591,6 +694,23 @@ below.
 - `hew.entity.rename`/`hew.entity.delete` reach materials and component
   definitions the same way they reach any other entity; `hew.doc.purge_unused`
   is the API counterpart of Purge Unused
+- Sorting and filters: the Materials palette and Components panel list by
+  name (case-insensitive, numeric, so "paint 2" precedes "Paint 10"). The
+  Outliner has a sort control (document order, the default, name, kind:
+  objects, groups, components, sketches, then drawing) applied at every
+  level including open sessions and free sketches; rows keep their
+  document-order index, and the choice is per person, stored with the other
+  View settings. The Tags pane gets the same filter box as the other panels
+  (a parent stays, dimmed, when only a child matches), and one shared
+  comparator serves every panel and the tag tree
+- Object Info's tag chips jump to the Tags pane (tray restored, tag selected,
+  parents expanded, scrolled into view), and a Materials row lists every
+  distinct material on the selection (own paint, per-face paint front and
+  back, and for a group or component the recursive union including hidden
+  contents) as swatch-and-name links that select and reveal the material in
+  the Materials pane without arming Paint; nothing painted reads "None" and
+  past twelve entries "+N more" expands the rest. The read-only wasm
+  `object_materials` query backs it without a tessellation per object
 
 ### Materials
 
@@ -685,6 +805,15 @@ below.
   instead of reporting a wrong number
 - Annotations save with the document and read at a constant on-screen size,
   staying legible at any zoom
+- Dimension arrowheads are a fixed size on screen tied to the label text
+  height and capped so the two heads never cover more than about 60 percent
+  of the line, built in the per-frame layout pass at each tip's own depth for
+  linear and radial dimensions; the same pass keeps an outside label's tail
+  out of the text, puts a radius label past its leader end, keeps a small
+  circle's center cross inside it, and limits extension-line overshoot to a
+  few pixels. The raster print uses the same layout; the vector print sizes
+  arrows in paper millimeters and drops any head seen end-on. Label textures
+  are tagged sRGB so the light theme's ink stays near-black
 
 ### File format & persistence
 
@@ -822,6 +951,23 @@ below.
 | 3MF | — | yes |
 | USDZ | — | yes |
 | SVG line drawing | — | yes |
+- Reference pictures: File ▸ Import Image… (or a PNG or JPEG dropped on the
+  viewport) arms `PlaceImageTool`: a ghost follows the cursor on the face
+  under it or the ground (arrow keys lock the plane), the first click sets a
+  corner, the cursor sizes it with the aspect locked, flipping to the
+  cursor's side, and a typed width or a second click places it. The result
+  is what a SketchUp image opens as, in one undo step: one textured material
+  carrying the bytes verbatim, one definition holding a single quad whose UV
+  frame stretches the picture over it once, and one placement with a rigid
+  pose, so the Tape Measure resizes it like any part. The size comes from the
+  PNG or JPEG header (EXIF orientation honored); over 64 megapixels, under a
+  micrometer a side, or over 1,000,000 meters a side is refused with its own
+  reason. The `image-import` crate builds the recipe for the browser and
+  `hew-cli`; `hew.doc.import` of a `.png` or `.jpg` places it at an optional
+  frame and width and the wasm API gains `place_image`, recorded and
+  replayed. Every host checks the kernel can build the face before any
+  mutation and refuses with a typed reason; a backstop failure after ingest
+  says the document may hold a partial import
 
 ### Application shell & UX
 
@@ -957,6 +1103,55 @@ below.
   dialog listing what would be lost — entries since the save, plus any
   non-undoable-dirty reasons — with Save/Don't Save/Cancel, Save running
   the normal save flow and continuing the original action once it lands
+- File ▸ Revert to Saved (after Save As, in the web and native menus; also in
+  the command palette) is enabled when the document is dirty and bound to a
+  file. It confirms once with Cancel focused, then re-reads the saved bytes
+  through the ordinary open path, keeping the window, camera, panels, and
+  recents entry, with empty undo and redo stacks and a clean title; a read
+  failure leaves the document as it was, and a change made during the read
+  (judged by the kernel's undo depth) cancels the revert with a message.
+  Reverting a SketchUp file keeps the camera and skips the import report.
+  `hew.doc.revert` is host-side next to save and close and refuses
+  `nothing_to_revert` without a file or at the saved mark (a headless revert
+  judges by the history's saved mark, the live app by its dirty flag); the
+  desktop router hands it to the window, which reverts without asking
+- A View pane in Settings (between Units and Theme) holds four per-person
+  preferences that persist in `localStorage`, sync across windows, and
+  default to prior behavior: zoom wheel speed (five stops, Slow to Fast),
+  smooth camera moves (off applies every camera change at once, including
+  scene activation, the live bridge, and orbit and pan inertia), two
+  switches under At the cursor that hide the inference hint and the
+  tool-shaped pointer icon, and the Measurements box position (top right or
+  bottom right, with the Fly speed readout following)
+- Localization: Lingui macros and gettext catalogs under
+  `app/src/locales/` (an English source, a Japanese catalog, and a
+  compile-time pseudo-locale), an `I18nProvider` over every render root with
+  latest-wins activation and an English fallback, and a Language setting
+  (System default, each shipped language in its own name, the pseudo-locale
+  while Debug Mode is on) persisted and synced like units and theme; a
+  switch re-renders in place and re-derives the window title. Every
+  user-facing string is wrapped (panels, dialogs, tooltips, tool prompts,
+  Measurements box, kernel error copy, Model Health, palette, Shop Mode,
+  Print, Report Bug, Settings, HTML menu bar), counts go through ICU plurals,
+  numbers through `Intl`, and module-level copy resolves at read time.
+  Each history entry carries a structured kind (a stable id plus arguments)
+  that the kernel renders its English label from and the app builds its
+  localized label from; the English label stays the API's `expected_label`.
+  The desktop shell builds its native menu from ids and a per-locale JSON
+  generated from one label table and the catalogs, so a language switch
+  relabels the menu, updater dialogs, window titles, and library folder
+  picker, and the locale is remembered for the next launch. Keyboard
+  shortcuts match the ASCII letter a keystroke produced and fall back to the
+  physical key (AZERTY, Dvorak, idle IMEs work; Option/Alt combinations
+  never dispatch), text-field Enter, Escape, and arrows ignore IME
+  composition, and palette search normalizes with NFKC and matches English
+  tool names in every locale. A first launch on a profile with no state
+  seeds millimeters in Japan, and bug reports record the UI language. The
+  verify gate adds Oxlint with the Lingui plugin, a catalog extraction
+  check, shipped-locale completeness, a native menu label check, and a
+  pseudo-locale Playwright smoke. `SHIPPED_LOCALES`
+  (`app/src/i18n/locales.ts`) is English only; the Japanese catalog is not
+  offered until complete (`docs/LOCALIZATION.md`)
 
 ### Reliability & diagnostics
 
@@ -992,20 +1187,12 @@ below.
 
 ### Near-term
 
-- **Localization.** The app's text goes through Lingui macros into gettext
-  catalogs under `app/src/locales/`, with a Language setting (System
-  default, each shipped language in its own name, and a pseudo-locale
-  behind Debug Mode), locale-aware number formatting, and a lint rule that
-  rejects an unwrapped string (`docs/LOCALIZATION.md`). Landing in stages:
-  the plumbing and the sweep that wraps every string; a structured `kind`
-  on history entries so undo/redo labels are built in the app rather than
-  minted in Rust; native macOS menu labels generated from the same
-  catalogs; input-method-safe keyboard handling (physical-key tool
-  shortcuts, no dispatch during IME composition, NFKC-normalized palette
-  search); then the first translated language, Japanese, from a
-  contributor. The headless API, CLI, file format, user-typed names, and
-  the website stay English. Right-to-left layout and comma-decimal
-  measurement parsing are separate, later work
+- **First translated language.** The localization plumbing is shipped (see
+  Application shell & UX) with English the only offered language; the
+  Japanese catalog awaits a translator and is offered once complete. The
+  headless API, CLI, file format, user-typed names, and the website stay
+  English. Right-to-left layout and comma-decimal measurement parsing are
+  separate, later work
 - **Flat-path push/pull into a face's own holes.** Both push/pull paths
   are shipped (translate-and-build for any planar face, whole-wall radial
   offset for analytic curved walls — see Shipped). The one flat-path case
