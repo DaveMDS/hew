@@ -8,6 +8,24 @@ A newer Hew always opens documents saved by an older one. The reverse
 is not guaranteed: releases that change the `.hew` format say so under
 **Changed**.
 
+## [1.3.1] (2026-10-26) - The "Safe to Reopen" Release
+
+A fix for several ways Hew could save a file it then could not open, or stop
+with an error when it saved. If you wrapped part of a group in a component
+while editing that group, closed the group, and saved, the file could come
+back with "This file is damaged and can't be opened." Ungrouping inside a
+component you were editing could do the same, or crash Hew at the next
+autosave. Nested editing, where one group or component is open inside another,
+had a few more ways to get there. All are fixed.
+
+### Fixed
+
+- **Components:** Making a component out of something inside a group you are editing, then closing the group, left that item listed in both places. The file saved, and then would not open. Closing the group now leaves the item in its new component.
+- **Components:** Deleting every part of a component while editing it used to delete the component, even when another component still held a copy of it. That left the copy pointing at nothing, and the saved file would not open. Such a component now stays, empty, until you delete the one that holds it.
+- **Components:** Ungrouping a group inside a component you were editing took the group's contents out of the component's list, so Hew could stop with an error the next time it saved, autosave included, or save a file that would not open. The contents now stay in the component.
+- **Groups:** Grouping some items inside a group you were editing, then ungrouping them again, listed those items twice when you finished editing, and the saved file would not open. They now stay as they were.
+- **Components:** Placing a component while a group inside that same component was open could put the component inside itself, and a long enough chain of components inside components could go past the depth Hew allows. Both saved a file that would not open. Hew now refuses the placement instead.
+
 ## [1.3.0] (2026-10-24) - The "Second Nature" Release
 
 More tools now do what a SketchUp hand expects without thinking about it.  Every
