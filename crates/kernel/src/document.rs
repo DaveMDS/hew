@@ -1606,7 +1606,9 @@ enum DocAction {
     /// members that were ALREADY tombstoned before the open in place, so an
     /// older `delete_def_member`'s undo stays valid), and unhid
     /// `hidden_instances` — unless the close EMPTIED the definition, in
-    /// which case it deleted definition and instances outright (`emptied`).
+    /// which case it deleted definition and instances outright (`emptied`) —
+    /// except a definition a live definition still nests, which stays,
+    /// empty, so that placement never points at a hidden definition.
     /// Undo re-opens the session ([`Document::bake_explode_session`] over
     /// the stored `members`/`sketches`/`hidden_instances` lists — see those
     /// fields for why re-derivation is wrong) after first restoring
@@ -1653,12 +1655,16 @@ enum DocAction {
         surfaced_groups: Vec<GroupId>,
         surfaced_instances: Vec<(InstanceId, Transform)>,
         /// True when the close found the definition EMPTIED (every member
-        /// deleted mid-session, nothing folded in): the definition and its
-        /// instances were deleted outright (hidden, ids stable), matching
-        /// `delete_def_member`'s documented SketchUp posture for a
-        /// now-empty component. Undo un-hides the definition and re-opens
-        /// the session; the instances stay hidden either way (a session
-        /// hides them, an emptied close keeps them hidden).
+        /// deleted mid-session, nothing folded in) and no live definition
+        /// still nests it: the definition and its instances were deleted
+        /// outright (hidden, ids stable), matching `delete_def_member`'s
+        /// documented SketchUp posture for a now-empty component. A
+        /// definition that is nested elsewhere is kept, empty, and its
+        /// world placements unhide like any other close
+        /// (`delete_definition` refuses that same case). Undo un-hides an
+        /// emptied definition and re-opens the session; the instances stay
+        /// hidden either way (a session hides them, an emptied close keeps
+        /// them hidden).
         emptied: bool,
     },
     /// `open_group_session` applied the ungroup posture to a top-level
@@ -15031,19 +15037,32 @@ impl Document {
         // contains) any open session's definition would close a cycle at
         // fold time; and the fold must not push the innermost definition's
         // chain past the depth bound anywhere it is already nested.
-        if self.component_session().is_some() {
-            for d in self.defs_on_loan() {
+        // The WHOLE stack, not just the innermost frame: a group frame
+        // sitting on a component frame (drilling into a member group) folds
+        // its placement into the group, which folds into the definition on
+        // loan beneath it — `component_session()` alone would answer
+        // `None` there and skip both gates.
+        let on_loan = self.defs_on_loan();
+        if !on_loan.is_empty() {
+            for &d in &on_loan {
                 if component == d || self.def_reaches(component, d) {
                     return Err(DocumentError::ComponentCycle);
                 }
             }
-            let fold_target = self
-                .component_session()
-                .map(|sess| sess.component)
-                .expect("checked above");
-            if self.def_ancestry_depth(fold_target) + 1 + self.def_depth(component)
-                > MAX_COMPONENT_DEPTH
-            {
+            // The chain ABOVE the fold target runs through the open frames
+            // too, and the committed graph cannot see it: each entered
+            // instance is hidden for the session, and a definition placed
+            // mid-session is not yet anyone's member. So every frame
+            // contributes its own committed ancestry plus the frames
+            // stacked below it, and the deepest of those bounds the fold.
+            let frames = on_loan.len();
+            let ancestry = on_loan
+                .iter()
+                .enumerate()
+                .map(|(i, &d)| self.def_ancestry_depth(d) + (frames - 1 - i))
+                .max()
+                .unwrap_or(0);
+            if ancestry + 1 + self.def_depth(component) > MAX_COMPONENT_DEPTH {
                 return Err(DocumentError::ComponentDepthExceeded);
             }
         }
@@ -16822,13 +16841,26 @@ impl Document {
         // session touches instances but the open/close bracket itself), so
         // every entry here is still exactly the tombstone `open` recorded.
         // (A definition of lines alone is not empty, as a group of lines
-        // alone is not.)
+        // alone is not.) Nor does a definition that a LIVE definition
+        // still places as a member go: tombstoning it would leave that
+        // member instance referencing a hidden definition. It stays, empty,
+        // for the same reason `delete_definition` refuses
+        // (`DefinitionNestedInDefinition`) — the close cannot refuse, so it
+        // keeps the definition instead.
         let holds_drawing = self.def_sketches.iter().any(|(s, &c)| {
             c == session.component
                 && !self.hidden_sketches.contains(s)
                 && self.sketches.contains_key(*s)
         });
-        let emptied = self.components[session.component].members.is_empty() && !holds_drawing;
+        let nested_in_live_def = self.instances.iter().any(|(_, r)| {
+            !r.hidden
+                && r.def == session.component
+                && r.owner_def
+                    .is_some_and(|o| self.components.get(o).is_some_and(|c| !c.hidden))
+        });
+        let emptied = self.components[session.component].members.is_empty()
+            && !holds_drawing
+            && !nested_in_live_def;
         if emptied {
             self.components[session.component].hidden = true;
         } else {
@@ -17005,10 +17037,12 @@ impl Document {
 
     /// Whether `node` is live, world-owned, and sitting at the top level —
     /// the group-session close's re-home/fold-in eligibility test
-    /// (docs/design/group-session.md). An object that left the world
-    /// mid-session (folded into a definition by `make_component`), or a
-    /// node an inner session's close already re-homed into its own group,
-    /// fails this and is deliberately left where it is.
+    /// (docs/design/group-session.md). A node that left the world
+    /// mid-session (folded into a definition by `make_component`: an
+    /// object's owner becomes a definition, a group's or instance's
+    /// `owner_def` is set while its parent is cleared), or a node an inner
+    /// session's close already re-homed into its own group, fails this and
+    /// is deliberately left where it is.
     fn node_is_top_level_world(&self, node: NodeId) -> bool {
         match node {
             NodeId::Object(id) => self
@@ -17018,11 +17052,11 @@ impl Document {
             NodeId::Group(id) => self
                 .groups
                 .get(id)
-                .is_some_and(|r| !r.hidden && r.parent.is_none()),
+                .is_some_and(|r| !r.hidden && r.parent.is_none() && r.owner_def.is_none()),
             NodeId::Instance(id) => self
                 .instances
                 .get(id)
-                .is_some_and(|r| !r.hidden && r.parent.is_none()),
+                .is_some_and(|r| !r.hidden && r.parent.is_none() && r.owner_def.is_none()),
         }
     }
 

@@ -43,7 +43,7 @@ A component is shared geometry: one **definition**, any number of placed **insta
 
 An instance that's mirrored, scaled unevenly on one axis, or has a sibling placement kept inside some *other* group, edits a little differently: its siblings stay visible the whole time instead of stepping out of view, because that placement can't be lifted out to edit alone. Everything else — the tools, drawing, stepping out — works the same, with one exception: a definition edited this way always needs at least one member, so deleting its last one is refused rather than emptying the component.
 
-Deleting a member otherwise works the same way you'd delete anything else. Delete every member and step out, and the whole component — and every instance of it — disappears with it (undo brings it all back).
+Deleting a member otherwise works the same way you'd delete anything else. Delete every member and step out, and the whole component — and every instance of it — disappears with it (undo brings it all back). The one exception is a component that sits inside another component: it stays, empty, because removing it would change the component around it.
 
 Saving works normally while you're in the middle of editing a component, autosave included — your place in the edit holds, and the saved file reflects the component as it stands.
 

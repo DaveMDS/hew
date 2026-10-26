@@ -453,6 +453,54 @@ fn make_component_mid_session_folds_the_instance_into_the_group() {
     assert_eq!(doc.node_parent(NodeId::Instance(instance)), Some(group));
 }
 
+/// **A member folded into a component mid-session stays in the component**:
+/// wrapping a grouped instance (or a nested group) in a new definition
+/// while the group is open must not let the close re-home the wrapped node
+/// back into the group — it would then be listed by the group AND owned by
+/// the definition, and the saved file could not be reopened.
+#[test]
+fn a_member_folded_into_a_component_is_not_rehomed_at_close() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let c = build_box(&mut doc, 6.0, 0.0, 0.0, 7.0, 1.0, 1.0);
+    let d = build_box(&mut doc, 9.0, 0.0, 0.0, 10.0, 1.0, 1.0);
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(a)]).expect("component");
+    let (group, _) = doc
+        .group_nodes(&[
+            NodeId::Object(b),
+            NodeId::Instance(inst),
+            NodeId::Object(c),
+            NodeId::Object(d),
+        ])
+        .expect("group");
+
+    doc.open_group_session(group).expect("open");
+    // A grouped instance wrapped on its own.
+    let (_, wrapper, _) = doc
+        .make_component(&[NodeId::Instance(inst)])
+        .expect("wrap the instance");
+    // A group made mid-session, then wrapped.
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(c), NodeId::Object(d)])
+        .expect("inner group");
+    let (_, group_wrapper, _) = doc
+        .make_component(&[NodeId::Group(inner)])
+        .expect("wrap the group");
+    doc.close_group_session().expect("close");
+
+    assert_eq!(
+        doc.group_members(group).expect("group survives"),
+        vec![
+            NodeId::Object(b),
+            NodeId::Instance(wrapper),
+            NodeId::Instance(group_wrapper)
+        ],
+        "only the replacement instances rejoin; the wrapped nodes stay in their definitions"
+    );
+    Document::load(&doc.save()).expect("the saved document must reopen");
+}
+
 // -------------------------------------------------------------- spec 11
 
 /// **The kernel backstop under a group frame**: an operand OUTSIDE the

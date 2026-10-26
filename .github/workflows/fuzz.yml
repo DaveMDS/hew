@@ -1,0 +1,51 @@
+# Nightly deep fuzz — the kernel's structure-and-session fuzz harness at a
+# case count too large for the per-commit gate.
+#
+# scripts/verify.sh and CI already run crates/kernel/tests/session_fuzz.rs at
+# proptest's default 256 cases on every change. That catches a regression the
+# way a unit test does; it is too shallow to find a new interaction between
+# editing sessions and the tree-shaping ops. This runs the same test at
+# PROPTEST_CASES=20000, so a new failure surfaces the next morning instead of
+# in someone's saved file.
+#
+# A failure prints proptest's shrunk op list in the log and uploads the seed
+# file. Reproduce locally with the same PROPTEST_CASES, then turn the shrunk
+# sequence into an explicit spec next to the fix (see the explode_session and
+# group_session specs for the pattern).
+
+name: Fuzz
+
+on:
+  schedule:
+    # 11:00 UTC daily, ahead of the 13:00 dependency audit.
+    - cron: '0 11 * * *'
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: 'PROPTEST_CASES'
+        default: '20000'
+
+jobs:
+  session-fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # rustup honors rust-toolchain.toml — the same pinned compiler CI uses.
+      - name: Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Session fuzz
+        env:
+          PROPTEST_CASES: ${{ inputs.cases || '20000' }}
+        run: cargo test -p kernel --test session_fuzz
+
+      - name: Keep the failing seed
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: session-fuzz-regressions
+          path: crates/kernel/tests/session_fuzz.proptest-regressions
+          if-no-files-found: ignore

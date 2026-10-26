@@ -22,7 +22,10 @@
 //!   (`ExplodeSessionScope`) — the kernel backstop behind the app's own
 //!   session modality.
 //! - a close that finds the definition emptied deletes definition and
-//!   instances outright (SketchUp's posture), fully undoable.
+//!   instances outright (SketchUp's posture), fully undoable — unless a
+//!   live definition still nests it, which stays, empty.
+//! - the cycle and depth gates on placing a definition mid-session read the
+//!   whole frame stack, not just the innermost frame.
 
 use kernel::{
     ComponentId, Document, DocumentError, InstanceId, KernelOp, NodeId, ObjectId, Plane, Point3,
@@ -962,4 +965,142 @@ fn an_undone_edit_stays_undone_across_a_reclose() {
         "undone rotate leaked into the definition (max vertex deviation {dev})"
     );
     let _ = component;
+}
+
+// -------------------------------------------------------------- spec 14
+
+/// **A definition a live definition still nests survives being emptied**:
+/// deleting every member mid-session and closing would otherwise hide the
+/// definition while the nested placement inside the outer definition kept
+/// referencing it — a document that panics under the debug invariants and
+/// saves a file that cannot be reopened. (`delete_definition` refuses the
+/// same case with `DefinitionNestedInDefinition`; a close cannot refuse, so
+/// the definition stays, empty.) The whole chain stays undoable.
+#[test]
+fn closing_an_emptied_definition_that_is_nested_elsewhere_keeps_it() {
+    let mut doc = Document::new();
+    let (inner, nested, member_a, member_b) = two_member_component(&mut doc);
+    // Wrap the placement in an outer definition: `nested` is now a member
+    // of it, and a second, world placement of the inner definition is the
+    // one the session opens.
+    let (_outer, _outer_instance, _) = doc
+        .make_component(&[NodeId::Instance(nested)])
+        .expect("wrap the placement");
+    let (world, _) = doc
+        .place_instance(inner, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .expect("world placement");
+
+    doc.open_explode_session(world).expect("open");
+    doc.delete_node(NodeId::Object(member_a)).expect("delete a");
+    doc.delete_node(NodeId::Object(member_b)).expect("delete b");
+    doc.close_explode_session().expect("close");
+
+    assert!(
+        doc.def_members(inner).is_some(),
+        "the nested definition is kept, not tombstoned"
+    );
+    assert!(
+        doc.instance_ids().contains(&world),
+        "its world placement unhides like on any other close (empty, but live)"
+    );
+    Document::load(&doc.save()).expect("the saved document must reopen");
+    Document::load(&doc.save_for_persistence()).expect("so must a mid-edit save");
+
+    doc.undo().expect("undo close");
+    assert_eq!(doc.explode_session_instance(), Some(world));
+    doc.redo().expect("redo close");
+    assert!(doc.def_members(inner).is_some());
+    Document::load(&doc.save()).expect("the redone state reopens too");
+}
+
+// -------------------------------------------------------------- spec 15
+
+/// **The cycle gate sees the whole frame stack**: with a group frame
+/// opened on top of a component frame, placing the definition on loan must
+/// still refuse as a cycle — the placement folds into the group, which
+/// folds into the definition. Reading only the innermost frame let it
+/// through, and the saved file then failed to reopen with a component
+/// cycle.
+#[test]
+fn placing_the_definition_on_loan_refuses_under_a_group_frame_too() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 2.0, 2.0, 1.0);
+    let b = build_box(&mut doc, 4.0, 0.0, 0.0, 6.0, 2.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group");
+    let (component, instance, _) = doc
+        .make_component(&[NodeId::Group(group)])
+        .expect("wrap the group");
+
+    doc.open_explode_session(instance).expect("open component");
+    doc.open_group_session(group)
+        .expect("open the member group");
+
+    assert_eq!(
+        doc.place_instance(component, Transform::IDENTITY)
+            .unwrap_err(),
+        DocumentError::ComponentCycle
+    );
+
+    doc.close_innermost_session().expect("close group");
+    doc.close_innermost_session().expect("close component");
+    Document::load(&doc.save()).expect("the saved document must reopen");
+}
+
+// -------------------------------------------------------------- spec 16
+
+/// **The depth gate counts the open frames**: a chain of stacked sessions is
+/// invisible to the committed definition graph (each entered instance is
+/// hidden while its definition is on loan, and a definition placed
+/// mid-session is not yet anyone's member), so reading only the committed
+/// ancestry let a stack of sessions fold a chain deeper than the bound. The
+/// close does not re-check depth, and the saved file then failed to reopen
+/// with "definitions nest beyond 64 levels". The placement must refuse
+/// typed instead, and everything that did open must still close into a
+/// document that reopens.
+#[test]
+fn stacked_sessions_cannot_fold_a_chain_past_the_depth_bound() {
+    const DEFS: usize = 70;
+    let mut doc = Document::new();
+    // Flat, unplaced definitions: delete every world placement but the
+    // first, so the width bound never trips before the depth bound does.
+    let mut defs = Vec::new();
+    let mut firsts = Vec::new();
+    for i in 0..DEFS {
+        let b = build_box(
+            &mut doc,
+            3.0 * i as f64,
+            0.0,
+            0.0,
+            3.0 * i as f64 + 1.0,
+            1.0,
+            1.0,
+        );
+        let (c, inst, _) = doc.make_component(&[NodeId::Object(b)]).expect("component");
+        defs.push(c);
+        firsts.push(inst);
+    }
+    for &inst in &firsts[1..] {
+        doc.delete_node(NodeId::Instance(inst))
+            .expect("drop the placement");
+    }
+
+    doc.open_explode_session(firsts[0])
+        .expect("open the first frame");
+    let mut refused = false;
+    for &def in &defs[1..] {
+        match doc.place_instance(def, Transform::IDENTITY) {
+            Ok((inst, _)) => doc.open_explode_session(inst).map(|_| ()).expect("enter"),
+            Err(e) => {
+                assert_eq!(e, DocumentError::ComponentDepthExceeded);
+                refused = true;
+                break;
+            }
+        }
+    }
+    assert!(refused, "the 64-level bound must refuse a deeper stack");
+
+    while doc.close_innermost_session().is_ok() {}
+    Document::load(&doc.save()).expect("the saved document must reopen");
 }

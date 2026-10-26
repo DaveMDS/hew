@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a73bdeb5c8f33595af246be286eaddeefaf0a882e1c0ea5594153dcbd6a3daaf # shrinks to boxes = 3, ops = [Group { a: 1706260352797009582, b: 2403297935574914096 }, Delete { sel: 2043223049753066796 }, MakeComponent { sel: 2694117821347102782 }, MakeUnique { sel: 1 }, Undo, OpenGroupSession { sel: 12607147364322412481 }, MakeComponent { sel: 10881836789024627792 }]

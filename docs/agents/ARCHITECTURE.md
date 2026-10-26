@@ -505,7 +505,10 @@ of the anchor. The world outside the frame never moves.
 
 A session that deletes every member leaves the definition with nothing to
 fold back into: closing it deletes the definition and every instance of it
-outright, matching SketchUp's posture for an emptied component. Opening and
+outright, matching SketchUp's posture for an emptied component — unless a
+live definition still nests it, in which case it stays, empty, because
+deleting it would leave that nested placement pointing at nothing (the same
+case `delete_definition` refuses). Opening and
 closing a session are themselves ordinary, granular undo steps — undoing
 past a close visually reopens the session, and every operation performed
 inside one is individually undoable forever, exactly like any other
