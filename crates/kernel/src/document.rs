@@ -13919,13 +13919,22 @@ impl Document {
         if !self.group_is_live(group) {
             return Err(DocumentError::UnknownGroup);
         }
-        // Under a group frame the dissolved group must be session geometry
-        // — ungrouping an OUTSIDE group would release members the close's
-        // fold-in walk ([`Document::nodes_surfaced_since`]) then absorbs
-        // into the session group. (During a component session ungroup stays
-        // deliberately ungated, as before: released members keep their
-        // world parents and never fold into a definition.)
-        if matches!(self.sessions.last(), Some(SessionFrame::Group(_))) {
+        // With a group frame ANYWHERE on the stack the dissolved group must
+        // be session geometry of the innermost frame — ungrouping an
+        // OUTSIDE group would release members the group close's fold-in
+        // walk ([`Document::nodes_surfaced_since`]) then absorbs into the
+        // session group. The whole stack, not just the innermost frame: a
+        // component frame can sit on top of a group frame. With only
+        // component frames open, ungroup of an outside world group stays
+        // ungated (its released members keep their world parents). A group
+        // that IS session geometry of a component frame (a surfaced member
+        // group, or one made mid-session) releases its contents into the
+        // definition: the component close lists them as direct members.
+        if self
+            .sessions
+            .iter()
+            .any(|f| matches!(f, SessionFrame::Group(_)))
+        {
             self.explode_scope_node(NodeId::Group(group))?;
         }
         let parent = self.groups[group].parent;
@@ -16709,6 +16718,37 @@ impl Document {
                 NodeId::Group(g) => !dropped_groups.contains(g),
                 NodeId::Instance(i) => !dropped_instances.contains(i),
             });
+        // Nodes a mid-session `ungroup` released out of a top-level member
+        // group: the dissolved group was just dropped above, and its
+        // contents now sit at the definition's top level, so they must be
+        // listed as direct members. Left unlisted, the definition owns
+        // nodes it cannot reach, and the save either panics (an emptied
+        // definition) or writes a file the loader refuses. Only nodes the
+        // session's own actions surfaced can be in that state, so the walk
+        // is over those few, not over every member of a possibly huge
+        // definition.
+        for node in self.nodes_surfaced_since(session.undo_len_at_open) {
+            let released = match node {
+                NodeId::Object(o) => {
+                    session.members.contains(&o)
+                        && !self.objects[o].hidden
+                        && self.objects[o].group_parent().is_none()
+                }
+                NodeId::Group(g) => {
+                    session.surfaced_groups.contains(&g)
+                        && !self.groups[g].hidden
+                        && self.groups[g].parent.is_none()
+                }
+                NodeId::Instance(i) => {
+                    session.surfaced_instances.contains(&i)
+                        && !self.instances[i].hidden
+                        && self.instances[i].parent.is_none()
+                }
+            };
+            if released && !self.components[session.component].members.contains(&node) {
+                self.components[session.component].members.push(node);
+            }
+        }
 
         // Original def-owned sketches: same restore-or-unbake choice. A
         // sketch has no `hidden`-tombstone-vs-membership-list split the way
@@ -17141,20 +17181,22 @@ impl Document {
 
         let prev_members = self.groups[session.group].members.clone();
 
-        // Survivors in original order, then fold-ins in creation order. An
-        // original member re-created in `created` cannot happen (creation
-        // mints fresh ids), so the two lists are disjoint by construction.
+        // Survivors in original order, then fold-ins in creation order.
+        // The lists CAN overlap: a group made mid-session from original
+        // members and then ungrouped releases those same members, so
+        // `created` names them again. Each node is listed once, at its
+        // original position.
         let mut members: Vec<NodeId> = session
             .members
             .iter()
             .copied()
             .filter(|&m| self.node_is_top_level_world(m))
             .collect();
-        members.extend(
-            created
-                .into_iter()
-                .filter(|&n| self.node_is_top_level_world(n)),
-        );
+        for n in created {
+            if self.node_is_top_level_world(n) && !members.contains(&n) {
+                members.push(n);
+            }
+        }
 
         for &m in &members {
             self.set_node_parent(m, Some(session.group));

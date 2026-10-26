@@ -1104,3 +1104,168 @@ fn stacked_sessions_cannot_fold_a_chain_past_the_depth_bound() {
     while doc.close_innermost_session().is_ok() {}
     Document::load(&doc.save()).expect("the saved document must reopen");
 }
+
+// -------------------------------------------------------------- spec 17
+
+/// **Ungrouping a member group inside a component session keeps its
+/// contents in the component**: dissolving the surfaced group drops it from
+/// the definition's member list, and the released objects then sit at the
+/// definition's top level. They must be listed there at close. Left
+/// unlisted, the definition owned objects it could not reach, and the saved
+/// file refused to reopen.
+#[test]
+fn ungrouping_a_member_group_in_a_component_session_keeps_the_objects() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group");
+    let (component, instance, _) = doc
+        .make_component(&[NodeId::Group(group)])
+        .expect("wrap the group");
+
+    doc.open_explode_session(instance).expect("open");
+    doc.ungroup(group).expect("ungroup the member group");
+    Document::load(&doc.save_for_persistence()).expect("a mid-session autosave must reopen");
+    doc.close_explode_session().expect("close");
+
+    let members = doc.def_members(component).expect("component survives");
+    assert!(
+        members.contains(&a) && members.contains(&b),
+        "the released objects are direct members of the definition"
+    );
+    Document::load(&doc.save()).expect("the saved document must reopen");
+
+    doc.undo().expect("undo close");
+    Document::load(&doc.save_for_persistence()).expect("the reopened session autosaves");
+    doc.redo().expect("redo close");
+    Document::load(&doc.save()).expect("the redone state reopens too");
+}
+
+// -------------------------------------------------------------- spec 18
+
+/// **The same, for a group of component instances** — the shape a user
+/// reported: group four placed components, make that group a component,
+/// open it, and ungroup. The released instances stay inside the component,
+/// and neither the autosave nor the saved file panics or fails to reopen.
+#[test]
+fn ungrouping_a_member_group_of_instances_in_a_component_session_keeps_them() {
+    let mut doc = Document::new();
+    let mut placed = Vec::new();
+    for i in 0..4 {
+        let x = 3.0 * i as f64;
+        let b = build_box(&mut doc, x, 0.0, 0.0, x + 1.0, 1.0, 1.0);
+        let (_, inst, _) = doc.make_component(&[NodeId::Object(b)]).expect("component");
+        placed.push(NodeId::Instance(inst));
+    }
+    let (group, _) = doc.group_nodes(&placed).expect("group the instances");
+    let (component, wrapper, _) = doc
+        .make_component(&[NodeId::Group(group)])
+        .expect("wrap the group");
+
+    doc.open_explode_session(wrapper).expect("open");
+    doc.ungroup(group).expect("ungroup the member group");
+    Document::load(&doc.save_for_persistence()).expect("a mid-session autosave must reopen");
+    doc.close_explode_session().expect("close");
+    Document::load(&doc.save()).expect("the saved document must reopen");
+    let members = doc.def_member_nodes(component).expect("component survives");
+    for &n in &placed {
+        let NodeId::Instance(i) = n else {
+            unreachable!()
+        };
+        assert!(
+            !doc.instance_ids().contains(&i),
+            "a released instance is not back in the world"
+        );
+        assert!(
+            members.contains(&n),
+            "a released instance is a direct member of the definition: {members:?}"
+        );
+    }
+
+    doc.undo().expect("undo close");
+    Document::load(&doc.save_for_persistence()).expect("the reopened session autosaves");
+    doc.redo().expect("redo close");
+    Document::load(&doc.save()).expect("the redone state reopens too");
+}
+
+// -------------------------------------------------------------- spec 19
+
+/// **A nested member group released by an ungroup is listed too**: with
+/// `outer = { inner, c }` wrapped in a component, ungrouping `outer` in the
+/// session leaves `inner` (a group, still owned by the definition) at the
+/// top level next to `c`. Both must be direct members at close; a group
+/// the definition owns but does not list is as unreachable as an object.
+#[test]
+fn ungrouping_the_outer_of_nested_member_groups_lists_the_inner_group() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let c = build_box(&mut doc, 6.0, 0.0, 0.0, 7.0, 1.0, 1.0);
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("inner group");
+    let (outer, _) = doc
+        .group_nodes(&[NodeId::Group(inner), NodeId::Object(c)])
+        .expect("outer group");
+    let (component, instance, _) = doc
+        .make_component(&[NodeId::Group(outer)])
+        .expect("wrap the outer group");
+
+    doc.open_explode_session(instance).expect("open");
+    doc.ungroup(outer).expect("ungroup the outer group");
+    Document::load(&doc.save_for_persistence()).expect("a mid-session autosave must reopen");
+    doc.close_explode_session().expect("close");
+
+    let members = doc.def_member_nodes(component).expect("component survives");
+    assert!(
+        members.contains(&NodeId::Group(inner)) && members.contains(&NodeId::Object(c)),
+        "the released inner group and the loose box are direct members: {members:?}"
+    );
+    Document::load(&doc.save()).expect("the saved document must reopen");
+
+    doc.undo().expect("undo close");
+    doc.redo().expect("redo close");
+    Document::load(&doc.save()).expect("the redone state reopens too");
+}
+
+// -------------------------------------------------------------- spec 20
+
+/// **Ungroup reads the whole frame stack**: with a component frame opened
+/// on top of a group frame, ungrouping a world group from OUTSIDE the
+/// session must still refuse. Looking only at the innermost frame let it
+/// through, and the group close's fold-in walk then absorbed the released
+/// members into the group.
+#[test]
+fn ungrouping_an_outside_group_refuses_under_a_component_frame_on_a_group_frame() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let x = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let w1 = build_box(&mut doc, 6.0, 0.0, 0.0, 7.0, 1.0, 1.0);
+    let w2 = build_box(&mut doc, 9.0, 0.0, 0.0, 10.0, 1.0, 1.0);
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(a)]).expect("component");
+    let (g, _) = doc
+        .group_nodes(&[NodeId::Instance(inst), NodeId::Object(x)])
+        .expect("group");
+    let (outside, _) = doc
+        .group_nodes(&[NodeId::Object(w1), NodeId::Object(w2)])
+        .expect("outside group");
+
+    doc.open_group_session(g).expect("open the group");
+    doc.open_explode_session(inst)
+        .expect("open the instance inside it");
+
+    assert_eq!(
+        doc.ungroup(outside).unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+
+    doc.close_innermost_session().expect("close component");
+    doc.close_innermost_session().expect("close group");
+    let members = doc.group_members(g).expect("group survives");
+    assert!(
+        !members.contains(&NodeId::Object(w1)) && !members.contains(&NodeId::Object(w2)),
+        "the outside group's boxes never joined the session group: {members:?}"
+    );
+}

@@ -950,3 +950,40 @@ fn session_direct_members_tracks_the_live_scope() {
     doc.close_group_session().expect("close");
     assert_eq!(doc.session_direct_members(), None);
 }
+
+// -------------------------------------------------------------- spec 22
+
+/// **Ungrouping a group made mid-session lists each member once at close**:
+/// the dissolved group's members are both original members of the open
+/// group and "released" nodes, so the close's survivor list and its
+/// fold-in list overlap. Without a de-duplication the group listed the
+/// same member twice, which trips the tree invariants and saves a file the
+/// loader refuses.
+#[test]
+fn ungrouping_a_mid_session_group_of_original_members_lists_each_once() {
+    let mut doc = Document::new();
+    let a = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let b = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let c = build_box(&mut doc, 6.0, 0.0, 0.0, 7.0, 1.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b), NodeId::Object(c)])
+        .expect("group");
+
+    doc.open_group_session(group).expect("open");
+    let (inner, _) = doc
+        .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
+        .expect("group two members");
+    doc.ungroup(inner).expect("ungroup them again");
+    Document::load(&doc.save_for_persistence()).expect("a mid-session autosave must reopen");
+    doc.close_group_session().expect("close");
+
+    let members = doc.group_members(group).expect("group survives");
+    assert_eq!(members.len(), 3, "each member exactly once: {members:?}");
+    for n in [a, b, c] {
+        assert!(
+            members.contains(&NodeId::Object(n)),
+            "{n:?} stays in the group"
+        );
+    }
+    Document::load(&doc.save()).expect("the saved document must reopen");
+}

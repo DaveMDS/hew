@@ -1,5 +1,5 @@
 //! Structure-and-session fuzz harness (DEVELOPMENT.md rule 3): random
-//! sequences of the tree-shaping ops — make component, group, ungroup-by-
+//! sequences of the tree-shaping ops — make component, group, ungroup,
 //! reparent, explode, place, make unique, duplicate, delete, delete
 //! definition — interleaved with component and group EDITING SESSIONS
 //! (opened, stacked, closed innermost-first) and undo/redo, over a document
@@ -33,6 +33,7 @@ enum Op {
     MakeComponent { sel: usize },
     MakeComponentPair { a: usize, b: usize },
     Group { a: usize, b: usize },
+    Ungroup { sel: usize },
     Reparent { sel: usize, parent: usize },
     Explode { sel: usize },
     Place { comp: usize },
@@ -54,6 +55,7 @@ fn arb_op() -> impl Strategy<Value = Op> {
         3 => sel().prop_map(|sel| Op::MakeComponent { sel }),
         1 => (sel(), sel()).prop_map(|(a, b)| Op::MakeComponentPair { a, b }),
         2 => (sel(), sel()).prop_map(|(a, b)| Op::Group { a, b }),
+        2 => sel().prop_map(|sel| Op::Ungroup { sel }),
         2 => (sel(), sel()).prop_map(|(sel, parent)| Op::Reparent { sel, parent }),
         1 => sel().prop_map(|sel| Op::Explode { sel }),
         2 => sel().prop_map(|comp| Op::Place { comp }),
@@ -127,6 +129,11 @@ fn apply(doc: &mut Document, op: &Op) {
         Op::Group { a, b } => {
             if let (Some(a), Some(b)) = (pick(&nodes, a), pick(&nodes, b)) {
                 let _ = doc.group_nodes(&[a, b]);
+            }
+        }
+        Op::Ungroup { sel } => {
+            if let Some(g) = pick(&groups, sel) {
+                let _ = doc.ungroup(g);
             }
         }
         Op::Reparent { sel, parent } => {

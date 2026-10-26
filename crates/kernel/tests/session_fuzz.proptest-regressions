@@ -4,4 +4,10 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
+#
+# A seed replays against the CURRENT strategy: changing an op's weight or
+# adding an op shifts what an older seed generates. The explicit specs next
+# to each fix (explode_session_specs, group_session_specs) are the durable
+# regression cases; these seeds are extra coverage.
 cc a73bdeb5c8f33595af246be286eaddeefaf0a882e1c0ea5594153dcbd6a3daaf # shrinks to boxes = 3, ops = [Group { a: 1706260352797009582, b: 2403297935574914096 }, Delete { sel: 2043223049753066796 }, MakeComponent { sel: 2694117821347102782 }, MakeUnique { sel: 1 }, Undo, OpenGroupSession { sel: 12607147364322412481 }, MakeComponent { sel: 10881836789024627792 }]
+cc a67aa7d823dab70b5df1dba3542839722c883b20317fb5214ac5054f156c7d23 # shrinks to boxes = 3, ops = [Group { a: 5902730896307323354, b: 12128546437680279219 }, MakeComponent { sel: 16705782274114075810 }, Duplicate { sel: 226217940149477670 }, OpenGroupSession { sel: 0 }, Group { a: 1115114717984545685, b: 1466145349044151761 }, OpenComponentSession { sel: 750455621813130492 }, Delete { sel: 11927985637388952396 }, Undo, Delete { sel: 18261088346384783361 }, Ungroup { sel: 11137048337908289550 }]

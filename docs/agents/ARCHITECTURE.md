@@ -446,8 +446,10 @@ work. Closing the frame regroups: survivors re-home in their original
 order, everything created during the session that is still live and
 top-level folds in as a new member (grouping, component and instance
 creation, import, and 3D text are all legal inside a group frame for
-exactly this reason), members deleted or consumed mid-session drop out,
-and a group left with nothing is deleted outright.
+exactly this reason), members released by ungrouping a group made
+mid-session from original members keep their original place and are
+listed once, members deleted or consumed mid-session drop out, and a
+group left with nothing is deleted outright.
 
 Entering a **Component instance** opens an **explode session** — the
 transient-*explode* analog, and always the innermost frame (definitions
@@ -468,8 +470,11 @@ pristine snapshot taken at open (bit-exact, sidestepping round-trip
 floating-point noise entirely for the common case of a session that only
 touches some members), and anything drawn or created during the session —
 new Objects, new sketches — folds in too, becoming part of the definition
-(SketchUp's "what you draw while editing goes into the component"). Every
-placement of the definition then shows the result.
+(SketchUp's "what you draw while editing goes into the component"). A
+member group ungrouped during the session releases its contents to the
+definition's top level, and they are listed as direct members of the
+definition at close. Every placement of the definition then shows the
+result.
 
 This works only when the instance's pose is a **similarity with a positive
 determinant** — uniform scale, no mirror (`Transform::similarity_scale`).
