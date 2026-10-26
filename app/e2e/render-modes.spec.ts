@@ -365,6 +365,12 @@ test('switching the mode with the pointer parked re-resolves the cue there, both
   // Through the command palette, by keyboard only: the mouse never moves.
   const viaPalette = async (): Promise<void> => {
     await page.keyboard.press('Control+/')
+    // Type only once the palette has reset and focused its search field:
+    // the reset runs on open and the focus a frame later, so keys sent
+    // straight after the shortcut land on the previous run's text.
+    const search = page.getByRole('dialog', { name: /command palette/i }).getByPlaceholder(/search/i)
+    await expect(search).toBeFocused()
+    await expect(search).toHaveValue('')
     await page.keyboard.type('X-ray')
     await page.keyboard.press('Enter')
     await page.waitForTimeout(300)
