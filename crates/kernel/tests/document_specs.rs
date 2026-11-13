@@ -2161,7 +2161,7 @@ fn delete_selection_batches_multiple_nodes_into_one_undo_step() {
     let before = top_set(&doc);
 
     let change = doc
-        .delete_selection(&[NodeId::Object(a), NodeId::Object(b)])
+        .delete_selection(&[NodeId::Object(a), NodeId::Object(b)], &[], &[])
         .expect("delete a and b");
     assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
     assert!(change.objects_touched.contains(&a) && change.objects_touched.contains(&b));
@@ -2193,7 +2193,7 @@ fn delete_selection_labels_a_single_node_by_name_or_falls_back() {
     doc.set_node_name(NodeId::Object(a), Some("Roof".to_string()))
         .expect("name the object");
 
-    doc.delete_selection(&[NodeId::Object(a)])
+    doc.delete_selection(&[NodeId::Object(a)], &[], &[])
         .expect("delete the named object");
     assert_eq!(
         doc.peek_undo_meta().map(|m| m.label.as_str()),
@@ -2203,7 +2203,7 @@ fn delete_selection_labels_a_single_node_by_name_or_falls_back() {
     doc.undo().expect("undo");
 
     let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
-    doc.delete_selection(&[NodeId::Object(b)])
+    doc.delete_selection(&[NodeId::Object(b)], &[], &[])
         .expect("delete the unnamed object");
     assert_eq!(
         doc.peek_undo_meta().map(|m| m.label.as_str()),
@@ -2228,7 +2228,7 @@ fn delete_selection_skips_a_member_its_own_batch_already_removed() {
         .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
         .expect("group");
     let depth = doc.undo_depth();
-    doc.delete_selection(&[NodeId::Group(g), NodeId::Object(a)])
+    doc.delete_selection(&[NodeId::Group(g), NodeId::Object(a)], &[], &[])
         .expect("group first, then its already-gone member");
     assert_eq!(doc.undo_depth(), depth + 1, "one entry");
     assert!(top_set(&doc).is_empty());
@@ -2236,7 +2236,7 @@ fn delete_selection_skips_a_member_its_own_batch_already_removed() {
     assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
     assert!(doc.visible_object_ids().contains(&a));
     // Member listed FIRST: it is deleted on its own, then the group.
-    doc.delete_selection(&[NodeId::Object(a), NodeId::Group(g)])
+    doc.delete_selection(&[NodeId::Object(a), NodeId::Group(g)], &[], &[])
         .expect("member first, then the group");
     assert!(top_set(&doc).is_empty());
     doc.undo().expect("undo again");
@@ -2251,7 +2251,7 @@ fn delete_selection_aborts_the_whole_batch_on_a_stale_node() {
 
     let stale = NodeId::Object(ObjectId::default());
     assert_eq!(
-        doc.delete_selection(&[NodeId::Object(a), stale]),
+        doc.delete_selection(&[NodeId::Object(a), stale], &[], &[]),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
@@ -2259,6 +2259,225 @@ fn delete_selection_aborts_the_whole_batch_on_a_stale_node() {
         before,
         "a refused batch leaves the document byte-identical to before the call"
     );
+}
+
+/// A selection mixing nodes, guides, and annotations deletes as ONE undo
+/// step: one undo brings every member back, and an annotation anchored to a
+/// deleted node comes back attached.
+#[test]
+fn delete_selection_takes_guides_and_annotations_in_the_same_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let line = doc
+        .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let point = doc.add_guide_point(Point3::new(0.0, 5.0, 0.0)).unwrap();
+    let kept_guide = doc.add_guide_point(Point3::new(9.0, 9.0, 0.0)).unwrap();
+    let on_a = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(a)), Point3::ORIGIN),
+            Vec3::ZERO,
+            "on a".to_string(),
+        )
+        .unwrap();
+    let on_b = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(b)), Point3::new(2.0, 0.0, 0.0)),
+            Vec3::ZERO,
+            "on b".to_string(),
+        )
+        .unwrap();
+    let depth = doc.undo_depth();
+
+    let change = doc
+        .delete_selection(&[NodeId::Object(a)], &[line, point], &[on_a])
+        .expect("mixed delete");
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Delete 4 items")
+    );
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(b)]));
+    assert_eq!(doc.guide_ids(), vec![kept_guide]);
+    assert_eq!(doc.annotation_ids(), vec![on_b]);
+    assert!(change.objects_touched.contains(&a));
+    assert!(change.guides_touched.contains(&line) && change.guides_touched.contains(&point));
+
+    doc.undo().expect("undo");
+    assert_eq!(
+        top_set(&doc),
+        HashSet::from([NodeId::Object(a), NodeId::Object(b)])
+    );
+    assert_eq!(
+        doc.guide_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([line, point, kept_guide])
+    );
+    assert_eq!(
+        doc.annotation_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([on_a, on_b])
+    );
+    assert_eq!(
+        doc.annotation_detached(on_a),
+        Some(false),
+        "the annotation comes back attached to its restored node"
+    );
+
+    doc.redo().expect("redo");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(b)]));
+    assert_eq!(doc.guide_ids(), vec![kept_guide]);
+    assert_eq!(doc.annotation_ids(), vec![on_b]);
+}
+
+/// Deleting an annotation's anchor node without the annotation leaves it
+/// detached, and one undo reattaches it — the step carries the detach.
+#[test]
+fn delete_selection_detaches_an_annotation_it_leaves_behind() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let guide = doc.add_guide_point(Point3::new(0.0, 5.0, 0.0)).unwrap();
+    let on_a = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(a)), Point3::ORIGIN),
+            Vec3::ZERO,
+            "on a".to_string(),
+        )
+        .unwrap();
+
+    doc.delete_selection(&[NodeId::Object(a)], &[guide], &[])
+        .expect("delete");
+    assert_eq!(doc.annotation_detached(on_a), Some(true));
+    doc.undo().expect("undo");
+    assert_eq!(doc.annotation_detached(on_a), Some(false));
+    assert_eq!(doc.guide_ids(), vec![guide]);
+}
+
+/// Guides alone are a valid selection, labeled by the guide count; an
+/// annotation alone, or any other mix, is labeled by the item count.
+#[test]
+fn delete_selection_labels_guide_and_annotation_selections() {
+    let mut doc = Document::new();
+    let g1 = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let g2 = doc.add_guide_point(Point3::new(1.0, 0.0, 0.0)).unwrap();
+    let g3 = doc.add_guide_point(Point3::new(2.0, 0.0, 0.0)).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let label = |doc: &Document| doc.peek_undo_meta().map(|m| m.label.clone());
+
+    doc.delete_selection(&[], &[g1], &[]).expect("one guide");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 1 guide"));
+    doc.delete_selection(&[], &[g2, g3], &[])
+        .expect("two guides");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 2 guides"));
+    assert!(doc.guide_ids().is_empty());
+    doc.delete_selection(&[], &[], &[note])
+        .expect("one annotation");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 1 item"));
+    assert!(doc.annotation_ids().is_empty());
+
+    doc.undo().expect("undo the annotation");
+    doc.undo().expect("undo the two guides");
+    doc.delete_selection(&[], &[g2], &[note])
+        .expect("a guide and an annotation");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 2 items"));
+}
+
+/// A guide or annotation listed twice is deleted once, as a node listed
+/// twice is: the second listing was live when the batch began, so it is
+/// skipped rather than refused.
+#[test]
+fn delete_selection_skips_a_guide_or_annotation_listed_twice() {
+    let mut doc = Document::new();
+    let g = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let depth = doc.undo_depth();
+
+    doc.delete_selection(&[], &[g, g], &[note, note])
+        .expect("duplicates are skipped");
+    assert_eq!(doc.undo_depth(), depth + 1);
+    assert!(doc.guide_ids().is_empty());
+    assert!(doc.annotation_ids().is_empty());
+    doc.undo().expect("undo");
+    assert_eq!(doc.guide_ids(), vec![g]);
+    assert_eq!(doc.annotation_ids(), vec![note]);
+}
+
+/// A guide or annotation that was stale or already deleted when the batch
+/// began refuses the whole batch typed — nodes deleted before it in the
+/// same call included — and the document is byte-identical afterwards.
+#[test]
+fn delete_selection_aborts_the_whole_batch_on_a_stale_guide_or_annotation() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let live_guide = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let gone_guide = doc.add_guide_point(Point3::new(1.0, 0.0, 0.0)).unwrap();
+    doc.delete_guide(gone_guide).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let gone_note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    doc.delete_annotation(gone_note).unwrap();
+    let before = doc.save();
+    let depth = doc.undo_depth();
+
+    assert_eq!(
+        doc.delete_selection(&[NodeId::Object(a)], &[live_guide, gone_guide], &[note]),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert_eq!(doc.save(), before);
+    let stale_guide: kernel::GuideId = Default::default();
+    assert_eq!(
+        doc.delete_selection(&[NodeId::Object(a)], &[stale_guide], &[]),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert_eq!(doc.save(), before);
+    assert_eq!(
+        doc.delete_selection(&[NodeId::Object(a)], &[live_guide], &[note, gone_note]),
+        Err(DocumentError::UnknownAnnotation)
+    );
+    assert_eq!(doc.save(), before);
+    let stale_note: kernel::AnnotationId = Default::default();
+    assert_eq!(
+        doc.delete_selection(&[], &[], &[stale_note]),
+        Err(DocumentError::UnknownAnnotation)
+    );
+    assert_eq!(
+        doc.save(),
+        before,
+        "a refused batch leaves the document byte-identical to before the call"
+    );
+    assert_eq!(doc.undo_depth(), depth, "no undo entry for a refused batch");
+}
+
+/// Nothing listed is a no-op with no undo entry.
+#[test]
+fn delete_selection_of_nothing_adds_no_undo_entry() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let depth = doc.undo_depth();
+    doc.delete_selection(&[], &[], &[]).expect("empty");
+    assert_eq!(doc.undo_depth(), depth);
 }
 
 // ----------------------------------------------------------------- helper

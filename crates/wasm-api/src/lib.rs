@@ -4934,19 +4934,49 @@ impl Scene {
 
     /// [`Scene::delete_node`] across a whole selection as ONE undo step
     /// (`kinds`/`ids` parallel, `make_component`'s convention) —
-    /// [`kernel::Document::delete_selection`]. The Outliner/Edit ▸ Delete
-    /// and Cut (Lane D, v1.1-cycle.md) both route every multi/single-node
-    /// delete through here now, so a batch is one undo entry, not N: a
-    /// stale handle anywhere in `kinds`/`ids` refuses the WHOLE batch with
-    /// nothing applied, matching `add_node_tag_many`'s all-or-nothing
-    /// posture.
-    pub fn delete_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
-        let nodes = node_ids(kinds, ids)?;
-        let change = self.doc.delete_selection(&nodes).map_err(doc_err)?;
+    /// [`kernel::Document::delete_selection`]. The selection's construction
+    /// guides and annotations go in the same step, each removed as
+    /// [`Scene::delete_guide`] and [`Scene::delete_annotation`] remove one.
+    /// The Outliner/Edit ▸ Delete and Cut (Lane D, v1.1-cycle.md) both route
+    /// every multi/single-node delete through here now, so a batch is one
+    /// undo entry, not N: a stale handle anywhere in the lists refuses the
+    /// WHOLE batch with nothing applied, matching `add_node_tag_many`'s
+    /// all-or-nothing posture.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind, or nothing at all is listed.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownGuide`/
+    ///   `UnknownAnnotation` — a stale or hidden handle; the document is
+    ///   untouched.
+    pub fn delete_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        guides: &[u64],
+        annotations: &[u64],
+    ) -> Result<(), ApiError> {
+        // Nodes may be absent when guides or annotations are listed; an
+        // empty selection refuses as it always has.
+        let nodes =
+            if kinds.is_empty() && ids.is_empty() && !(guides.is_empty() && annotations.is_empty())
+            {
+                Vec::new()
+            } else {
+                node_ids(kinds, ids)?
+            };
+        let guide_ids: Vec<_> = guides.iter().map(|&g| guide_id(g)).collect();
+        let annotation_ids: Vec<_> = annotations.iter().map(|&a| annotation_id(a)).collect();
+        let change = self
+            .doc
+            .delete_selection(&nodes, &guide_ids, &annotation_ids)
+            .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSelection {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
+            guides: guides.to_vec(),
+            annotations: annotations.to_vec(),
         });
         Ok(())
     }
@@ -11675,8 +11705,13 @@ impl Scene {
                             ));
                         }
                     }
-                    DeleteSelection { kinds, ids } => {
-                        self.delete_selection(&kinds, &ids)?;
+                    DeleteSelection {
+                        kinds,
+                        ids,
+                        guides,
+                        annotations,
+                    } => {
+                        self.delete_selection(&kinds, &ids, &guides, &annotations)?;
                     }
                     ReparentNodes { kinds, ids, group } => {
                         self.reparent_nodes(&kinds, &ids, group)?;
@@ -19120,6 +19155,100 @@ mod tests {
         let json = scene.take_recording();
         assert!(json.contains("\"method\":\"transform_selection\""));
         assert!(json.contains("\"guides\":["), "the guides are recorded");
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Guides and annotations listed in a selection delete go with its
+    /// nodes in ONE undo step, the guide's snap registration with them. A
+    /// stale guide or annotation refuses typed with nothing applied.
+    #[test]
+    fn delete_selection_deletes_guides_and_annotations_in_one_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        let on_guide = |scene: &Scene| {
+            scene
+                .snap(
+                    5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None,
+                )
+                .unwrap()
+                .is_some_and(|s| s.kind() == "on-guide")
+        };
+        assert!(on_guide(&scene));
+        let hash_before = scene.state_hash();
+
+        scene.delete_selection(&[0], &[o], &[g], &[note]).unwrap();
+        assert!(scene.object_ids().is_empty());
+        assert!(scene.guide_ids().is_empty());
+        assert!(scene.annotation_ids().is_empty());
+        assert!(!on_guide(&scene), "the deleted guide no longer snaps");
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
+        assert!(on_guide(&scene));
+        assert_eq!(scene.annotation_detached(note), Some(false));
+
+        let stale_guide = scene.add_guide_point(0.0, 9.0, 0.0).unwrap();
+        scene.delete_guide(stale_guide).unwrap();
+        let hash = scene.state_hash();
+        let err = scene
+            .delete_selection(&[0], &[o], &[g, stale_guide], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownGuide"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .delete_selection(&[0], &[o], &[], &[note, u64::MAX])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownAnnotation"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene.delete_selection(&[], &[], &[], &[]).unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+    }
+
+    /// Guides and annotations in a selection delete are part of the replay
+    /// contract; a node-only delete writes neither list, so its recording
+    /// reads as it did before they existed.
+    #[test]
+    fn delete_selection_with_guides_and_annotations_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        scene.delete_selection(&[], &[], &[g], &[note]).unwrap();
+        scene.delete_selection(&[0], &[o], &[], &[]).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"delete_selection\""));
+        assert!(json.contains("\"guides\":["), "the guides are recorded");
+        assert!(
+            json.contains("\"annotations\":["),
+            "the annotations are recorded"
+        );
+        assert_eq!(
+            json.matches("\"guides\":[").count(),
+            1,
+            "a delete with no guides writes no guides list"
+        );
 
         let mut replayed = Scene::new();
         let final_hash = replayed.replay(&json).unwrap();

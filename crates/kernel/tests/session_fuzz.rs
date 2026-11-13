@@ -339,7 +339,7 @@ fn apply(doc: &mut Document, op: &Op) {
         }
         Op::DeleteSelection { sel } => {
             if let Some(n) = pick(&nodes, sel) {
-                let _ = doc.delete_selection(&[n]);
+                let _ = doc.delete_selection(&[n], &[], &[]);
             }
         }
         Op::DeleteDefinition { comp } => {

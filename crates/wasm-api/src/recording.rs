@@ -1029,14 +1029,25 @@ pub enum RecordedCall {
         /// The JSON-RPC request text, verbatim.
         frame: String,
     },
-    /// `delete_selection(kinds, ids)` — the Delete-key/Cut batch delete
-    /// (Lane D, v1.1-cycle.md): every listed node removed as ONE undo step,
+    /// `delete_selection(kinds, ids, guides, annotations)` — the
+    /// Delete-key/Cut batch delete (Lane D, v1.1-cycle.md): every listed
+    /// node, guide, and annotation removed as ONE undo step,
     /// `add_node_tag_many`'s labeled-compound shape. Additive variant: a
     /// recording that never batch-deletes (every recording captured before
     /// this shipped, including the individual `DeleteNode` calls it
     /// replaces going forward) replays on older builds unchanged; one that
     /// does fails to parse there — loudly, never silently divergent.
-    DeleteSelection { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `guides` and `annotations` are additive in turn, as in
+    /// [`RecordedCall::TransformSelection`]: a recording made before they
+    /// existed has none and replays unchanged; an empty list is not written.
+    DeleteSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        guides: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        annotations: Vec<u64>,
+    },
     /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
     /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
     /// every listed node moved as ONE undo step, `DeleteSelection`'s

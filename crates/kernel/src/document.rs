@@ -14802,41 +14802,90 @@ impl Document {
 
     /// [`Document::delete_node`] across a whole selection as ONE undo step (a
     /// labeled compound, like `tag_many`) — the Delete key and Cut alike must
-    /// remove N nodes in a single undo entry, not N separate ones. A per-node
-    /// error (a stale handle anywhere in the batch) aborts the WHOLE batch
-    /// back to the pre-call snapshot, matching `tag_many`'s all-or-nothing
-    /// posture — nothing is silently partially deleted.
+    /// remove N nodes in a single undo entry, not N separate ones. The
+    /// selection's construction guides and annotations go in the same step,
+    /// each removed exactly as [`Document::delete_guide`] and
+    /// [`Document::delete_annotation`] remove one. A per-entry error (a stale
+    /// handle anywhere in the batch) aborts the WHOLE batch back to the
+    /// pre-call snapshot, matching `tag_many`'s all-or-nothing posture —
+    /// nothing is silently partially deleted.
     ///
-    /// `nodes` may be objects, groups, and instances mixed; an empty slice is
-    /// a no-op (`Ok` with a touching `DocChange`, no undo entry). The
-    /// compound's label names the sole node when there's exactly one
-    /// ("Delete 'Roof'", falling back to "Delete 1 item" when it has no
-    /// name), else the count ("Delete 3 items").
-    pub fn delete_selection(&mut self, nodes: &[NodeId]) -> Result<DocChange, DocumentError> {
-        if nodes.is_empty() {
+    /// `nodes` may be objects, groups, and instances mixed. Nodes go first,
+    /// so an annotation anchored to a deleted node detaches before it is
+    /// itself deleted and undo restores both. All three lists empty is a
+    /// no-op (`Ok` with a touching `DocChange`, no undo entry). The
+    /// compound's label names the sole node when the selection is exactly
+    /// one node ("Delete 'Roof'", falling back to "Delete 1 item" when it has
+    /// no name), the guide count when it holds guides only ("Delete 2
+    /// guides"), else the count of everything listed ("Delete 3 items").
+    ///
+    /// # Errors
+    /// - [`DocumentError::UnknownObject`] / [`DocumentError::UnknownGroup`] /
+    ///   [`DocumentError::UnknownInstance`] / [`DocumentError::UnknownGuide`] /
+    ///   [`DocumentError::UnknownAnnotation`] — a handle that was stale or
+    ///   hidden when the batch began.
+    ///
+    /// On `Err` the document is untouched (the strong guarantee).
+    pub fn delete_selection(
+        &mut self,
+        nodes: &[NodeId],
+        guides: &[GuideId],
+        annotations: &[AnnotationId],
+    ) -> Result<DocChange, DocumentError> {
+        if nodes.is_empty() && guides.is_empty() && annotations.is_empty() {
             return Ok(DocChange::default());
         }
-        let label = if let [only] = *nodes {
-            match self.node_meta(only) {
+        let label = match (nodes, guides.len(), annotations.len()) {
+            ([only], 0, 0) => match self.node_meta(*only) {
                 Ok((Some(name), _)) if !name.trim().is_empty() => format!("Delete '{name}'"),
                 _ => "Delete 1 item".to_string(),
-            }
-        } else {
-            format!("Delete {} items", nodes.len())
+            },
+            ([], g, 0) => format!("Delete {}", count_label(g, "guide")),
+            (n, g, a) => format!("Delete {}", count_label(n.len() + g + a, "item")),
         };
+        // A selection can list a group AND one of its members; once the group
+        // is gone its member is tombstoned with it, and deleting it again is
+        // not an error the user can act on — skip it, as the per-node loop
+        // this replaced did. A guide or annotation listed twice is skipped
+        // the same way. A handle that was not live when the batch began
+        // still refuses typed through its own delete.
+        let live_nodes: Vec<bool> = nodes.iter().map(|&n| self.node_is_live(n)).collect();
+        let live_guides: Vec<bool> = guides.iter().map(|&g| self.guide(g).is_some()).collect();
+        let live_annotations: Vec<bool> = annotations
+            .iter()
+            .map(|&a| self.annotation(a).is_some())
+            .collect();
         let txn = self.begin_transaction();
         let mut merged = DocChange::default();
-        let live_at_start: Vec<bool> = nodes.iter().map(|&n| self.node_is_live(n)).collect();
         for (i, &node) in nodes.iter().enumerate() {
-            // A selection can list a group AND one of its members; once the
-            // group is gone its member is tombstoned with it, and deleting
-            // it again is not an error the user can act on — skip it, as the
-            // per-node loop this replaced did. A handle that was not live
-            // when the batch began still refuses typed through `delete_node`.
-            if live_at_start[i] && !self.node_is_live(node) {
+            if live_nodes[i] && !self.node_is_live(node) {
                 continue;
             }
             match self.delete_node(node) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        for (i, &guide) in guides.iter().enumerate() {
+            if live_guides[i] && self.guide(guide).is_none() {
+                continue;
+            }
+            match self.delete_guide(guide) {
+                Ok(change) => merge_doc_change(&mut merged, change),
+                Err(e) => {
+                    self.abort_transaction(txn);
+                    return Err(e);
+                }
+            }
+        }
+        for (i, &annotation) in annotations.iter().enumerate() {
+            if live_annotations[i] && self.annotation(annotation).is_none() {
+                continue;
+            }
+            match self.delete_annotation(annotation) {
                 Ok(change) => merge_doc_change(&mut merged, change),
                 Err(e) => {
                     self.abort_transaction(txn);
