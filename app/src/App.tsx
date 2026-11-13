@@ -5279,12 +5279,9 @@ export default function App() {
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // Nodes, guides, and annotations all go; each guide and annotation is
-    // still an undo step of its own.
+    // Nodes, guides, and annotations all go, in one undo step.
     if (selectedIds.length === 0 && selectedGuides.length === 0 && selectedAnnotations.length === 0) return
-    if (selectedIds.length > 0) viewportApi.current?.runDelete(selectedIds)
-    for (const id of selectedGuides) viewportApi.current?.runDeleteGuide(id)
-    for (const id of selectedAnnotations) viewportApi.current?.runDeleteAnnotation(id)
+    viewportApi.current?.runDelete(selectedIds, selectedGuides, selectedAnnotations)
     setSelectedIds([])
     setSelectedGuides(NO_IDS)
     setSelectedAnnotations(NO_IDS)

@@ -725,8 +725,9 @@ export interface ViewportApi {
    * already toasted and left the document untouched.
    */
   runReparent: (nodes: NodeRef[], group: bigint | undefined) => boolean
-  /** Delete whole tree nodes (Object/Group/Instance), undoably. */
-  runDelete: (nodes: NodeRef[]) => void
+  /** Delete whole tree nodes (Object/Group/Instance), undoably, with the
+   * selection's construction guides and annotations in the same undo step. */
+  runDelete: (nodes: NodeRef[], guides?: readonly bigint[], annotations?: readonly bigint[]) => void
   /** Fold a sibling selection into a component + identity instance. Returns the instance handle. */
   runMakeComponent: (nodes: NodeRef[]) => bigint | null
   /** Place a second instance of the given instance's definition, offset slightly. */
@@ -1287,11 +1288,6 @@ export interface ViewportApi {
    *  (View ▸ Reset Drawing Axes) — same commit path as the Drawing Axes tool's own
    *  `set_axes`, one undo step. */
   resetAxes: () => void
-  /** Delete a single picked construction guide. */
-  runDeleteGuide: (id: bigint) => void
-  /** Delete a single picked annotation (dimension or leader text) —
-   * docs/design/dimensions-text.md. */
-  runDeleteAnnotation: (id: bigint) => void
   /**
    * Commit whatever the in-viewport annotation editor currently has pending
    * (`AnnotationEditor`'s Enter/blur) — either an edit to an existing
@@ -5337,8 +5333,12 @@ export default function Viewport({
       }
     }
 
-    function runDelete(nodes: NodeRef[]): void {
-      if (nodes.length === 0) return
+    function runDelete(
+      nodes: NodeRef[],
+      guides: readonly bigint[] = [],
+      annotations: readonly bigint[] = [],
+    ): void {
+      if (nodes.length === 0 && guides.length === 0 && annotations.length === 0) return
       // An explicit delete is deliberate and executes — but first disarm the
       // array window so no hot state points at the deleted copies.
       disarmActivePostCommitWindow()
@@ -5401,10 +5401,11 @@ export default function Viewport({
       }
       // World node deletes (object/group/instance, NOT a definition member
       // edited in-place) are collected here and issued as ONE
-      // `delete_selection` call after the loop, so a multi-node Delete/Cut
-      // lands as a single undo entry instead of N (adversarial review
-      // finding 3) — sketch sub-entity/def-member deletes stay per-node
-      // above, since `delete_selection` only takes world NodeIds.
+      // `delete_selection` call after the loop, together with the selected
+      // guides and annotations, so a multi-node Delete/Cut lands as a single
+      // undo entry instead of N (adversarial review finding 3) — sketch
+      // sub-entity/def-member deletes stay per-node above, since
+      // `delete_selection` only takes world NodeIds.
       const worldDeleteKinds: number[] = []
       const worldDeleteIds: bigint[] = []
       for (const n of ordered) {
@@ -5430,11 +5431,13 @@ export default function Viewport({
           handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         }
       }
-      if (worldDeleteKinds.length > 0) {
+      if (worldDeleteKinds.length > 0 || guides.length > 0 || annotations.length > 0) {
         try {
           wasmScene.delete_selection(
             new Uint8Array(worldDeleteKinds),
             new BigUint64Array(worldDeleteIds),
+            new BigUint64Array(guides),
+            new BigUint64Array(annotations),
           )
         } catch (err) {
           const code = parseKernelErrorCode(err)
@@ -7126,21 +7129,6 @@ export default function Viewport({
       scheduleRender()
     }
 
-    function runDeleteGuide(id: bigint): void {
-      // Same reasoning as `deleteAllGuides` above — a single deleted guide
-      // can be the exact point an idle recall is anchored to.
-      disarmActivePostCommitWindow()
-      try {
-        wasmScene.delete_guide(id)
-      } catch (err) {
-        handleToast(friendlyErrorText(err))
-        return
-      }
-      sceneRenderer.refreshGuides()
-      onDocumentChangedRef.current?.()
-      scheduleRender()
-    }
-
     /**
      * Reset the movable drawing axes (tool-parity §4) to world identity —
      * same commit path as the Drawing Axes tool's own `set_axes` gesture (one undo
@@ -7155,18 +7143,6 @@ export default function Viewport({
         handleToast(friendlyErrorText(err))
         return
       }
-      onDocumentChangedRef.current?.()
-      scheduleRender()
-    }
-
-    function runDeleteAnnotation(id: bigint): void {
-      try {
-        wasmScene.delete_annotation(id)
-      } catch (err) {
-        handleToast(friendlyErrorText(err))
-        return
-      }
-      sceneRenderer.refreshAnnotations()
       onDocumentChangedRef.current?.()
       scheduleRender()
     }
@@ -7429,7 +7405,7 @@ export default function Viewport({
         toolController.setTool(tool)
       }
 
-      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, runDeleteGuide, runDeleteAnnotation, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
+      apiRefRef.current.current = { runBoolean, runGroup, runUngroup, runReparent, runDelete, runMakeComponent, runPlaceInstance, runExplodeInstance, runMakeUnique, runOpenExplodeSession, runOpenExplodeSessionOrFallback: openExplodeSessionOrFallback, runCloseExplodeSession, explodeSessionInstance: () => explodeSessionInstanceRef.current, runOpenGroupSession, runCloseGroupSession, runCloseInnermostSession, sessionStack: () => [...sessionStackRef.current], sessionMembers: () => (sessionDirectMembersRef.current === null ? null : [...sessionDirectMembersRef.current]), hasArmedGesture: () => toolHasArmedGesture(toolController.activeTool), confirmPendingRescale, cancelPendingRescale, notifyLoaded, refreshScene, refreshSketches, refreshSessionScope, syncMaterialOpacity, isCapturingInput, runUndo, runRedo, zoomExtents, zoomToWorldBounds, setHealthOverlay, setStandardView, setViewDirection, orbitDrag, endOrbitDrag, subscribeCameraOrientation, setCamera, captureFrame, renderPrintPages, getPrintView, computePrintExtent, getSelectedIds: () => sceneRenderer.getSelectedIds(), getHiddenIds: () => ({ objects: [...baseHidden.objects], instances: [...baseHidden.instances] }), getEffectiveHiddenIds, isolate, clearIsolation, setFramingInset: (rightPx: number, leftPx = 0) => { framingInset = { left: leftPx, right: rightPx } }, refreshIsolation, getIsolation: () => (isolation === null ? null : [...isolation.targets]), collectAnnotationDrawing: () => sceneRenderer.collectAnnotationDrawing(), worldToScreen: worldToScreenPx, getDrawPlaneCue: () => drawPlaneCueLayer.current, getDrawPlaneState, pipClick, pipEnabled, pipWillRelease, subscribeDrawPlaneState, getHoverHighlight: () => sceneRenderer.getHoverHighlight(), rayAtCanvasPoint, frameCount: () => renderScheduler.frameCount, getCamera, getCameraState, applyCameraState, tweenCameraState, cancelCameraTween, setSectionPlane, setHomeFraming, setHidden, selectAll, invertSelection, setAxesVisible, setGridVisible, setViewStyle, setRenderMode, getRenderMode: () => sceneRenderer.getRenderMode(), setGuidesVisible, deleteAllGuides, resetAxes, commitAnnotationEditorText, cancelAnnotationEditor, getAnnotationLabel, getAnnotationTextWorldPosition, toggleSectionActive, getSectionState, getSectionRenderInfo, exportGlb, exportStl, export3mf, exportUsdz, toggleProjection, getProjection: () => rig.projection, setFov, armTextPlacement, armLibraryPlacement, armImagePlacement, clearSnapHold: () => snapService.clearHold(), setFlyLatched, toggleFlyLatched: () => setFlyLatched(!flyLatched), getFlyState: () => ({ ...flyState }) }
     }
 
     // ------------------------------------------------------------------ tool factories
