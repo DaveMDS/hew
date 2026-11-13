@@ -2037,8 +2037,8 @@ export function ShopApp() {
             // sessions themselves still open/close via Viewport's own
             // internal double-click handling; Shop Mode just renders no
             // breadcrumb for it), onSectionChanged (Section Plane),
-            // onToolReverted (Zoom Window's one-shot revert), selectedGuide/
-            // onSelectGuide/selectedAnnotation/onSelectAnnotation/
+            // onToolReverted (Zoom Window's one-shot revert), selectedGuides/
+            // onSelectGuide/selectedAnnotations/onSelectAnnotation/
             // onSelectMany (marquee/guide selection — Select still resolves
             // single-node taps fine without them), onDocumentChanged/
             // onHistoryChanged (no tree/undo chrome to refresh),

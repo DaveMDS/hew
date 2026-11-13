@@ -144,17 +144,17 @@ interface Props {
    */
   onShowHealth?: (objectId: bigint) => void
   /**
-   * The selected dimension or leader text, if any. Annotations are not
-   * nodes, so they never appear in `selectedIds`; when nothing else is
-   * selected the panel shows a read-only entry for it.
+   * The selected dimensions and leader texts. Annotations are not nodes, so
+   * they never appear in `selectedIds`; when exactly one is selected and
+   * nothing else, the panel shows a read-only entry for it.
    */
-  selectedAnnotation?: bigint | null
+  selectedAnnotations?: readonly bigint[]
   /**
-   * The selected construction guide (line or point), if any. Guides are not
-   * nodes, so they never appear in `selectedIds`; when nothing else is
-   * selected the panel shows a read-only entry for it.
+   * The selected construction guides (lines or points). Guides are not
+   * nodes, so they never appear in `selectedIds`; when exactly one is
+   * selected and nothing else, the panel shows a read-only entry for it.
    */
-  selectedGuide?: bigint | null
+  selectedGuides?: readonly bigint[]
   /**
    * The open session frames (outermost first, with the labels captured when
    * they opened) and the innermost frame's live direct members. An open frame
@@ -195,6 +195,10 @@ const PANEL_STYLE: React.CSSProperties = {
   flexDirection: 'column',
   gap: '10px',
 }
+
+/** The default for an unset guide/annotation selection: one shared empty
+ *  list, so the memos below keep their identity across renders. */
+const NO_IDS: readonly bigint[] = []
 
 const HEALTH_ACTION_STYLE: React.CSSProperties = {
   background: 'none',
@@ -253,7 +257,7 @@ const ADD_TAG_BUTTON_STYLE: React.CSSProperties = {
   flexShrink: 0,
 }
 
-export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotation = null, selectedGuide = null, sessionStack, sessionMembers = null }: Props) {
+export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onGeometryChanged, onTagsChanged, onSelectMany, onSelectTag, onSelectMaterial, onToast, onShowHealth, selectedAnnotations = NO_IDS, selectedGuides = NO_IDS, sessionStack, sessionMembers = null }: Props) {
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   useLengthDisplay()
@@ -842,7 +846,8 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // A selected dimension or leader text (read-only). Re-derived on every
   // document change, since the text and tags can change without the id doing so.
   const annotationInfo = useMemo(() => {
-    if (selectedIds.length !== 0 || selectedAnnotation === null) return null
+    if (selectedIds.length !== 0 || selectedAnnotations.length !== 1) return null
+    const selectedAnnotation = selectedAnnotations[0]
     const ann = scene as unknown as AnnotationScene
     const kind = ann.annotation_kind(selectedAnnotation)
     if (kind === undefined) return null
@@ -852,18 +857,19 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return { name, type, tags }
     // docRev: text and tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotation, docRev, t])
+  }, [scene, selectedIds, selectedAnnotations, docRev, t])
 
   // A selected construction guide (read-only).
   const guideInfo = useMemo(() => {
-    if (selectedIds.length !== 0 || selectedAnnotation !== null || selectedGuide === null) return null
+    if (selectedIds.length !== 0 || selectedAnnotations.length !== 0 || selectedGuides.length !== 1) return null
+    const selectedGuide = selectedGuides[0]
     const guides = scene as unknown as GuideScene
     const kind = guides.guide_kind(selectedGuide)
     if (kind === undefined) return null
     const tags = guides.guide_tags(selectedGuide).map((t) => t.split('/'))
     return { name: kind === 'point' ? t`Guide point` : t`Guide line`, type: t`Guide`, tags }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotation, selectedGuide, docRev, t])
+  }, [scene, selectedIds, selectedAnnotations, selectedGuides, docRev, t])
 
   // --------------------------------------------------------------------------
   // Render

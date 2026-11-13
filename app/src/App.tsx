@@ -433,6 +433,18 @@ function sameIds(a: readonly bigint[], b: readonly bigint[]): boolean {
   return sa.size === sb.size && [...sa].every((id) => sb.has(id))
 }
 
+/** The one empty guide/annotation selection: clearing an already empty one
+ *  hands React the same value, so nothing re-renders. */
+const NO_IDS: readonly bigint[] = Object.freeze([])
+
+/** The guide/annotation selection holding just `id` (null: none), as an
+ *  update of `cur` — `cur` itself when it already is that selection, so a
+ *  repeated pick re-renders nothing. */
+function idsOf(id: bigint | null, cur: readonly bigint[]): readonly bigint[] {
+  if (id === null) return NO_IDS
+  return cur.length === 1 && cur[0] === id ? cur : [id]
+}
+
 /** Whether two session stacks are the SAME sequence of frames (identity at
  *  every position, ignoring label — a label can legitimately change under a
  *  stack that is otherwise the same frame, e.g. a rename) — `handleSessionChange`'s
@@ -552,13 +564,15 @@ export default function App() {
   const [kernelPanicked, setKernelPanicked] = useState(false)
   /** Selected nodes (ordered; index 0 = primary). */
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
-  /** Selected construction guide, mutually exclusive with node
-   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes. */
-  const [selectedGuide, setSelectedGuide] = useState<bigint | null>(null)
-  /** Selected dimension/leader-text annotation, mutually exclusive with node
+  /** Selected construction guides, mutually exclusive with node
+   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes.
+   * Empty is always `NO_IDS`, so clearing an empty selection re-renders
+   * nothing. */
+  const [selectedGuides, setSelectedGuides] = useState<readonly bigint[]>(NO_IDS)
+  /** Selected dimension/leader-text annotations, mutually exclusive with node
    * and guide selection (docs/design/dimensions-text.md). Deleted via the
-   * same Edit ▸ Delete / Delete-key path. */
-  const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
+   * same Edit ▸ Delete / Delete-key path. Empty is always `NO_IDS`. */
+  const [selectedAnnotations, setSelectedAnnotations] = useState<readonly bigint[]>(NO_IDS)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Whether Paste/Paste In Place have something to work with — gates the
@@ -1389,8 +1403,8 @@ export default function App() {
     // click and the crumb click set it again right after this returns.
     setPathHit(null)
     // Node, guide, and annotation selection are mutually exclusive.
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
+    setSelectedGuides(NO_IDS)
+    setSelectedAnnotations(NO_IDS)
     setSelectedIds((cur) => nextSelection(cur, node, mode))
   }, [])
 
@@ -1414,8 +1428,8 @@ export default function App() {
    * (`selectModeFor`): replace / toggle / add / subtract — see
    * `mergeSelection`. */
   const handleSelectMany = useCallback((nodes: NodeRef[], mode: SelectMode) => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
+    setSelectedGuides(NO_IDS)
+    setSelectedAnnotations(NO_IDS)
     setSelectedIds((cur) => mergeSelection(cur, nodes, mode))
   }, [])
 
@@ -1430,8 +1444,8 @@ export default function App() {
   /** Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A): clear every kind of selection
    * — nodes, guide, annotation — without touching the editing context. */
   const handleSelectNone = useCallback(() => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
+    setSelectedGuides(NO_IDS)
+    setSelectedAnnotations(NO_IDS)
     setSelectedIds([])
   }, [])
 
@@ -1561,15 +1575,15 @@ export default function App() {
 
   /** Lift a guide pick from the viewport; clears node/annotation selection. */
   const handleSelectGuide = useCallback((id: bigint | null) => {
-    setSelectedGuide(id)
-    setSelectedAnnotation(null)
+    setSelectedGuides((cur) => idsOf(id, cur))
+    setSelectedAnnotations(NO_IDS)
     if (id !== null) setSelectedIds([])
   }, [])
 
   /** Lift an annotation pick from the viewport; clears node/guide selection. */
   const handleSelectAnnotation = useCallback((id: bigint | null) => {
-    setSelectedAnnotation(id)
-    setSelectedGuide(null)
+    setSelectedAnnotations((cur) => idsOf(id, cur))
+    setSelectedGuides(NO_IDS)
     if (id !== null) setSelectedIds([])
   }, [])
 
@@ -1680,8 +1694,8 @@ export default function App() {
         : !nodeEq(prevInnermost, nextInnermost)
       if (innermostChanged) {
         setSelectedIds([])
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
+        setSelectedGuides(NO_IDS)
+        setSelectedAnnotations(NO_IDS)
       }
       // Tape Measure scoped-rescale invalidation (finding 5,
       // group-session.md): the confirmation dialog captured a specific
@@ -2072,8 +2086,8 @@ export default function App() {
       setSelectedObjects: (ids) =>
         setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
       setSelection: (nodes) => {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
+        setSelectedGuides(NO_IDS)
+        setSelectedAnnotations(NO_IDS)
         setSelectedIds(nodes)
       },
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
@@ -5246,17 +5260,17 @@ export default function App() {
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // A selected guide/annotation deletes via the same path; mutually
+    // Selected guides/annotations delete via the same path; mutually
     // exclusive with node selection.
-    if (selectedGuide !== null) {
-      viewportApi.current?.runDeleteGuide(selectedGuide)
-      setSelectedGuide(null)
+    if (selectedGuides.length > 0) {
+      for (const id of selectedGuides) viewportApi.current?.runDeleteGuide(id)
+      setSelectedGuides(NO_IDS)
       setDocRev((r) => r + 1)
       return
     }
-    if (selectedAnnotation !== null) {
-      viewportApi.current?.runDeleteAnnotation(selectedAnnotation)
-      setSelectedAnnotation(null)
+    if (selectedAnnotations.length > 0) {
+      for (const id of selectedAnnotations) viewportApi.current?.runDeleteAnnotation(id)
+      setSelectedAnnotations(NO_IDS)
       setDocRev((r) => r + 1)
       return
     }
@@ -5397,8 +5411,8 @@ export default function App() {
           kind: k === 0 ? 'object' as const : k === 1 ? 'group' as const : 'instance' as const,
           id: result.rootIds[i],
         }))
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
+        setSelectedGuides(NO_IDS)
+        setSelectedAnnotations(NO_IDS)
         setSelectedIds(refs)
         return
       }
@@ -5451,8 +5465,8 @@ export default function App() {
       const [, kindStr, idStr] = payload.split(':')
       const kind = kindStr as NodeRef['kind']
       if ((kind === 'object' || kind === 'group' || kind === 'instance') && /^\d+$/.test(idStr)) {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
+        setSelectedGuides(NO_IDS)
+        setSelectedAnnotations(NO_IDS)
         setSelectedIds([{ kind, id: BigInt(idStr) }])
         setShowModelInfo(true)
         setShowObjectInfo(true)
@@ -6280,7 +6294,7 @@ export default function App() {
       checked[id] = tool === activeTool
     }
     const enabled: Record<string, boolean> = {
-      'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+      'edit-delete': selectedIds.length > 0 || selectedGuides.length > 0 || selectedAnnotations.length > 0,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
       'edit-make-component': menuGates?.canMakeComponent ?? false,
@@ -6342,8 +6356,8 @@ export default function App() {
     showDebugLog,
     showLibrary,
     selectedIds,
-    selectedGuide,
-    selectedAnnotation,
+    selectedGuides,
+    selectedAnnotations,
     menuGates,
     menuFocusTick,
     parallelProjection,
@@ -7192,9 +7206,9 @@ export default function App() {
             onSelectSnap={handleSelectSnap}
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
-            selectedGuide={selectedGuide}
+            selectedGuides={selectedGuides}
             onSelectAnnotation={handleSelectAnnotation}
-            selectedAnnotation={selectedAnnotation}
+            selectedAnnotations={selectedAnnotations}
             onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
@@ -7420,7 +7434,7 @@ export default function App() {
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <ContextualDock
               selectedIds={selectedIds}
-              selectedGuide={selectedGuide}
+              selectedGuides={selectedGuides}
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
@@ -7605,8 +7619,8 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              selectedAnnotation={selectedAnnotation}
-              selectedGuide={selectedGuide}
+              selectedAnnotations={selectedAnnotations}
+              selectedGuides={selectedGuides}
               // Segments rebuilds a circle's chords, so it needs the repaint
               // path like every other tray panel that edits geometry; names
               // change nothing drawn and skip the re-tessellation.
@@ -8246,7 +8260,7 @@ export default function App() {
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteExtraEntries}
         gates={{
-          selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+          selection: selectedIds.length > 0 || selectedGuides.length > 0 || selectedAnnotations.length > 0,
           canGroup: menuGates?.canGroup ?? false,
           canUngroup: menuGates?.canUngroup ?? false,
           canMakeComponent: menuGates?.canMakeComponent ?? false,

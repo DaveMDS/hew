@@ -10,7 +10,7 @@ const sketch = (id: bigint): NodeRef => ({ kind: 'sketch', id })
 
 describe('ContextualDock', () => {
   it('shows the Empty (draw-tool) verb set when nothing is selected', () => {
-    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('DRAW')).toBeInTheDocument()
     expect(screen.getByText('Rectangle')).toBeInTheDocument()
     expect(screen.getByText('Line')).toBeInTheDocument()
@@ -19,7 +19,7 @@ describe('ContextualDock', () => {
   })
 
   it('shows the Object verb set for a single selected Object', () => {
-    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('OBJECT')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
@@ -29,7 +29,7 @@ describe('ContextualDock', () => {
   })
 
   it('shows the Group verb set for a single selected Group', () => {
-    render(<ContextualDock selectedIds={[group(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[group(1n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('GROUP')).toBeInTheDocument()
     expect(screen.getByText('Edit')).toBeInTheDocument()
     expect(screen.getByText('Make Component')).toBeInTheDocument()
@@ -37,14 +37,14 @@ describe('ContextualDock', () => {
   })
 
   it('shows the Instance verb set for a single selected Instance', () => {
-    render(<ContextualDock selectedIds={[instance(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[instance(1n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('COMPNT')).toBeInTheDocument()
     expect(screen.getByText('Make Unique')).toBeInTheDocument()
     expect(screen.getByText('Explode')).toBeInTheDocument()
   })
 
   it('shows the Multi verb set for more than one selected node', () => {
-    render(<ContextualDock selectedIds={[obj(1n), group(2n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[obj(1n), group(2n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('MULTI')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
     expect(screen.getByText('Group')).toBeInTheDocument()
@@ -59,7 +59,7 @@ describe('ContextualDock', () => {
     render(
       <ContextualDock
         selectedIds={[obj(1n), obj(2n)]}
-        selectedGuide={null}
+        selectedGuides={[]}
         onRun={onRun}
         gates={{ canGroup: true, canMakeComponent: true }}
       />,
@@ -73,7 +73,7 @@ describe('ContextualDock', () => {
     render(
       <ContextualDock
         selectedIds={[obj(1n)]}
-        selectedGuide={null}
+        selectedGuides={[]}
         onRun={onRun}
         gates={{ canGroup: false, canMakeComponent: true }}
       />,
@@ -86,7 +86,7 @@ describe('ContextualDock', () => {
     render(
       <ContextualDock
         selectedIds={[obj(1n), sketch(2n)]}
-        selectedGuide={null}
+        selectedGuides={[]}
         onRun={vi.fn()}
         gates={{ canGroup: false, canMakeComponent: false }}
       />,
@@ -101,7 +101,7 @@ describe('ContextualDock', () => {
   // now gets its own 'sketch' verb row (Push/Pull primary, then the
   // transform trio, then Erase).
   it('shows the Sketch verb set for a single selected free-standing sketch', () => {
-    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(screen.getByText('SKETCH')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
     expect(screen.getByText('Move')).toBeInTheDocument()
@@ -111,20 +111,20 @@ describe('ContextualDock', () => {
   })
 
   it('renders nothing when a construction guide is selected', () => {
-    const { container } = render(<ContextualDock selectedIds={[]} selectedGuide={5n} onRun={vi.fn()} />)
+    const { container } = render(<ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} />)
     expect(container.firstChild).toBeNull()
   })
 
   it('clicking the primary verb calls onRun with its id', () => {
     const onRun = vi.fn()
-    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={onRun} />)
     fireEvent.click(screen.getByText('Push/Pull'))
     expect(onRun).toHaveBeenCalledWith('tool-pushpull')
   })
 
   it('clicking a secondary verb calls onRun with its id', () => {
     const onRun = vi.fn()
-    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={onRun} />)
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={onRun} />)
     fireEvent.click(screen.getByText('Erase'))
     expect(onRun).toHaveBeenCalledWith('edit-delete')
   })
@@ -135,7 +135,7 @@ describe('ContextualDock', () => {
     render(
       <ContextualDock
         selectedIds={[obj(1n)]}
-        selectedGuide={null}
+        selectedGuides={[]}
         onRun={vi.fn()}
         gates={{ canGroup: false, canMakeComponent: false }}
       />,
@@ -148,7 +148,7 @@ describe('ContextualDock', () => {
     render(
       <ContextualDock
         selectedIds={[obj(1n)]}
-        selectedGuide={null}
+        selectedGuides={[]}
         onRun={onRun}
         gates={{ canGroup: false, canMakeComponent: false, canSaveToLibrary: true }}
       />,
@@ -160,7 +160,7 @@ describe('ContextualDock', () => {
   // --- Active-tool highlight  ---
 
   it('does NOT highlight the first (primary) verb when it is not the active tool', () => {
-    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    render(<ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} activeToolId="tool-arc" />)
     // Rectangle is first in EMPTY_VERBS (the old "primary" slot) but Arc is
     // the actual active tool here — Rectangle must render unselected.
     const rectangleBtn = screen.getByRole('button', { name: 'Rectangle' })
@@ -169,7 +169,7 @@ describe('ContextualDock', () => {
   })
 
   it('highlights the verb matching activeToolId, wherever it sits in the list', () => {
-    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    render(<ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} activeToolId="tool-arc" />)
     const arcBtn = screen.getByRole('button', { name: 'Arc' })
     expect(arcBtn.style.border).toContain('var(--accent-border)')
     // aria-pressed mirrors the highlight — the machine-readable contract the
@@ -178,7 +178,7 @@ describe('ContextualDock', () => {
   })
 
   it('highlights nothing when activeToolId is undefined', () => {
-    render(<ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} />)
     for (const label of ['Rectangle', 'Line', 'Circle', 'Arc']) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn.style.border).toBe('1px solid transparent')
@@ -187,7 +187,7 @@ describe('ContextualDock', () => {
 
   it('highlights nothing when activeToolId is not in the current context\'s verb set', () => {
     // Arc has no dock verb in the Object context — nothing should light up.
-    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} activeToolId="tool-arc" />)
+    render(<ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} activeToolId="tool-arc" />)
     for (const label of ['Push/Pull', 'Move', 'Paint', 'Erase']) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn.style.border).toBe('1px solid transparent')
@@ -196,12 +196,12 @@ describe('ContextualDock', () => {
 
   it('cross-fades on context change: container carries.hew-dock and remounts when the context swaps', () => {
     const { container, rerender } = render(
-      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />,
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} />,
     )
     const before = container.firstChild as HTMLElement
     expect(before.className).toContain('hew-dock')
 
-    rerender(<ContextualDock selectedIds={[group(2n)]} selectedGuide={null} onRun={vi.fn()} />)
+    rerender(<ContextualDock selectedIds={[group(2n)]} selectedGuides={[]} onRun={vi.fn()} />)
     const after = container.firstChild as HTMLElement
     // The container is keyed on the context, so a context swap replaces the
     // DOM node — that remount is what replays the CSS cross-fade animation.
@@ -212,16 +212,16 @@ describe('ContextualDock', () => {
 
   it('does NOT remount (no cross-fade restart) when the selection changes but the context stays the same', () => {
     const { container, rerender } = render(
-      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} />,
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} />,
     )
     const before = container.firstChild as HTMLElement
-    rerender(<ContextualDock selectedIds={[obj(2n)]} selectedGuide={null} onRun={vi.fn()} />)
+    rerender(<ContextualDock selectedIds={[obj(2n)]} selectedGuides={[]} onRun={vi.fn()} />)
     expect(container.firstChild).toBe(before)
   })
 
   it('hidden (camera drag): stays mounted but fades to opacity 0 and becomes click-through', () => {
     const { container } = render(
-      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden />,
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} hidden />,
     )
     const dock = container.firstChild as HTMLElement
     expect(dock).not.toBeNull() // mounted, so the fade can transition back in
@@ -231,10 +231,10 @@ describe('ContextualDock', () => {
 
   it('reappears when hidden flips back off (drag released)', () => {
     const { container, rerender } = render(
-      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden />,
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} hidden />,
     )
     const before = container.firstChild as HTMLElement
-    rerender(<ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hidden={false} />)
+    rerender(<ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} hidden={false} />)
     const dock = container.firstChild as HTMLElement
     // Same node (no remount — this is the transition path, not the cross-fade
     // path) and fully interactive again.
@@ -247,7 +247,7 @@ describe('ContextualDock', () => {
 
   it('shows the Sketch verb set when selection is empty and hoveringSketchRegion is set', () => {
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} hoveringSketchRegion />,
     )
     expect(screen.getByText('SKETCH')).toBeInTheDocument()
     expect(screen.getByText('Push/Pull')).toBeInTheDocument()
@@ -256,7 +256,7 @@ describe('ContextualDock', () => {
 
   it('shows the ordinary empty (draw-tool) verb set when hoveringSketchRegion is false', () => {
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion={false} />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} hoveringSketchRegion={false} />,
     )
     expect(screen.getByText('DRAW')).toBeInTheDocument()
     expect(screen.getByText('Rectangle')).toBeInTheDocument()
@@ -264,7 +264,7 @@ describe('ContextualDock', () => {
 
   it('ignores hoveringSketchRegion entirely once something is actually selected', () => {
     render(
-      <ContextualDock selectedIds={[obj(1n)]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[obj(1n)]} selectedGuides={[]} onRun={vi.fn()} hoveringSketchRegion />,
     )
     // An explicit Object selection always wins — still the Object row, not Sketch.
     expect(screen.getByText('OBJECT')).toBeInTheDocument()
@@ -273,7 +273,7 @@ describe('ContextualDock', () => {
 
   it('ignores hoveringSketchRegion when a construction guide is selected (still no dock)', () => {
     const { container } = render(
-      <ContextualDock selectedIds={[]} selectedGuide={5n} onRun={vi.fn()} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} hoveringSketchRegion />,
     )
     expect(container.firstChild).toBeNull()
   })
@@ -281,7 +281,7 @@ describe('ContextualDock', () => {
   it('clicking the hover-previewed Push/Pull verb dispatches the same id as a real Sketch selection', () => {
     const onRun = vi.fn()
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={onRun} hoveringSketchRegion />,
     )
     fireEvent.click(screen.getByText('Push/Pull'))
     expect(onRun).toHaveBeenCalledWith('tool-pushpull')
@@ -291,7 +291,7 @@ describe('ContextualDock', () => {
 
   it('hover-preview: only Push/Pull is enabled; the other sketch verbs render disabled', () => {
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} hoveringSketchRegion />,
     )
     expect(screen.getByRole('button', { name: 'Push/Pull' })).not.toBeDisabled()
     for (const label of ['Move', 'Rotate', 'Scale', 'Erase']) {
@@ -307,7 +307,7 @@ describe('ContextualDock', () => {
   it('hover-preview: clicking a disabled verb does not dispatch', () => {
     const onRun = vi.fn()
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={onRun} hoveringSketchRegion />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Move' }))
     expect(onRun).not.toHaveBeenCalled()
@@ -315,7 +315,7 @@ describe('ContextualDock', () => {
 
   it('hover-preview: disabled verbs do not light up on hover', () => {
     render(
-      <ContextualDock selectedIds={[]} selectedGuide={null} onRun={vi.fn()} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[]} selectedGuides={[]} onRun={vi.fn()} hoveringSketchRegion />,
     )
     const btn = screen.getByRole('button', { name: 'Move' })
     fireEvent.mouseEnter(btn)
@@ -323,7 +323,7 @@ describe('ContextualDock', () => {
   })
 
   it('a real sketch SELECTION keeps every sketch verb enabled', () => {
-    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={vi.fn()} />)
+    render(<ContextualDock selectedIds={[sketch(1n)]} selectedGuides={[]} onRun={vi.fn()} />)
     for (const label of ['Push/Pull', 'Move', 'Rotate', 'Scale', 'Erase']) {
       const btn = screen.getByRole('button', { name: label })
       expect(btn).not.toBeDisabled()
@@ -334,7 +334,7 @@ describe('ContextualDock', () => {
   it('a real sketch selection keeps every verb enabled even while hoveringSketchRegion is set', () => {
     const onRun = vi.fn()
     render(
-      <ContextualDock selectedIds={[sketch(1n)]} selectedGuide={null} onRun={onRun} hoveringSketchRegion />,
+      <ContextualDock selectedIds={[sketch(1n)]} selectedGuides={[]} onRun={onRun} hoveringSketchRegion />,
     )
     const move = screen.getByRole('button', { name: 'Move' })
     expect(move).not.toBeDisabled()

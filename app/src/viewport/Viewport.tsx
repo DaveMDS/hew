@@ -479,13 +479,13 @@ interface Props {
   onSelectMany?: (nodes: NodeRef[], mode: SelectMode) => void
   /** Lift a construction-guide pick to the parent; `null` clears. */
   onSelectGuide?: (id: bigint | null) => void
-  /** The currently selected guide, reflected into the renderer highlight. */
-  selectedGuide?: bigint | null
+  /** The currently selected guides, reflected into the renderer highlight. */
+  selectedGuides?: readonly bigint[]
   /** Lift an annotation (dimension/leader-text) pick to the parent; `null`
    * clears (docs/design/dimensions-text.md). */
   onSelectAnnotation?: (id: bigint | null) => void
-  /** The currently selected annotation, reflected into the renderer highlight. */
-  selectedAnnotation?: bigint | null
+  /** The currently selected annotations, reflected into the renderer highlight. */
+  selectedAnnotations?: readonly bigint[]
   /**
    * Requests the parent open the in-viewport text editor (`AnnotationEditor`,
    * the `InferenceTooltip` DOM-positioning pattern): a double-click on an
@@ -2169,6 +2169,16 @@ function highlightDeps(wasmScene: WasmScene): HighlightDeps {
 /** The component placement being edited in place, if the deepest open
  * context is one: its members highlight inside it, and sketches inside it
  * are drawn through its pose. */
+/** The default for an unset guide/annotation selection: one shared empty
+ *  list, so the effects keyed on it don't re-run every render. */
+const NO_IDS: readonly bigint[] = []
+
+/** The guide Move and Rotate act on (guideTarget.ts): the selected guide
+ *  when exactly one is selected, else none. */
+function guideTargetOf(selectedGuides: readonly bigint[]): bigint | null {
+  return selectedGuides.length === 1 ? selectedGuides[0] : null
+}
+
 function activeInstanceOf(activeContext: readonly NodeRef[]): bigint | null {
   const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
   return deepest?.kind === 'instance' ? deepest.id : null
@@ -2432,9 +2442,9 @@ export default function Viewport({
   onIsolateRequest,
   onSelectMany,
   onSelectGuide,
-  selectedGuide = null,
+  selectedGuides = NO_IDS,
   onSelectAnnotation,
-  selectedAnnotation = null,
+  selectedAnnotations = NO_IDS,
   onOpenAnnotationEditor,
   onEnterContext,
   onExitContext,
@@ -2599,7 +2609,7 @@ export default function Viewport({
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
   // Latest selected construction guide — the Move tool's guide target.
-  const selectedGuideRef = useRef<bigint | null>(selectedGuide)
+  const selectedGuideRef = useRef<bigint | null>(guideTargetOf(selectedGuides))
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -12134,25 +12144,26 @@ export default function Viewport({
     scheduleRenderRef.current()
   }, [selectedIds, activeContext])
 
-  // Reflect the selected construction guide into the renderer highlight,
+  // Reflect the selected construction guides into the renderer highlight,
   // and into the active tool (Move's guide target, like Tool.setSelection).
   useEffect(() => {
-    selectedGuideRef.current = selectedGuide
+    const guideTarget = guideTargetOf(selectedGuides)
+    selectedGuideRef.current = guideTarget
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
-      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(selectedGuide)
+      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(guideTarget)
     }
-    sceneRendererRef.current?.setSelectedGuide(selectedGuide)
+    sceneRendererRef.current?.setSelectedGuides(selectedGuides)
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
-  }, [selectedGuide])
+  }, [selectedGuides])
 
-  // Reflect the selected annotation into the renderer highlight
+  // Reflect the selected annotations into the renderer highlight
   // (docs/design/dimensions-text.md).
   useEffect(() => {
-    sceneRendererRef.current?.setSelectedAnnotation(selectedAnnotation)
+    sceneRendererRef.current?.setSelectedAnnotations(selectedAnnotations)
     scheduleRenderRef.current()
-  }, [selectedAnnotation])
+  }, [selectedAnnotations])
 
   return (
     <div

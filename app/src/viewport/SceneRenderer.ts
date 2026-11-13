@@ -780,9 +780,9 @@ export class SceneRenderer {
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
   private guideMarkers: THREE.LineSegments | null = null
-  /** The currently selected guide, drawn as a bright overlay. */
-  private selectedGuideId: bigint | null = null
-  /** Highlight overlay (solid bright line/cross) for `selectedGuideId`. */
+  /** The currently selected guides, drawn as a bright overlay. */
+  private selectedGuideIds: ReadonlySet<bigint> = new Set()
+  /** Highlight overlay (solid bright lines/crosses) for `selectedGuideIds`. */
   private guideHighlight: THREE.LineSegments | null = null
 
   /** Batched fat-line geometry for every live, non-detached annotation's
@@ -807,8 +807,8 @@ export class SceneRenderer {
    * carried forward so its edge-on guard (baseline viewed screen-on) can
    * hold the previous decision instead of guessing, avoiding oscillation. */
   private annotationFlipState: Map<bigint, boolean> = new Map()
-  /** The currently selected annotation, drawn as a bright overlay. */
-  private selectedAnnotationId: bigint | null = null
+  /** The currently selected annotations, drawn as a bright overlay. */
+  private selectedAnnotationIds: ReadonlySet<bigint> = new Set()
 
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
@@ -2990,16 +2990,16 @@ export class SceneRenderer {
     }
   }
 
-  /** Mark `id` as the selected guide and redraw its bright overlay;
-   * `null` clears it. The caller schedules the render. */
-  setSelectedGuide(id: bigint | null): void {
-    this.selectedGuideId = id
+  /** Mark `ids` as the selected guides and redraw their bright overlay;
+   * `[]` clears it. The caller schedules the render. */
+  setSelectedGuides(ids: readonly bigint[]): void {
+    this.selectedGuideIds = new Set(ids)
     this._rebuildGuideHighlight()
   }
 
-  /** (Re)build the bright overlay for the selected guide — a solid line/cross in
-   * the selection color, drawn on top so it reads as picked over the dashed
-   * grey. Cleared if nothing is selected or the guide no longer exists. */
+  /** (Re)build the bright overlay for the selected guides — a solid
+   * line/cross in the selection color, drawn on top so it reads as picked
+   * over the dashed grey. A guide that no longer exists is skipped. */
   private _rebuildGuideHighlight(): void {
     if (this.guideHighlight !== null) {
       this.guideHighlight.geometry.dispose()
@@ -3007,13 +3007,15 @@ export class SceneRenderer {
       this.guidesGroup.remove(this.guideHighlight)
       this.guideHighlight = null
     }
-    if (this.selectedGuideId === null) return
-    const kind = this.wasmScene.guide_kind(this.selectedGuideId)
-    const geometry = this.wasmScene.guide_geometry(this.selectedGuideId)
-    if (kind === undefined || geometry === undefined) return
-
-    const pts = guideOverlayPositions(kind, geometry)
-    if (pts === null) return
+    const pts: number[] = []
+    for (const id of this.selectedGuideIds) {
+      const kind = this.wasmScene.guide_kind(id)
+      const geometry = this.wasmScene.guide_geometry(id)
+      if (kind === undefined || geometry === undefined) continue
+      const overlay = guideOverlayPositions(kind, geometry)
+      if (overlay !== null) pts.push(...overlay)
+    }
+    if (pts.length === 0) return
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
     const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
@@ -3332,10 +3334,10 @@ export class SceneRenderer {
     this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
   }
 
-  /** Mark `id` as the selected annotation and redraw its bright overlay;
-   * `null` clears it. The caller schedules the render. */
-  setSelectedAnnotation(id: bigint | null): void {
-    this.selectedAnnotationId = id
+  /** Mark `ids` as the selected annotations and redraw their bright
+   * overlay; `[]` clears it. The caller schedules the render. */
+  setSelectedAnnotations(ids: readonly bigint[]): void {
+    this.selectedAnnotationIds = new Set(ids)
     this._rebuildAnnotationHighlight()
   }
 
@@ -3360,24 +3362,20 @@ export class SceneRenderer {
     return this.annotationBase.get(id)?.label ?? null
   }
 
-  /** (Re)build the bright overlay for the selected annotation, straight from
+  /** (Re)build the bright overlay for the selected annotations, straight from
    * `annotationBase` (camera-independent — the per-frame path in
    * `updateAnnotationBillboards` overwrites this with the gap-laid-out +
    * biased version on the very next frame, same one-frame-nicety-gap
    * tradeoff as `refreshAnnotations`' own initial paint). */
   private _rebuildAnnotationHighlight(): void {
-    if (this.selectedAnnotationId === null) {
-      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
-      return
-    }
-    const info = this.annotationBase.get(this.selectedAnnotationId)
-    if (info === undefined) {
-      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
-      return
-    }
-    const positions = [...info.fixed]
-    if (info.dimLine !== null) {
-      positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
+    const positions: number[] = []
+    for (const id of this.selectedAnnotationIds) {
+      const info = this.annotationBase.get(id)
+      if (info === undefined) continue
+      positions.push(...info.fixed)
+      if (info.dimLine !== null) {
+        positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
+      }
     }
     this._installAnnotationLineBatch('highlight', positions, EDGE_COLOR_SELECTED)
   }
@@ -3413,7 +3411,7 @@ export class SceneRenderer {
 
     const normalPositions: number[] = []
     const detachedPositions: number[] = []
-    let highlightPositions: number[] = []
+    const highlightPositions: number[] = []
 
     for (const [id, info] of this.annotationBase) {
       const billboard = this.annotationBillboards.get(id)
@@ -3526,14 +3524,14 @@ export class SceneRenderer {
       }
       billboard.update(camera, viewportHeight, faceQuaternion)
 
-      if (id === this.selectedAnnotationId) {
-        highlightPositions = [...info.fixed, ...dimSegments, ...arrowSegments]
+      if (this.selectedAnnotationIds.has(id)) {
+        highlightPositions.push(...info.fixed, ...dimSegments, ...arrowSegments)
       }
     }
 
     this._installAnnotationLineBatch('normal', normalPositions, normalColor)
     this._installAnnotationLineBatch('detached', detachedPositions, warningColor)
-    if (this.selectedAnnotationId !== null) {
+    if (this.selectedAnnotationIds.size > 0) {
       this._installAnnotationLineBatch('highlight', highlightPositions, EDGE_COLOR_SELECTED)
     }
   }
@@ -3683,7 +3681,7 @@ export class SceneRenderer {
 
   /**
    * Highlight exactly the given sketches as a bright overlay drawn on
-   * top of the normal sketch-line color, mirroring `setSelectedGuide`'s
+   * top of the normal sketch-line color, mirroring `setSelectedGuides`'s
    * "separate overlay object" approach rather than recoloring the merged
    * per-sketch-agnostic `sketchLines` buffer in place. Pass `[]` to clear.
    */
