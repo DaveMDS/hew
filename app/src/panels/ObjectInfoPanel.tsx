@@ -257,12 +257,13 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   const { t } = useLingui()
   // Re-render the length readouts when the format OR the Precision changes.
   useLengthDisplay()
-  const selectedCount = selectedIds.length
+  // Everything selected: nodes, guides, and annotations alike.
+  const selectedCount = selectedIds.length + selectedGuides.length + selectedAnnotations.length
   // --------------------------------------------------------------------------
   // Derive the node info from the scene whenever docRev or selectedIds changes.
   // --------------------------------------------------------------------------
   const nodeInfo = useMemo(() => {
-    if (selectedIds.length !== 1) return null
+    if (selectedIds.length !== 1 || selectedCount !== 1) return null
     const node = selectedIds[0]
     const kind = node.kind
     const id = node.id
@@ -463,7 +464,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
       points: null as number | null,
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, docRev, selectedIds, t])
+  }, [scene, docRev, selectedIds, selectedCount, t])
   const instanceCount = nodeInfo?.instanceIds.length ?? 0
 
   // --------------------------------------------------------------------------
@@ -760,8 +761,10 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // this section answers "what is true of the whole selection", so + adds
   // a tag to all (and it appears at once) and × removes it from all
   // (playtest round 2: a union-with-counts view read as noise).
+  // Guides and annotations in the selection count toward it being a multi
+  // one, but carry no part here: + and × reach the nodes only.
   const multi = useMemo(() => {
-    if (selectedIds.length < 2) return null
+    if (selectedCount < 2) return null
     const kinds: number[] = []
     const ids: bigint[] = []
     let common: Map<string, string[]> | null = null
@@ -788,7 +791,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return { kinds, ids, tags }
     // docRev: tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedIds, scene, docRev])
+  }, [selectedIds, selectedCount, scene, docRev])
 
   // ---- Materials row ---------------------------------------------------
   // The union of every material on the selection (see selectionMaterials).
@@ -842,7 +845,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   // A selected dimension or leader text (read-only). Re-derived on every
   // document change, since the text and tags can change without the id doing so.
   const annotationInfo = useMemo(() => {
-    if (selectedIds.length !== 0 || selectedAnnotations.length !== 1) return null
+    if (selectedCount !== 1 || selectedAnnotations.length !== 1) return null
     const selectedAnnotation = selectedAnnotations[0]
     const ann = scene as unknown as AnnotationScene
     const kind = ann.annotation_kind(selectedAnnotation)
@@ -853,11 +856,11 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     return { name, type, tags }
     // docRev: text and tags change on every mutation without changing identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotations, docRev, t])
+  }, [scene, selectedCount, selectedAnnotations, docRev, t])
 
   // A selected construction guide (read-only).
   const guideInfo = useMemo(() => {
-    if (selectedIds.length !== 0 || selectedAnnotations.length !== 0 || selectedGuides.length !== 1) return null
+    if (selectedCount !== 1 || selectedGuides.length !== 1) return null
     const selectedGuide = selectedGuides[0]
     const guides = scene as unknown as GuideScene
     const kind = guides.guide_kind(selectedGuide)
@@ -865,7 +868,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
     const tags = guides.guide_tags(selectedGuide).map((t) => t.split('/'))
     return { name: kind === 'point' ? t`Guide point` : t`Guide line`, type: t`Guide`, tags }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, selectedIds, selectedAnnotations, selectedGuides, docRev, t])
+  }, [scene, selectedCount, selectedGuides, docRev, t])
 
   // --------------------------------------------------------------------------
   // Render
@@ -926,7 +929,7 @@ export function ObjectInfoPanel({ scene, docRev, selectedIds, onNameChanged, onG
   }
 
   // Nothing selected → an empty panel, no boilerplate.
-  if (nodeInfo === null && selectedIds.length === 0) {
+  if (nodeInfo === null && selectedCount === 0) {
     return <div style={PANEL_STYLE} />
   }
 

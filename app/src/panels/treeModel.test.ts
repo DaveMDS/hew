@@ -6,6 +6,8 @@ import {
   breadcrumb,
   isTreeRowDimmed,
   nextSelection,
+  nextIdSelection,
+  NO_IDS,
   mergeSelection,
   canBoolean,
   canGroup,
@@ -595,6 +597,47 @@ describe('canUngroup', () => {
   it('false for two groups', () => {
     const g2: NodeRef = { kind: 'group', id: 3n }
     expect(canUngroup([g, g2])).toBe(false)
+  })
+})
+
+describe('nextIdSelection (guide/annotation ids)', () => {
+  it('replaces on a plain click, keeping the very list when it already is that pick', () => {
+    expect(nextIdSelection([1n, 2n], 3n, 'replace')).toEqual([3n])
+    const sole = [3n]
+    expect(nextIdSelection(sole, 3n, 'replace')).toBe(sole)
+  })
+
+  it('clears on an empty plain click, to the shared empty list', () => {
+    expect(nextIdSelection([1n, 2n], null, 'replace')).toBe(NO_IDS)
+  })
+
+  it('keeps the very list on a modified empty click', () => {
+    const cur = [1n, 2n]
+    expect(nextIdSelection(cur, null, 'toggle')).toBe(cur)
+    expect(nextIdSelection(cur, null, 'add')).toBe(cur)
+    expect(nextIdSelection(cur, null, 'subtract')).toBe(cur)
+  })
+
+  it('toggle appends a new id and removes a selected one, preserving order', () => {
+    expect(nextIdSelection([1n], 2n, 'toggle')).toEqual([1n, 2n])
+    expect(nextIdSelection([1n, 2n, 3n], 2n, 'toggle')).toEqual([1n, 3n])
+  })
+
+  it('add appends a new id and leaves a selected one, keeping the very list', () => {
+    expect(nextIdSelection([1n], 2n, 'add')).toEqual([1n, 2n])
+    const cur = [1n, 2n]
+    expect(nextIdSelection(cur, 1n, 'add')).toBe(cur)
+  })
+
+  it('subtract removes a selected id and ignores an unselected one, keeping the very list', () => {
+    expect(nextIdSelection([1n, 2n], 1n, 'subtract')).toEqual([2n])
+    const cur = [1n]
+    expect(nextIdSelection(cur, 2n, 'subtract')).toBe(cur)
+  })
+
+  it('removing the last id leaves the shared empty list', () => {
+    expect(nextIdSelection([1n], 1n, 'toggle')).toBe(NO_IDS)
+    expect(nextIdSelection([1n], 1n, 'subtract')).toBe(NO_IDS)
   })
 })
 

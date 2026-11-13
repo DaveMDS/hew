@@ -110,9 +110,25 @@ describe('ContextualDock', () => {
     expect(screen.getByText('Erase')).toBeInTheDocument()
   })
 
-  it('renders nothing when a construction guide is selected', () => {
-    const { container } = render(<ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} />)
-    expect(container.firstChild).toBeNull()
+  it('shows the empty dock for a lone construction guide', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} />)
+    expect(screen.getByText('DRAW')).toBeInTheDocument()
+  })
+
+  it('shows the multi dock without Group for guides and annotations alone', () => {
+    render(
+      <ContextualDock
+        selectedIds={[]}
+        selectedGuides={[5n]}
+        selectedAnnotations={[6n]}
+        onRun={vi.fn()}
+        gates={{ canGroup: false, canMakeComponent: false }}
+      />,
+    )
+    expect(screen.getByText('MULTI')).toBeInTheDocument()
+    expect(screen.getByText('Move')).toBeInTheDocument()
+    expect(screen.getByText('Erase')).toBeInTheDocument()
+    expect(screen.queryByText('Group')).not.toBeInTheDocument()
   })
 
   it('clicking the primary verb calls onRun with its id', () => {
@@ -271,11 +287,15 @@ describe('ContextualDock', () => {
     expect(screen.queryByText('SKETCH')).not.toBeInTheDocument()
   })
 
-  it('ignores hoveringSketchRegion when a construction guide is selected (still no dock)', () => {
-    const { container } = render(
-      <ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} hoveringSketchRegion />,
-    )
-    expect(container.firstChild).toBeNull()
+  it('previews the sketch dock on hover over a lone guide selection, as over nothing', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuides={[5n]} onRun={vi.fn()} hoveringSketchRegion />)
+    expect(screen.getByText('SKETCH')).toBeInTheDocument()
+  })
+
+  it('ignores hoveringSketchRegion over a multi selection of guides', () => {
+    render(<ContextualDock selectedIds={[]} selectedGuides={[5n, 6n]} onRun={vi.fn()} hoveringSketchRegion />)
+    expect(screen.getByText('MULTI')).toBeInTheDocument()
+    expect(screen.queryByText('SKETCH')).not.toBeInTheDocument()
   })
 
   it('clicking the hover-previewed Push/Pull verb dispatches the same id as a real Sketch selection', () => {

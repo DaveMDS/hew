@@ -419,6 +419,23 @@ describe('ObjectInfoPanel — guide selection', () => {
     expect(screen.getByText('Guide line')).toBeTruthy()
   })
 
+  it('shows no guide entry when the guide is not all that is selected', () => {
+    const scene = makeScene({
+      guide_kind: () => 'line',
+      guide_tags: () => [],
+      annotation_kind: () => 'leader',
+      annotation_text: () => 'Note',
+    })
+    const { unmount } = render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n, 8n]} />)
+    expect(screen.queryByText('Guide line')).toBeNull()
+    expect(screen.getByText('2 selected')).toBeTruthy()
+    unmount()
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} selectedAnnotations={[9n]} />)
+    expect(screen.queryByText('Guide line')).toBeNull()
+    expect(screen.queryByText('Note')).toBeNull()
+    expect(screen.getByText('2 selected')).toBeTruthy()
+  })
+
   it('shows the tags of a tagged guide read-only', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => ['Rig', 'Cameras/Wide'] })
     render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
@@ -554,6 +571,72 @@ describe('ObjectInfoPanel — tag chips', () => {
     )
     fireEvent.click(screen.getByText('Walls'))
     expect(onSelectTag).toHaveBeenCalledWith(['Walls'])
+  })
+})
+
+describe('ObjectInfoPanel — nodes selected with guides and annotations', () => {
+  function mixedScene() {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }],
+      node_tags: () => ['Walls'],
+      node_parent: () => undefined,
+      object_solid: () => true,
+      object_name: (id: bigint) => `Obj${id}`,
+      object_materials: () => [],
+      guide_kind: () => 'line',
+      guide_tags: () => [],
+      annotation_kind: () => 'leader',
+      annotation_text: () => 'Note',
+    })
+  }
+
+  it('counts guides and annotations in the selection', () => {
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={mixedScene()}
+        selectedIds={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
+        selectedGuides={[7n]}
+        selectedAnnotations={[8n]}
+      />,
+    )
+    expect(screen.getByText('4 selected')).toBeTruthy()
+  })
+
+  it('shows the nodes\' Tags and Materials rows, acting on the nodes only', () => {
+    const addMany = vi.fn()
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={{ ...mixedScene(), add_node_tag_many: addMany } as unknown as WasmScene}
+        selectedIds={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
+        selectedGuides={[7n]}
+      />,
+    )
+    expect(screen.getByText('Walls')).toBeTruthy()
+    expect(screen.getByTestId('object-info-materials')).toBeTruthy()
+    fireEvent.click(screen.getByLabelText('Add tag to all selected'))
+    const input = screen.getByLabelText('New tag for all selected')
+    fireEvent.change(input, { target: { value: 'Roof' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(addMany).toHaveBeenCalledTimes(1)
+    const [kinds, ids] = addMany.mock.calls[0]
+    expect(Array.from(kinds as ArrayLike<number>)).toEqual([0, 0])
+    expect(Array.from(ids as ArrayLike<bigint>)).toEqual([1n, 2n])
+  })
+
+  it('shows the multi entry, not the node\'s own, for one node with a guide', () => {
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={mixedScene()}
+        selectedIds={[{ kind: 'object', id: 1n }]}
+        selectedGuides={[7n]}
+      />,
+    )
+    expect(screen.getByText('2 selected')).toBeTruthy()
+    expect(screen.queryByDisplayValue('Obj1')).toBeNull()
+    expect(screen.getByText('Walls')).toBeTruthy()
   })
 })
 

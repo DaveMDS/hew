@@ -1390,9 +1390,12 @@ export default function App() {
     // Every route to a selection starts without a hit leaf; the viewport
     // click and the crumb click set it again right after this returns.
     setPathHit(null)
-    // Node, guide, and annotation selection are mutually exclusive.
-    setSelectedGuides(NO_IDS)
-    setSelectedAnnotations(NO_IDS)
+    // A plain click replaces the whole selection, guides and annotations
+    // included; a modified one changes only the nodes.
+    if (mode === 'replace') {
+      setSelectedGuides(NO_IDS)
+      setSelectedAnnotations(NO_IDS)
+    }
     setSelectedIds((cur) => nextSelection(cur, node, mode))
   }, [])
 
@@ -1416,8 +1419,12 @@ export default function App() {
    * (`selectModeFor`): replace / toggle / add / subtract — see
    * `mergeSelection`. */
   const handleSelectMany = useCallback((nodes: NodeRef[], mode: SelectMode) => {
-    setSelectedGuides(NO_IDS)
-    setSelectedAnnotations(NO_IDS)
+    // As for a click (`handleSelect`): only a replace drops guides and
+    // annotations.
+    if (mode === 'replace') {
+      setSelectedGuides(NO_IDS)
+      setSelectedAnnotations(NO_IDS)
+    }
     setSelectedIds((cur) => mergeSelection(cur, nodes, mode))
   }, [])
 
@@ -1563,20 +1570,20 @@ export default function App() {
 
   /** Lift a guide pick from the viewport, combined with the selected guides
    *  as `mode` asks (`nextIdSelection`); `null` clears the guides and
-   *  annotations. A pick that changes the guides clears the node and
-   *  annotation selection: the kinds stay mutually exclusive. */
+   *  annotations. A plain pick replaces the whole selection, nodes and
+   *  annotations included; a modified one changes only the guides. */
   const handleSelectGuide = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
     if (id === null) {
       setSelectedGuides(NO_IDS)
       setSelectedAnnotations(NO_IDS)
       return
     }
-    const next = nextIdSelection(selectedGuides, id, mode)
-    if (next === selectedGuides) return
-    setSelectedGuides(next)
-    setSelectedAnnotations(NO_IDS)
-    setSelectedIds([])
-  }, [selectedGuides])
+    setSelectedGuides((cur) => nextIdSelection(cur, id, mode))
+    if (mode === 'replace') {
+      setSelectedAnnotations(NO_IDS)
+      setSelectedIds((cur) => (cur.length === 0 ? cur : []))
+    }
+  }, [])
 
   /** Lift an annotation pick from the viewport — `handleSelectGuide`'s rule,
    *  for annotations. */
@@ -1586,12 +1593,12 @@ export default function App() {
       setSelectedGuides(NO_IDS)
       return
     }
-    const next = nextIdSelection(selectedAnnotations, id, mode)
-    if (next === selectedAnnotations) return
-    setSelectedAnnotations(next)
-    setSelectedGuides(NO_IDS)
-    setSelectedIds([])
-  }, [selectedAnnotations])
+    setSelectedAnnotations((cur) => nextIdSelection(cur, id, mode))
+    if (mode === 'replace') {
+      setSelectedGuides(NO_IDS)
+      setSelectedIds((cur) => (cur.length === 0 ? cur : []))
+    }
+  }, [])
 
   /** The in-viewport annotation text editor's pending target — either an
    * existing annotation being edited (`id` set, double-click) or a
@@ -5266,23 +5273,15 @@ export default function App() {
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // Selected guides/annotations delete via the same path; mutually
-    // exclusive with node selection.
-    if (selectedGuides.length > 0) {
-      for (const id of selectedGuides) viewportApi.current?.runDeleteGuide(id)
-      setSelectedGuides(NO_IDS)
-      setDocRev((r) => r + 1)
-      return
-    }
-    if (selectedAnnotations.length > 0) {
-      for (const id of selectedAnnotations) viewportApi.current?.runDeleteAnnotation(id)
-      setSelectedAnnotations(NO_IDS)
-      setDocRev((r) => r + 1)
-      return
-    }
-    if (selectedIds.length === 0) return
-    viewportApi.current?.runDelete(selectedIds)
+    // Nodes, guides, and annotations all go; each guide and annotation is
+    // still an undo step of its own.
+    if (selectedIds.length === 0 && selectedGuides.length === 0 && selectedAnnotations.length === 0) return
+    if (selectedIds.length > 0) viewportApi.current?.runDelete(selectedIds)
+    for (const id of selectedGuides) viewportApi.current?.runDeleteGuide(id)
+    for (const id of selectedAnnotations) viewportApi.current?.runDeleteAnnotation(id)
     setSelectedIds([])
+    setSelectedGuides(NO_IDS)
+    setSelectedAnnotations(NO_IDS)
     setDocRev((r) => r + 1)
   }
 
@@ -7441,6 +7440,7 @@ export default function App() {
             <ContextualDock
               selectedIds={selectedIds}
               selectedGuides={selectedGuides}
+              selectedAnnotations={selectedAnnotations}
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}

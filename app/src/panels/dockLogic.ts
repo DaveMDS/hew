@@ -44,15 +44,19 @@ export function dockVerbLabel(verb: DockVerb): string {
 }
 
 /**
- * Derive the dock's context from the current selection. A non-empty
- * `selectedGuides` means construction guides are selected (mutually exclusive
- * with `selectedIds` elsewhere in App.tsx) — returns null (no dock) since the
- * spec has no defined verb set for them and inventing one is out of scope here.
+ * Derive the dock's context from the current selection. Guides and
+ * annotations count toward a 'multi' selection like nodes do (its gated
+ * verbs — Group — leave out a selection without nodes); a lone guide or
+ * annotation gets the 'empty' dock, as if nothing were selected: the spec
+ * has no verb set for one.
  */
-export function deriveDockContext(selectedIds: NodeRef[], selectedGuides: readonly bigint[]): DockContext | null {
-  if (selectedGuides.length > 0) return null
+export function deriveDockContext(
+  selectedIds: NodeRef[],
+  selectedGuides: readonly bigint[],
+  selectedAnnotations: readonly bigint[] = [],
+): DockContext {
+  if (selectedIds.length + selectedGuides.length + selectedAnnotations.length > 1) return 'multi'
   if (selectedIds.length === 0) return 'empty'
-  if (selectedIds.length > 1) return 'multi'
   const kind = selectedIds[0].kind
   // Sketch-scoped selections (a whole sketch, or any drawn shape, curve,
   // line, or region on a plane) all get the sketch verb set — same context,

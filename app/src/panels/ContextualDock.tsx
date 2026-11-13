@@ -117,6 +117,8 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
 export interface ContextualDockProps {
   selectedIds: NodeRef[]
   selectedGuides: readonly bigint[]
+  /** Selected annotations: along with nodes, they make the selection 'multi'. */
+  selectedAnnotations?: readonly bigint[]
   onRun: (id: string) => void
   /** Fade the dock out (opacity 0 + click-through) while the camera is being
    * dragged (spec: "Hidden during pure camera navigation... reappears
@@ -144,18 +146,18 @@ export interface ContextualDockProps {
 export function ContextualDock({
   selectedIds,
   selectedGuides,
+  selectedAnnotations,
   onRun,
   hidden = false,
   activeToolId,
   hoveringSketchRegion = false,
   gates,
 }: ContextualDockProps) {
-  const baseContext = deriveDockContext(selectedIds, selectedGuides)
+  const baseContext = deriveDockContext(selectedIds, selectedGuides, selectedAnnotations)
   // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
-  // actual selection, or null for selected guides) is left untouched.
+  // actual node selection) is left untouched.
   const hoverPreviewOnly = baseContext === 'empty' && hoveringSketchRegion
   const context = hoverPreviewOnly ? 'sketch' : baseContext
-  if (context === null) return null
 
   const verbs = dockVerbsFor(context, gates)
 

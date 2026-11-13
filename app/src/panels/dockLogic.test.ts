@@ -12,9 +12,17 @@ describe('deriveDockContext', () => {
     expect(deriveDockContext([], [])).toBe('empty')
   })
 
-  it('is null when a guide is selected, regardless of node selection', () => {
-    expect(deriveDockContext([], [5n])).toBeNull()
-    expect(deriveDockContext([obj(1n)], [5n])).toBeNull()
+  it('is "empty" for a lone guide or annotation', () => {
+    expect(deriveDockContext([], [5n])).toBe('empty')
+    expect(deriveDockContext([], [], [5n])).toBe('empty')
+  })
+
+  it('is "multi" for several guides or annotations, with or without nodes', () => {
+    expect(deriveDockContext([], [5n, 6n])).toBe('multi')
+    expect(deriveDockContext([], [], [5n, 6n])).toBe('multi')
+    expect(deriveDockContext([], [5n], [6n])).toBe('multi')
+    expect(deriveDockContext([obj(1n)], [5n])).toBe('multi')
+    expect(deriveDockContext([obj(1n)], [], [5n])).toBe('multi')
   })
 
   it('is "object" for a single selected Object', () => {
