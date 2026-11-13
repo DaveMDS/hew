@@ -48,7 +48,7 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react'
 import { plural, t as tCore } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { entityLabel, resolveLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, type NodeRef } from './treeModel'
+import { entityLabel, resolveLabel, makeLabelFor, nodeKindToNumber, nodeKey, nodeRefFromJs, buildTreeIndexMap, isDraftKind, NO_IDS, type NodeRef } from './treeModel'
 import { pathAbove } from './selectionPath'
 import {
   runsOfCurve,
@@ -195,10 +195,6 @@ const PANEL_STYLE: React.CSSProperties = {
   flexDirection: 'column',
   gap: '10px',
 }
-
-/** The default for an unset guide/annotation selection: one shared empty
- *  list, so the memos below keep their identity across renders. */
-const NO_IDS: readonly bigint[] = []
 
 const HEALTH_ACTION_STYLE: React.CSSProperties = {
   background: 'none',

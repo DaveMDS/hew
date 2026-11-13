@@ -130,7 +130,7 @@ import type { Snap, SnapConstraint, Tool, EditContext } from '../tools/types'
 import { toolHasArmedGesture } from '../tools/types'
 import { rayPlaneIntersect, subV3, addV3, perpComponentV3, type V3 } from './geoHelpers'
 import { readAnnotation, commitAnnotationText, initialEditorText, type AnnotationSnapshot } from './annotationEdit'
-import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, type NodeRef, type SelectMode } from '../panels/treeModel'
+import { collectLeafIds, isDraftKind, nodeEq, nodeKey, nodeRefFromJs, resolveLabel, structuralSelection, treeIndexOf, NO_IDS, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { selectModeFor, isModifiedSelectPress } from './selectModifiers'
 import { baseBindingFor, desiredDragState, switchDragTo, orbitDragState, setPreciseOrbit, forceBaseAfterPress, type SwitchableDrag } from './orbitDragSwitch'
 import { MarqueeProjector, WINDOW_COVERAGE_MIN, boundsCoverage, emptyScreenBounds, normalizedRect, type MarqueeMode, type MarqueeRect, type ScreenBounds } from './marquee'
@@ -477,13 +477,15 @@ interface Props {
   /** Lift a multi-node selection (marquee, Select All, Invert Selection) up
    * to the parent. `mode` as for `onSelect`, read off the marquee's press. */
   onSelectMany?: (nodes: NodeRef[], mode: SelectMode) => void
-  /** Lift a construction-guide pick to the parent; `null` clears. */
-  onSelectGuide?: (id: bigint | null) => void
+  /** Lift a construction-guide pick to the parent, combined with the
+   * selected guides as `mode` asks (default `'replace'`); `null` clears. */
+  onSelectGuide?: (id: bigint | null, mode?: SelectMode) => void
   /** The currently selected guides, reflected into the renderer highlight. */
   selectedGuides?: readonly bigint[]
-  /** Lift an annotation (dimension/leader-text) pick to the parent; `null`
-   * clears (docs/design/dimensions-text.md). */
-  onSelectAnnotation?: (id: bigint | null) => void
+  /** Lift an annotation (dimension/leader-text) pick to the parent,
+   * combined with the selected annotations as `mode` asks (default
+   * `'replace'`); `null` clears (docs/design/dimensions-text.md). */
+  onSelectAnnotation?: (id: bigint | null, mode?: SelectMode) => void
   /** The currently selected annotations, reflected into the renderer highlight. */
   selectedAnnotations?: readonly bigint[]
   /**
@@ -2169,10 +2171,6 @@ function highlightDeps(wasmScene: WasmScene): HighlightDeps {
 /** The component placement being edited in place, if the deepest open
  * context is one: its members highlight inside it, and sketches inside it
  * are drawn through its pose. */
-/** The default for an unset guide/annotation selection: one shared empty
- *  list, so the effects keyed on it don't re-run every render. */
-const NO_IDS: readonly bigint[] = []
-
 /** The guide Move and Rotate act on (guideTarget.ts): the selected guide
  *  when exactly one is selected, else none. */
 function guideTargetOf(selectedGuides: readonly bigint[]): bigint | null {
@@ -3627,7 +3625,7 @@ export default function Viewport({
       const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
       const lineUnder = under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')
       if (g !== null && !lineUnder) {
-        onSelectGuideRef.current?.(g)
+        onSelectGuideRef.current?.(g, selectModeRef.current)
         scheduleRender()
         return
       }
@@ -10349,9 +10347,16 @@ export default function Viewport({
         // commits a kernel mutation (`_commitAnnotationDrag`), and Shop Mode
         // has no chrome for annotation selection anyway (`onSelectAnnotation`
         // is one of the deliberately-unwired callbacks — see ShopApp.tsx's
-        // own comment on its `Viewport` usage).
-        if (!isModifiedSelectPress(ev) && !readOnlyRef.current) {
+        // own comment on its `Viewport` usage). A modified press (Shift,
+        // Ctrl/⌘/Option) only changes the annotation selection, the way the
+        // held keys ask, and arms no drag.
+        if (!readOnlyRef.current) {
           const annotationId = pickAnnotation(ndcX, ndcY)
+          if (annotationId !== null && isModifiedSelectPress(ev)) {
+            onSelectAnnotationRef.current?.(annotationId, selectModeFor(ev))
+            scheduleRender()
+            return
+          }
           if (annotationId !== null) {
             onSelectAnnotationRef.current?.(annotationId)
             const snapshot = readAnnotation(wasmScene, annotationId)

@@ -68,7 +68,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, nextIdSelection, NO_IDS, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
@@ -431,18 +431,6 @@ function sameIds(a: readonly bigint[], b: readonly bigint[]): boolean {
   const sa = new Set(a)
   const sb = new Set(b)
   return sa.size === sb.size && [...sa].every((id) => sb.has(id))
-}
-
-/** The one empty guide/annotation selection: clearing an already empty one
- *  hands React the same value, so nothing re-renders. */
-const NO_IDS: readonly bigint[] = Object.freeze([])
-
-/** The guide/annotation selection holding just `id` (null: none), as an
- *  update of `cur` — `cur` itself when it already is that selection, so a
- *  repeated pick re-renders nothing. */
-function idsOf(id: bigint | null, cur: readonly bigint[]): readonly bigint[] {
-  if (id === null) return NO_IDS
-  return cur.length === 1 && cur[0] === id ? cur : [id]
 }
 
 /** Whether two session stacks are the SAME sequence of frames (identity at
@@ -1573,19 +1561,37 @@ export default function App() {
     [openModelHealth],
   )
 
-  /** Lift a guide pick from the viewport; clears node/annotation selection. */
-  const handleSelectGuide = useCallback((id: bigint | null) => {
-    setSelectedGuides((cur) => idsOf(id, cur))
+  /** Lift a guide pick from the viewport, combined with the selected guides
+   *  as `mode` asks (`nextIdSelection`); `null` clears the guides and
+   *  annotations. A pick that changes the guides clears the node and
+   *  annotation selection: the kinds stay mutually exclusive. */
+  const handleSelectGuide = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    if (id === null) {
+      setSelectedGuides(NO_IDS)
+      setSelectedAnnotations(NO_IDS)
+      return
+    }
+    const next = nextIdSelection(selectedGuides, id, mode)
+    if (next === selectedGuides) return
+    setSelectedGuides(next)
     setSelectedAnnotations(NO_IDS)
-    if (id !== null) setSelectedIds([])
-  }, [])
+    setSelectedIds([])
+  }, [selectedGuides])
 
-  /** Lift an annotation pick from the viewport; clears node/guide selection. */
-  const handleSelectAnnotation = useCallback((id: bigint | null) => {
-    setSelectedAnnotations((cur) => idsOf(id, cur))
+  /** Lift an annotation pick from the viewport — `handleSelectGuide`'s rule,
+   *  for annotations. */
+  const handleSelectAnnotation = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    if (id === null) {
+      setSelectedAnnotations(NO_IDS)
+      setSelectedGuides(NO_IDS)
+      return
+    }
+    const next = nextIdSelection(selectedAnnotations, id, mode)
+    if (next === selectedAnnotations) return
+    setSelectedAnnotations(next)
     setSelectedGuides(NO_IDS)
-    if (id !== null) setSelectedIds([])
-  }, [])
+    setSelectedIds([])
+  }, [selectedAnnotations])
 
   /** The in-viewport annotation text editor's pending target — either an
    * existing annotation being edited (`id` set, double-click) or a

@@ -818,6 +818,33 @@ export function nextSelection(
   return exists ? current.filter((n) => !nodeEq(n, node)) : [...current, node]
 }
 
+/** The one empty guide/annotation selection (see `nextIdSelection`): every
+ *  empty one is this same value, so clearing an already empty selection
+ *  hands React nothing new to render. */
+export const NO_IDS: readonly bigint[] = Object.freeze([])
+
+/**
+ * `nextSelection` for a selection of plain ids — the selected construction
+ * guides or annotations. The same four modes, for a click that picked `id`
+ * (null: an empty click, which clears under `'replace'` and leaves the
+ * selection alone otherwise). Returns `current` itself when nothing changes,
+ * and `NO_IDS` for an empty result.
+ */
+export function nextIdSelection(
+  current: readonly bigint[],
+  id: bigint | null,
+  mode: SelectMode,
+): readonly bigint[] {
+  if (id === null) return mode === 'replace' ? NO_IDS : current
+  if (mode === 'replace') return current.length === 1 && current[0] === id ? current : [id]
+  const exists = current.includes(id)
+  if (mode === 'add') return exists ? current : [...current, id]
+  if (mode === 'toggle' && !exists) return [...current, id]
+  if (!exists) return current
+  const kept = current.filter((x) => x !== id)
+  return kept.length === 0 ? NO_IDS : kept
+}
+
 /**
  * Next selection after a MULTI-node pick (a marquee, Select All, Invert
  * Selection). The same four modes as `nextSelection`, applied per node:
