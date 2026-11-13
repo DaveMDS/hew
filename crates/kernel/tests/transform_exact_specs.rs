@@ -269,6 +269,7 @@ fn transform_selection_undo_redo_is_bit_exact_never_drifts() {
         doc.transform_selection(
             &[NodeId::Object(id)],
             &[],
+            &[],
             &Transform::translation(Vec3::new(0.1, 0.0, -0.454_510_442_911_682_36)),
         )
         .expect("translate the selection");
@@ -291,7 +292,7 @@ fn transform_selection_undo_redo_is_bit_exact_never_drifts() {
             FRAC_PI_2,
             Point3::new(1.7, -0.6, 0.3),
         );
-        doc.transform_selection(&[NodeId::Object(id)], &[], &rot)
+        doc.transform_selection(&[NodeId::Object(id)], &[], &[], &rot)
             .expect("rotate the selection about an off-center pivot");
         let after = doc.save();
         assert_undo_redo_bit_exact(&mut doc, &before, &after, 3, "transform_selection rotation");
@@ -303,6 +304,7 @@ fn transform_selection_undo_redo_is_bit_exact_never_drifts() {
         let before = doc.save();
         doc.transform_selection(
             &[NodeId::Object(id)],
+            &[],
             &[],
             &Transform::scale(Vec3::new(1.3, 0.7, 2.1)),
         )
@@ -339,6 +341,7 @@ fn transform_selection_undo_redo_is_bit_exact_never_drifts() {
         doc.transform_selection(
             &[NodeId::Object(a), NodeId::Group(g), NodeId::Instance(inst)],
             &[s],
+            &[],
             &t,
         )
         .expect("transform the mixed selection");

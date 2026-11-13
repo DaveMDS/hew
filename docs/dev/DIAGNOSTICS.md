@@ -218,10 +218,10 @@ longer replay.
 | `history_bracket_open` / `history_bracket_commit` / `history_bracket_abort` | `label` (commit) | bracket a multi-edit gesture (a selection transform that moves objects and drawing) into one undo step, or restore the document as it was at open |
 | `push_pull` | `object`, `face`, `distance` | push/pull a solid face; the kernel re-derives the routing (translate, whole-wall radial offset, boss/recess, or through-cut) on replay |
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
-| `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `affine[12]` | transform a whole multi-selection as one undo step |
+| `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `guides[]` (omitted when empty; a recording without it replays unchanged), `affine[12]` | transform a whole multi-selection, construction guides included, as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
 | `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
-| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node cloned `count` times along the step, one undo step |
+| `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `guides[]` (omitted when empty, as in `transform_selection`), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node and guide copied `count` times along the step, one undo step |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
 | `transform_sketch` | `sketch`, `affine[12]` | bake an affine into a free-standing sketch |
 | `transform_sketch_island` | `sketch`, `island`, `affine[12]` | rigidly move one sketch island |

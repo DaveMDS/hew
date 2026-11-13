@@ -100,11 +100,11 @@ function makeTool(
   return { tool, onCommit, onToast, onMeasurement, wasmScene, preview }
 }
 
-/** The affine `Float64Array` passed to `transform_selection`'s 4th arg on
+/** The affine `Float64Array` passed to `transform_selection`'s 5th arg on
  * its most recent call, as a plain number array for easy assertions. */
 function lastAffine(wasmScene: ReturnType<typeof makeWasmScene>): number[] {
   const calls = wasmScene.transform_selection.mock.calls
-  const affine = calls[calls.length - 1][3] as Float64Array
+  const affine = calls[calls.length - 1][4] as Float64Array
   return Array.from(affine)
 }
 
@@ -427,7 +427,7 @@ describe('ScaleTool — drag constrained to the grip axis/plane', () => {
     tool.onPointerDown(makeSnap({ x: 99, y: 99, z: 0, kind: 'ground' }), rayAt([4, 2, 3])) // commit
 
     const calls = wasmScene.transform_selection.mock.calls
-    const affine = Array.from(calls[calls.length - 1][3] as Float64Array)
+    const affine = Array.from(calls[calls.length - 1][4] as Float64Array)
     expect(affine[0]).toBeCloseTo(2) // X: (4-0)/(2-0)
     expect(affine[5]).toBeCloseTo(1) // Y untouched
     expect(affine[10]).toBeCloseTo(1.5) // Z: (3-0)/(2-0), from the RAY, not z=0
@@ -443,7 +443,7 @@ describe('ScaleTool — drag constrained to the grip axis/plane', () => {
       rayAt([3, 2, 4]),
     )
     const calls = wasmScene.transform_selection.mock.calls
-    const affine = Array.from(calls[calls.length - 1][3] as Float64Array)
+    const affine = Array.from(calls[calls.length - 1][4] as Float64Array)
     expect(affine[0]).toBeCloseTo(1.5) // X: (3-0)/(2-0)
     expect(affine[10]).toBeCloseTo(2) // Z: (4-0)/(2-0)
   })

@@ -226,7 +226,7 @@ fn moving_a_group_takes_the_drawing_it_holds_along() {
     doc.transform_group(g, &shift).unwrap();
     assert!(ys(&doc).iter().all(|&y| y == 10_000), "{:?}", ys(&doc));
     // As one node of a selection, too.
-    doc.transform_selection(&[NodeId::Group(g)], &[], &shift)
+    doc.transform_selection(&[NodeId::Group(g)], &[], &[], &shift)
         .unwrap();
     assert!(ys(&doc).iter().all(|&y| y == 20_000), "{:?}", ys(&doc));
     // Undo brings the drawing back with the group.

@@ -377,8 +377,13 @@ fn every_common_action_gets_the_label_the_ui_shows() {
     let shift = Transform::translation(Vec3::new(0.0, 5.0, 0.0));
     doc.duplicate_node(NodeId::Object(a), &shift).expect("copy");
     assert_eq!(last(&doc), "Copy");
-    doc.duplicate_nodes_array(&[NodeId::Object(a)], &shift, NonZeroU32::new(3).unwrap())
-        .expect("array copy");
+    doc.duplicate_nodes_array(
+        &[NodeId::Object(a)],
+        &[],
+        &shift,
+        NonZeroU32::new(3).unwrap(),
+    )
+    .expect("array copy");
     assert_eq!(last(&doc), "Copy ×3");
 
     // Materials.
@@ -464,15 +469,35 @@ fn every_common_action_gets_the_label_the_ui_shows() {
 
     // Whole-selection transforms name the kind when it is uniform.
     let y = build_box(&mut doc, 18.0);
-    doc.transform_selection(&[NodeId::Object(x), NodeId::Object(y)], &[], &shift)
+    doc.transform_selection(&[NodeId::Object(x), NodeId::Object(y)], &[], &[], &shift)
         .expect("move selection");
     assert_eq!(last(&doc), "Move 2 objects");
     let (_, inst2, _) = doc
         .make_component(&[NodeId::Object(y)])
         .expect("component 2");
-    doc.transform_selection(&[NodeId::Object(x), NodeId::Instance(inst2)], &[], &shift)
-        .expect("move mixed");
+    doc.transform_selection(
+        &[NodeId::Object(x), NodeId::Instance(inst2)],
+        &[],
+        &[],
+        &shift,
+    )
+    .expect("move mixed");
     assert_eq!(last(&doc), "Move 2 items");
+    let g1 = doc
+        .add_guide_point(Point3::new(0.0, 0.0, 9.0))
+        .expect("guide 1");
+    let g2 = doc
+        .add_guide_point(Point3::new(1.0, 0.0, 9.0))
+        .expect("guide 2");
+    doc.transform_selection(&[], &[], &[g1, g2], &shift)
+        .expect("move guides");
+    assert_eq!(last(&doc), "Move 2 guides");
+    doc.transform_selection(&[NodeId::Object(x)], &[], &[g1], &shift)
+        .expect("move object and guide");
+    assert_eq!(last(&doc), "Move 2 items");
+    doc.duplicate_nodes_array(&[], &[g1, g2], &shift, NonZeroU32::new(2).unwrap())
+        .expect("array copy of guides");
+    assert_eq!(last(&doc), "Copy ×4");
 
     // Model-wide edits.
     doc.rescale_document(2.0).expect("rescale");

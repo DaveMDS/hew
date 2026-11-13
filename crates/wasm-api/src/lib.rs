@@ -1575,6 +1575,29 @@ impl FaceMaterialJs {
     }
 }
 
+/// What [`Scene::duplicate_selection_array`] created: the node clone roots
+/// and the guide copies, each in creation order (every source's copy 1,
+/// then copy 2, …), as `kernel::Document::duplicate_nodes_array` returns
+/// them.
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct DuplicateArrayJs {
+    roots: Vec<NodeId>,
+    guides: Vec<GuideId>,
+}
+
+#[wasm_bindgen]
+impl DuplicateArrayJs {
+    /// The node clone roots (objects, groups, instances).
+    pub fn roots(&self) -> Vec<NodeJs> {
+        self.roots.iter().map(|&n| node_js(n)).collect()
+    }
+    /// The guide copies' handles.
+    pub fn guides(&self) -> Vec<u64> {
+        self.guides.iter().map(|g| g.data().as_ffi()).collect()
+    }
+}
+
 /// What [`Scene::purge_unused`] removed (mirrors `kernel::PurgeReport`).
 #[wasm_bindgen]
 pub struct PurgeReportJs {
@@ -4748,13 +4771,19 @@ impl Scene {
     ///
     /// `kinds`/`ids` are parallel arrays naming live sibling-or-not tree
     /// nodes (kind `0` = object, `1` = group, `2` = instance, as in
-    /// [`Scene::group_nodes`]); `affine` is the same row-major 3×4 12-float
-    /// matrix as [`Scene::transform_object`]. Returns the clone roots in
-    /// creation order (every source's copy 1, then copy 2, …).
+    /// [`Scene::group_nodes`]); `guides` lists construction guide handles,
+    /// each copied as [`Scene::duplicate_guide_array`] copies one; `affine`
+    /// is the same row-major 3×4 12-float matrix as
+    /// [`Scene::transform_object`]. Returns the node clone roots and the
+    /// guide copies, each in creation order (every source's copy 1, then
+    /// copy 2, …). See [`kernel::Document::duplicate_nodes_array`] for the
+    /// full contract.
     ///
     /// # Errors
     /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
-    ///   kind; or the same node is listed twice (`DuplicateMember`).
+    ///   kind.
+    /// - `DuplicateMember` — the same node, or the same guide, is listed
+    ///   twice.
     /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]. The cap
     ///   is enforced HERE, at the trust boundary, because recorded sessions
     ///   are plain JSON replayed through this method verbatim — a hand-edited
@@ -4762,19 +4791,21 @@ impl Scene {
     ///   geometry.
     /// - `BadAffine` — `affine` is not 12 floats.
     /// - `EmptySelection` — nothing to duplicate.
-    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a stale or hidden
-    ///   handle.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownGuide` — a
+    ///   stale or hidden handle.
     /// - `Transform` — a singular `affine`, or one that reflects a baked
     ///   target.
+    /// - `DegenerateGuide` — a guide copy's geometry is not a guide.
     ///
     /// On error the document is untouched (partial clones are rolled back).
     pub fn duplicate_selection_array(
         &mut self,
         kinds: &[u8],
         ids: &[u64],
+        guides: &[u64],
         affine: &[f64],
         count: u32,
-    ) -> Result<Vec<NodeJs>, ApiError> {
+    ) -> Result<DuplicateArrayJs, ApiError> {
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4801,18 +4832,23 @@ impl Scene {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
         let t = Transform::from_affine(rows);
-        let (roots, change) = self
+        let guide_ids: Vec<_> = guides.iter().map(|&g| guide_id(g)).collect();
+        let (roots, guide_copies, change) = self
             .doc
-            .duplicate_nodes_array(&nodes, &t, count_nz)
+            .duplicate_nodes_array(&nodes, &guide_ids, &t, count_nz)
             .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DuplicateSelectionArray {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
+            guides: guides.to_vec(),
             affine: *rows,
             count,
         });
-        Ok(roots.into_iter().map(node_js).collect())
+        Ok(DuplicateArrayJs {
+            roots,
+            guides: guide_copies,
+        })
     }
 
     /// The ceiling [`Scene::duplicate_selection_array`] enforces on `count`
@@ -4999,23 +5035,27 @@ impl Scene {
     /// tree nodes (kind `0` = object, `1` = group, `2` = instance, as in
     /// [`Scene::group_nodes`]); `sketches` lists free-standing sketch
     /// handles (a distinct FFI concept from tree nodes, as in
-    /// [`Scene::delete_sketch`]). Objects and group leaves bake the affine;
-    /// instances compose it into their pose; nested/duplicate listings
-    /// transform once. `affine` is the same row-major 3×4 12-float matrix as
-    /// [`Scene::transform_object`].
+    /// [`Scene::delete_sketch`]); `guides` lists construction guide handles,
+    /// each carried as [`Scene::transform_guide`] carries one. Objects and
+    /// group leaves bake the affine; instances compose it into their pose;
+    /// nested/duplicate listings transform once. `affine` is the same
+    /// row-major 3×4 12-float matrix as [`Scene::transform_object`]. See
+    /// [`kernel::Document::transform_selection`] for the full contract.
     ///
     /// # Errors
     /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad kind.
     /// - `BadAffine` — `affine` is not 12 floats.
     /// - `EmptySelection` — nothing to transform.
-    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch` — a
-    ///   stale or hidden handle; the document is untouched.
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch`/
+    ///   `UnknownGuide` — a stale or hidden handle; the document is untouched.
     /// - `Transform` — singular affine, or one that reflects a baked target.
+    /// - `DegenerateGuide` — a moved guide's geometry is not a guide.
     pub fn transform_selection(
         &mut self,
         kinds: &[u8],
         ids: &[u64],
         sketches: &[u64],
+        guides: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
         if kinds.len() != ids.len() {
@@ -5029,19 +5069,21 @@ impl Scene {
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
         let sketch_ids: Vec<_> = sketches.iter().map(|&s| sketch_id(s)).collect();
+        let guide_ids: Vec<_> = guides.iter().map(|&g| guide_id(g)).collect();
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
         let t = Transform::from_affine(rows);
         let change = self
             .doc
-            .transform_selection(&nodes, &sketch_ids, &t)
+            .transform_selection(&nodes, &sketch_ids, &guide_ids, &t)
             .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::TransformSelection {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
             sketches: sketches.to_vec(),
+            guides: guides.to_vec(),
             affine: *rows,
         });
         Ok(())
@@ -10722,9 +10764,10 @@ impl Scene {
                         kinds,
                         ids,
                         sketches,
+                        guides,
                         affine,
                     } => {
-                        self.transform_selection(&kinds, &ids, &sketches, &affine)?;
+                        self.transform_selection(&kinds, &ids, &sketches, &guides, &affine)?;
                     }
                     RescaleDocument { factor } => {
                         self.rescale_document(factor)?;
@@ -10735,10 +10778,11 @@ impl Scene {
                     DuplicateSelectionArray {
                         kinds,
                         ids,
+                        guides,
                         affine,
                         count,
                     } => {
-                        self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
+                        self.duplicate_selection_array(&kinds, &ids, &guides, &affine, count)?;
                     }
                     PushPull {
                         object,
@@ -13754,10 +13798,11 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, 3)
+            .duplicate_selection_array(&[0], &[o], &[], &step, 3)
             .unwrap();
-        assert_eq!(roots.len(), 3);
-        assert!(roots.iter().all(|n| n.kind == "object"));
+        assert_eq!(roots.roots().len(), 3);
+        assert!(roots.roots().iter().all(|n| n.kind == "object"));
+        assert!(roots.guides().is_empty());
         assert_eq!(scene.object_ids().len(), 4, "source + three copies");
 
         // ONE undo removes the whole array; ONE redo restores it.
@@ -13768,19 +13813,19 @@ mod tests {
 
         // Typed rejections, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, 0)
+            .duplicate_selection_array(&[0], &[o], &[], &step, 0)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0, 0], &[o], &step, 1)
+            .duplicate_selection_array(&[0, 0], &[o], &[], &step, 1)
             .unwrap_err();
         assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step[..7], 1)
+            .duplicate_selection_array(&[0], &[o], &[], &step[..7], 1)
             .unwrap_err();
         assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[], &[], &step, 1)
+            .duplicate_selection_array(&[], &[], &[], &step, 1)
             .unwrap_err();
         assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 4, "refusals mutate nothing");
@@ -13803,7 +13848,7 @@ mod tests {
 
         // cap + 1 refuses typed, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1)
+            .duplicate_selection_array(&[0], &[o], &[], &step, MAX_ARRAY_COUNT + 1)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 1, "refusal mutates nothing");
@@ -13817,9 +13862,9 @@ mod tests {
 
         // Exactly the cap succeeds.
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT)
+            .duplicate_selection_array(&[0], &[o], &[], &step, MAX_ARRAY_COUNT)
             .unwrap();
-        assert_eq!(roots.len(), MAX_ARRAY_COUNT as usize);
+        assert_eq!(roots.roots().len(), MAX_ARRAY_COUNT as usize);
         assert_eq!(scene.object_ids().len(), 1 + MAX_ARRAY_COUNT as usize);
 
         // A recording with an absurd count fails loudly on replay.
@@ -13967,7 +14012,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         scene
-            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2)
+            .duplicate_selection_array(&[0, 0], &[o, copy.id], &[], &step, 2)
             .unwrap();
         assert_eq!(scene.object_ids().len(), 6);
 
@@ -13976,6 +14021,9 @@ mod tests {
         let json = scene.take_recording();
         assert!(json.contains("\"method\":\"duplicate_node\""));
         assert!(json.contains("\"method\":\"duplicate_selection_array\""));
+        // No guides listed: the field is not written, so the recording reads
+        // exactly as one made before guides could be listed.
+        assert!(!json.contains("\"guides\""));
 
         let mut replayed = Scene::new();
         let final_hash = replayed.replay(&json).unwrap();
@@ -16975,7 +17023,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         scene
-            .transform_selection(&[0, 1], &[o1, g], &[free], &affine)
+            .transform_selection(&[0, 1], &[o1, g], &[free], &[], &affine)
             .unwrap();
         assert_ne!(scene.state_hash(), hash_before, "the selection moved");
 
@@ -16984,15 +17032,15 @@ mod tests {
         assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
 
         let err = scene
-            .transform_selection(&[0, 0], &[o1], &[], &affine)
+            .transform_selection(&[0, 0], &[o1], &[], &[], &affine)
             .unwrap_err();
         assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
         let err = scene
-            .transform_selection(&[], &[], &[], &affine)
+            .transform_selection(&[], &[], &[], &[], &affine)
             .unwrap_err();
         assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
         let err = scene
-            .transform_selection(&[0], &[o1], &[], &affine[..7])
+            .transform_selection(&[0], &[o1], &[], &[], &affine[..7])
             .unwrap_err();
         assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
     }
@@ -18965,6 +19013,121 @@ mod tests {
             let err = scene.duplicate_guide_array(g, &step, bad).unwrap_err();
             assert!(err.0.starts_with("BadCount"), "{}", err.0);
         }
+    }
+
+    /// Guides listed in a selection transform move with its nodes in ONE
+    /// undo step, their snap registration with them — and back again
+    /// across undo/redo. A stale guide refuses typed.
+    #[test]
+    fn transform_selection_moves_guides_and_their_snap_registration() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let on_guide_at = |scene: &Scene, x: f64| {
+            scene
+                .snap(
+                    x, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None,
+                )
+                .unwrap()
+                .is_some_and(|s| s.kind() == "on-guide")
+        };
+        let hash_before = scene.state_hash();
+        let move_x = kernel::Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)).to_affine();
+        scene
+            .transform_selection(&[0], &[o], &[], &[g], &move_x)
+            .unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+        assert_eq!(scene.guide_geometry(g).unwrap()[0], 7.0);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
+        assert!(on_guide_at(&scene, 5.0) && !on_guide_at(&scene, 7.0));
+        scene.scene_redo().unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+
+        scene.delete_guide(g).unwrap();
+        let err = scene
+            .transform_selection(&[0], &[o], &[], &[g], &move_x)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownGuide"), "got {}", err.0);
+    }
+
+    /// Guides listed in an array copy are copied with its nodes in ONE undo
+    /// step; the report names the node roots and the guide copies apart.
+    #[test]
+    fn duplicate_selection_array_copies_guides_in_one_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let step = kernel::Transform::translation(kernel::Vec3::new(1.0, 0.0, 0.0)).to_affine();
+        let report = scene
+            .duplicate_selection_array(&[0], &[o], &[g], &step, 2)
+            .unwrap();
+        assert_eq!(report.roots().len(), 2);
+        assert!(report.roots().iter().all(|n| n.kind == "object"));
+        let copies = report.guides();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(scene.guide_geometry(copies[0]).unwrap()[0], 6.0);
+        assert_eq!(scene.guide_geometry(copies[1]).unwrap()[0], 7.0);
+        assert_eq!(scene.object_ids().len(), 3);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            scene.guide_ids(),
+            vec![g],
+            "one undo hides the guide copies"
+        );
+        assert_eq!(scene.object_ids(), vec![o], "and the node copies");
+
+        let err = scene
+            .duplicate_selection_array(&[], &[], &[g, g], &step, 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("DuplicateMember"), "got {}", err.0);
+    }
+
+    /// Guides in a selection transform or array copy are part of the replay
+    /// contract: the session replays into a fresh Scene to the exact golden
+    /// state_hash.
+    #[test]
+    fn selection_transform_and_array_copy_with_guides_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let p = scene.add_guide_point(2.0, 3.0, 0.0).unwrap();
+        let turn = kernel::Transform::rotation(kernel::Vec3::new(0.0, 0.0, 1.0), 0.3)
+            .unwrap()
+            .then(&kernel::Transform::translation(kernel::Vec3::new(
+                1.0, 2.0, 0.0,
+            )))
+            .to_affine();
+        scene
+            .transform_selection(&[0], &[o], &[], &[g, p], &turn)
+            .unwrap();
+        let step = kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 2.0)).to_affine();
+        scene
+            .duplicate_selection_array(&[], &[], &[g, p], &step, 3)
+            .unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"transform_selection\""));
+        assert!(json.contains("\"guides\":["), "the guides are recorded");
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
     /// A guide point registers as an `"endpoint"` snap (Endpoint-tier, like a

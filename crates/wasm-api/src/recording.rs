@@ -236,12 +236,16 @@ pub enum RecordedCall {
     SliceObject { object: u64, plane: [f64; 6] },
     /// `transform_object(object, affine)`.
     TransformObject { object: u64, affine: [f64; 12] },
-    /// `transform_selection(kinds, ids, sketches, affine)` — a whole
-    /// multi-selection moved/rotated/scaled as one undo step.
+    /// `transform_selection(kinds, ids, sketches, guides, affine)` — a
+    /// whole multi-selection moved/rotated/scaled as one undo step.
+    /// `guides` is additive: a recording made before it existed has none
+    /// and replays unchanged; an empty list is not written.
     TransformSelection {
         kinds: Vec<u8>,
         ids: Vec<u64>,
         sketches: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        guides: Vec<u64>,
         affine: [f64; 12],
     },
     /// `rescale_document(factor)` — the Tape Measure "resize the model"
@@ -253,13 +257,17 @@ pub enum RecordedCall {
     RescaleDocument { factor: f64 },
     /// `delete_node(kind, id)`.
     DeleteNode { kind: u8, id: u64 },
-    /// `duplicate_selection_array(kinds, ids, affine, count)` — the Move
-    /// tool's array copy (a copy commit, or its ×N / /N refinement): every
-    /// listed node cloned `count` times along `affine`, one undo step.
-    /// Additive variant (same posture as [`RecordedCall::DuplicateNode`]).
+    /// `duplicate_selection_array(kinds, ids, guides, affine, count)` — the
+    /// Move tool's array copy (a copy commit, or its ×N / /N refinement):
+    /// every listed node and guide copied `count` times along `affine`, one
+    /// undo step. Additive variant (same posture as
+    /// [`RecordedCall::DuplicateNode`]); `guides` is additive in turn, as in
+    /// [`RecordedCall::TransformSelection`].
     DuplicateSelectionArray {
         kinds: Vec<u8>,
         ids: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        guides: Vec<u64>,
         affine: [f64; 12],
         count: u32,
     },

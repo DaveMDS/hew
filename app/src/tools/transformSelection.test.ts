@@ -674,6 +674,7 @@ describe('commitSelectionTransform', () => {
       new Uint8Array([0]),
       new BigUint64Array([3n]),
       new BigUint64Array([]),
+      new BigUint64Array([]),
       AFFINE,
     )
     expect([...raw.draft_transform_edges.mock.calls[0][1]]).toEqual([7n])

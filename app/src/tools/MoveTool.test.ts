@@ -204,7 +204,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
       return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
     }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _guides: BigUint64Array, _affine: Float64Array, count: number) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -214,11 +214,11 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
         // Every commit moves both tokens, as the kernel's would.
         state.hash++
         state.gen++
-        return out
+        return { roots: () => out, guides: () => new BigUint64Array(0), free: () => { /* no-op */ } }
       },
     ),
     transform_selection: vi.fn(
-      (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _affine: Float64Array) => {
+      (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _guides: BigUint64Array, _affine: Float64Array) => {
         state.hash++
         state.gen++
       },
@@ -279,7 +279,7 @@ describe('MoveTool — movable drawing axes (arrow-key lock)', () => {
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(scene.transform_selection).toHaveBeenCalledTimes(1)
-    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    const [, , , , affine] = scene.transform_selection.mock.calls[0]
     // 2 units along the frame's red axis [0,1,0] — NOT world X [1,0,0].
     expect(translationOf(affine as Float64Array)).toEqual([0, 2, 0])
   })
@@ -322,7 +322,7 @@ describe('MoveTool — locked typed-entry direction (signed by the cursor\'s sid
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(scene.transform_selection).toHaveBeenCalledTimes(1)
-    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    const [, , , , affine] = scene.transform_selection.mock.calls[0]
     expect(translationOf(affine as Float64Array)).toEqual([0, 0, 0.5])
   })
 
@@ -333,7 +333,7 @@ describe('MoveTool — locked typed-entry direction (signed by the cursor\'s sid
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(scene.transform_selection).toHaveBeenCalledTimes(1)
-    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    const [, , , , affine] = scene.transform_selection.mock.calls[0]
     expect(translationOf(affine as Float64Array)).toEqual([0, 0, -0.5])
   })
 
@@ -344,7 +344,7 @@ describe('MoveTool — locked typed-entry direction (signed by the cursor\'s sid
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(scene.transform_selection).toHaveBeenCalledTimes(1)
-    const [, , , affine] = scene.transform_selection.mock.calls[0]
+    const [, , , , affine] = scene.transform_selection.mock.calls[0]
     expect(translationOf(affine as Float64Array)).toEqual([0, 0, 0.5])
   })
 })
@@ -380,7 +380,7 @@ describe('MoveTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Enter'))
 
     expect(scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
-    const [kinds, ids, affine, count] = scene.duplicate_selection_array.mock.calls[0]
+    const [kinds, ids, , affine, count] = scene.duplicate_selection_array.mock.calls[0]
     expect(Array.from(kinds as Uint8Array)).toEqual([0])
     expect(Array.from(ids as BigUint64Array)).toEqual([1n])
     expect(translationOf(affine as Float64Array)).toEqual([2, 0, 0])
@@ -614,7 +614,7 @@ describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")',
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(t.scene.undo_depth()).toBe(1)
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
-    expect(t.scene.duplicate_selection_array.mock.calls[1][3]).toBe(3)
+    expect(t.scene.duplicate_selection_array.mock.calls[1][4]).toBe(3)
     expect(t.scene.draft_copy_edges.mock.calls.slice(1)).toHaveLength(3)
   })
 })
@@ -648,7 +648,7 @@ describe('MoveTool — ×N / /N array copy', () => {
     t.tool.onKey(makeKeyEvent('Enter'))
 
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
-    const [, ids, affine, count] = t.scene.duplicate_selection_array.mock.calls[1]
+    const [, ids, , affine, count] = t.scene.duplicate_selection_array.mock.calls[1]
     expect(Array.from(ids as BigUint64Array)).toEqual([1n])
     expect(translationOf(affine as Float64Array)).toEqual([2, 0, 0])
     expect(count).toBe(3)
@@ -661,8 +661,8 @@ describe('MoveTool — ×N / /N array copy', () => {
     typeKeys(t.tool, '4/')
     t.tool.onKey(makeKeyEvent('Enter'))
     const call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(translationOf(call[2] as Float64Array)).toEqual([0.5, 0, 0])
-    expect(call[3]).toBe(4)
+    expect(translationOf(call[3] as Float64Array)).toEqual([0.5, 0, 0])
+    expect(call[4]).toBe(4)
   })
 
   it('x3 + Enter re-resolves into 3 copies at the SAME spacing (one undo retracts the single copy first)', () => {
@@ -675,7 +675,7 @@ describe('MoveTool — ×N / /N array copy', () => {
 
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
-    const [kinds, ids, affine, count] = t.scene.duplicate_selection_array.mock.calls[1]
+    const [kinds, ids, , affine, count] = t.scene.duplicate_selection_array.mock.calls[1]
     expect(Array.from(kinds as Uint8Array)).toEqual([0])
     expect(Array.from(ids as BigUint64Array)).toEqual([1n]) // the ORIGINAL source
     expect(translationOf(affine as Float64Array)).toEqual([2, 0, 0])
@@ -692,15 +692,15 @@ describe('MoveTool — ×N / /N array copy', () => {
     typeKeys(t.tool, '*4')
     t.tool.onKey(makeKeyEvent('Enter'))
     let call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(translationOf(call[2] as Float64Array)).toEqual([2, 0, 0])
-    expect(call[3]).toBe(4)
+    expect(translationOf(call[3] as Float64Array)).toEqual([2, 0, 0])
+    expect(call[4]).toBe(4)
 
     // Still hot — refine again, this time dividing: step = 2 m / 4.
     typeKeys(t.tool, '/4')
     t.tool.onKey(makeKeyEvent('Enter'))
     call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(translationOf(call[2] as Float64Array)).toEqual([0.5, 0, 0])
-    expect(call[3]).toBe(4)
+    expect(translationOf(call[3] as Float64Array)).toEqual([0.5, 0, 0])
+    expect(call[4]).toBe(4)
     // Each refinement retracted the previous commit with ONE undo.
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
   })
@@ -742,7 +742,7 @@ describe('MoveTool — ×N / /N array copy', () => {
 
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
     const call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(call[3]).toBe(3)
+    expect(call[4]).toBe(3)
     expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -848,7 +848,7 @@ describe('MoveTool — ×N / /N array copy', () => {
     t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
     const call = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(call[3]).toBe(2)
+    expect(call[4]).toBe(2)
     expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -954,7 +954,7 @@ describe('MoveTool — auto-select on click', () => {
     tool.onPointerDown(makeSnapSel({ x: 2, y: 0, z: 0 }), rayThroughSel(2, 0)) // destination
 
     expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
-    const [kinds, ids, , affine] = (wasmScene.transform_selection as ReturnType<typeof vi.fn>).mock.calls[0]
+    const [kinds, ids, , , affine] = (wasmScene.transform_selection as ReturnType<typeof vi.fn>).mock.calls[0]
     expect(Array.from(kinds as Uint8Array)).toEqual([0]) // one object
     expect(Array.from(ids as BigUint64Array)).toEqual([7n])
     expect((affine as Float64Array)[3]).toBeCloseTo(2) // tx = 2
@@ -1047,7 +1047,7 @@ describe('MoveTool — setEditContext aborts an armed gesture on a genuine chang
 describe('MoveTool — retype the distance after the commit', () => {
   const lastTranslation = (t: ReturnType<typeof makeTool>) => {
     const calls = t.scene.transform_selection.mock.calls
-    return translationOf(calls[calls.length - 1][3] as Float64Array)
+    return translationOf(calls[calls.length - 1][4] as Float64Array)
   }
 
   it('a plain move redone at a typed distance: one undo, the same nodes moved the new distance along X', () => {
@@ -1094,14 +1094,14 @@ describe('MoveTool — retype the distance after the commit', () => {
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
     const dupCalls = t.scene.duplicate_selection_array.mock.calls
-    const affine = dupCalls[1][2] as Float64Array
+    const affine = dupCalls[1][3] as Float64Array
     expect(translationOf(affine)).toEqual([3, 0, 0])
 
     // The array window rides along: 3x now makes three copies at 3 m spacing.
     typeKeys(t.tool, '3x')
     t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(3)
-    expect(dupCalls[2][3]).toBe(3)
+    expect(dupCalls[2][4]).toBe(3)
   })
 
   it('Escape closes the window; a stale generation is reported', () => {
@@ -1218,7 +1218,7 @@ describe('MoveTool — retype window edge cases', () => {
     typeKeys(t.tool, '1')
     t.tool.onKey(makeKeyEvent('Enter'))
     const calls = t.scene.transform_selection.mock.calls
-    expect(translationOf(calls[calls.length - 1][3] as Float64Array)[0]).toBeCloseTo(1, 9) // not 71
+    expect(translationOf(calls[calls.length - 1][4] as Float64Array)[0]).toBeCloseTo(1, 9) // not 71
   })
 
   it('after a PLAIN move, a slash is an imperial fraction bar, not an array token', () => {
@@ -1230,7 +1230,7 @@ describe('MoveTool — retype window edge cases', () => {
     t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
     const calls = t.scene.transform_selection.mock.calls
-    expect(translationOf(calls[calls.length - 1][3] as Float64Array)[0]).toBeCloseTo(0.0127, 6)
+    expect(translationOf(calls[calls.length - 1][4] as Float64Array)[0]).toBeCloseTo(0.0127, 6)
   })
 })
 
@@ -1243,23 +1243,23 @@ describe('MoveTool — a typed distance after an array re-spaces the array', () 
     const dup = t.scene.duplicate_selection_array.mock.calls
     typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup.length).toBe(2)
-    expect(dup[1][3]).toBe(3)
-    expect(translationOf(dup[1][2] as Float64Array)[0]).toBeCloseTo(2, 9)
+    expect(dup[1][4]).toBe(3)
+    expect(translationOf(dup[1][3] as Float64Array)[0]).toBeCloseTo(2, 9)
 
     typeKeys(t.tool, '3'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup.length).toBe(3)
-    expect(dup[2][3]).toBe(3)
-    expect(translationOf(dup[2][2] as Float64Array)[0]).toBeCloseTo(3, 9)
+    expect(dup[2][4]).toBe(3)
+    expect(translationOf(dup[2][3] as Float64Array)[0]).toBeCloseTo(3, 9)
 
     typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup.length).toBe(4)
-    expect(dup[3][3]).toBe(5)
-    expect(translationOf(dup[3][2] as Float64Array)[0]).toBeCloseTo(3, 9)
+    expect(dup[3][4]).toBe(5)
+    expect(translationOf(dup[3][3] as Float64Array)[0]).toBeCloseTo(3, 9)
 
     typeKeys(t.tool, '1.5'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup.length).toBe(5)
-    expect(dup[4][3]).toBe(5)
-    expect(translationOf(dup[4][2] as Float64Array)[0]).toBeCloseTo(1.5, 9)
+    expect(dup[4][4]).toBe(5)
+    expect(translationOf(dup[4][3] as Float64Array)[0]).toBeCloseTo(1.5, 9)
     // Every re-space retracted exactly the previous array (one step each).
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(4)
   })
@@ -1272,8 +1272,8 @@ describe('MoveTool — a typed distance after an array re-spaces the array', () 
     typeKeys(t.tool, '4/'); t.tool.onKey(makeKeyEvent('Enter'))
     typeKeys(t.tool, '8'); t.tool.onKey(makeKeyEvent('Enter'))
     const dup = t.scene.duplicate_selection_array.mock.calls
-    expect(dup[dup.length - 1][3]).toBe(4)
-    expect(translationOf(dup[dup.length - 1][2] as Float64Array)[0]).toBeCloseTo(2, 9) // 8 / 4
+    expect(dup[dup.length - 1][4]).toBe(4)
+    expect(translationOf(dup[dup.length - 1][3] as Float64Array)[0]).toBeCloseTo(2, 9) // 8 / 4
   })
 })
 
@@ -1297,7 +1297,7 @@ describe('MoveTool — a clicked distance is exactly the displayed distance', ()
       tool.onKey(makeKeyEvent('Enter'))
     }
     expect(scene.transform_selection).toHaveBeenCalledTimes(1)
-    return { t: translationOf(scene.transform_selection.mock.calls[0][3] as Float64Array), onMeasurement }
+    return { t: translationOf(scene.transform_selection.mock.calls[0][4] as Float64Array), onMeasurement }
   }
 
   it('a free click moves by the same vector as typing the shown distance', () => {
@@ -1364,7 +1364,7 @@ describe('MoveTool — a refused mixed array resolve is atomic', () => {
     // The window is still hot and re-stamped: another count resolves.
     typeKeys(t.tool, 'x2')
     t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(2)
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![4]).toBe(2)
   })
 })
 
@@ -1383,7 +1383,7 @@ describe('MoveTool — array history edge cases', () => {
     typeKeys(t.tool, '5'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.onToast.mock.calls.map((c) => c[0] as string).filter((m) => STALE.test(m))).toEqual([])
     const dup = t.scene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(translationOf(dup[2] as Float64Array)[0]).toBeCloseTo(5, 9)
+    expect(translationOf(dup[3] as Float64Array)[0]).toBeCloseTo(5, 9)
   })
 
   it('a refused relay that recorded nothing re-stamps the array window so the next xN is accepted', () => {
@@ -1397,7 +1397,7 @@ describe('MoveTool — array history edge cases', () => {
     t.onToast.mockClear()
     typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.onToast).not.toHaveBeenCalledWith(expect.stringContaining('Array entry ended'), undefined)
-    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(5)
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![4]).toBe(5)
   })
 
   describe('a relay whose second drawn context refuses (the bracket aborts: history and stack are put back exactly)', () => {
@@ -1630,7 +1630,7 @@ describe('MoveTool — a click-taken selection lasts only for the gesture (Sketc
 
     typeKeys(t.tool, '3x')
     t.tool.onKey(makeKeyEvent('Enter'))
-    const [, ids, , count] = t.scene.duplicate_selection_array.mock.calls.at(-1)!
+    const [, ids, , , count] = t.scene.duplicate_selection_array.mock.calls.at(-1)!
     expect(Array.from(ids as BigUint64Array)).toEqual([7n])
     expect(count).toBe(3)
     expect(t.release).toHaveBeenCalledTimes(2)

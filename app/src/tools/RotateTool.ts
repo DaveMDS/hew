@@ -1286,10 +1286,15 @@ export class RotateTool implements Tool {
     const created = this.wasmScene.duplicate_selection_array(
       new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind))),
       new BigUint64Array(nodes.map((n) => n.id)),
+      new BigUint64Array(0),
       affineF64,
       count,
     )
-    return created.map(nodeRefFromJs)
+    try {
+      return created.roots().map(nodeRefFromJs)
+    } finally {
+      created.free()
+    }
   }
 
   /** The array buffer as a readout, with the display glyph for `x`. */

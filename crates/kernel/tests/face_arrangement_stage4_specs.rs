@@ -912,6 +912,7 @@ fn closing_a_session_whose_unbake_would_vanish_a_face_refuses_typed() {
     doc.transform_selection(
         &[NodeId::Instance(inst)],
         &[],
+        &[],
         &Transform::uniform_scale(1000.0),
     )
     .expect("scale the instance");

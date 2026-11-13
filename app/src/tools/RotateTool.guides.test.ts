@@ -44,7 +44,10 @@ function makeScene() {
       bump()
       return BigUint64Array.from({ length: count }, () => state.nextGuide++)
     }),
-    duplicate_selection_array: vi.fn(() => { bump(); return [] }),
+    duplicate_selection_array: vi.fn(() => {
+      bump()
+      return { roots: () => [], guides: () => new BigUint64Array(0), free: () => { /* no-op */ } }
+    }),
     transform_selection: vi.fn(() => bump()),
     history_generation: vi.fn(() => state.gen),
     max_array_count: vi.fn(() => 1000),

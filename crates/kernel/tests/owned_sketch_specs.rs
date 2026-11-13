@@ -460,7 +460,7 @@ fn transform_selection_moves_the_owned_sketch_of_a_selected_node() {
     let (oa, oc) = (verts(&doc, sa), verts(&doc, sc));
     let before = doc.save();
 
-    doc.transform_selection(&[NodeId::Object(a)], &[], &pose())
+    doc.transform_selection(&[NodeId::Object(a)], &[], &[], &pose())
         .expect("transform selection");
     assert_moved(&doc, sa, &oa, &pose());
     assert!(
@@ -1385,8 +1385,13 @@ fn a_selection_move_that_lifts_an_owned_sketch_off_its_owner_frees_it() {
     let s = owned_sketch(&mut doc, b, 1.0, &[near()]);
     let before = doc.save();
 
-    doc.transform_selection(&[], &[s], &Transform::translation(Vec3::new(0.0, 0.0, 0.5)))
-        .expect("lift the drawing");
+    doc.transform_selection(
+        &[],
+        &[s],
+        &[],
+        &Transform::translation(Vec3::new(0.0, 0.0, 0.5)),
+    )
+    .expect("lift the drawing");
     assert_eq!(
         doc.sketch_owner_object(s),
         None,

@@ -289,7 +289,7 @@ fn apply_node_transform(
     copy: Option<CopySpec>,
 ) -> Result<Value, CmdError> {
     let Some(copy) = copy else {
-        ctx.doc.transform_selection(nodes, &[], t)?;
+        ctx.doc.transform_selection(nodes, &[], &[], t)?;
         return Ok(serde_json::json!({}));
     };
     let count = copy.count.unwrap_or(1);
@@ -311,7 +311,7 @@ fn apply_node_transform(
         let (root, _) = ctx.doc.duplicate_node(nodes[0], t)?;
         vec![root]
     } else {
-        let (roots, _) = ctx.doc.duplicate_nodes_array(nodes, t, count)?;
+        let (roots, _, _) = ctx.doc.duplicate_nodes_array(nodes, &[], t, count)?;
         roots
     };
     let resolver = ctx.resolver();
@@ -425,6 +425,6 @@ fn scale(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         ctx.doc.transform_sketch(sketches[0], &t)?;
         return Ok(serde_json::json!({}));
     }
-    ctx.doc.transform_selection(&nodes, &[], &t)?;
+    ctx.doc.transform_selection(&nodes, &[], &[], &t)?;
     Ok(serde_json::json!({}))
 }

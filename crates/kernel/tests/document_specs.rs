@@ -1172,6 +1172,7 @@ fn transform_selection_moves_mixed_selection_in_one_undo_step() {
         .transform_selection(
             &[NodeId::Object(a), NodeId::Group(g), NodeId::Instance(inst)],
             &[s],
+            &[],
             &t,
         )
         .expect("transform the mixed selection");
@@ -1239,6 +1240,7 @@ fn transform_selection_dedups_a_node_listed_with_its_ancestor_group() {
     doc.transform_selection(
         &[NodeId::Group(g), NodeId::Object(a)],
         &[],
+        &[],
         &Transform::translation(offset),
     )
     .expect("group and member listed together");
@@ -1293,7 +1295,7 @@ proptest! {
         ];
         let sc = sketch_centroid(&doc, s);
 
-        doc.transform_selection(&[NodeId::Object(a), NodeId::Group(g)], &[s], &t)
+        doc.transform_selection(&[NodeId::Object(a), NodeId::Group(g)], &[s], &[], &t)
             .expect("transform the mixed selection");
 
         // An affine map commutes with centroids, so each baked centroid
@@ -1316,6 +1318,7 @@ proptest! {
         doc2.transform_selection(
             &[NodeId::Object(a2), NodeId::Group(g2), NodeId::Object(b2)],
             &[s2],
+            &[],
             &t,
         )
         .expect("transform with a doubly-listed member");
@@ -1335,25 +1338,35 @@ fn transform_selection_refuses_empty_stale_and_degenerate() {
     let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
 
     assert_eq!(
-        doc.transform_selection(&[], &[], &t),
+        doc.transform_selection(&[], &[], &[], &t),
         Err(DocumentError::EmptySelection)
     );
     assert_eq!(
-        doc.transform_selection(&[NodeId::Object(kernel::ObjectId::default())], &[], &t),
+        doc.transform_selection(&[NodeId::Object(kernel::ObjectId::default())], &[], &[], &t),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
-        doc.transform_selection(&[], &[SketchId::default()], &t),
+        doc.transform_selection(&[], &[SketchId::default()], &[], &t),
         Err(DocumentError::UnknownSketch)
     );
     // Reflection is refused for a selection with baked targets; the object is
     // untouched afterwards.
     assert_eq!(
-        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(-1.0)),
+        doc.transform_selection(
+            &[NodeId::Object(a)],
+            &[],
+            &[],
+            &Transform::uniform_scale(-1.0)
+        ),
         Err(DocumentError::Transform(TransformError::Reflection))
     );
     assert_eq!(
-        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(0.0)),
+        doc.transform_selection(
+            &[NodeId::Object(a)],
+            &[],
+            &[],
+            &Transform::uniform_scale(0.0)
+        ),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
@@ -5642,6 +5655,376 @@ proptest! {
     }
 }
 
+// ------------------------------------------------ guides in a selection
+
+/// The history label of the entry on top of the undo stack.
+fn last_label(doc: &Document) -> String {
+    doc.history_entries()
+        .undo
+        .last()
+        .map(|e| e.label.clone())
+        .expect("an undo entry")
+}
+
+/// `transform_selection` carries listed guides along with the nodes, each
+/// exactly as `transform_guide` would, and the whole act is ONE undo step:
+/// a single undo restores the object and both guides bit-for-bit, a
+/// single redo re-applies them bit-for-bit.
+#[test]
+fn transform_selection_moves_guides_with_nodes_in_one_undo_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let line = doc
+        .add_guide_line(Point3::new(1.0, 2.0, 3.0), Vec3::new(0.3, 0.4, 0.0))
+        .unwrap();
+    let point = doc.add_guide_point(Point3::new(-2.0, 0.5, 1.0)).unwrap();
+    let depth = doc.undo_depth();
+    let orig_a = doc.object(a).unwrap().clone();
+    let (line0, point0) = (*doc.guide(line).unwrap(), *doc.guide(point).unwrap());
+    let ca = centroid(&orig_a);
+
+    let t = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.7)
+        .unwrap()
+        .then(&Transform::translation(Vec3::new(0.3, -1.0, 1.1)));
+    // What `transform_guide` makes of each guide, on a twin document.
+    let mut twin = doc.clone();
+    twin.transform_guide(line, &t).unwrap();
+    twin.transform_guide(point, &t).unwrap();
+    let (line1, point1) = (*twin.guide(line).unwrap(), *twin.guide(point).unwrap());
+
+    let change = doc
+        .transform_selection(&[NodeId::Object(a)], &[], &[line, point], &t)
+        .expect("transform object and guides");
+    assert_eq!(change.guides_touched, vec![line, point]);
+    assert_eq!(change.objects_touched, vec![a]);
+    assert!(approx_pt(
+        centroid(doc.object(a).unwrap()),
+        t.apply_point(ca)
+    ));
+    assert_eq!(
+        *doc.guide(line).unwrap(),
+        line1,
+        "posed as transform_guide poses it"
+    );
+    assert_eq!(*doc.guide(point).unwrap(), point1);
+    assert_eq!(doc.guide_ids(), vec![line, point], "guides keep their ids");
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo step");
+    assert_eq!(last_label(&doc), "Rotate 3 items");
+
+    doc.undo().expect("undo");
+    assert!(objects_equivalent(doc.object(a).unwrap(), &orig_a));
+    assert_eq!(*doc.guide(line).unwrap(), line0, "undo is bit-exact");
+    assert_eq!(*doc.guide(point).unwrap(), point0);
+    assert_eq!(doc.undo_depth(), depth);
+
+    doc.redo().expect("redo");
+    assert!(approx_pt(
+        centroid(doc.object(a).unwrap()),
+        t.apply_point(ca)
+    ));
+    assert_eq!(*doc.guide(line).unwrap(), line1, "redo is bit-exact");
+    assert_eq!(*doc.guide(point).unwrap(), point1);
+}
+
+/// A selection of guides alone is valid — it keeps tags, takes a
+/// reflecting map (nothing is baked, as with `transform_guide`), and
+/// reports itself as a guide move. A guide listed twice moves once.
+#[test]
+fn transform_selection_moves_guides_alone() {
+    let (mut doc, tagged) = doc_with_tagged_segment_guide();
+    let point = doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    let mut twin = doc.clone();
+    twin.transform_guide(tagged, &mirror).unwrap();
+    twin.transform_guide(point, &mirror).unwrap();
+
+    let change = doc
+        .transform_selection(&[], &[], &[tagged, point, tagged], &mirror)
+        .expect("guides alone, reflected");
+    assert_eq!(
+        change.guides_touched,
+        vec![tagged, point],
+        "listed twice, moved once"
+    );
+    assert_eq!(doc.guide(tagged), twin.guide(tagged));
+    assert_eq!(doc.guide(point), twin.guide(point));
+    assert_eq!(
+        doc.guide_tags(tagged),
+        &[vec!["Rig".to_string()]],
+        "tags stay"
+    );
+    // The verb follows the map (not this test's concern); the noun is the
+    // guides'.
+    assert!(
+        last_label(&doc).ends_with(" 2 guides"),
+        "{}",
+        last_label(&doc)
+    );
+}
+
+/// Refusals leave the document untouched and push no undo entry: a stale
+/// guide, a degenerate guide listed with a movable object, and a
+/// reflection refused by a baked object listed with a guide.
+#[test]
+fn transform_selection_refuses_bad_guides_leaving_everything_untouched() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let far = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let gone = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    doc.delete_guide(gone).unwrap();
+    let hash = doc.state_hash();
+    let depth = doc.undo_depth();
+
+    assert_eq!(
+        doc.transform_selection(
+            &[NodeId::Object(a)],
+            &[],
+            &[gone],
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+        ),
+        Err(DocumentError::UnknownGuide)
+    );
+    // The object alone would move; the overflowing guide refuses it all.
+    assert_eq!(
+        doc.transform_selection(
+            &[NodeId::Object(a)],
+            &[],
+            &[far],
+            &Transform::translation(Vec3::new(1.0e308, 0.0, 0.0)),
+        ),
+        Err(DocumentError::DegenerateGuide)
+    );
+    // The guide alone would mirror; the baked object refuses it all.
+    assert_eq!(
+        doc.transform_selection(
+            &[NodeId::Object(a)],
+            &[],
+            &[far],
+            &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)),
+        ),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert!(matches!(
+        doc.transform_selection(&[], &[], &[far], &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(_))
+    ));
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    assert_eq!(doc.undo_depth(), depth, "no undo entry pushed on Err");
+}
+
+/// `duplicate_nodes_array` copies listed guides along with the nodes,
+/// each placed, tagged, and dashed as `duplicate_guide_array` would, in
+/// creation order (every guide's copy 1, then copy 2, …), and the whole
+/// array is ONE undo step that keeps every id across undo/redo.
+#[test]
+fn duplicate_nodes_array_copies_guides_with_nodes_in_one_undo_step() {
+    let (mut doc, tagged) = doc_with_tagged_segment_guide();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let point = doc.add_guide_point(Point3::new(-2.0, 0.5, 1.0)).unwrap();
+    let depth = doc.undo_depth();
+    let step = Transform::translation(Vec3::new(0.0, 0.0, 2.0));
+    let three = NonZeroU32::new(3).unwrap();
+    // What `duplicate_guide_array` makes of each guide, on a twin document.
+    let mut twin = doc.clone();
+    let (tagged_copies, _) = twin.duplicate_guide_array(tagged, &step, three).unwrap();
+    let (point_copies, _) = twin.duplicate_guide_array(point, &step, three).unwrap();
+
+    let (roots, copies, change) = doc
+        .duplicate_nodes_array(&[NodeId::Object(a)], &[tagged, point], &step, three)
+        .expect("copy object and guides");
+    assert_eq!(roots.len(), 3);
+    assert_eq!(copies.len(), 6);
+    assert_eq!(change.guides_touched, copies);
+    for k in 0..3 {
+        let (t_copy, p_copy) = (copies[2 * k], copies[2 * k + 1]);
+        assert_eq!(
+            doc.guide(t_copy),
+            twin.guide(tagged_copies[k]),
+            "copy {k} of the line"
+        );
+        assert_eq!(
+            doc.guide(p_copy),
+            twin.guide(point_copies[k]),
+            "copy {k} of the point"
+        );
+        assert_eq!(doc.guide_tags(t_copy), &[vec!["Rig".to_string()]]);
+        assert_eq!(doc.guide_dash(t_copy), doc.guide_dash(tagged));
+        assert!(doc.guide_tags(p_copy).is_empty());
+    }
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo step");
+    assert_eq!(last_label(&doc), "Copy ×9");
+
+    doc.undo().expect("undo");
+    assert_eq!(
+        doc.guide_ids(),
+        vec![tagged, point],
+        "one undo hides every guide copy"
+    );
+    assert_eq!(doc.visible_object_ids(), vec![a], "and every node copy");
+    doc.redo().expect("redo");
+    let mut expected = vec![tagged, point];
+    expected.extend(&copies);
+    let mut live = doc.guide_ids();
+    live.sort();
+    expected.sort();
+    assert_eq!(live, expected, "redo restores the same guide ids");
+    assert_eq!(doc.visible_object_ids().len(), 4);
+}
+
+/// Guides alone copy as well, a reflecting step included (nothing is
+/// baked, as with `duplicate_guide_array`).
+#[test]
+fn duplicate_nodes_array_copies_guides_alone() {
+    let mut doc = Document::new();
+    let point = doc.add_guide_point(Point3::new(1.0, 2.0, 3.0)).unwrap();
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    let (roots, copies, _) = doc
+        .duplicate_nodes_array(&[], &[point], &mirror, NonZeroU32::new(1).unwrap())
+        .expect("guide alone, reflected");
+    assert!(roots.is_empty());
+    assert_eq!(copies.len(), 1);
+    match *doc.guide(copies[0]).unwrap() {
+        Guide::Point { position } => {
+            assert!(position.approx_eq(Point3::new(-1.0, 2.0, 3.0), 1e-12))
+        }
+        Guide::Line { .. } => panic!("expected a Point guide"),
+    }
+}
+
+/// Refusals insert nothing — no node clone, no guide copy, no undo entry.
+#[test]
+fn duplicate_nodes_array_refuses_bad_guides_inserting_nothing() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let far = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let gone = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    doc.delete_guide(gone).unwrap();
+    let hash = doc.state_hash();
+    let depth = doc.undo_depth();
+    let one = NonZeroU32::new(1).unwrap();
+    let shift = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.duplicate_nodes_array(&[], &[], &shift, one).map(|_| ()),
+        Err(DocumentError::EmptySelection)
+    );
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(a)], &[far, far], &shift, one)
+            .map(|_| ()),
+        Err(DocumentError::DuplicateMember)
+    );
+    assert_eq!(
+        doc.duplicate_nodes_array(&[NodeId::Object(a)], &[gone], &shift, one)
+            .map(|_| ()),
+        Err(DocumentError::UnknownGuide)
+    );
+    // Copy 1 fits, copy 2 overflows: the whole array refuses, the object's
+    // clones included.
+    assert_eq!(
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &[far],
+            &Transform::translation(Vec3::new(0.6e308, 0.0, 0.0)),
+            NonZeroU32::new(2).unwrap(),
+        )
+        .map(|_| ()),
+        Err(DocumentError::DegenerateGuide)
+    );
+    // The object's clone refuses the reflection: no guide copy lands.
+    assert_eq!(
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &[far],
+            &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)),
+            one,
+        )
+        .map(|_| ()),
+        Err(DocumentError::Transform(TransformError::Reflection))
+    );
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    assert_eq!(doc.undo_depth(), depth, "no undo entry pushed on Err");
+    assert_eq!(doc.guide_ids(), vec![far]);
+    assert_eq!(doc.visible_object_ids(), vec![a]);
+}
+
+proptest! {
+    /// Property (DEVELOPMENT.md rule 3): for an arbitrary orientation-
+    /// preserving similarity, `transform_selection` over an object and two
+    /// guides poses each guide exactly as `transform_guide` does, and one
+    /// undo restores every guide bit-for-bit (rule 9: recorded state, never
+    /// a recomputed inverse), one redo re-applies it bit-for-bit.
+    #[test]
+    fn transform_selection_guides_match_transform_guide_and_undo_exactly(
+        o in prop::array::uniform3(-10.0f64..10.0),
+        d in prop::array::uniform3(-1.0f64..1.0),
+        p in prop::array::uniform3(-10.0f64..10.0),
+        axis in prop::array::uniform3(-1.0f64..1.0),
+        angle in -6.3f64..6.3,
+        scale in 0.25f64..4.0,
+        shift in prop::array::uniform3(-10.0f64..10.0),
+    ) {
+        let dir = Vec3::new(d[0], d[1], d[2]);
+        let axis = Vec3::new(axis[0], axis[1], axis[2]);
+        prop_assume!(dir.length() > 1e-3 && axis.length() > 1e-3);
+        let mut doc = Document::new();
+        let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let line = doc.add_guide_line(Point3::new(o[0], o[1], o[2]), dir).unwrap();
+        let point = doc.add_guide_point(Point3::new(p[0], p[1], p[2])).unwrap();
+        let before = (*doc.guide(line).unwrap(), *doc.guide(point).unwrap());
+        let orig_a = doc.object(a).unwrap().clone();
+        let t = Transform::uniform_scale(scale)
+            .then(&Transform::rotation(axis, angle).unwrap())
+            .then(&Transform::translation(Vec3::new(shift[0], shift[1], shift[2])));
+        let mut twin = doc.clone();
+        twin.transform_guide(line, &t).unwrap();
+        twin.transform_guide(point, &t).unwrap();
+        let after = (*twin.guide(line).unwrap(), *twin.guide(point).unwrap());
+
+        doc.transform_selection(&[NodeId::Object(a)], &[], &[line, point], &t).unwrap();
+        prop_assert_eq!((*doc.guide(line).unwrap(), *doc.guide(point).unwrap()), after);
+
+        doc.undo().unwrap();
+        prop_assert_eq!((*doc.guide(line).unwrap(), *doc.guide(point).unwrap()), before);
+        prop_assert!(objects_equivalent(doc.object(a).unwrap(), &orig_a));
+        doc.redo().unwrap();
+        prop_assert_eq!((*doc.guide(line).unwrap(), *doc.guide(point).unwrap()), after);
+    }
+
+    /// Copy `k` of every guide in an array sits where `duplicate_guide_array`
+    /// puts it, whatever the step and count.
+    #[test]
+    fn duplicate_nodes_array_guide_copies_match_duplicate_guide_array(
+        p in prop::array::uniform3(-10.0f64..10.0),
+        s in prop::array::uniform3(-2.0f64..2.0),
+        angle in -3.0f64..3.0,
+        count in 1u32..6,
+    ) {
+        let mut doc = Document::new();
+        let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+        let point = doc.add_guide_point(Point3::new(p[0], p[1], p[2])).unwrap();
+        let line = doc
+            .add_guide_line(Point3::new(p[2], p[0], p[1]), Vec3::new(1.0, 1.0, 0.0))
+            .unwrap();
+        let step = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), angle)
+            .unwrap()
+            .then(&Transform::translation(Vec3::new(s[0], s[1], s[2])));
+        let n = NonZeroU32::new(count).unwrap();
+        let mut twin = doc.clone();
+        let (point_copies, _) = twin.duplicate_guide_array(point, &step, n).unwrap();
+        let (line_copies, _) = twin.duplicate_guide_array(line, &step, n).unwrap();
+
+        let (roots, copies, _) = doc
+            .duplicate_nodes_array(&[NodeId::Object(a)], &[point, line], &step, n)
+            .unwrap();
+        prop_assert_eq!(roots.len(), count as usize);
+        prop_assert_eq!(copies.len(), 2 * count as usize);
+        for k in 0..count as usize {
+            prop_assert_eq!(doc.guide(copies[2 * k]), twin.guide(point_copies[k]));
+            prop_assert_eq!(doc.guide(copies[2 * k + 1]), twin.guide(line_copies[k]));
+        }
+    }
+}
+
 // ------------------------------------------------------------------ slice
 
 #[test]
@@ -6030,9 +6413,10 @@ fn array_copy_places_evenly_spaced_copies_as_one_undo_step() {
     let c0 = centroid(&original);
     let step = Vec3::new(3.0, 0.0, 0.0);
 
-    let (roots, change) = doc
+    let (roots, _, change) = doc
         .duplicate_nodes_array(
             &[NodeId::Object(a)],
+            &[],
             &Transform::translation(step),
             NonZeroU32::new(3).unwrap(),
         )
@@ -6091,9 +6475,10 @@ fn array_copy_count_one_matches_single_duplicate() {
     let c0 = centroid(doc.object(a).unwrap());
     let step = Vec3::new(0.0, 2.0, 0.0);
 
-    let (roots, _) = doc
+    let (roots, _, _) = doc
         .duplicate_nodes_array(
             &[NodeId::Object(a)],
+            &[],
             &Transform::translation(step),
             NonZeroU32::new(1).unwrap(),
         )
@@ -6120,9 +6505,10 @@ fn array_copy_of_instances_shares_the_definition() {
     let free = extrude_box(&mut doc, 5.0, 5.0, 6.0, 6.0, 0.0, 1.0);
     let step = Vec3::new(4.0, 0.0, 0.0);
 
-    let (roots, _) = doc
+    let (roots, _, _) = doc
         .duplicate_nodes_array(
             &[NodeId::Instance(inst), NodeId::Object(free)],
+            &[],
             &Transform::translation(step),
             NonZeroU32::new(2).unwrap(),
         )
@@ -6184,28 +6570,38 @@ fn array_copy_rejects_bad_input_without_touching_the_document() {
     let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
 
     assert_eq!(
-        doc.duplicate_nodes_array(&[], &t, one).map(|_| ()),
+        doc.duplicate_nodes_array(&[], &[], &t, one).map(|_| ()),
         Err(DocumentError::EmptySelection)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a), NodeId::Object(a)], &t, one)
+        doc.duplicate_nodes_array(&[NodeId::Object(a), NodeId::Object(a)], &[], &t, one)
             .map(|_| ()),
         Err(DocumentError::DuplicateMember)
     );
     let bogus = ObjectId::default();
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(bogus)], &t, one)
+        doc.duplicate_nodes_array(&[NodeId::Object(bogus)], &[], &t, one)
             .map(|_| ()),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(0.0), one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &[],
+            &Transform::uniform_scale(0.0),
+            one
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &[],
+            &Transform::uniform_scale(-1.0),
+            one
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Reflection))
     );
     assert_eq!(
@@ -6238,9 +6634,10 @@ proptest! {
         let c0 = centroid(doc.object(a).unwrap());
         let step = Vec3::new(dx, dy, dz);
 
-        let (roots, _) = doc
+        let (roots, _, _) = doc
             .duplicate_nodes_array(
                 &[NodeId::Object(a)],
+                &[],
                 &Transform::translation(step),
                 NonZeroU32::new(count).unwrap(),
             )
@@ -6314,6 +6711,7 @@ fn net_zero_tag_pair_restores_the_hash_but_not_the_generation() {
     let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     doc.duplicate_nodes_array(
         &[NodeId::Object(a)],
+        &[],
         &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
         NonZeroU32::new(1).unwrap(),
     )
@@ -9325,7 +9723,7 @@ fn transform_selection_reanchors_annotation_on_touched_object() {
         .unwrap();
 
     let t = Transform::translation(Vec3::new(0.0, 7.0, 0.0));
-    doc.transform_selection(&[NodeId::Object(obj)], &[], &t)
+    doc.transform_selection(&[NodeId::Object(obj)], &[], &[], &t)
         .expect("transform selection");
     match doc.annotation(id).unwrap() {
         Annotation::LeaderText { anchor, .. } => {

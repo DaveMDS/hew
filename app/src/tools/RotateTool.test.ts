@@ -207,7 +207,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     pick_face: vi.fn(() => undefined),
     transform_selection: vi.fn(() => { gen++ }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _guides: BigUint64Array, _affine: Float64Array, count: number) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -215,7 +215,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
           }
         }
         gen++
-        return out
+        return { roots: () => out, guides: () => new BigUint64Array(0), free: () => { /* no-op */ } }
       },
     ),
     max_array_count: vi.fn(() => 1000),
@@ -866,7 +866,7 @@ describe('RotateTool — durable Alt copy toggle', () => {
     runNinetyDegreeGesture(tool)
 
     expect(wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
-    const [kinds, ids, affine, count] = wasmScene.duplicate_selection_array.mock.calls[0]
+    const [kinds, ids, , affine, count] = wasmScene.duplicate_selection_array.mock.calls[0]
     expect(Array.from(kinds as Uint8Array)).toEqual([0])
     expect(Array.from(ids as BigUint64Array)).toEqual([1n])
     expect(thetaOfZAffine(affine as Float64Array)).toBeCloseTo(Math.PI / 2)
@@ -1276,7 +1276,7 @@ describe('RotateTool — ×N / /N array copy', () => {
     t.tool.onKey(makeKeyEvent('Enter'))
 
     expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(1)
-    const [, ids, affine, count] = t.wasmScene.duplicate_selection_array.mock.calls[1]
+    const [, ids, , affine, count] = t.wasmScene.duplicate_selection_array.mock.calls[1]
     expect(Array.from(ids as BigUint64Array)).toEqual([1n]) // the ORIGINAL source
     expect(thetaOfZAffine(affine as Float64Array)).toBeCloseTo(Math.PI / 2)
     expect(count).toBe(3)
@@ -1289,8 +1289,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2)
-    expect(call[3]).toBe(3)
+    expect(thetaOfZAffine(call[3] as Float64Array)).toBeCloseTo(Math.PI / 2)
+    expect(call[4]).toBe(3)
   })
 
   it('the trailing divide form 4/ + Enter divides the swept angle across the copies', () => {
@@ -1300,8 +1300,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     typeKeys(t.tool, '4/')
     t.tool.onKey(makeKeyEvent('Enter'))
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
-    expect(call[3]).toBe(4)
+    expect(thetaOfZAffine(call[3] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
+    expect(call[4]).toBe(4)
   })
 
   it('the leading divide form /4 resolves the same way (both token orders)', () => {
@@ -1311,8 +1311,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     typeKeys(t.tool, '/4')
     t.tool.onKey(makeKeyEvent('Enter'))
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
-    expect(call[3]).toBe(4)
+    expect(thetaOfZAffine(call[3] as Float64Array)).toBeCloseTo(Math.PI / 2 / 4)
+    expect(call[4]).toBe(4)
   })
 
   it('re-entering a different count while hot retracts the previous array with ONE undo and replaces it', () => {
@@ -1336,8 +1336,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
     expect(t.wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(3)
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(call[3]).toBe(5)
-    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 2 / 5)
+    expect(call[4]).toBe(5)
+    expect(thetaOfZAffine(call[3] as Float64Array)).toBeCloseTo(Math.PI / 2 / 5)
     expect(t.onArrayCommit).toHaveBeenCalledTimes(2)
   })
 
@@ -1360,7 +1360,7 @@ describe('RotateTool — ×N / /N array copy', () => {
     t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.wasmScene.scene_undo).toHaveBeenCalledTimes(2)
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(call[3]).toBe(2)
+    expect(call[4]).toBe(2)
     expect(t.onArrayCommit).toHaveBeenCalledTimes(1)
   })
 
@@ -1535,7 +1535,7 @@ describe('RotateTool — ×N / /N array copy', () => {
 describe('RotateTool — retype the angle after the commit', () => {
   const lastTheta = (t: ReturnType<typeof makeTool>) => {
     const calls = (t.wasmScene.transform_selection as ReturnType<typeof vi.fn>).mock.calls
-    return thetaOfZAffine(calls[calls.length - 1][3] as Float64Array)
+    return thetaOfZAffine(calls[calls.length - 1][4] as Float64Array)
   }
 
   it('a 90° rotation redone at 45° (one undo), then flipped with -30°', () => {
@@ -1621,17 +1621,17 @@ describe('RotateTool — a typed angle after an array re-fans the array', () => 
     expect(dup).toHaveBeenCalledTimes(1)
     typeKeys(t.tool, '3x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup).toHaveBeenCalledTimes(2)
-    expect(dup.mock.calls[1][3]).toBe(3)
-    expect(thetaOfZAffine(dup.mock.calls[1][2] as Float64Array)).toBeCloseTo(Math.PI / 2, 6)
+    expect(dup.mock.calls[1][4]).toBe(3)
+    expect(thetaOfZAffine(dup.mock.calls[1][3] as Float64Array)).toBeCloseTo(Math.PI / 2, 6)
 
     typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(dup).toHaveBeenCalledTimes(3)
-    expect(dup.mock.calls[2][3]).toBe(3)
-    expect(thetaOfZAffine(dup.mock.calls[2][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+    expect(dup.mock.calls[2][4]).toBe(3)
+    expect(thetaOfZAffine(dup.mock.calls[2][3] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
 
     typeKeys(t.tool, '2x'); t.tool.onKey(makeKeyEvent('Enter'))
-    expect(dup.mock.calls[3][3]).toBe(2)
-    expect(thetaOfZAffine(dup.mock.calls[3][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+    expect(dup.mock.calls[3][4]).toBe(2)
+    expect(thetaOfZAffine(dup.mock.calls[3][3] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
   })
 })
 
@@ -1674,7 +1674,7 @@ describe('RotateTool — array history edge cases', () => {
     typeKeys(t.tool, '45'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.onToast).not.toHaveBeenCalled()
     const call = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
-    expect(thetaOfZAffine(call[2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
+    expect(thetaOfZAffine(call[3] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
   })
 
   it('a refused relay that recorded nothing re-stamps the array window so the next xN is accepted', () => {
@@ -1687,7 +1687,7 @@ describe('RotateTool — array history edge cases', () => {
     t.onToast.mockClear()
     typeKeys(t.tool, '5x'); t.tool.onKey(makeKeyEvent('Enter'))
     expect(t.onToast).not.toHaveBeenCalledWith(expect.stringContaining('Array entry ended'), undefined)
-    expect(t.wasmScene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(5)
+    expect(t.wasmScene.duplicate_selection_array.mock.calls.at(-1)![4]).toBe(5)
   })
 
   it('the drawn half succeeding and the object half refusing during a relay nets out', () => {
@@ -1824,7 +1824,7 @@ describe('RotateTool — a click-taken selection lasts only for the gesture (as 
     expect(t.release).toHaveBeenCalledTimes(1)
     typeKeys(t.tool, '3x')
     t.tool.onKey(makeKeyEvent('Enter'))
-    const [, ids, , count] = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    const [, ids, , , count] = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
     expect(Array.from(ids as BigUint64Array)).toEqual([7n])
     expect(count).toBe(3)
     expect(t.release).toHaveBeenCalledTimes(2)

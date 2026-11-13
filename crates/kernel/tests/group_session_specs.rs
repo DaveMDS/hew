@@ -678,6 +678,47 @@ fn rescale_session_scales_group_contents_about_the_anchor_and_nothing_else() {
     doc.close_group_session().expect("close");
 }
 
+/// **A guide copied mid-session belongs to the session** — an array copy
+/// made by `duplicate_nodes_array` while a group session is open resizes
+/// with the session, like a guide added there; its pre-session source
+/// stays put.
+#[test]
+fn rescale_session_scales_guides_array_copied_during_the_session() {
+    let mut doc = Document::new();
+    let (group, _, _) = two_box_group(&mut doc);
+    let source = doc
+        .add_guide_point(Point3::new(20.0, 0.0, 0.0))
+        .expect("pre-session guide");
+
+    doc.open_group_session(group).expect("open");
+    let (_, copies, _) = doc
+        .duplicate_nodes_array(
+            &[],
+            &[source],
+            &kernel::Transform::translation(kernel::Vec3::new(0.0, 4.0, 0.0)),
+            std::num::NonZeroU32::new(1).unwrap(),
+        )
+        .expect("copy the guide mid-session");
+    let anchor = Point3::new(2.0, 2.0, 1.0);
+    doc.rescale_session(2.0, anchor).expect("scoped rescale");
+
+    let scaled = |p: Point3| anchor + (p - anchor) * 2.0;
+    match doc.guide(copies[0]).expect("copy live") {
+        kernel::Guide::Point { position } => {
+            assert!((*position - scaled(Point3::new(20.0, 4.0, 0.0))).length() < 1e-12)
+        }
+        _ => panic!("guide kind changed"),
+    }
+    match doc.guide(source).expect("source live") {
+        kernel::Guide::Point { position } => {
+            assert_eq!(*position, Point3::new(20.0, 0.0, 0.0))
+        }
+        _ => panic!("guide kind changed"),
+    }
+
+    doc.close_group_session().expect("close");
+}
+
 // -------------------------------------------------------------- spec 14
 
 /// **A member instance scales via its pose** under a group frame — the

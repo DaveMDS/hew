@@ -681,6 +681,7 @@ function commitSelectionTransformInner(
             new Uint8Array(kinds),
             new BigUint64Array(ids),
             new BigUint64Array(sketches),
+            new BigUint64Array(0),
             affineF64,
           )
         }
@@ -705,7 +706,13 @@ function commitSelectionTransformInner(
           )
         }
         if (post.sketches.length > 0) {
-          wasmScene.transform_selection(new Uint8Array(0), new BigUint64Array(0), new BigUint64Array(post.sketches), affineF64)
+          wasmScene.transform_selection(
+            new Uint8Array(0),
+            new BigUint64Array(0),
+            new BigUint64Array(post.sketches),
+            new BigUint64Array(0),
+            affineF64,
+          )
         }
       }
       // Re-resolve the moved shapes BY GEOMETRY in the final state.
