@@ -157,3 +157,47 @@ test('Move carries a mixed selection of a box and a guide, and one undo brings b
   expect(undone.box).toEqual(before.box)
   expect(undone.guide).toEqual(before.guide)
 })
+
+test('Rotate turns a mixed selection of a box and a guide, and one undo brings both back', async ({ page }) => {
+  const { box, right } = await boot(page)
+
+  await click(page, [0.5, 0.5, 1])
+  await click(page, [3, 0.5, 0], ['Shift'])
+  await expect(count(page, 2)).toBeVisible()
+
+  const read = () => page.evaluate(([b, g]) => {
+    const h = window.__hew_test!
+    return { box: h.getObjectBounds(b), guide: h.getGuideGeometry(g)! }
+  }, [box, right])
+  const before = await read()
+
+  await page.getByRole('radio', { name: 'Rotate' }).click()
+  await page.waitForTimeout(100)
+  await page.keyboard.press('ArrowUp') // lock the blue (Z) axis
+  // Pivot on the box's top corner at the origin, reference along +X, sweep
+  // toward +Y, then a typed 90°.
+  await click(page, [0, 0, 1])
+  await click(page, [1, 0, 1])
+  const toward = await pagePoint(page, [0, 1, 1])
+  await page.mouse.move(toward.x, toward.y, { steps: 6 })
+  await page.waitForTimeout(100)
+  await page.keyboard.type('90')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(150)
+
+  const after = await read()
+  // A quarter turn about Z through the origin: (x, y) → (−y, x).
+  expect(after.box[0]).toBeCloseTo(-1, 6)
+  expect(after.box[3]).toBeCloseTo(0, 6)
+  expect(after.guide[0]).toBeCloseTo(0, 6)
+  expect(after.guide[1]).toBeCloseTo(3, 6)
+  expect(after.guide[3]).toBeCloseTo(-1, 6)
+  expect(after.guide[4]).toBeCloseTo(0, 6)
+  await expect(count(page, 2)).toBeVisible()
+
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(150)
+  const undone = await read()
+  expect(undone.box).toEqual(before.box)
+  expect(undone.guide).toEqual(before.guide)
+})

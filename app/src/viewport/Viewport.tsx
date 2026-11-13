@@ -2175,12 +2175,6 @@ function highlightDeps(wasmScene: WasmScene): HighlightDeps {
 /** The component placement being edited in place, if the deepest open
  * context is one: its members highlight inside it, and sketches inside it
  * are drawn through its pose. */
-/** The guide Rotate acts on (guideTarget.ts): the selected guide when
- *  exactly one is selected, else none. */
-function guideTargetOf(selectedGuides: readonly bigint[]): bigint | null {
-  return selectedGuides.length === 1 ? selectedGuides[0] : null
-}
-
 function activeInstanceOf(activeContext: readonly NodeRef[]): bigint | null {
   const deepest = activeContext.length > 0 ? activeContext[activeContext.length - 1] : null
   return deepest?.kind === 'instance' ? deepest.id : null
@@ -2613,10 +2607,9 @@ export default function Viewport({
   const lastPushedSessionRef = useRef<{ node: NodeRef; label: string }[]>([])
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
-  // Latest selected construction guides — what Move moves beside the nodes.
+  // Latest selected construction guides — what Move and Rotate carry
+  // beside the nodes.
   const selectedGuidesRef = useRef<readonly bigint[]>(selectedGuides)
-  // The one selected guide, when exactly one is — Rotate's guide target.
-  const selectedGuideRef = useRef<bigint | null>(guideTargetOf(selectedGuides))
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
   // Polygon's last-used side count — session-lived across tool re-selection
@@ -3865,7 +3858,7 @@ export default function Viewport({
     }
 
     /**
-     * Guide auto-select for Move and Rotate (guideTarget.ts): the guide
+     * Guide auto-select for Move and Rotate: the guide
      * under the first click is selected and transformed — the Select click's
      * own rule (`dispatchSelectPick`), so a drawn line lying along the guide
      * still wins and is left to `acquireTransformTargets`.
@@ -3898,15 +3891,8 @@ export default function Viewport({
       return g
     }
 
-    /** A guide transform landed (or a gesture on a guide ended): redraw the
-     *  guides and select `guide` (null: none). */
-    function landGuideTransform(guide: bigint | null): void {
-      sceneRenderer.refreshGuides()
-      onSelectGuideRef.current?.(guide)
-      scheduleRender()
-    }
-
-    /** Guides moved or were copied along with a Move (MoveTool `_land`):
+    /** Guides moved or were copied along with a Move or a Rotate (their
+     *  `_land`):
      *  redraw the guides and select exactly `guides`, beside the nodes the
      *  commit selected. */
     function landGuideSelection(guides: bigint[]): void {
@@ -7865,8 +7851,8 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
-      tool.setGuideTarget(selectedGuideRef.current)
-      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
+      tool.setGuideSelection(selectedGuidesRef.current)
+      tool.setGuideHooks(acquireGuideTarget, landGuideSelection)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -12168,17 +12154,13 @@ export default function Viewport({
   }, [selectedIds, activeContext])
 
   // Reflect the selected construction guides into the renderer highlight,
-  // and into the active tool (Move's guide target, like Tool.setSelection).
+  // and into the active tool (what Move and Rotate carry beside the nodes,
+  // like Tool.setSelection).
   useEffect(() => {
-    const guideTarget = guideTargetOf(selectedGuides)
-    selectedGuideRef.current = guideTarget
     selectedGuidesRef.current = selectedGuides
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setGuideSelection' in activeTool) {
       (activeTool as { setGuideSelection(guides: readonly bigint[]): void }).setGuideSelection(selectedGuides)
-    }
-    if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
-      (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(guideTarget)
     }
     sceneRendererRef.current?.setSelectedGuides(selectedGuides)
     refreshAcquireHoverRef.current?.()

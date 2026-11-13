@@ -1856,7 +1856,7 @@ describe('RotateTool — what a click would take (clickAcquire, the hover highli
     const guide = makeTool({ selection: [] })
     guide.tool.setSelectionAcquirer(() => null)
     guide.tool.setGuideHooks(() => null, vi.fn())
-    guide.tool.setGuideTarget(5n)
+    guide.tool.setGuideSelection([5n])
     expect(guide.tool.clickAcquire()).toBeNull()
 
     const t = makeTool({ selection: [] })

@@ -1,8 +1,9 @@
 /**
- * RotateTool on construction guides: the guide target, the pivot click on a
- * guide (taken for the gesture only with nothing selected; just a pivot
- * with a guide already selected — SketchUp's rule), and the copy / ×N fan /
- * retype paths through `transform_guide` and `duplicate_guide_array`,
+ * RotateTool on construction guides: the selected guides
+ * (`setGuideSelection`) rotate, copy, fan, and retype in the nodes' own
+ * kernel calls (`transform_selection`, `duplicate_selection_array`); the
+ * pivot click on a guide takes it for the gesture only with nothing
+ * selected, and is just a pivot with a selection — SketchUp's rule —
  * against a mocked WasmScene. `isMac` is mocked to true so a bare Alt tap
  * toggles copy mode (see RotateTool.test.ts).
  */
@@ -33,22 +34,30 @@ const thetaOf = (affine: Float64Array): number => Math.atan2(affine[4], affine[0
 /** The members RotateTool calls on a guide gesture. Every commit, undo and
  *  redo moves the history generation, as the kernel's would. */
 function makeScene() {
-  const state = { gen: 1n, nextGuide: 50n }
+  const state = { gen: 1n, nextGuide: 50n, nextNode: 100n }
   const bump = () => { state.gen += 1n }
   return {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     guide_kind: vi.fn(() => 'line'),
     guide_geometry: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0])),
-    transform_guide: vi.fn((_g: bigint, _a: Float64Array) => bump()),
-    duplicate_guide_array: vi.fn((_g: bigint, _a: Float64Array, count: number) => {
-      bump()
-      return BigUint64Array.from({ length: count }, () => state.nextGuide++)
-    }),
-    duplicate_selection_array: vi.fn(() => {
-      bump()
-      return { roots: () => [], guides: () => new BigUint64Array(0), free: () => { /* no-op */ } }
-    }),
-    transform_selection: vi.fn(() => bump()),
+    transform_guide: vi.fn(),
+    duplicate_guide_array: vi.fn(),
+    // Copies in creation order: every source's copy 1, then copy 2, …
+    duplicate_selection_array: vi.fn(
+      (_kinds: Uint8Array, ids: BigUint64Array, guides: BigUint64Array, _affine: Float64Array, count: number) => {
+        bump()
+        const roots: { kind: string; id: bigint }[] = []
+        const copies: bigint[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) roots.push({ kind: 'object', id: state.nextNode++ })
+          for (let i = 0; i < guides.length; i++) copies.push(state.nextGuide++)
+        }
+        return { roots: () => roots, guides: () => BigUint64Array.from(copies), free: () => { /* no-op */ } }
+      },
+    ),
+    transform_selection: vi.fn(
+      (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _guides: BigUint64Array, _affine: Float64Array) => bump(),
+    ),
     history_generation: vi.fn(() => state.gen),
     max_array_count: vi.fn(() => 1000),
     scene_undo: vi.fn(() => { bump(); return { free: () => { /* no-op */ } } }),
@@ -56,29 +65,47 @@ function makeScene() {
   }
 }
 
-/** A tool with `selected` as the app's guide and a guide acquirer hitting
- *  `hit`; both hooks select what they name in the app, which pushes it back
- *  into the tool, as the Viewport does. */
-function makeTool(opts: { selected?: bigint | null; hit?: bigint | null; nodes?: NodeRef[] } = {}) {
+/** A tool with `nodes` and `guides` as the app's selection and a guide
+ *  acquirer hitting `hit`; the hooks mirror the Viewport (MoveTool.guides
+ *  test's `makeTool`), each pushing the app selection back into the tool. */
+function makeTool(opts: { guides?: bigint[]; hit?: bigint | null; nodes?: NodeRef[] } = {}) {
   const scene = makeScene()
   const preview = new THREE.Group()
   const onToast = vi.fn()
-  const tool = new RotateTool(scene as never, preview, null, opts.nodes ?? [], vi.fn(), onToast)
-  const app = { guide: opts.selected ?? null }
-  const select = (g: bigint | null) => {
-    app.guide = g
-    tool.setGuideTarget(g)
+  const app = { nodes: opts.nodes ?? [], guides: opts.guides ?? [] }
+  const push = () => {
+    tool.setSelection(app.nodes)
+    tool.setGuideSelection(app.guides)
   }
-  tool.setGuideTarget(app.guide)
+  const onCommit = vi.fn((nodes: NodeRef[]) => {
+    app.nodes = nodes
+    app.guides = []
+    push()
+  })
+  const tool = new RotateTool(scene as never, preview, null, app.nodes, onCommit, onToast)
+  tool.setGuideSelection(app.guides)
   const acquire = vi.fn(() => {
     const g = opts.hit ?? null
-    if (g !== null) select(g)
+    if (g !== null) {
+      app.nodes = []
+      app.guides = [g]
+      push()
+    }
     return g
   })
-  tool.setGuideHooks(acquire, (g) => select(g))
+  const onGuides = vi.fn((guides: bigint[]) => {
+    app.guides = guides
+    push()
+  })
+  tool.setGuideHooks(acquire, onGuides)
   const nodeAcquire = vi.fn(() => null)
-  tool.setSelectionAcquirer(nodeAcquire)
-  return { tool, scene, preview, onToast, app, acquire, nodeAcquire }
+  const release = vi.fn(() => {
+    app.nodes = []
+    app.guides = []
+    push()
+  })
+  tool.setSelectionAcquirer(nodeAcquire, release)
+  return { tool, scene, preview, onToast, onCommit, app, acquire, onGuides, nodeAcquire }
 }
 
 /** Pivot at the origin, reference along +X: the sweep is about +Z. */
@@ -95,108 +122,148 @@ function rotateQuarter(tool: RotateTool): void {
   tool.onPointerDown(snapAt(0, 1), rayAt(0, 1))
 }
 
-describe('RotateTool — rotating a selected guide', () => {
-  it('commits one transform_guide by the swept angle; the guide stays selected', () => {
-    const t = makeTool({ selected: 7n })
+/** The nodes, guides, and angle of a `transform_selection` call. */
+const rotated = (call: unknown[]): { ids: bigint[]; guides: bigint[]; theta: number } => ({
+  ids: [...(call[1] as BigUint64Array)],
+  guides: [...(call[3] as BigUint64Array)],
+  theta: thetaOf(call[4] as Float64Array),
+})
+/** The sources, step angle, and count of a `duplicate_selection_array` call. */
+const copied = (call: unknown[]): { ids: bigint[]; guides: bigint[]; theta: number; count: number } => ({
+  ids: [...(call[1] as BigUint64Array)],
+  guides: [...(call[2] as BigUint64Array)],
+  theta: thetaOf(call[3] as Float64Array),
+  count: call[4] as number,
+})
+
+describe('RotateTool — rotating selected guides', () => {
+  it('commits one transform_selection by the swept angle; the guide stays selected', () => {
+    const t = makeTool({ guides: [7n] })
     setPivotAndReference(t.tool)
     expect(t.preview.children.some((c) => c instanceof THREE.LineSegments)).toBe(true) // the ghost
     t.tool.onPointerMove(snapAt(0, 1), rayAt(0, 1))
     t.tool.onPointerDown(snapAt(0, 1), rayAt(0, 1))
 
-    expect(t.scene.transform_guide).toHaveBeenCalledTimes(1)
-    const [g, affine] = t.scene.transform_guide.mock.calls[0]
-    expect(g).toBe(7n)
-    expect(thetaOf(affine)).toBeCloseTo(Math.PI / 2, 9)
-    expect(t.app.guide).toBe(7n)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    const call = rotated(t.scene.transform_selection.mock.calls[0])
+    expect(call.ids).toEqual([])
+    expect(call.guides).toEqual([7n])
+    expect(call.theta).toBeCloseTo(Math.PI / 2, 9)
+    expect(t.scene.transform_guide).not.toHaveBeenCalled()
+    expect(t.app.guides).toEqual([7n])
+    expect(t.onCommit).not.toHaveBeenCalled()
+  })
+
+  it('rotates nodes and every selected guide in one call, and keeps them selected', () => {
+    const node: NodeRef = { kind: 'object', id: 1n }
+    const t = makeTool({ nodes: [node], guides: [7n, 8n] })
+    rotateQuarter(t.tool)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    const call = rotated(t.scene.transform_selection.mock.calls[0])
+    expect([call.ids, call.guides]).toEqual([[1n], [7n, 8n]])
+    expect(t.app.nodes).toEqual([node])
+    expect(t.app.guides).toEqual([7n, 8n])
   })
 
   it('the pivot click on ANOTHER guide only sets the pivot — the selected guide rotates', () => {
-    const t = makeTool({ selected: 7n, hit: 9n })
+    const t = makeTool({ guides: [7n], hit: 9n })
     rotateQuarter(t.tool)
     expect(t.acquire).not.toHaveBeenCalled()
-    expect(t.scene.transform_guide.mock.calls[0][0]).toBe(7n)
-    expect(t.app.guide).toBe(7n)
+    expect(rotated(t.scene.transform_selection.mock.calls[0]).guides).toEqual([7n])
+    expect(t.app.guides).toEqual([7n])
   })
 
-  it('a typed angle rotates the guide exactly; a retyped one redoes it', () => {
-    const t = makeTool({ selected: 7n })
+  it('a typed angle rotates the guides exactly; a retyped one redoes it', () => {
+    const t = makeTool({ guides: [7n, 8n] })
     setPivotAndReference(t.tool)
     t.tool.onPointerMove(snapAt(0, 1), rayAt(0, 1))
     type(t.tool, '30')
     t.tool.onKey(key('Enter'))
-    expect(thetaOf(t.scene.transform_guide.mock.calls[0][1])).toBeCloseTo(Math.PI / 6, 9)
-
+    expect(rotated(t.scene.transform_selection.mock.calls[0]).theta).toBeCloseTo(Math.PI / 6, 9)
     type(t.tool, '45')
     t.tool.onKey(key('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
-    const [g, affine] = t.scene.transform_guide.mock.calls[1]
-    expect(g).toBe(7n)
-    expect(thetaOf(affine)).toBeCloseTo(Math.PI / 4, 9)
+    const redo = rotated(t.scene.transform_selection.mock.calls[1])
+    expect(redo.guides).toEqual([7n, 8n])
+    expect(redo.theta).toBeCloseTo(Math.PI / 4, 9)
   })
 
-  it('a refused rotation toasts the kernel error', () => {
-    const t = makeTool({ selected: 7n })
-    t.scene.transform_guide.mockImplementationOnce(() => {
+  it('a refused rotation toasts the kernel error and lands nothing', () => {
+    const t = makeTool({ guides: [7n] })
+    t.scene.transform_selection.mockImplementationOnce(() => {
       throw new Error('UnknownGuide: no such guide in this document')
     })
     rotateQuarter(t.tool)
     expect(t.onToast).toHaveBeenCalledTimes(1)
+    expect(t.onGuides).not.toHaveBeenCalled()
   })
 })
 
-describe('RotateTool — copying a guide', () => {
-  it('copy mode commits one duplicate_guide_array (count 1); the copy becomes the selected guide', () => {
-    const t = makeTool({ selected: 7n })
+describe('RotateTool — copying guides', () => {
+  it('copy mode commits one duplicate_selection_array (count 1); the copies become the selected guides', () => {
+    const t = makeTool({ guides: [7n, 8n] })
     t.tool.onKey(key('Alt'))
     rotateQuarter(t.tool)
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    const [g, affine, count] = t.scene.duplicate_guide_array.mock.calls[0]
-    expect([g, count]).toEqual([7n, 1])
-    expect(thetaOf(affine)).toBeCloseTo(Math.PI / 2, 9)
-    expect(t.app.guide).toBe(50n)
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_guide_array).not.toHaveBeenCalled()
+    const call = copied(t.scene.duplicate_selection_array.mock.calls[0])
+    expect([call.guides, call.count]).toEqual([[7n, 8n], 1])
+    expect(call.theta).toBeCloseTo(Math.PI / 2, 9)
+    expect(t.app.guides).toEqual([50n, 51n])
+  })
+
+  it('copies nodes and guides in the one call; all the copies become the selection', () => {
+    const t = makeTool({ nodes: [{ kind: 'object', id: 1n }], guides: [7n] })
+    t.tool.onKey(key('Alt'))
+    rotateQuarter(t.tool)
+    const call = copied(t.scene.duplicate_selection_array.mock.calls[0])
+    expect([call.ids, call.guides]).toEqual([[1n], [7n]])
+    expect(t.app.nodes).toEqual([{ kind: 'object', id: 100n }])
+    expect(t.app.guides).toEqual([50n])
   })
 
   it('/6 retracts the copy and fans six copies from the ORIGINAL guide, one call on the step', () => {
-    const t = makeTool({ selected: 7n })
+    const t = makeTool({ guides: [7n] })
     t.tool.onKey(key('Alt'))
     rotateQuarter(t.tool)
     type(t.tool, '/6')
     t.tool.onKey(key('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
-    const [g, affine, count] = t.scene.duplicate_guide_array.mock.calls[1]
-    expect([g, count]).toEqual([7n, 6])
-    expect(thetaOf(affine)).toBeCloseTo(Math.PI / 12, 9) // 90° / 6
-    expect(t.app.guide).toBe(56n) // the last of the six
+    const call = copied(t.scene.duplicate_selection_array.mock.calls[1])
+    expect([call.guides, call.count]).toEqual([[7n], 6])
+    expect(call.theta).toBeCloseTo(Math.PI / 12, 9)
+    expect(t.app.guides).toEqual([51n, 52n, 53n, 54n, 55n, 56n]) // every copy, like nodes
   })
 })
 
 describe('RotateTool — a pivot click on a guide with nothing selected takes it, for the gesture only', () => {
   it('the clicked guide rotates and the selection is empty afterwards', () => {
     const t = makeTool({ hit: 9n })
+    t.tool.onPointerMove(snapAt(0, 0), rayAt(0, 0))
     t.tool.onPointerDown(snapAt(0, 0), rayAt(0, 0))
-    expect(t.app.guide).toBe(9n) // highlighted while it rotates
+    expect(t.app.guides).toEqual([9n]) // highlighted while it rotates
     expect(t.nodeAcquire).not.toHaveBeenCalled()
     t.tool.onPointerDown(snapAt(1, 0), rayAt(1, 0))
     t.tool.onPointerMove(snapAt(0, 1), rayAt(0, 1))
     t.tool.onPointerDown(snapAt(0, 1), rayAt(0, 1))
-    expect(t.scene.transform_guide.mock.calls[0][0]).toBe(9n)
-    expect(t.app.guide).toBeNull()
+    expect(rotated(t.scene.transform_selection.mock.calls[0]).guides).toEqual([9n])
+    expect(t.app.guides).toEqual([])
   })
 
   it('Escape at the reference stage gives the selection back', () => {
     const t = makeTool({ hit: 9n })
     setPivotAndReference(t.tool)
     t.tool.onKey(key('Escape'))
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    expect(t.app.guide).toBeNull()
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.app.guides).toEqual([])
   })
 
   it('a zero sweep rotates nothing and gives the selection back', () => {
     const t = makeTool({ hit: 9n })
     setPivotAndReference(t.tool)
     t.tool.onPointerDown(snapAt(1, 0), rayAt(1, 0))
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    expect(t.app.guide).toBeNull()
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.app.guides).toEqual([])
   })
 
   it('a fan of a click-taken guide leaves nothing selected', () => {
@@ -205,20 +272,21 @@ describe('RotateTool — a pivot click on a guide with nothing selected takes it
     rotateQuarter(t.tool)
     type(t.tool, '3x')
     t.tool.onKey(key('Enter'))
-    expect(t.scene.duplicate_guide_array.mock.calls[1][0]).toBe(9n)
-    expect(t.app.guide).toBeNull()
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[1]).guides).toEqual([9n])
+    expect(t.app.guides).toEqual([])
   })
 
   it('with nodes selected, a pivot click on a guide is their pivot', () => {
     const t = makeTool({ hit: 9n, nodes: [{ kind: 'object', id: 1n }] })
     rotateQuarter(t.tool)
     expect(t.acquire).not.toHaveBeenCalled()
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    const call = rotated(t.scene.transform_selection.mock.calls[0])
+    expect([call.ids, call.guides]).toEqual([[1n], []])
   })
 
   it('a miss falls through to the node acquirer, then the hint', () => {
     const t = makeTool({ hit: null })
+    t.tool.onPointerMove(snapAt(0, 0), rayAt(0, 0))
     t.tool.onPointerDown(snapAt(0, 0), rayAt(0, 0))
     expect(t.nodeAcquire).toHaveBeenCalledTimes(1)
     expect(t.onToast).toHaveBeenCalledWith('Click an object to rotate it')

@@ -79,14 +79,13 @@
  * (`editArrayBuffer`/`parseArraySpec`, the history-generation guard on the
  * retracting undo) — see MoveTool's doc comment for the shared reasoning.
  *
- * Guides: a selected construction guide (`setGuideTarget`) rotates the same
- * way — preview, axis locks, typed and retyped angles — committing one
- * `transform_guide`; copy mode and its ×N / /N array place copies through
- * one `duplicate_guide_array`, the step rotation composed per copy (a fan
- * of guides about the pivot). With nothing selected, a guide under the
- * pivot click is taken for the gesture only (guideTarget.ts). Unlike Move,
- * a selected guide is kept: the pivot click may land on another guide, so
- * a guide rotates about a point on another one, as in SketchUp.
+ * Guides: the selected construction guides (`setGuideSelection`) rotate
+ * with the selected nodes — same preview, axis locks, typed and retyped
+ * angles, copy mode and ×N / /N fans — in the nodes' own kernel calls, so
+ * nodes and guides land as one undo step. With a selection the pivot click
+ * lands wherever it is, on another guide too (a guide rotates about a point
+ * on another one, as in SketchUp). With nothing selected, a guide under the
+ * pivot click is taken, else a node, for the gesture only.
  *
  * The rotation plane is the plane through the pivot whose normal is the
  * effective axis. Once an axis LOCK is engaged (Shift or an arrow key) and a
@@ -151,7 +150,7 @@ import {
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
 import { buildGuidePreview } from './guidePreview'
-import { GuideTarget, type OnGuideCommit } from './guideTarget'
+import type { OnGuidesLanded } from './MoveTool'
 import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColors'
 import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
@@ -171,8 +170,8 @@ type Stage =
   | {
       kind: 'pivot'
       nodes: NodeRef[]
-      /** The construction guide being rotated instead of `nodes` (then empty). */
-      guide: bigint | null
+      /** The construction guides rotating with `nodes` (either may be empty). */
+      guides: bigint[]
       pivot: Vec3
       /** Rotation axis captured at the pivot click (unit). Overridable by a
        * later Shift/arrow lock via `lockedNormal`. */
@@ -181,7 +180,7 @@ type Stage =
   | {
       kind: 'ref'
       nodes: NodeRef[]
-      guide: bigint | null
+      guides: bigint[]
       pivot: Vec3
       axis: Vec3
       /** The 3D reference point (2nd click); the baseline (0°) arm is this
@@ -237,10 +236,10 @@ interface Spoke {
  * at the commit. Lives beside the ×N / /N array window exactly as in
  * MoveTool: one idle buffer, routed by what it parses as.
  */
-type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; pivot: Vec3; axis: Vec3; theta: number; copy: boolean }
+type RetypeSpec = { nodes: NodeRef[]; guides: bigint[]; pivot: Vec3; axis: Vec3; theta: number; copy: boolean }
 
-/** What an array resolve placed: node copies, or a guide's (the last one). */
-type ArrayLanding = { nodes: NodeRef[] } | { guide: bigint }
+/** What a copy or an array resolve placed: node copies and guide copies. */
+type CopyLanding = { nodes: NodeRef[]; guides: bigint[] }
 
 export class RotateTool implements Tool {
   readonly name = 'Rotate'
@@ -249,11 +248,11 @@ export class RotateTool implements Tool {
 
   /** Hover highlight (types.ts `ClickAcquire`), mirroring `onPointerDown`'s
    * idle branch: with nothing selected a click takes the guide under it,
-   * else the node under it. A selected guide rotates about wherever the
-   * click lands, another guide included — nothing to highlight. */
+   * else the node under it. A selection rotates about wherever the click
+   * lands, another guide included — nothing to highlight. */
   clickAcquire(): ClickAcquire | null {
-    if (this.stage.kind !== 'idle' || this.selection.length > 0 || this.guides.selected !== null) return null
-    const guides = this.guides.canAcquire
+    if (this.stage.kind !== 'idle' || this.selection.length > 0 || this.guideSelection.length > 0) return null
+    const guides = this.acquireGuide !== null
     const nodes = this.acquireSelection !== null
     return guides || nodes ? { guides, nodes } : null
   }
@@ -269,7 +268,7 @@ export class RotateTool implements Tool {
       if (this.arrayHot !== null) {
         return t`Type 3x to make 3 copies, or 3/ to divide the angle — Enter applies.`
       }
-      if (this.selection.length === 0 && this.guides.selected === null) {
+      if (this.selection.length === 0 && this.guideSelection.length === 0) {
         return t`Click the object you want to rotate.`
       }
       return this.copyMode
@@ -309,27 +308,48 @@ export class RotateTool implements Tool {
    *  over (MoveTool's `acquireSelection` doc: SketchUp's pre-highlight
    *  rule, copies and arrays included). */
   private releaseSelection: (() => void) | null = null
-  /** The gesture's nodes were taken by its click (`acquireSelection`). */
-  private nodesAcquired = false
+  /** The gesture's nodes or guide were taken by its click
+   *  (`acquireSelection`, `acquireGuide`). */
+  private acquired = false
 
-  /** A gesture on click-taken nodes ended (landed, cancelled, or refused):
-   *  give the selection back to empty, what it was before the click. */
-  private _releaseAcquiredNodes(): void {
-    if (!this.nodesAcquired) return
-    this.nodesAcquired = false
+  /** A gesture on a click-taken node or guide ended (landed, cancelled, or
+   *  refused): give the selection back to empty, what it was before the
+   *  click. */
+  private _releaseAcquired(): void {
+    if (!this.acquired) return
+    this.acquired = false
     this.selection = []
+    this.guideSelection = []
     this.releaseSelection?.()
   }
 
-  /** A transform or copy landed (moved nodes, copies, an ×N / /N array, a
-   *  retyped value): click-taken nodes were selected for the gesture only,
-   *  so the selection empties again, copies included — SketchUp's rule.
-   *  The flag stays set while the post-commit windows are open, since a
-   *  retype or an array re-lands on the same click-taken source. */
+  /** A transform or copy landed (rotated nodes, copies, an ×N / /N array, a
+   *  retyped value): a click-taken node or guide was selected for the
+   *  gesture only, so the selection empties again, copies included —
+   *  SketchUp's rule. The flag stays set while the post-commit windows are
+   *  open, since a retype or an array re-lands on the same click-taken
+   *  source. */
   private _landedOnAcquired(): void {
-    if (!this.nodesAcquired) return
+    if (!this.acquired) return
     this.selection = []
+    this.guideSelection = []
     this.releaseSelection?.()
+  }
+
+  /** Hand what a commit placed to the host (MoveTool's `_land`): `nodes`
+   *  through `commit` when there are any, `guides` beside them; then a
+   *  click-taken selection empties again. */
+  private _land(nodes: NodeRef[], guides: bigint[], commit: OnRotateCommit): void {
+    if (nodes.length === 0 && guides.length === 0) return
+    // The host may push the landed selection straight back, which reads as
+    // a selection made by someone else: the click-taken flag survives it.
+    const acquired = this.acquired
+    this.selection = nodes
+    this.guideSelection = guides
+    if (nodes.length > 0) commit(nodes)
+    if (guides.length > 0) this.onGuidesLanded(guides)
+    this.acquired = acquired
+    this._landedOnAcquired()
   }
 
   /** The current editing context (component-edit-parity.md phase A1). When
@@ -351,19 +371,23 @@ export class RotateTool implements Tool {
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
     // Something else selected between gestures: no longer ours to release.
-    if (this.stage.kind === 'idle' && nodes.length > 0) this.nodesAcquired = false
+    if (this.stage.kind === 'idle' && nodes.length > 0) this.acquired = false
   }
 
-  /** The construction guide this tool acts on instead of nodes (see
-   *  guideTarget.ts). */
-  private readonly guides = new GuideTarget()
-  /** The app's selected guide, pushed by the Viewport like `setSelection`. */
-  setGuideTarget(guide: bigint | null): void {
-    this.guides.selected = guide
+  /** The selected construction guides: they rotate with `selection`. */
+  private guideSelection: bigint[] = []
+  /** The app's selected guides, pushed by the Viewport like `setSelection`. */
+  setGuideSelection(guides: readonly bigint[]): void {
+    this.guideSelection = [...guides]
+    if (this.stage.kind === 'idle' && guides.length > 0) this.acquired = false
   }
+  /** Picks the guide under the click ray and selects it (MoveTool's). */
+  private acquireGuide: ((ray: Ray) => bigint | null) | null = null
+  private onGuidesLanded: OnGuidesLanded = () => { /* no-op */ }
   /** The Viewport's guide click pick and post-commit refresh. */
-  setGuideHooks(acquire: ((ray: Ray) => bigint | null) | null, onCommit: OnGuideCommit): void {
-    this.guides.setHooks(acquire, onCommit)
+  setGuideHooks(acquire: ((ray: Ray) => bigint | null) | null, onLanded: OnGuidesLanded): void {
+    this.acquireGuide = acquire
+    this.onGuidesLanded = onLanded
   }
 
   /** Axis locked by Shift/arrow (unit). Overrides inference; null = infer. */
@@ -404,8 +428,8 @@ export class RotateTool implements Tool {
   private arrayHot: {
     copySources: NodeRef[]
     sketchSources: NodeRef[]
-    /** The ORIGINAL guide (`duplicate_guide_array`), when a guide was copied. */
-    guide: bigint | null
+    /** The ORIGINAL guides, copied in the sources' own call. */
+    guides: bigint[]
     pivot: Vec3
     axis: Vec3
     theta: number
@@ -697,22 +721,28 @@ export class RotateTool implements Tool {
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
-      // No nodes selected: the selected guide rotates, the click setting
-      // its pivot wherever it lands (on another guide too); with none
-      // selected, a guide under the click is taken for this gesture.
-      const guide = this.guides.start(ray, nodes.length === 0, false)
-      this.nodesAcquired = false
-      if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
-        // Empty selection: auto-select whatever the click landed on and
-        // start the rotation on it in the same gesture.
-        const acquired = this.acquireSelection(ray)
-        if (acquired !== null && acquired.length > 0) {
-          this.selection = acquired
-          nodes = acquired
-          this.nodesAcquired = true
+      let guides = this.guideSelection
+      // With a selection the click sets its pivot wherever it lands (on
+      // another guide too). Empty selection: auto-select whatever the click
+      // landed on — a guide first, else a node — and start the rotation on
+      // it in the same gesture.
+      this.acquired = false
+      if (nodes.length === 0 && guides.length === 0) {
+        const guide = this.acquireGuide?.(ray) ?? null
+        if (guide !== null) {
+          guides = [guide]
+          this.guideSelection = guides
+          this.acquired = true
+        } else {
+          const acquired = this.acquireSelection?.(ray) ?? null
+          if (acquired !== null && acquired.length > 0) {
+            this.selection = acquired
+            nodes = acquired
+            this.acquired = true
+          }
         }
       }
-      if (nodes.length === 0 && guide === null) {
+      if (nodes.length === 0 && guides.length === 0) {
         this.onToast(t`Click an object to rotate it`)
         return
       }
@@ -726,29 +756,29 @@ export class RotateTool implements Tool {
       this.candidateNormal = this._resolveAxis(snap, ray)
       const axis = this._effectiveAxis()
       this.typed = ''
-      this.stage = { kind: 'pivot', nodes, guide, pivot, axis }
+      this.stage = { kind: 'pivot', nodes, guides, pivot, axis }
       this.lastSnapPoint = pivot
       this._refreshDisk()
       this.onMeasurementCb('')
     } else if (this.stage.kind === 'pivot') {
-      const { nodes, guide, pivot, axis } = this.stage
+      const { nodes, guides, pivot, axis } = this.stage
       const rawRef: Vec3 = [snap.x, snap.y, snap.z]
       // Ignore a reference that coincides with the pivot, or lies on the axis
       // through it: its projection into the rotation plane is ~zero, which would
       // freeze the sweep at 0° with no feedback. Wait for a usable reference.
       const refPoint = this._refPointFor(pivot, rawRef)
       if (refPoint === null) return
-      const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes)
+      const previewMesh = this._buildPreview(nodes, guides)
       if (previewMesh !== null) {
         this.preview.add(previewMesh)
       }
-      this.stage = { kind: 'ref', nodes, guide, pivot, axis, refPoint, previewMesh, lastDelta: 0 }
+      this.stage = { kind: 'ref', nodes, guides, pivot, axis, refPoint, previewMesh, lastDelta: 0 }
       this._setRefLink(pivot, refPoint)
       this.typed = ''
       this._refreshDisk()
       this.onMeasurementCb(this._decorate('0.0°'))
     } else if (this.stage.kind === 'ref') {
-      const { nodes, guide, pivot, lastDelta } = this.stage
+      const { nodes, guides, pivot, lastDelta } = this.stage
       // The sweep is already quantized to 15° steps, so it shows exactly
       // what it commits; re-derive it from the shown degrees the way a
       // typed angle is (`n * PI / 180`) so it is bit-identical to typing it.
@@ -759,12 +789,11 @@ export class RotateTool implements Tool {
 
       if (Math.abs(delta) < 1e-9) {
         // No-op rotation
-        this.guides.ended()
-        this._releaseAcquiredNodes()
+        this._releaseAcquired()
         return
       }
 
-      this._commit(nodes, guide, pivot, axis, delta)
+      this._commit(nodes, guides, pivot, axis, delta)
     }
   }
 
@@ -862,14 +891,13 @@ export class RotateTool implements Tool {
       if (n !== null) {
         // Degrees are unitless — commit directly, no metersFromUnit conversion.
         const theta = (n * Math.PI) / 180
-        const { nodes, guide, pivot } = this.stage
+        const { nodes, guides, pivot } = this.stage
         const axis = this._effectiveAxis()
         this._resetToIdle()
         if (Math.abs(theta) > 1e-9) {
-          this._commit(nodes, guide, pivot, axis, theta)
+          this._commit(nodes, guides, pivot, axis, theta)
         } else {
-          this.guides.ended()
-          this._releaseAcquiredNodes()
+          this._releaseAcquired()
         }
       }
       return
@@ -889,10 +917,7 @@ export class RotateTool implements Tool {
   cancel(): void {
     const live = this.stage.kind !== 'idle'
     this._resetToIdle()
-    if (live) {
-      this.guides.ended()
-      this._releaseAcquiredNodes()
-    }
+    if (live) this._releaseAcquired()
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
@@ -1011,14 +1036,27 @@ export class RotateTool implements Tool {
     return match !== null ? `${AXIS_LABEL[match.axis]} ` : ''
   }
 
-  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
-    return buildSelectionPreview(
-      this.wasmScene,
-      this.objectsGroup,
-      this.instanceGroupGetter,
-      nodes,
-      this._activeInstance,
-    )
+  /** The ghost the sweep carries: the nodes' and each guide's. */
+  private _buildPreview(nodes: NodeRef[], guides: readonly bigint[]): THREE.Object3D | null {
+    const parts: THREE.Object3D[] = []
+    if (nodes.length > 0) {
+      const ghost = buildSelectionPreview(
+        this.wasmScene,
+        this.objectsGroup,
+        this.instanceGroupGetter,
+        nodes,
+        this._activeInstance,
+      )
+      if (ghost !== null) parts.push(ghost)
+    }
+    for (const guide of guides) {
+      const ghost = buildGuidePreview(this.wasmScene, guide)
+      if (ghost !== null) parts.push(ghost)
+    }
+    if (parts.length <= 1) return parts[0] ?? null
+    const group = new THREE.Group()
+    group.add(...parts)
+    return group
   }
 
   /** Redraw the protractor for the current stage/axis. Reads the ghost from the
@@ -1079,8 +1117,7 @@ export class RotateTool implements Tool {
   /** True when the kernel accepted the commit (false = refused, toasted).
    *  Opens the retype window on the result — a plain rotation or a copy
    *  (whose array window opens alongside). */
-  private _commit(allNodes: NodeRef[], guide: bigint | null, pivot: Vec3, axis: Vec3, theta: number): boolean {
-    if (guide !== null) return this._commitGuide(guide, pivot, axis, theta)
+  private _commit(allNodes: NodeRef[], guides: bigint[], pivot: Vec3, axis: Vec3, theta: number): boolean {
     try {
       // Drawn shapes on a selected object ride with it (see `dropRidingDrafts`).
       const nodes = dropRidingDrafts(this.wasmScene, allNodes)
@@ -1091,52 +1128,41 @@ export class RotateTool implements Tool {
         (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
       )
       const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
-      if (this.copyMode && (copyables.length > 0 || sketchSources.length > 0)) {
+      if (this.copyMode && (copyables.length > 0 || sketchSources.length > 0 || guides.length > 0)) {
         // Copy mode: duplicate at the rotated pose instead of rotating. Each
         // copy is the same kind as its source; the copies become the
         // selection so a follow-up rotation chains off them. The whole copy
         // is ONE undo step and atomic (`copyOwnersAndDrawing`): drawn shapes
-        // copy through the drafting engine, then all duplicable nodes clone
-        // in ONE `duplicate_selection_array` call (count 1).
-        const committed: NodeRef[] = []
-        try {
-          committed.push(
-            ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
-              this._duplicateArray(copyables, affineF64, 1),
-            ),
-          )
-          // The copy gesture is "hot" for an ×N / /N array refinement,
-          // whichever kinds duplicated (see the class doc comment).
-          this.arrayHot = {
-            copySources: copyables,
-            sketchSources,
-            guide: null,
-            pivot,
-            axis,
-            theta,
-            historyGen: this.wasmScene.history_generation().toString(),
-          }
-          this.arrayTyped = ''
-        } finally {
-          if (committed.length > 0) {
-            this.selection = committed
-            this.onCommit(committed)
-            this._landedOnAcquired()
-          }
+        // copy through the drafting engine, then all duplicable nodes and the
+        // guides copy in ONE `duplicate_selection_array` call (count 1). A
+        // refusal changes nothing.
+        const landed = this._layArray({ copySources: copyables, sketchSources, guides }, [affineF64], 1)
+        // The copy gesture is "hot" for an ×N / /N array refinement,
+        // whichever kinds duplicated (see the class doc comment).
+        this.arrayHot = {
+          copySources: copyables,
+          sketchSources,
+          guides,
+          pivot,
+          axis,
+          theta,
+          historyGen: this.wasmScene.history_generation().toString(),
         }
+        this.arrayTyped = ''
+        this._land(landed.nodes, landed.guides, this.onCommit)
         surfaceSketchTransformReports((m) => this.onToast(m))
-        this.retype.arm({ nodes, guide: null, pivot, axis, theta, copy: true })
+        this.retype.arm({ nodes, guides, pivot, axis, theta, copy: true })
       } else {
         // The whole selection: the planner leaves riding shapes to their
-        // owner and hands them back re-found where they landed.
-        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Rotate' }))
-        this.onCommit(committed)
+        // owner and hands them back re-found where they landed. The guides
+        // ride the same step.
+        const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Rotate' }), guides)
+        this._land(committed, guides, this.onCommit)
         surfaceSketchTransformReports((m) => this.onToast(m))
-        this._landedOnAcquired()
         // Armed with the PRE-commit `nodes`: the window's undo restores the
         // original unit keys (geometry hashes), which the re-resolved
         // `committed` refs of an arranging landing do not name.
-        this.retype.arm({ nodes: allNodes, guide: null, pivot, axis, theta, copy: false })
+        this.retype.arm({ nodes: allNodes, guides, pivot, axis, theta, copy: false })
       }
       return true
     } catch (err) {
@@ -1147,59 +1173,16 @@ export class RotateTool implements Tool {
       // the window survives on the landing already made (whose selection was
       // already given back), and a later retype that lands must give it back
       // again, so the click-taken flag stays.
-      if (!this.retype.isOpen) this._releaseAcquiredNodes()
+      if (!this.retype.isOpen) this._releaseAcquired()
       return false
     }
   }
 
-  /** `_commit` for a construction guide: one `transform_guide`, or in copy
-   *  mode one `duplicate_guide_array` (count 1), hot for an ×N / /N array. */
-  private _commitGuide(guide: bigint, pivot: Vec3, axis: Vec3, theta: number): boolean {
-    try {
-      this.arrayLast = null
-      const affineF64 = affineToFloat64(
-        rotateAboutPivotAxis(pivot[0], pivot[1], pivot[2], axis[0], axis[1], axis[2], theta),
-      )
-      if (this.copyMode) {
-        const copy = this.wasmScene.duplicate_guide_array(guide, affineF64, 1)[0]
-        this.arrayHot = {
-          copySources: [],
-          sketchSources: [],
-          guide,
-          pivot,
-          axis,
-          theta,
-          historyGen: this.wasmScene.history_generation().toString(),
-        }
-        this.arrayTyped = ''
-        this.guides.landed(copy)
-        this.retype.arm({ nodes: [], guide, pivot, axis, theta, copy: true })
-      } else {
-        this.wasmScene.transform_guide(guide, affineF64)
-        this.guides.landed(guide)
-        this.retype.arm({ nodes: [], guide, pivot, axis, theta, copy: false })
-      }
-      return true
-    } catch (err) {
-      const code = parseKernelErrorCode(err)
-      const rawMsg = err instanceof Error ? err.message : String(err)
-      this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-      return false
-    }
-  }
-
-  /** Hand an array's copies to the host: node copies become the selection
-   *  (none when the click took the source, `_landedOnAcquired`),
-   *  a guide's last copy lands as guideTarget.ts says. */
-  private _landArray(landed: ArrayLanding): void {
-    if ('guide' in landed) {
-      this.guides.landed(landed.guide)
-    } else {
-      this.selection = landed.nodes
-      this.onArrayCommit(landed.nodes)
-      surfaceSketchTransformReports((m) => this.onToast(m))
-      this._landedOnAcquired()
-    }
+  /** Hand an array's copies to the host: they become the selection (none
+   *  when the click took the source, `_landedOnAcquired`). */
+  private _landArray(landed: CopyLanding): void {
+    this._land(landed.nodes, landed.guides, this.onArrayCommit)
+    surfaceSketchTransformReports((m) => this.onToast(m))
   }
 
   /**
@@ -1270,28 +1253,29 @@ export class RotateTool implements Tool {
     const prev = this.copyMode
     this.copyMode = hot.copy
     try {
-      return this._commit(hot.nodes, hot.guide, hot.pivot, hot.axis, theta)
+      return this._commit(hot.nodes, hot.guides, hot.pivot, hot.axis, theta)
     } finally {
       this.copyMode = prev
     }
   }
 
-  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs —
+  /** One `duplicate_selection_array` call over `nodes` and `guides` —
    * MoveTool's identical helper. */
   private _duplicateArray(
     nodes: readonly NodeRef[],
+    guides: readonly bigint[],
     affineF64: Float64Array,
     count: number,
-  ): NodeRef[] {
+  ): CopyLanding {
     const created = this.wasmScene.duplicate_selection_array(
       new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind))),
       new BigUint64Array(nodes.map((n) => n.id)),
-      new BigUint64Array(0),
+      new BigUint64Array(guides),
       affineF64,
       count,
     )
     try {
-      return created.roots().map(nodeRefFromJs)
+      return { nodes: created.roots().map(nodeRefFromJs), guides: [...created.guides()] }
     } finally {
       created.free()
     }
@@ -1303,27 +1287,27 @@ export class RotateTool implements Tool {
   }
 
   /** Lay `count` copies: the drawn half through cumulative affines, the
-   *  object half through one `duplicate_selection_array` call — one undo
-   *  step, atomic. A hot guide's copies go through one
-   *  `duplicate_guide_array` call on the step (`affines[0]`). */
+   *  objects and the guides through one `duplicate_selection_array` call on
+   *  the step (`affines[0]`) — one undo step, atomic. */
   private _layArray(
-    arr: { sketchSources: NodeRef[]; copySources: NodeRef[]; guide: bigint | null },
+    arr: { sketchSources: NodeRef[]; copySources: NodeRef[]; guides: bigint[] },
     affines: readonly Float64Array[],
     count: number,
-  ): ArrayLanding {
-    if (arr.guide !== null) {
-      const copies = this.wasmScene.duplicate_guide_array(arr.guide, affines[0], count)
-      return { guide: copies[copies.length - 1] }
-    }
-    return {
-      nodes: copyOwnersAndDrawing(
-        this.wasmScene,
-        arr.copySources,
-        arr.sketchSources,
-        affines,
-        () => this._duplicateArray(arr.copySources, affines[0], count),
-      ),
-    }
+  ): CopyLanding {
+    let guideCopies: bigint[] = []
+    const nodes = copyOwnersAndDrawing(
+      this.wasmScene,
+      arr.copySources,
+      arr.sketchSources,
+      affines,
+      () => {
+        const made = this._duplicateArray(arr.copySources, arr.guides, affines[0], count)
+        guideCopies = made.guides
+        return made.nodes
+      },
+      arr.guides.length > 0,
+    )
+    return { nodes, guides: guideCopies }
   }
 
   /**
@@ -1339,7 +1323,7 @@ export class RotateTool implements Tool {
       this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
       // The undo + redo moved the generation: re-arm the retype window on
       // the restored entry, or an angle typed next reports 'stale'.
-      this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], guide: hot.guide, pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
+      this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], guides: hot.guides, pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
     } catch {
       this.arrayHot = null
     }
@@ -1387,7 +1371,7 @@ export class RotateTool implements Tool {
     this.wasmScene.scene_undo().free()
 
     const genBefore = this.wasmScene.history_generation()
-    let created: ArrayLanding
+    let created: CopyLanding
     try {
       // One cumulative affine per copy: θ, 2θ, …, Nθ about the same
       // pivot/axis. The object half only needs the STEP affine (the kernel
@@ -1420,7 +1404,7 @@ export class RotateTool implements Tool {
     }
     this.arrayLast = spec
     // An angle typed now re-spaces THIS array (see `_relayArray`).
-    this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], guide: hot.guide, pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
+    this.retype.arm({ nodes: [...hot.copySources, ...hot.sketchSources], guides: hot.guides, pivot: hot.pivot, axis: hot.axis, theta: hot.theta, copy: true })
     this._landArray(created)
   }
 
