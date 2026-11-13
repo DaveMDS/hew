@@ -19,6 +19,9 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Inference:** From Point reference lines. Corners of the shape you started on, the points of the shape you are drawing, and points you rest the cursor on for a moment lend dashed lines to the drawing plane, and the cursor snaps to them and to where they cross. Stand a Rectangle up from one corner and snap it exactly above the far corner.
 - **Object:** Make Solid also works on selected sketches. It first fills any faces the lines can close, as one undo step; if no solid forms, it changes nothing. When they do not close a space, the open edges are marked in red, and if those edges form a loop that does not lie flat, the message suggests trying a line across the opening to split it into flat faces.
 - **API:** `hew.solid.from_faces` makes a solid from drawn faces, filling any faces the lines can close first. Drawing and sketch-edit commands report `faces_closed` and `solid` when an edit closed a face or made a solid.
+- **Selection:** Guides, dimensions, and text join the selection alongside Objects, groups, and components. Shift toggles, Ctrl, ⌘, or Alt (Option) adds, and Shift with one of those removes a guide, dimension, or text without dropping the rest of the selection; a plain click or a marquee starts a new selection. Object Info counts everything selected, and Delete erases all of it in one undo step.
+- **Move, Rotate:** Selected guides move, rotate, copy, and make ×N / /N arrays together with the selected Objects, in one undo step, with the same axis locks and typed values. After a copy, every copy is selected, guides included.
+- **Eraser:** A new Eraser tool (`E`). Click an Object, group, component, drawn line, guide, dimension, or text to erase it, or drag across several: everything the drag touches is selected as it goes and erased together on release, in one undo step. Hovering highlights what a click would erase. Escape during a drag cancels it and erases nothing. A face is never erased on its own.
 - **Viewport:** A view die in the top-right corner shows which way the camera is looking and turns with it. Click a face to look straight at it, click a corner to look from that corner, or drag it to orbit. Four pips under it (red, green, blue, and one for any other plane) show the plane the next drawing click lands on; a padlock marks a locked or pinned plane, and clicking a pip locks or releases it, the mouse form of the arrow keys. The die is not shown in Shop mode.
 
 ### Changed
@@ -30,6 +33,8 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Drawing:** Shapes drawn in empty space land on the axis plane facing the camera, as in SketchUp. From a low view that squarely faces a wall (a Front or Side standard view, for one) Line, Rectangle, Circle, Polygon, Arc, and Place Image start on that wall's plane, shown by a status-bar line before you click; from above or a three-quarter view they still start on the ground. The arrow keys and Shift still override it. With the drawing axes moved, empty-space drawing follows the moved axes' ground.
 - **Viewport:** The Orbit, Top, Iso, and Front chips in the top-left corner are removed. The view die covers standard views; Orbit remains in the tool rail, the Camera menu, and `O`.
 - **Drawing:** At a corner or edge shared by two faces, a shape starts on the face the cursor is leaning toward, not always the one facing the camera most squarely. Off the solid to one side, it takes that side's plane.
+
+- **Move, Rotate:** With a selection, a click on a guide is just the base point or the pivot; it no longer switches the tool to moving that guide alone. With nothing selected, a click still takes the guide under it for that one move or rotation.
 
 ### Fixed
 

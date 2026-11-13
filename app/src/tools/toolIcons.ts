@@ -42,12 +42,14 @@ import controlCameraSvg from '@material-symbols/svg-400/outlined/control_camera.
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
 import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
+import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
  * the `toolIcons.test.ts` coverage test instead). */
 export type ToolName =
   | 'Select'
+  | 'Eraser'
   | 'Rectangle'
   | 'Circle'
   | 'Polygon'
@@ -80,6 +82,7 @@ export type ToolName =
 /** Raw Material Symbols SVG markup for each tool. */
 export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Select': arrowSelectorToolSvg,
+  'Eraser': inkEraserSvg,
   'Rectangle': rectangleSvg,
   'Circle': circleSvg,
   'Polygon': hexagonSvg,
@@ -115,6 +118,7 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
  * tip-of-glyph for point-and-click tools (Select/Paint/Tape Measure). */
 const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Select': { x: 0.25, y: 0.1 },
+  'Eraser': { x: 0.2, y: 0.85 },
   'Rectangle': { x: 0.1, y: 0.9 },
   'Circle': { x: 0.1, y: 0.9 },
   'Polygon': { x: 0.1, y: 0.9 },

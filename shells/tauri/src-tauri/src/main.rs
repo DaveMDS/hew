@@ -1430,6 +1430,7 @@ fn menu_action_for(id: &str) -> Option<&'static str> {
         "draw-line" => "tool-line",
         "draw-3d-text" => "draw-3d-text",
         "tool-select" => "tool-select",
+        "tool-eraser" => "tool-eraser",
         "tool-paint" => "tool-paint",
         "tool-position-texture" => "tool-position-texture",
         "tool-move" => "tool-move",
@@ -4087,6 +4088,14 @@ fn main() {
                 None,
                 Some("Space"),
             )?;
+            let tool_eraser = check_item(
+                handle,
+                &mut checks,
+                "tool-eraser",
+                lbl!("tool-eraser"),
+                None,
+                Some("E"),
+            )?;
             let tool_paint = check_item(
                 handle,
                 &mut checks,
@@ -4224,6 +4233,7 @@ fn main() {
             let tools_menu =
                 SubmenuBuilder::with_id(handle, "submenu:tools", lbl!("submenu:tools"))
                     .item(&tool_select)
+                    .item(&tool_eraser)
                     .separator()
                     .item(&tool_move)
                     .item(&tool_rotate)

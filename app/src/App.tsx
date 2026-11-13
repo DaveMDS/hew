@@ -264,6 +264,7 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   'Tape Measure': 'tool-tape-measure',
   Dimension: 'tool-dimension',
   Protractor: 'tool-protractor',
+  Eraser: 'tool-eraser',
   Slice: 'tool-slice',
   'Section Plane': 'tool-section-plane',
   'Edit Vertex': 'tool-edit-vertex',
@@ -5645,6 +5646,7 @@ export default function App() {
       // Tool activations from native menu
       /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
       case 'tool-select':    setActiveTool('Select'); break
+      case 'tool-eraser':    setActiveTool('Eraser'); break
       case 'tool-rectangle': setActiveTool('Rectangle'); break
       case 'tool-circle':    setActiveTool('Circle'); break
       case 'tool-polygon':   setActiveTool('Polygon'); break

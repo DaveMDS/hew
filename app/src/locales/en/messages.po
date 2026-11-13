@@ -1598,6 +1598,10 @@ msgstr "Click an object to rotate it"
 msgid "Click an object to scale it"
 msgstr "Click an object to scale it"
 
+#: src/tools/EraserTool.ts
+msgid "Click an object, line, guide, dimension, or text to erase it, or drag across several. Esc cancels the drag."
+msgstr "Click an object, line, guide, dimension, or text to erase it, or drag across several. Esc cancels the drag."
+
 #: src/tools/ArcTool.ts
 msgid "Click the arc's first endpoint — on the ground plane or any face or sketch."
 msgstr "Click the arc's first endpoint — on the ground plane or any face or sketch."
@@ -2370,6 +2374,10 @@ msgstr "Definition Name"
 msgid "Delay (s)"
 msgstr "Delay (s)"
 
+#: src/palette/registry.ts
+msgid "delete"
+msgstr "delete"
+
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/palette/registry.ts
@@ -3001,6 +3009,15 @@ msgstr "erase"
 #: src/panels/dockLogic.ts
 msgid "Erase"
 msgstr "Erase"
+
+#: src/palette/registry.ts
+msgid "Erase what you click or drag across: lines, objects, guides, dimensions, and text."
+msgstr "Erase what you click or drag across: lines, objects, guides, dimensions, and text."
+
+#: src/i18n/nativeMenu.ts
+#: src/tools/toolRegistry.ts
+msgid "Eraser"
+msgstr "Eraser"
 
 #. Escape key cap in the placement pill
 #: src/App.tsx
@@ -6950,6 +6967,10 @@ msgstr "Roughness (select a material swatch first)"
 #: src/panels/MaterialPalette.tsx
 msgid "Roughness for {selectedName}"
 msgstr "Roughness for {selectedName}"
+
+#: src/palette/registry.ts
+msgid "rubber"
+msgstr "rubber"
 
 #: src/viewport/Viewport.tsx
 msgid "Running without graphics acceleration — large models will be slow."

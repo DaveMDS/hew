@@ -3101,6 +3101,7 @@ describe('SceneRenderer — hover highlight (setHoverHighlight)', () => {
     sketchInstance: null,
     draftSegments: new Float32Array(0),
     guide: null,
+    annotation: null,
   }
 
   function hoverGroup(threeScene: THREE.Scene): THREE.Group {

@@ -128,6 +128,7 @@ export const NATIVE_MENU_LABELS: Record<string, MessageDescriptor> = {
 
   // Tools
   'tool-select': msg`Select`,
+  'tool-eraser': msg`Eraser`,
   'tool-paint': msg`Paint`,
   'tool-position-texture': msg`Position Texture`,
   'tool-move': msg`Move`,

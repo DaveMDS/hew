@@ -1128,10 +1128,10 @@ export interface HewTestHarness {
    *  (`ViewportApi.pipEnabled`), read live rather than off the widget. */
   pipEnabled(pip: 'red' | 'green' | 'blue' | 'custom'): boolean
 
-  /** What the transform tools' hover highlight (Move/Rotate/Scale with
-   *  nothing selected) covers right now, ids as decimal strings, or null
-   *  when nothing is highlighted. */
-  getHoverHighlight(): { objects: string[]; instances: string[]; guide: string | null } | null
+  /** What the hover highlight (Move/Rotate/Scale with nothing selected,
+   *  the Eraser) covers right now, ids as decimal strings, or null when
+   *  nothing is highlighted. */
+  getHoverHighlight(): { objects: string[]; instances: string[]; guide: string | null; annotation: string | null } | null
 
   /** The world ray the pointer at canvas-relative CSS pixel (`x`, `y`)
    *  casts for the camera as it is now. */
@@ -2447,6 +2447,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         objects: h.objects.map(String),
         instances: h.instances.map(String),
         guide: h.guide === null ? null : String(h.guide),
+        annotation: h.annotation === null ? null : String(h.annotation),
       }
     },
 

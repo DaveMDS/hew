@@ -82,6 +82,7 @@
   "draw-line": "Line",
   "draw-3d-text": "3D Text…",
   "tool-select": "Select",
+  "tool-eraser": "Eraser",
   "tool-paint": "Paint",
   "tool-position-texture": "Position Texture",
   "tool-move": "Move",

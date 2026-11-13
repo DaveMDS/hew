@@ -177,6 +177,10 @@ export interface SnapConstraint {
 export interface ClickAcquire {
   guides: boolean
   nodes: boolean
+  /** The click takes what a Select click takes instead — an annotation, a
+   * guide, a drawn line, or a node, never a drawn region on its own — as
+   * the Eraser's does; `guides` and `nodes` are then not read. */
+  select?: boolean
 }
 
 /**

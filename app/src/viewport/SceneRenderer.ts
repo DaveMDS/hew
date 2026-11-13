@@ -411,7 +411,7 @@ export interface RefreshTouched {
 }
 
 /** Disposable group for one object's faces + edges */
-/** What the transform tools' hover highlight covers (`setHoverHighlight`). */
+/** What the hover highlight covers (`setHoverHighlight`). */
 export interface HoverHighlight {
   objects: bigint[]
   instances: bigint[]
@@ -423,6 +423,8 @@ export interface HoverHighlight {
   /** Flat world segment endpoints of drawn shapes. */
   draftSegments: Float32Array
   guide: bigint | null
+  /** An annotation, drawn in the annotations' own highlight batch. */
+  annotation: bigint | null
 }
 
 interface ObjectMeshGroup {
@@ -3369,15 +3371,20 @@ export class SceneRenderer {
    * tradeoff as `refreshAnnotations`' own initial paint). */
   private _rebuildAnnotationHighlight(): void {
     const positions: number[] = []
-    for (const id of this.selectedAnnotationIds) {
-      const info = this.annotationBase.get(id)
-      if (info === undefined) continue
+    for (const [id, info] of this.annotationBase) {
+      if (!this._annotationHighlighted(id)) continue
       positions.push(...info.fixed)
       if (info.dimLine !== null) {
         positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
       }
     }
     this._installAnnotationLineBatch('highlight', positions, EDGE_COLOR_SELECTED)
+  }
+
+  /** Whether annotation `id` draws in the highlight: selected, or under the
+   * hover highlight (`setHoverHighlight`). */
+  private _annotationHighlighted(id: bigint): boolean {
+    return this.selectedAnnotationIds.has(id) || this.hover?.annotation === id
   }
 
   /**
@@ -3524,14 +3531,14 @@ export class SceneRenderer {
       }
       billboard.update(camera, viewportHeight, faceQuaternion)
 
-      if (this.selectedAnnotationIds.has(id)) {
+      if (this._annotationHighlighted(id)) {
         highlightPositions.push(...info.fixed, ...dimSegments, ...arrowSegments)
       }
     }
 
     this._installAnnotationLineBatch('normal', normalPositions, normalColor)
     this._installAnnotationLineBatch('detached', detachedPositions, warningColor)
-    if (this.selectedAnnotationIds.size > 0) {
+    if (this.selectedAnnotationIds.size > 0 || (this.hover?.annotation ?? null) !== null) {
       this._installAnnotationLineBatch('highlight', highlightPositions, EDGE_COLOR_SELECTED)
     }
   }
@@ -3771,8 +3778,10 @@ export class SceneRenderer {
    * render are skipped. The caller schedules the render.
    */
   setHoverHighlight(hover: HoverHighlight | null): void {
+    const annotationBefore = this.hover?.annotation ?? null
     this.hover = hover
     this._rebuildHoverHighlight()
+    if ((hover?.annotation ?? null) !== annotationBefore) this._rebuildAnnotationHighlight()
   }
 
   private _clearHoverHighlight(): void {

@@ -83,7 +83,7 @@ export const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   'toggle-object-info', 'toggle-parallel-projection', 'toggle-scenes',
   'toggle-section-active', 'toggle-tags', 'toggle-tray', 'toggle-wireframe',
   'toggle-xray', 'tool-arc', 'tool-axes', 'tool-circle', 'tool-dimension',
-  'tool-edit-vertex', 'tool-follow-me', 'tool-line', 'tool-look-around',
+  'tool-edit-vertex', 'tool-eraser', 'tool-follow-me', 'tool-line', 'tool-look-around',
   'tool-move', 'tool-offset', 'tool-orbit', 'tool-paint', 'tool-pan',
   'tool-polygon', 'tool-position-camera', 'tool-position-texture',
   'tool-protractor', 'tool-pushpull', 'tool-rectangle', 'tool-rotate',

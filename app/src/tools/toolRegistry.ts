@@ -44,6 +44,7 @@ export interface ToolSpec {
 export const TOOL_REGISTRY: readonly ToolSpec[] = [
   // ---- Draw ----
   { name: 'Select', label: msg({ context: 'tool', message: 'Select' }), group: 'Draw', actionId: 'tool-select' },
+  { name: 'Eraser', label: msg`Eraser`, group: 'Draw', actionId: 'tool-eraser' },
   { name: 'Line', label: msg({ context: 'tool', message: 'Line' }), group: 'Draw', actionId: 'tool-line' },
   { name: 'Rectangle', label: msg`Rectangle`, group: 'Draw', actionId: 'tool-rectangle' },
   { name: 'Circle', label: msg`Circle`, group: 'Draw', actionId: 'tool-circle' },

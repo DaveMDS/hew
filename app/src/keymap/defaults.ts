@@ -39,6 +39,7 @@ export function defaultBindings({ isMac, isDesktop }: KeymapPlatform): Bindings 
   return {
     // ---- Tools ----
     'tool-select': ['Space', '1'],
+    'tool-eraser': ['E'],
     'tool-line': ['L', ...mac('Mod+L')],
     'tool-rectangle': ['R', '2', ...mac('Mod+K')],
     'tool-circle': ['C'],

@@ -330,6 +330,7 @@ const T = {
   PositionCamera: 'Position Camera' as ToolName,
   PositionTexture: 'Position Texture' as ToolName,
   Protractor: 'Protractor' as ToolName,
+  Eraser: 'Eraser' as ToolName,
   PushPull: 'Push/Pull' as ToolName,
   Rectangle: 'Rectangle' as ToolName,
   Rotate: 'Rotate' as ToolName,
@@ -1438,6 +1439,12 @@ export function MenuBar({
               shortcut={keyFor(T.Select)}
               checked={activeTool === T.Select}
               onClick={withClose(() => onSelectTool?.(T.Select))}
+            />
+            <CheckMenuItem
+              label={toolLabel(T.Eraser)}
+              shortcut={keyFor(T.Eraser)}
+              checked={activeTool === T.Eraser}
+              onClick={withClose(() => onSelectTool?.(T.Eraser))}
             />
             <div style={SEPARATOR_STYLE} />
             <CheckMenuItem

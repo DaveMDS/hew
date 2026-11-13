@@ -96,6 +96,7 @@ import { AxesTool } from '../tools/AxesTool'
 import { getDrawingAxes, type DrawingAxes } from '../tools/drawingAxes'
 import { DimensionTool } from '../tools/DimensionTool'
 import { TextTool, type PlacedLeader } from '../tools/TextTool'
+import { EraserTool, type EraseTarget } from '../tools/EraserTool'
 import { parseKernelErrorCode, kernelErrorMessage, friendlyErrorText } from '../kernelErrors'
 import type { Ray, ApertureBasis } from './math'
 import {
@@ -1145,7 +1146,7 @@ export interface ViewportApi {
 
   /** Test-only: what the transform tools' hover highlight covers right now
    *  (`SceneRenderer.getHoverHighlight`), or null when nothing is highlighted. */
-  getHoverHighlight: () => { objects: bigint[]; instances: bigint[]; guide: bigint | null } | null
+  getHoverHighlight: () => { objects: bigint[]; instances: bigint[]; guide: bigint | null; annotation: bigint | null } | null
 
   /** Test-only: the world ray the pointer at canvas-relative CSS pixel
    *  (`x`, `y`) casts for the camera as it is now, built exactly as the
@@ -3607,22 +3608,35 @@ export default function Viewport({
       return snap?.kind === 'on-axis' ? null : snap
     }
 
-    function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
+    /** The snap a Select click resolves under `ray` — the one its
+     *  `resolveSelectableRef` reads. */
+    function selectClickSnap(ray: Ray): Snap | null {
       const { snap: rawSnap } = snapService.resolve(
         ray, el.clientHeight, apertureBasis(),
         undefined, undefined, undefined, undefined,
         readOnlyRef.current ? 1 : undefined,
         undefined, true,
       )
-      const snap = excludeAxisSnapForSelect(rawSnap)
+      return excludeAxisSnapForSelect(rawSnap)
+    }
+
+    /** The guide a Select click at (`ndcX`, `ndcY`) takes, or null. A drawn
+     *  line under the cursor, on a face or on the ground, wins over a guide
+     *  lying along it: guides are often placed exactly on the edges a shape
+     *  was drawn to, and the line is what the click is for. The guide stays
+     *  selectable anywhere else along its length. */
+    function selectClickGuide(ndcX: number, ndcY: number, ray: Ray, snap: Snap | null): bigint | null {
       const g = pickGuide(ndcX, ndcY)
-      // A drawn line under the cursor, on a face or on the ground, wins over
-      // a guide lying along it: guides are often placed exactly on the edges
-      // a shape was drawn to, and the line is what the click is for. The
-      // guide stays selectable anywhere else along its length.
-      const under = g !== null ? resolveSelectableRef(snap, ray, selectionDeps()) : null
+      if (g === null) return null
+      const under = resolveSelectableRef(snap, ray, selectionDeps())
       const lineUnder = under !== null && (under.kind === 'draft-edge' || under.kind === 'draft-curve')
-      if (g !== null && !lineUnder) {
+      return lineUnder ? null : g
+    }
+
+    function dispatchSelectPick(ndcX: number, ndcY: number, ray: Ray): void {
+      const snap = selectClickSnap(ray)
+      const g = selectClickGuide(ndcX, ndcY, ray, snap)
+      if (g !== null) {
         onSelectGuideRef.current?.(g, selectModeRef.current)
         scheduleRender()
         return
@@ -3920,15 +3934,28 @@ export default function Viewport({
       const spec = toolControllerRef.current?.activeTool.clickAcquire?.() ?? null
       const at = ray ?? heldPointerRay()
       let guide: bigint | null = null
+      let annotation: bigint | null = null
       let node: NodeRef | null = null
       if (spec !== null && at !== undefined && pointerInsideCanvas && heldButtons === 0 && !cameraModeRef.current && !readOnlyRef.current) {
-        if (spec.guides) guide = pickGuideTarget(at)
-        if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
+        if (spec.select === true) {
+          // `at` is built at the pointer's last position, so its NDC are
+          // the ones the click would read.
+          const ndc = lastPointerNdcRef.current
+          const hit = ndc === null ? null : selectClickTarget(ndc.ndcX, ndc.ndcY, at)
+          if (hit?.kind === 'annotation') annotation = hit.id
+          else if (hit?.kind === 'guide') guide = hit.id
+          else if (hit?.kind === 'node') node = hit.ref
+        } else {
+          if (spec.guides) guide = pickGuideTarget(at)
+          if (guide === null && spec.nodes) node = pickTransformableUnderCursor(at)
+        }
       }
       const activeInstance = activeInstanceOf(activeContextRef.current)
-      const key = guide !== null
-        ? `guide:${guide}`
-        : node !== null ? `${nodeKey(node)}@${activeInstance ?? ''}` : null
+      const key = annotation !== null
+        ? `annotation:${annotation}`
+        : guide !== null
+          ? `guide:${guide}`
+          : node !== null ? `${nodeKey(node)}@${activeInstance ?? ''}` : null
       if (key === acquireHoverKey && !force) return
       acquireHoverKey = key
       if (key === null) {
@@ -3945,6 +3972,7 @@ export default function Viewport({
           sketchInstance: activeInstance,
           draftSegments: sets.draftSegments,
           guide,
+          annotation,
         })
       }
       scheduleRender()
@@ -7945,6 +7973,68 @@ export default function Viewport({
       )
     }
 
+    /** What the Eraser touches at canvas pixel (`xPx`, `yPx`): exactly what a
+     *  Select click there resolves — an annotation first, as Select's press
+     *  does, then a guide (unless a drawn line along it wins), then the
+     *  selectable ref under the snap. A face is never erased on its own: a
+     *  drawn region or shape is skipped, while a click anywhere on a solid
+     *  takes the node Select would select (Object, group, instance). */
+    function eraserPickAt(xPx: number, yPx: number): EraseTarget | null {
+      const w = renderer.domElement.clientWidth
+      const h = renderer.domElement.clientHeight
+      if (w === 0 || h === 0) return null
+      const ndcX = (xPx / w) * 2 - 1
+      const ndcY = -((yPx / h) * 2 - 1)
+      return selectClickTarget(ndcX, ndcY, makeWorldRay(ndcX, ndcY, camera))
+    }
+
+    /** What a Select click at (`ndcX`, `ndcY`), along `ray`, takes — the
+     *  Eraser's touch and its hover highlight (`ClickAcquire.select`) alike;
+     *  see `eraserPickAt`. */
+    function selectClickTarget(ndcX: number, ndcY: number, ray: Ray): EraseTarget | null {
+      const annotation = pickAnnotation(ndcX, ndcY)
+      if (annotation !== null) return { kind: 'annotation', id: annotation }
+      const snap = selectClickSnap(ray)
+      const guide = selectClickGuide(ndcX, ndcY, ray, snap)
+      if (guide !== null) return { kind: 'guide', id: guide }
+      const ref = resolveSelectableRef(snap, ray, selectionDeps())
+      if (ref === null) return null
+      if (ref.kind === 'draft-region' || ref.kind === 'draft-island') return null
+      return { kind: 'node', ref }
+    }
+
+    /** The Eraser selects what its stroke touches, through the same
+     *  selection the Select tool lifts, and erases the stroke's own list
+     *  in one `runDelete` — one undo step. */
+    function makeEraserTool(): EraserTool {
+      return new EraserTool({
+        pickAt: eraserPickAt,
+        select: (target) => {
+          if (target.kind === 'guide') onSelectGuideRef.current?.(target.id, 'add')
+          else if (target.kind === 'annotation') onSelectAnnotationRef.current?.(target.id, 'add')
+          else onSelectRef.current?.(target.ref, 'add')
+          scheduleRender()
+        },
+        clearSelection: () => {
+          onSelectRef.current?.(null, 'replace')
+          scheduleRender()
+        },
+        erase: (targets) => {
+          const nodes: NodeRef[] = []
+          const guides: bigint[] = []
+          const annotations: bigint[] = []
+          for (const target of targets) {
+            if (target.kind === 'guide') guides.push(target.id)
+            else if (target.kind === 'annotation') annotations.push(target.id)
+            else nodes.push(target.ref)
+          }
+          runDelete(nodes, guides, annotations)
+          onSelectRef.current?.(null, 'replace')
+          scheduleRender()
+        },
+      })
+    }
+
     function makeTextTool(): TextTool {
       return new TextTool(previewGroup, (leader: PlacedLeader) => {
         pendingAnnotationEdit = { kind: 'new-leader', leader }
@@ -8386,6 +8476,11 @@ export default function Viewport({
           cameraModeRef.current = false
           controls.mouseButtons.LEFT = null
           toolController.setTool(makeDimensionTool())
+          break
+        case 'Eraser':
+          cameraModeRef.current = false
+          controls.mouseButtons.LEFT = null
+          toolController.setTool(makeEraserTool())
           break
         case 'Text':
           cameraModeRef.current = false

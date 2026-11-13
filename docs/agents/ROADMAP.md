@@ -434,7 +434,13 @@ below.
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
   pose, leaving the shared definition and every sibling instance untouched
-- Delete for objects, groups, instances, and guides
+- Delete for objects, groups, instances, guides, and annotations; a
+  selection mixing them is deleted in one undo step
+- Eraser: click an entity, or drag across several, to erase what a Select
+  click there would take (never a face on its own). The stroke selects
+  what it touches as it goes and erases it all on release in one undo
+  step; hovering highlights what a click would erase, and Escape abandons
+  a stroke
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
 - Offset: copy a sketch region's or solid face's boundary inward or outward
