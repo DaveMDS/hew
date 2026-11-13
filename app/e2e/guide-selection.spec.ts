@@ -112,3 +112,48 @@ test('a plain click on a guide replaces a mixed selection', async ({ page }) => 
   expect(await selection(page)).toEqual([box])
   await expect(page.getByText('Guide line', { exact: true })).toHaveCount(0)
 })
+
+test('Move carries a mixed selection of a box and a guide, and one undo brings both back', async ({ page }) => {
+  const { box, right } = await boot(page)
+
+  await click(page, [0.5, 0.5, 1])
+  await click(page, [3, 0.5, 0], ['Shift'])
+  await expect(count(page, 2)).toBeVisible()
+
+  const before = await page.evaluate(([b, g]) => {
+    const h = window.__hew_test!
+    return { box: h.getObjectBounds(b), guide: h.getGuideGeometry(g)! }
+  }, [box, right])
+
+  await page.getByRole('radio', { name: 'Move' }).click()
+  await page.waitForTimeout(100)
+  // Base point on the box's top, a nudge right, X locked, then a typed 2 m.
+  await click(page, [0.5, 0.5, 1])
+  const away = await pagePoint(page, [1.5, 0.5, 1])
+  await page.mouse.move(away.x, away.y, { steps: 4 })
+  await page.waitForTimeout(100)
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.type('2')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(150)
+
+  const after = await page.evaluate(([b, g]) => {
+    const h = window.__hew_test!
+    return { box: h.getObjectBounds(b), guide: h.getGuideGeometry(g)! }
+  }, [box, right])
+  expect(after.box[0]).toBeCloseTo(before.box[0] + 2, 6)
+  expect(after.box[1]).toBeCloseTo(before.box[1], 6)
+  expect(after.guide[0]).toBeCloseTo(before.guide[0] + 2, 6)
+  expect(after.guide[1]).toBeCloseTo(before.guide[1], 6)
+  // Both stay selected.
+  await expect(count(page, 2)).toBeVisible()
+
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(150)
+  const undone = await page.evaluate(([b, g]) => {
+    const h = window.__hew_test!
+    return { box: h.getObjectBounds(b), guide: h.getGuideGeometry(g)! }
+  }, [box, right])
+  expect(undone.box).toEqual(before.box)
+  expect(undone.guide).toEqual(before.guide)
+})

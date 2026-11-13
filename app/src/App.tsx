@@ -1585,6 +1585,12 @@ export default function App() {
     }
   }, [])
 
+  /** Make exactly these the selected guides, the rest of the selection
+   *  untouched (a Move that landed nodes and guides together). */
+  const handleSelectGuides = useCallback((ids: bigint[]) => {
+    setSelectedGuides((cur) => (ids.length === 0 ? NO_IDS : sameIds(cur, ids) && cur.length === ids.length ? cur : ids))
+  }, [])
+
   /** Lift an annotation pick from the viewport — `handleSelectGuide`'s rule,
    *  for annotations. */
   const handleSelectAnnotation = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
@@ -7212,6 +7218,7 @@ export default function App() {
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
             selectedGuides={selectedGuides}
+            onSelectGuides={handleSelectGuides}
             onSelectAnnotation={handleSelectAnnotation}
             selectedAnnotations={selectedAnnotations}
             onOpenAnnotationEditor={handleOpenAnnotationEditor}

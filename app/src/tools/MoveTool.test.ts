@@ -1674,13 +1674,13 @@ describe('MoveTool — what a click would take (clickAcquire, the hover highligh
     expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
   })
 
-  it('a guide first when guides can be taken; with a guide selected, only another guide', () => {
+  it('a guide first when guides can be taken; with a guide selected, nothing (the click is its base point)', () => {
     const t = makeTool([])
     t.tool.setSelectionAcquirer(() => null)
     t.tool.setGuideHooks(() => null, vi.fn())
     expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: true })
-    t.tool.setGuideTarget(5n)
-    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: false })
+    t.tool.setGuideSelection([5n])
+    expect(t.tool.clickAcquire()).toBeNull()
   })
 
   it('nothing with a selection, or mid-gesture', () => {

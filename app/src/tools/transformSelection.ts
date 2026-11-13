@@ -558,6 +558,10 @@ function repointGroups(
  * any pose, unlike a scalar distance — no non-uniform-scale refusal here).
  * Drawn shapes inside an instance carry the instance in their context, so
  * their drafts conjugate the same way.
+ *
+ * `guides` are construction guides moved in the same step: they ride the
+ * world `transform_selection` call with the nodes — its own call inside an
+ * instance's definition, where the nodes go through the definition's.
  */
 export function commitSelectionTransform(
   wasmScene: WasmScene,
@@ -565,9 +569,10 @@ export function commitSelectionTransform(
   affineF64: Float64Array,
   activeInstance?: bigint | null,
   label = t({ context: 'tool', message: 'Move' }),
+  guides: readonly bigint[] = [],
 ): NodeRef[] {
   try {
-    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label)
+    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label, guides)
   } catch (err) {
     // A failed commit rolled back: its held reports name nothing that exists.
     resetSketchTransformReports()
@@ -581,6 +586,7 @@ function commitSelectionTransformInner(
   affineF64: Float64Array,
   activeInstance: bigint | null | undefined,
   label: string,
+  guides: readonly bigint[],
 ): NodeRef[] {
   resetSketchTransformReports()
   const committed: NodeRef[] = [...selection]
@@ -629,8 +635,8 @@ function commitSelectionTransformInner(
   const hasPost = post.sketches.length > 0 || post.islands.length > 0
   const mainSteps =
     activeInstance != null
-      ? (ids.length > 0 || sketches.length > 0 || islands.length > 0 ? 1 : 0) + (hasPost ? 1 : 0)
-      : islands.length + (kinds.length > 0 || sketches.length > 0 ? 1 : 0) + post.islands.length + (post.sketches.length > 0 ? 1 : 0)
+      ? (ids.length > 0 || sketches.length > 0 || islands.length > 0 ? 1 : 0) + (hasPost ? 1 : 0) + (guides.length > 0 ? 1 : 0)
+      : islands.length + (kinds.length > 0 || sketches.length > 0 || guides.length > 0 ? 1 : 0) + post.islands.length + (post.sketches.length > 0 ? 1 : 0)
   const steps = pureDrafts.length + 2 * redraws.size + mainSteps
 
   const found = new Map<DraftGroup, NodeRef[]>()
@@ -670,18 +676,28 @@ function commitSelectionTransformInner(
           )
         }
         if (ids.length > 0 || sketches.length > 0 || islands.length > 0) defMove(ids, sketches, islands)
+        // Guides are the world's, whatever is being edited.
+        if (guides.length > 0) {
+          wasmScene.transform_selection(
+            new Uint8Array(0),
+            new BigUint64Array(0),
+            new BigUint64Array(0),
+            new BigUint64Array(guides),
+            affineF64,
+          )
+        }
       } else {
         for (const group of islands) {
           noteSketchTransformReport(
             wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
           )
         }
-        if (kinds.length > 0 || sketches.length > 0) {
+        if (kinds.length > 0 || sketches.length > 0 || guides.length > 0) {
           wasmScene.transform_selection(
             new Uint8Array(kinds),
             new BigUint64Array(ids),
             new BigUint64Array(sketches),
-            new BigUint64Array(0),
+            new BigUint64Array(guides),
             affineF64,
           )
         }
@@ -800,6 +816,9 @@ function draftRefOfSketchIsland(wasmScene: WasmScene, sketch: bigint, island: bi
  * on their faces rides with the copies; then a MIXED shape (part of it rides
  * with an owner, the rest is drawn) draws its captured non-riding edges again
  * at every rep, circles kept as circles under a similarity.
+ *
+ * `withGuides` says `copyOwners` copies construction guides too (they ride
+ * the owners' kernel call), so it runs even with no owner to copy.
  */
 export function copyOwnersAndDrawing(
   wasmScene: WasmScene,
@@ -807,9 +826,10 @@ export function copyOwnersAndDrawing(
   drawn: readonly NodeRef[],
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
+  withGuides = false,
 ): NodeRef[] {
   try {
-    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners)
+    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners, withGuides)
   } catch (err) {
     resetSketchTransformReports() // the failed copy rolled back
     throw err
@@ -822,10 +842,19 @@ function copyOwnersAndDrawingInner(
   drawn: readonly NodeRef[],
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
+  withGuides: boolean,
 ): NodeRef[] {
   resetSketchTransformReports()
-  if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
-  if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
+  if (drawn.length === 0) return owners.length > 0 || withGuides ? copyOwners() : []
+  if (owners.length === 0) {
+    if (!withGuides) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
+    // Drawing and guides, no owner: nothing rides, so the drawing copies as
+    // it does alone, in one step with the guides.
+    return inHistoryBracket(wasmScene, t`Copy`, () => {
+      const drawnCopies = duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
+      return [...drawnCopies, ...copyOwners()]
+    })
+  }
   return inHistoryBracket(wasmScene, t`Copy`, () => {
     const plan = planCopy(wasmScene, [...owners, ...drawn], affines)
     const whole = copyWholeDrawing(wasmScene, plan, affines)

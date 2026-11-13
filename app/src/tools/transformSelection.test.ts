@@ -680,6 +680,34 @@ describe('commitSelectionTransform', () => {
     expect([...raw.draft_transform_edges.mock.calls[0][1]]).toEqual([7n])
   })
 
+  it('moves guides alone in one transform_selection call, with no bracket', () => {
+    const { scene, raw } = makeScene()
+    const out = commitSelectionTransform(scene, [], AFFINE, null, 'Move', [5n, 6n])
+    expect(out).toEqual([])
+    expect(raw.transform_selection).toHaveBeenCalledWith(
+      new Uint8Array([]),
+      new BigUint64Array([]),
+      new BigUint64Array([]),
+      new BigUint64Array([5n, 6n]),
+      AFFINE,
+    )
+    expect(raw.history_bracket_open).not.toHaveBeenCalled()
+  })
+
+  it('moves guides in the nodes\' own transform_selection call — one step', () => {
+    const { scene, raw } = makeScene()
+    commitSelectionTransform(scene, [{ kind: 'object', id: 3n }], AFFINE, null, 'Move', [5n])
+    expect(raw.transform_selection).toHaveBeenCalledTimes(1)
+    expect(raw.transform_selection).toHaveBeenCalledWith(
+      new Uint8Array([0]),
+      new BigUint64Array([3n]),
+      new BigUint64Array([]),
+      new BigUint64Array([5n]),
+      AFFINE,
+    )
+    expect(raw.history_bracket_open).not.toHaveBeenCalled()
+  })
+
   it('skips a stale edge like any pruned handle instead of throwing', () => {
     const { scene, raw } = makeScene({ listing: { [CTX]: [chain(40n, [7n])] } })
     commitSelectionTransform(scene, [de(99n)], AFFINE)
@@ -756,6 +784,21 @@ describe('commitSelectionTransform', () => {
         .toEqual([7n, 8n])
       expect(raw.transform_selection).not.toHaveBeenCalled()
       expect(raw.transform_sketch_islands).not.toHaveBeenCalled()
+    })
+
+    it("moves selected guides (the world's) in their own call, bracketed with the members into one step", () => {
+      const { scene, raw } = makeScene()
+      commitSelectionTransform(scene, [{ kind: 'object', id: 7n }], AFFINE, INSTANCE, 'Move', [5n])
+      expect(raw.transform_def_selection).toHaveBeenCalledTimes(1)
+      expect(raw.transform_selection).toHaveBeenCalledWith(
+        new Uint8Array([]),
+        new BigUint64Array([]),
+        new BigUint64Array([]),
+        new BigUint64Array([5n]),
+        AFFINE,
+      )
+      expect(raw.history_bracket_open).toHaveBeenCalledTimes(1)
+      expect(raw.history_bracket_commit).toHaveBeenCalledWith('Move')
     })
 
     it('routes a definition-owned detaching shape through the instance-aware sketch path', () => {
@@ -2232,6 +2275,25 @@ describe('a MIXED shape (part on a selected object\'s face, part over the void)'
       expect(copyOwners).not.toHaveBeenCalled()
       expect(raw.draft_copy_edges).toHaveBeenCalled()
       expect(raw.history_bracket_open).not.toHaveBeenCalled() // a single draft is one step
+    })
+
+    it('guides with no owner still run the owners\' call (the guides ride it)', () => {
+      const { scene, raw } = makeScene({ listing: listing() })
+      const copyOwners = vi.fn(() => [] as NodeRef[])
+      copyOwnersAndDrawing(scene, [], [], [AFFINE], copyOwners, true)
+      expect(copyOwners).toHaveBeenCalledTimes(1)
+      expect(raw.history_bracket_open).not.toHaveBeenCalled() // one kernel call is one step
+    })
+
+    it('drawing and guides with no owner copy in one bracket: the drawing as alone, then the guides', () => {
+      const { scene, raw } = makeScene({ listing: listing() })
+      const copyOwners = vi.fn(() => [] as NodeRef[])
+      copyOwnersAndDrawing(scene, [], [di(60n, CTX_UP)], [AFFINE], copyOwners, true)
+      expect(raw.draft_copy_edges).toHaveBeenCalled()
+      expect(copyOwners).toHaveBeenCalledTimes(1)
+      expect(raw.draft_copy_edges.mock.invocationCallOrder[0]).toBeLessThan(copyOwners.mock.invocationCallOrder[0])
+      expect(raw.history_bracket_open).toHaveBeenCalledTimes(1)
+      expect(raw.history_bracket_commit).toHaveBeenCalledWith('Copy')
     })
   })
 })

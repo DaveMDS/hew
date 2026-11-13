@@ -482,6 +482,10 @@ interface Props {
   onSelectGuide?: (id: bigint | null, mode?: SelectMode) => void
   /** The currently selected guides, reflected into the renderer highlight. */
   selectedGuides?: readonly bigint[]
+  /** Make exactly these the selected guides, leaving the node and
+   * annotation selection as it is — what a Move of nodes and guides
+   * together lands on (the nodes go through `onSelect`/`onSelectMany`). */
+  onSelectGuides?: (ids: bigint[]) => void
   /** Lift an annotation (dimension/leader-text) pick to the parent,
    * combined with the selected annotations as `mode` asks (default
    * `'replace'`); `null` clears (docs/design/dimensions-text.md). */
@@ -2171,8 +2175,8 @@ function highlightDeps(wasmScene: WasmScene): HighlightDeps {
 /** The component placement being edited in place, if the deepest open
  * context is one: its members highlight inside it, and sketches inside it
  * are drawn through its pose. */
-/** The guide Move and Rotate act on (guideTarget.ts): the selected guide
- *  when exactly one is selected, else none. */
+/** The guide Rotate acts on (guideTarget.ts): the selected guide when
+ *  exactly one is selected, else none. */
 function guideTargetOf(selectedGuides: readonly bigint[]): bigint | null {
   return selectedGuides.length === 1 ? selectedGuides[0] : null
 }
@@ -2441,6 +2445,7 @@ export default function Viewport({
   onSelectMany,
   onSelectGuide,
   selectedGuides = NO_IDS,
+  onSelectGuides,
   onSelectAnnotation,
   selectedAnnotations = NO_IDS,
   onOpenAnnotationEditor,
@@ -2490,6 +2495,8 @@ export default function Viewport({
   onSelectManyRef.current = onSelectMany
   const onSelectGuideRef = useRef(onSelectGuide)
   onSelectGuideRef.current = onSelectGuide
+  const onSelectGuidesRef = useRef(onSelectGuides)
+  onSelectGuidesRef.current = onSelectGuides
   const onSelectAnnotationRef = useRef(onSelectAnnotation)
   onSelectAnnotationRef.current = onSelectAnnotation
   const onOpenAnnotationEditorRef = useRef(onOpenAnnotationEditor)
@@ -2606,7 +2613,9 @@ export default function Viewport({
   const lastPushedSessionRef = useRef<{ node: NodeRef; label: string }[]>([])
   // Latest selected ids, readable inside the stable event closures.
   const selectedIdsRef = useRef<NodeRef[]>(selectedIds)
-  // Latest selected construction guide — the Move tool's guide target.
+  // Latest selected construction guides — what Move moves beside the nodes.
+  const selectedGuidesRef = useRef<readonly bigint[]>(selectedGuides)
+  // The one selected guide, when exactly one is — Rotate's guide target.
   const selectedGuideRef = useRef<bigint | null>(guideTargetOf(selectedGuides))
   // Latest current material id for the Paint tool.
   const currentMaterialIdRef = useRef<bigint>(currentMaterialId)
@@ -3894,6 +3903,15 @@ export default function Viewport({
     function landGuideTransform(guide: bigint | null): void {
       sceneRenderer.refreshGuides()
       onSelectGuideRef.current?.(guide)
+      scheduleRender()
+    }
+
+    /** Guides moved or were copied along with a Move (MoveTool `_land`):
+     *  redraw the guides and select exactly `guides`, beside the nodes the
+     *  commit selected. */
+    function landGuideSelection(guides: bigint[]): void {
+      sceneRenderer.refreshGuides()
+      onSelectGuidesRef.current?.(guides)
       scheduleRender()
     }
 
@@ -7777,10 +7795,10 @@ export default function Viewport({
         },
       )
       tool.setSelectionAcquirer(acquireTransformTargets, releaseTransformTargets)
-      // A guide is a Move target too. A drag-move hands over nodes, never
-      // a guide, so only a plain tool switch carries the selected one in.
-      if (selection === undefined) tool.setGuideTarget(selectedGuideRef.current)
-      tool.setGuideHooks(acquireGuideTarget, landGuideTransform)
+      // Guides are Move targets too. A drag-move hands over nodes, never
+      // a guide, so only a plain tool switch carries the selected ones in.
+      if (selection === undefined) tool.setGuideSelection(selectedGuidesRef.current)
+      tool.setGuideHooks(acquireGuideTarget, landGuideSelection)
       applyEditContext(tool, computeEditContext(wasmScene, activeContextRef.current))
       return tool
     }
@@ -12154,7 +12172,11 @@ export default function Viewport({
   useEffect(() => {
     const guideTarget = guideTargetOf(selectedGuides)
     selectedGuideRef.current = guideTarget
+    selectedGuidesRef.current = selectedGuides
     const activeTool = toolControllerRef.current?.activeTool
+    if (activeTool !== undefined && 'setGuideSelection' in activeTool) {
+      (activeTool as { setGuideSelection(guides: readonly bigint[]): void }).setGuideSelection(selectedGuides)
+    }
     if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
       (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(guideTarget)
     }

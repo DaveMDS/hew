@@ -1,9 +1,10 @@
 /**
- * MoveTool on construction guides: the guide target (`setGuideTarget`), the
- * click that takes a guide (`setGuideHooks`) and its ephemeral selection,
- * and the copy / ×N array / retype paths through `transform_guide` and
- * `duplicate_guide_array`, against a mocked WasmScene. `isMac` is mocked to
- * true so a bare Alt tap toggles copy mode (see MoveTool.test.ts).
+ * MoveTool on construction guides: the selected guides (`setGuideSelection`)
+ * move, copy, array, and retype in the nodes' own kernel calls
+ * (`transform_selection`, `duplicate_selection_array`), and the click that
+ * takes a guide (`setGuideHooks`) selects it for the gesture only — against
+ * a mocked WasmScene. `isMac` is mocked to true so a bare Alt tap toggles
+ * copy mode (see MoveTool.test.ts).
  */
 
 import { describe, it, expect, vi } from 'vitest'
@@ -30,22 +31,30 @@ const translationOf = (affine: Float64Array): number[] => [affine[3], affine[7],
 /** The members MoveTool calls on a guide gesture. Every commit, undo and
  *  redo moves the history generation, as the kernel's would. */
 function makeScene() {
-  const state = { gen: 1n, nextGuide: 50n }
+  const state = { gen: 1n, nextGuide: 50n, nextNode: 100n }
   const bump = () => { state.gen += 1n }
   const scene = {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     guide_kind: vi.fn(() => 'line'),
     guide_geometry: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
-    transform_guide: vi.fn((_g: bigint, _a: Float64Array) => bump()),
-    duplicate_guide_array: vi.fn((_g: bigint, _a: Float64Array, count: number) => {
-      bump()
-      return BigUint64Array.from({ length: count }, () => state.nextGuide++)
-    }),
-    duplicate_selection_array: vi.fn(() => {
-      bump()
-      return { roots: () => [], guides: () => new BigUint64Array(0), free: () => { /* no-op */ } }
-    }),
-    transform_selection: vi.fn(() => bump()),
+    transform_guide: vi.fn(),
+    duplicate_guide_array: vi.fn(),
+    // Copies in creation order: every source's copy 1, then copy 2, …
+    duplicate_selection_array: vi.fn(
+      (_kinds: Uint8Array, ids: BigUint64Array, guides: BigUint64Array, _affine: Float64Array, count: number) => {
+        bump()
+        const roots: { kind: string; id: bigint }[] = []
+        const copies: bigint[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) roots.push({ kind: 'object', id: state.nextNode++ })
+          for (let i = 0; i < guides.length; i++) copies.push(state.nextGuide++)
+        }
+        return { roots: () => roots, guides: () => BigUint64Array.from(copies), free: () => { /* no-op */ } }
+      },
+    ),
+    transform_selection: vi.fn(
+      (_kinds: Uint8Array, _ids: BigUint64Array, _sketches: BigUint64Array, _guides: BigUint64Array, _affine: Float64Array) => bump(),
+    ),
     history_generation: vi.fn(() => state.gen),
     max_array_count: vi.fn(() => 1000),
     scene_undo: vi.fn(() => { bump(); return { free: () => { /* no-op */ } } }),
@@ -55,33 +64,50 @@ function makeScene() {
 }
 
 /**
- * A tool with no nodes selected, `selected` as the app's selected guide,
- * and a guide acquirer that hits `hit` (null: a miss). The acquirer and the
- * commit hook mirror the Viewport: both select the guide they name in the
- * app, which pushes it back into the tool.
+ * A tool with `nodes` and `guides` as the app's selection and a guide
+ * acquirer that hits `hit` (null: a miss). The hooks mirror the Viewport:
+ * the acquirer selects the guide it names, a node commit replaces the whole
+ * selection with its nodes, a guide landing sets the guides beside them,
+ * and the release empties everything — each pushed back into the tool.
  */
-function makeTool(opts: { selected?: bigint | null; hit?: bigint | null; nodes?: NodeRef[] } = {}) {
+function makeTool(opts: { guides?: bigint[]; hit?: bigint | null; nodes?: NodeRef[] } = {}) {
   const scene = makeScene()
   const preview = new THREE.Group()
-  const onCommit = vi.fn()
-  const onToast = vi.fn()
-  const tool = new MoveTool(scene as never, preview, null, opts.nodes ?? [], onCommit, onToast)
-  const app = { guide: opts.selected ?? null }
-  const select = (g: bigint | null) => {
-    app.guide = g
-    tool.setGuideTarget(g)
+  const app = { nodes: opts.nodes ?? [], guides: opts.guides ?? [] }
+  const push = () => {
+    tool.setSelection(app.nodes)
+    tool.setGuideSelection(app.guides)
   }
-  tool.setGuideTarget(app.guide)
+  const onCommit = vi.fn((nodes: NodeRef[]) => {
+    app.nodes = nodes
+    app.guides = []
+    push()
+  })
+  const onToast = vi.fn()
+  const tool = new MoveTool(scene as never, preview, null, app.nodes, onCommit, onToast)
+  tool.setGuideSelection(app.guides)
   const acquire = vi.fn(() => {
     const g = opts.hit ?? null
-    if (g !== null) select(g)
+    if (g !== null) {
+      app.nodes = []
+      app.guides = [g]
+      push()
+    }
     return g
   })
-  const onGuide = vi.fn((g: bigint | null) => select(g))
-  tool.setGuideHooks(acquire, onGuide)
+  const onGuides = vi.fn((guides: bigint[]) => {
+    app.guides = guides
+    push()
+  })
+  tool.setGuideHooks(acquire, onGuides)
   const nodeAcquire = vi.fn(() => null)
-  tool.setSelectionAcquirer(nodeAcquire)
-  return { tool, scene, preview, onCommit, onToast, app, acquire, onGuide, nodeAcquire }
+  const release = vi.fn(() => {
+    app.nodes = []
+    app.guides = []
+    push()
+  })
+  tool.setSelectionAcquirer(nodeAcquire, release)
+  return { tool, scene, preview, onCommit, onToast, app, acquire, onGuides, nodeAcquire, release }
 }
 
 /** Click a base point at the origin, then a destination at (x, 0, 0). */
@@ -91,9 +117,23 @@ function clickMove(tool: MoveTool, x: number): void {
   tool.onPointerDown(snapAt(x), ray)
 }
 
-describe('MoveTool — moving a selected guide', () => {
-  it('commits one transform_guide by the clicked vector and keeps the guide selected', () => {
-    const t = makeTool({ selected: 7n })
+/** The guides and the translation of a `transform_selection` call. */
+const moved = (call: unknown[]): { ids: bigint[]; guides: bigint[]; by: number[] } => ({
+  ids: [...(call[1] as BigUint64Array)],
+  guides: [...(call[3] as BigUint64Array)],
+  by: translationOf(call[4] as Float64Array),
+})
+/** The sources, the step, and the count of a `duplicate_selection_array` call. */
+const copied = (call: unknown[]): { ids: bigint[]; guides: bigint[]; by: number[]; count: number } => ({
+  ids: [...(call[1] as BigUint64Array)],
+  guides: [...(call[2] as BigUint64Array)],
+  by: translationOf(call[3] as Float64Array),
+  count: call[4] as number,
+})
+
+describe('MoveTool — moving selected guides', () => {
+  it('commits one transform_selection by the clicked vector and keeps the guide selected', () => {
+    const t = makeTool({ guides: [7n] })
     t.tool.onPointerDown(snapAt(0), ray)
     // The guide's ghost, and the dashed base→destination line.
     expect(t.preview.children).toHaveLength(2)
@@ -102,89 +142,133 @@ describe('MoveTool — moving a selected guide', () => {
     t.tool.onPointerMove(snapAt(2), ray)
     t.tool.onPointerDown(snapAt(2), ray)
 
-    expect(t.scene.transform_guide).toHaveBeenCalledTimes(1)
-    const [g, affine] = t.scene.transform_guide.mock.calls[0]
-    expect(g).toBe(7n)
-    expect(translationOf(affine)).toEqual([2, 0, 0])
-    expect(t.onGuide).toHaveBeenLastCalledWith(7n)
-    expect(t.app.guide).toBe(7n)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(moved(t.scene.transform_selection.mock.calls[0])).toEqual({ ids: [], guides: [7n], by: [2, 0, 0] })
+    expect(t.scene.transform_guide).not.toHaveBeenCalled()
+    expect(t.onGuides).toHaveBeenLastCalledWith([7n])
+    expect(t.app.guides).toEqual([7n])
     expect(t.onCommit).not.toHaveBeenCalled() // no node selection churn
     expect(t.preview.children).toHaveLength(0)
   })
 
+  it('moves every selected guide in the one call', () => {
+    const t = makeTool({ guides: [7n, 8n, 9n] })
+    clickMove(t.tool, 2)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(moved(t.scene.transform_selection.mock.calls[0]).guides).toEqual([7n, 8n, 9n])
+    expect(t.app.guides).toEqual([7n, 8n, 9n])
+  })
+
+  it('moves nodes and guides together in one call, and keeps both selected', () => {
+    const node: NodeRef = { kind: 'object', id: 1n }
+    const t = makeTool({ nodes: [node], guides: [7n, 8n] })
+    t.tool.onPointerDown(snapAt(0), ray)
+    // One ghost group (the node's and the guides') and the dashed line.
+    expect(t.preview.children).toHaveLength(2)
+    t.tool.onPointerMove(snapAt(3), ray)
+    t.tool.onPointerDown(snapAt(3), ray)
+
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(moved(t.scene.transform_selection.mock.calls[0])).toEqual({ ids: [1n], guides: [7n, 8n], by: [3, 0, 0] })
+    expect(t.app.nodes).toEqual([node])
+    expect(t.app.guides).toEqual([7n, 8n])
+  })
+
   it('a typed distance along a locked axis moves the guide exactly that far', () => {
-    const t = makeTool({ selected: 7n })
+    const t = makeTool({ guides: [7n] })
     t.tool.onPointerDown(snapAt(0), ray)
     t.tool.onKey(key('ArrowLeft')) // lock green (Y)
     type(t.tool, '3')
     t.tool.onKey(key('Enter'))
-    expect(translationOf(t.scene.transform_guide.mock.calls[0][1])).toEqual([0, 3, 0])
+    expect(moved(t.scene.transform_selection.mock.calls[0]).by).toEqual([0, 3, 0])
   })
 
-  it('a click off any guide is the selected guide\'s base point — no node is acquired', () => {
-    const t = makeTool({ selected: 7n, hit: null })
+  it('a click is the selected guides\' base point, on another guide too — nothing is acquired', () => {
+    const t = makeTool({ guides: [7n], hit: 9n })
     clickMove(t.tool, 1)
+    expect(t.acquire).not.toHaveBeenCalled()
     expect(t.nodeAcquire).not.toHaveBeenCalled()
-    expect(t.scene.transform_guide.mock.calls[0][0]).toBe(7n)
+    expect(moved(t.scene.transform_selection.mock.calls[0]).guides).toEqual([7n])
+    expect(t.app.guides).toEqual([7n])
   })
 
-  it('a retyped distance redoes the guide move: one undo, the same guide moved again', () => {
-    const t = makeTool({ selected: 7n })
+  it('a retyped distance redoes the move: one undo, the same guides moved again', () => {
+    const t = makeTool({ guides: [7n, 8n] })
     clickMove(t.tool, 2)
     type(t.tool, '5')
     t.tool.onKey(key('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
-    expect(t.scene.transform_guide).toHaveBeenCalledTimes(2)
-    const [g, affine] = t.scene.transform_guide.mock.calls[1]
-    expect(g).toBe(7n)
-    expect(translationOf(affine)).toEqual([5, 0, 0])
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(2)
+    expect(moved(t.scene.transform_selection.mock.calls[1])).toEqual({ ids: [], guides: [7n, 8n], by: [5, 0, 0] })
   })
 
   it('a refused move toasts the kernel error and lands nothing', () => {
-    const t = makeTool({ selected: 7n })
-    t.scene.transform_guide.mockImplementationOnce(() => {
+    const t = makeTool({ guides: [7n] })
+    t.scene.transform_selection.mockImplementationOnce(() => {
       throw new Error('UnknownGuide: no such guide in this document')
     })
     clickMove(t.tool, 2)
     expect(t.onToast).toHaveBeenCalledTimes(1)
-    expect(t.onGuide).not.toHaveBeenCalled()
+    expect(t.onGuides).not.toHaveBeenCalled()
+  })
+
+  it('with a guide selected the hover highlights nothing; with nothing selected it offers both', () => {
+    expect(makeTool({ guides: [7n] }).tool.clickAcquire()).toBeNull()
+    expect(makeTool().tool.clickAcquire()).toEqual({ guides: true, nodes: true })
   })
 })
 
-describe('MoveTool — copying a guide', () => {
-  it('copy mode commits one duplicate_guide_array (count 1); the copy becomes the selected guide', () => {
-    const t = makeTool({ selected: 7n })
+describe('MoveTool — copying guides', () => {
+  it('copy mode commits one duplicate_selection_array (count 1); the copies become the selected guides', () => {
+    const t = makeTool({ guides: [7n, 8n] })
     t.tool.onKey(key('Alt'))
     clickMove(t.tool, 1)
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    const [g, affine, count] = t.scene.duplicate_guide_array.mock.calls[0]
-    expect([g, count]).toEqual([7n, 1])
-    expect(translationOf(affine)).toEqual([1, 0, 0])
-    expect(t.app.guide).toBe(50n)
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_guide_array).not.toHaveBeenCalled()
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[0])).toEqual({ ids: [], guides: [7n, 8n], by: [1, 0, 0], count: 1 })
+    expect(t.app.guides).toEqual([50n, 51n])
+  })
+
+  it('copies nodes and guides in the one call; all the copies become the selection', () => {
+    const t = makeTool({ nodes: [{ kind: 'object', id: 1n }], guides: [7n] })
+    t.tool.onKey(key('Alt'))
+    clickMove(t.tool, 1)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[0])).toEqual({ ids: [1n], guides: [7n], by: [1, 0, 0], count: 1 })
+    expect(t.app.nodes).toEqual([{ kind: 'object', id: 100n }])
+    expect(t.app.guides).toEqual([50n])
   })
 
   it('3x retracts the single copy and lays three from the ORIGINAL guide in one call', () => {
-    const t = makeTool({ selected: 7n })
+    const t = makeTool({ guides: [7n] })
     t.tool.onKey(key('Alt'))
     clickMove(t.tool, 1)
     type(t.tool, '3x')
     t.tool.onKey(key('Enter'))
     expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
-    const [g, affine, count] = t.scene.duplicate_guide_array.mock.calls[1]
-    expect([g, count]).toEqual([7n, 3])
-    expect(translationOf(affine)).toEqual([1, 0, 0])
-    expect(t.app.guide).toBe(53n) // the last of the three
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[1])).toEqual({ ids: [], guides: [7n], by: [1, 0, 0], count: 3 })
+    expect(t.app.guides).toEqual([51n, 52n, 53n]) // every copy, like nodes
   })
 
   it('/4 divides the committed distance into four steps', () => {
-    const t = makeTool({ selected: 7n })
+    const t = makeTool({ guides: [7n] })
     t.tool.onKey(key('Alt'))
     clickMove(t.tool, 2)
     type(t.tool, '/4')
     t.tool.onKey(key('Enter'))
-    const [, affine, count] = t.scene.duplicate_guide_array.mock.calls[1]
-    expect(count).toBe(4)
-    expect(translationOf(affine)).toEqual([0.5, 0, 0])
+    const call = copied(t.scene.duplicate_selection_array.mock.calls[1])
+    expect(call.count).toBe(4)
+    expect(call.by).toEqual([0.5, 0, 0])
+  })
+
+  it('a distance typed after an array re-spaces it from the original guide', () => {
+    const t = makeTool({ guides: [7n] })
+    t.tool.onKey(key('Alt'))
+    clickMove(t.tool, 1)
+    type(t.tool, '3x'); t.tool.onKey(key('Enter'))
+    type(t.tool, '2'); t.tool.onKey(key('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[2])).toEqual({ ids: [], guides: [7n], by: [2, 0, 0], count: 3 })
   })
 })
 
@@ -192,60 +276,64 @@ describe('MoveTool — a click on a guide takes it, for the gesture only', () =>
   it('with nothing selected, the clicked guide moves and the selection is empty afterwards', () => {
     const t = makeTool({ hit: 9n })
     t.tool.onPointerDown(snapAt(0), ray)
-    expect(t.app.guide).toBe(9n) // highlighted while it moves
+    expect(t.app.guides).toEqual([9n]) // highlighted while it moves
     expect(t.nodeAcquire).not.toHaveBeenCalled()
     t.tool.onPointerMove(snapAt(2), ray)
     t.tool.onPointerDown(snapAt(2), ray)
-    expect(t.scene.transform_guide.mock.calls[0][0]).toBe(9n)
-    expect(t.app.guide).toBeNull()
+    expect(moved(t.scene.transform_selection.mock.calls[0]).guides).toEqual([9n])
+    expect(t.app.guides).toEqual([])
   })
 
-  it('a click on ANOTHER guide moves that one, and the earlier selection comes back', () => {
-    const t = makeTool({ selected: 7n, hit: 9n })
-    clickMove(t.tool, 1)
-    expect(t.scene.transform_guide.mock.calls[0][0]).toBe(9n)
-    expect(t.app.guide).toBe(7n)
-  })
-
-  it('a click on the guide already selected keeps it selected', () => {
-    const t = makeTool({ selected: 7n, hit: 7n })
-    clickMove(t.tool, 1)
-    expect(t.app.guide).toBe(7n)
+  it('the next click takes another guide: nothing stays selected between gestures', () => {
+    const t = makeTool({ hit: 9n })
+    clickMove(t.tool, 2)
+    clickMove(t.tool, 2)
+    expect(t.acquire).toHaveBeenCalledTimes(2)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(2)
   })
 
   it('Escape mid-gesture gives the selection back', () => {
     const t = makeTool({ hit: 9n })
     t.tool.onPointerDown(snapAt(0), ray)
     t.tool.onKey(key('Escape'))
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    expect(t.app.guide).toBeNull()
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.app.guides).toEqual([])
   })
 
   it('a second click on the base point moves nothing and gives the selection back', () => {
     const t = makeTool({ hit: 9n })
     t.tool.onPointerDown(snapAt(0), ray)
     t.tool.onPointerDown(snapAt(0), ray)
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
-    expect(t.app.guide).toBeNull()
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.app.guides).toEqual([])
+  })
+
+  it('a retyped distance re-lands the click-taken guide and leaves nothing selected', () => {
+    const t = makeTool({ hit: 9n })
+    clickMove(t.tool, 2)
+    type(t.tool, '5')
+    t.tool.onKey(key('Enter'))
+    expect(moved(t.scene.transform_selection.mock.calls[1])).toEqual({ ids: [], guides: [9n], by: [5, 0, 0] })
+    expect(t.app.guides).toEqual([])
   })
 
   it('a copy of a click-taken guide, and its array, leave nothing selected', () => {
     const t = makeTool({ hit: 9n })
     t.tool.onKey(key('Alt'))
     clickMove(t.tool, 1)
-    expect(t.app.guide).toBeNull()
+    expect(t.app.guides).toEqual([])
     type(t.tool, '2x')
     t.tool.onKey(key('Enter'))
-    expect(t.scene.duplicate_guide_array.mock.calls[1][0]).toBe(9n)
-    expect(t.app.guide).toBeNull()
+    expect(copied(t.scene.duplicate_selection_array.mock.calls[1]).guides).toEqual([9n])
+    expect(t.app.guides).toEqual([])
   })
 
   it('with nodes selected, a click on a guide is their base point', () => {
     const t = makeTool({ hit: 9n, nodes: [{ kind: 'object', id: 1n }] })
     clickMove(t.tool, 1)
     expect(t.acquire).not.toHaveBeenCalled()
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
     expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(moved(t.scene.transform_selection.mock.calls[0])).toEqual({ ids: [1n], guides: [], by: [1, 0, 0] })
   })
 
   it('a miss falls through to the node acquirer, then the hint', () => {
