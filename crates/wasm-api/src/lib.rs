@@ -4772,7 +4772,7 @@ impl Scene {
     /// `kinds`/`ids` are parallel arrays naming live sibling-or-not tree
     /// nodes (kind `0` = object, `1` = group, `2` = instance, as in
     /// [`Scene::group_nodes`]); `guides` lists construction guide handles,
-    /// each copied as [`Scene::duplicate_guide_array`] copies one; `affine`
+    /// each copied as [`kernel::Document::duplicate_guide_array`] copies one; `affine`
     /// is the same row-major 3×4 12-float matrix as
     /// [`Scene::transform_object`]. Returns the node clone roots and the
     /// guide copies, each in creation order (every source's copy 1, then
@@ -4936,7 +4936,8 @@ impl Scene {
     /// (`kinds`/`ids` parallel, `make_component`'s convention) —
     /// [`kernel::Document::delete_selection`]. The selection's construction
     /// guides and annotations go in the same step, each removed as
-    /// [`Scene::delete_guide`] and [`Scene::delete_annotation`] remove one.
+    /// [`kernel::Document::delete_guide`] and
+    /// [`kernel::Document::delete_annotation`] remove one.
     /// The Outliner/Edit ▸ Delete and Cut (Lane D, v1.1-cycle.md) both route
     /// every multi/single-node delete through here now, so a batch is one
     /// undo entry, not N: a stale handle anywhere in the lists refuses the
@@ -5066,7 +5067,7 @@ impl Scene {
     /// [`Scene::group_nodes`]); `sketches` lists free-standing sketch
     /// handles (a distinct FFI concept from tree nodes, as in
     /// [`Scene::delete_sketch`]); `guides` lists construction guide handles,
-    /// each carried as [`Scene::transform_guide`] carries one. Objects and
+    /// each carried as [`kernel::Document::transform_guide`] carries one. Objects and
     /// group leaves bake the affine; instances compose it into their pose;
     /// nested/duplicate listings transform once. `affine` is the same
     /// row-major 3×4 12-float matrix as [`Scene::transform_object`]. See
@@ -8504,85 +8505,6 @@ impl Scene {
         Ok(())
     }
 
-    /// Moves one construction guide through `affine` (undoable) — the Move
-    /// tool on a guide. `affine` is the same row-major 3×4 12-float matrix
-    /// as [`Scene::transform_object`]. The handle is unchanged; a point or
-    /// a line's origin moves like any point, a line's direction turns with
-    /// the pose. The guide's snap registration follows it.
-    ///
-    /// # Errors
-    /// - `BadAffine` — `affine` is not 12 floats.
-    /// - `UnknownGuide` — stale, hidden, or foreign handle.
-    /// - `Transform` — a singular `affine`.
-    /// - `DegenerateGuide` — the moved geometry is not a guide (a
-    ///   non-finite coordinate, or a line whose stretch collapses).
-    ///
-    /// On error the document is untouched.
-    pub fn transform_guide(&mut self, guide: u64, affine: &[f64]) -> Result<(), ApiError> {
-        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
-            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
-        })?;
-        let t = Transform::from_affine(rows);
-        let change = self
-            .doc
-            .transform_guide(guide_id(guide), &t)
-            .map_err(doc_err)?;
-        self.reconcile(&change);
-        recording::record(recording::RecordedCall::TransformGuide {
-            guide,
-            affine: *rows,
-        });
-        Ok(())
-    }
-
-    /// Copies one construction guide `count` times along `affine` — the
-    /// Move tool's copy (count 1) and its ×N / /N array on a guide. Copy
-    /// `k` lands at `affine` composed `k` times, as in
-    /// [`Scene::duplicate_selection_array`]; each copy carries the source's
-    /// tags. The whole array is **one undoable step**. Returns the copies'
-    /// handles, copy 1 first.
-    ///
-    /// # Errors
-    /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]
-    ///   (enforced here, at the trust boundary, for the same reason as
-    ///   [`Scene::duplicate_selection_array`]).
-    /// - `BadAffine` — `affine` is not 12 floats.
-    /// - `UnknownGuide` — stale, hidden, or foreign handle.
-    /// - `Transform` — a singular `affine`.
-    /// - `DegenerateGuide` — a copy's geometry is not a guide.
-    ///
-    /// On error the document is untouched.
-    pub fn duplicate_guide_array(
-        &mut self,
-        guide: u64,
-        affine: &[f64],
-        count: u32,
-    ) -> Result<Vec<u64>, ApiError> {
-        let count_nz = std::num::NonZeroU32::new(count)
-            .filter(|c| c.get() <= MAX_ARRAY_COUNT)
-            .ok_or_else(|| {
-                ApiError::new(
-                    "BadCount",
-                    &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
-                )
-            })?;
-        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
-            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
-        })?;
-        let t = Transform::from_affine(rows);
-        let (copies, change) = self
-            .doc
-            .duplicate_guide_array(guide_id(guide), &t, count_nz)
-            .map_err(doc_err)?;
-        self.reconcile(&change);
-        recording::record(recording::RecordedCall::DuplicateGuideArray {
-            guide,
-            affine: *rows,
-            count,
-        });
-        Ok(copies.into_iter().map(|g| g.data().as_ffi()).collect())
-    }
-
     /// Enable/disable snapping to construction guides (View ▸ Guides). A hidden
     /// guide must not snap or flash a cue, so toggling its visibility off also
     /// suppresses its inference candidates. The guides stay registered;
@@ -9090,21 +9012,6 @@ impl Scene {
             offset: [offset_v.x, offset_v.y, offset_v.z],
             text,
         });
-        Ok(())
-    }
-
-    /// Deletes (hides) one annotation. Undoable; the handle stays valid for
-    /// redo.
-    ///
-    /// # Errors
-    /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
-    pub fn delete_annotation(&mut self, id: u64) -> Result<(), ApiError> {
-        let change = self
-            .doc
-            .delete_annotation(annotation_id(id))
-            .map_err(doc_err)?;
-        self.reconcile(&change);
-        recording::record(recording::RecordedCall::DeleteAnnotation { id });
         Ok(())
     }
 
@@ -11818,6 +11725,111 @@ impl Scene {
         recording::record(recording::RecordedCall::Load {
             bytes: bytes.to_vec(),
         });
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------- replay-only calls
+
+/// Calls the app no longer makes, kept off the JS surface for the replay of
+/// recordings that still carry them ([`recording::RecordedCall`]'s
+/// `TransformGuide`, `DuplicateGuideArray`, and `DeleteAnnotation`): Move
+/// and Rotate carry guides through [`Scene::transform_selection`] and
+/// [`Scene::duplicate_selection_array`], and Delete removes annotations
+/// through [`Scene::delete_selection`]. Each still records itself, so a
+/// replay recorded in turn reads as the original did.
+impl Scene {
+    /// Moves one construction guide through `affine` (undoable) — the Move
+    /// tool on a guide. `affine` is the same row-major 3×4 12-float matrix
+    /// as [`Scene::transform_object`]. The handle is unchanged; a point or
+    /// a line's origin moves like any point, a line's direction turns with
+    /// the pose. The guide's snap registration follows it.
+    ///
+    /// # Errors
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — the moved geometry is not a guide (a
+    ///   non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// On error the document is untouched.
+    pub(crate) fn transform_guide(&mut self, guide: u64, affine: &[f64]) -> Result<(), ApiError> {
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_guide(guide_id(guide), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformGuide {
+            guide,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Copies one construction guide `count` times along `affine` — the
+    /// Move tool's copy (count 1) and its ×N / /N array on a guide. Copy
+    /// `k` lands at `affine` composed `k` times, as in
+    /// [`Scene::duplicate_selection_array`]; each copy carries the source's
+    /// tags. The whole array is **one undoable step**. Returns the copies'
+    /// handles, copy 1 first.
+    ///
+    /// # Errors
+    /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]
+    ///   (enforced here, at the trust boundary, for the same reason as
+    ///   [`Scene::duplicate_selection_array`]).
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — a copy's geometry is not a guide.
+    ///
+    /// On error the document is untouched.
+    pub(crate) fn duplicate_guide_array(
+        &mut self,
+        guide: u64,
+        affine: &[f64],
+        count: u32,
+    ) -> Result<Vec<u64>, ApiError> {
+        let count_nz = std::num::NonZeroU32::new(count)
+            .filter(|c| c.get() <= MAX_ARRAY_COUNT)
+            .ok_or_else(|| {
+                ApiError::new(
+                    "BadCount",
+                    &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
+                )
+            })?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let (copies, change) = self
+            .doc
+            .duplicate_guide_array(guide_id(guide), &t, count_nz)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateGuideArray {
+            guide,
+            affine: *rows,
+            count,
+        });
+        Ok(copies.into_iter().map(|g| g.data().as_ffi()).collect())
+    }
+
+    /// Deletes (hides) one annotation. Undoable; the handle stays valid for
+    /// redo.
+    ///
+    /// # Errors
+    /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
+    pub(crate) fn delete_annotation(&mut self, id: u64) -> Result<(), ApiError> {
+        let change = self
+            .doc
+            .delete_annotation(annotation_id(id))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteAnnotation { id });
         Ok(())
     }
 }
@@ -19249,6 +19261,47 @@ mod tests {
             1,
             "a delete with no guides writes no guides list"
         );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// A recording that still carries the single-guide move and copy and the
+    /// single-annotation delete — calls the app no longer makes, kept off
+    /// the JS surface for this — replays to the exact golden state.
+    #[test]
+    fn replay_only_guide_and_annotation_calls_still_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(-1, 0, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        let step = kernel::Transform::translation(kernel::Vec3::new(1.0, 0.0, 0.0)).to_affine();
+        scene.transform_guide(g, &step).unwrap();
+        scene.duplicate_guide_array(g, &step, 2).unwrap();
+        scene.delete_annotation(note).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        for method in [
+            "transform_guide",
+            "duplicate_guide_array",
+            "delete_annotation",
+        ] {
+            assert!(
+                json.contains(&format!("\"method\":\"{method}\"")),
+                "{method} is recorded"
+            );
+        }
 
         let mut replayed = Scene::new();
         let final_hash = replayed.replay(&json).unwrap();

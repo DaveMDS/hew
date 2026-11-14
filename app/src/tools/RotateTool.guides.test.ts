@@ -40,8 +40,6 @@ function makeScene() {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     guide_kind: vi.fn(() => 'line'),
     guide_geometry: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0])),
-    transform_guide: vi.fn(),
-    duplicate_guide_array: vi.fn(),
     // Copies in creation order: every source's copy 1, then copy 2, …
     duplicate_selection_array: vi.fn(
       (_kinds: Uint8Array, ids: BigUint64Array, guides: BigUint64Array, _affine: Float64Array, count: number) => {
@@ -149,7 +147,6 @@ describe('RotateTool — rotating selected guides', () => {
     expect(call.ids).toEqual([])
     expect(call.guides).toEqual([7n])
     expect(call.theta).toBeCloseTo(Math.PI / 2, 9)
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
     expect(t.app.guides).toEqual([7n])
     expect(t.onCommit).not.toHaveBeenCalled()
   })
@@ -205,7 +202,6 @@ describe('RotateTool — copying guides', () => {
     t.tool.onKey(key('Alt'))
     rotateQuarter(t.tool)
     expect(t.scene.transform_selection).not.toHaveBeenCalled()
-    expect(t.scene.duplicate_guide_array).not.toHaveBeenCalled()
     const call = copied(t.scene.duplicate_selection_array.mock.calls[0])
     expect([call.guides, call.count]).toEqual([[7n, 8n], 1])
     expect(call.theta).toBeCloseTo(Math.PI / 2, 9)

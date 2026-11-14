@@ -37,8 +37,6 @@ function makeScene() {
     axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     guide_kind: vi.fn(() => 'line'),
     guide_geometry: vi.fn(() => new Float64Array([0, 0, 0, 0, 1, 0])),
-    transform_guide: vi.fn(),
-    duplicate_guide_array: vi.fn(),
     // Copies in creation order: every source's copy 1, then copy 2, …
     duplicate_selection_array: vi.fn(
       (_kinds: Uint8Array, ids: BigUint64Array, guides: BigUint64Array, _affine: Float64Array, count: number) => {
@@ -144,7 +142,6 @@ describe('MoveTool — moving selected guides', () => {
 
     expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
     expect(moved(t.scene.transform_selection.mock.calls[0])).toEqual({ ids: [], guides: [7n], by: [2, 0, 0] })
-    expect(t.scene.transform_guide).not.toHaveBeenCalled()
     expect(t.onGuides).toHaveBeenLastCalledWith([7n])
     expect(t.app.guides).toEqual([7n])
     expect(t.onCommit).not.toHaveBeenCalled() // no node selection churn
@@ -224,7 +221,6 @@ describe('MoveTool — copying guides', () => {
     t.tool.onKey(key('Alt'))
     clickMove(t.tool, 1)
     expect(t.scene.transform_selection).not.toHaveBeenCalled()
-    expect(t.scene.duplicate_guide_array).not.toHaveBeenCalled()
     expect(copied(t.scene.duplicate_selection_array.mock.calls[0])).toEqual({ ids: [], guides: [7n, 8n], by: [1, 0, 0], count: 1 })
     expect(t.app.guides).toEqual([50n, 51n])
   })
