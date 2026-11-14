@@ -195,7 +195,7 @@ longer replay.
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket the segments of one drawn arc/circle as a curve chain |
 | `sketch_begin_curve_with` | `sketch`, `center[3]`, `radius` | curve bracket carrying the chain's analytic circle |
 | `sketch_add_segment` | `sketch`, `a[3]`, `b[3]` | add a segment to a sketch |
-| `sketch_remove_edge` | `sketch`, `edge` | remove one sketch edge (the eraser's commit) |
+| `sketch_remove_edge` | `sketch`, `edge` | remove one sketch edge (the app erases drawing through `draft_remove_edges`) |
 | `sketch_begin_gesture` / `sketch_end_gesture` | `sketch` | bracket one drawing gesture (one undo step) |
 | `sketch_cancel_gesture` | — | drop the open gesture without recording |
 | `sketch_begin_curve` / `sketch_end_curve` | `sketch` | bracket segments into one curve chain |
@@ -220,6 +220,7 @@ longer replay.
 | `transform_object` | `object`, `affine[12]` (row-major 3×4) | apply an affine transform |
 | `transform_selection` | `kinds[]`/`ids[]` (parallel node lists), `sketches[]`, `guides[]` (omitted when empty; a recording without it replays unchanged), `affine[12]` | transform a whole multi-selection, construction guides included, as one undo step |
 | `delete_node` | `kind` (0=object, 1=group, 2=instance), `id` | delete a node |
+| `delete_selection` | `kinds[]`/`ids[]` (parallel node lists), `guides[]`, `annotations[]` (each omitted when empty; a recording without them replays unchanged) | delete a whole selection, guides and annotations included, as one undo step (Delete, Cut, and the Eraser) |
 | `duplicate_node` | `kind`, `id`, `affine[12]` | Move+copy of one node: a deep clone placed at the offset |
 | `duplicate_selection_array` | `kinds[]`/`ids[]` (parallel node lists), `guides[]` (omitted when empty, as in `transform_selection`), `affine[12]`, `count` (1–1000; an out-of-range count fails the replay typed rather than hanging) | array copy: every listed node and guide copied `count` times along the step, one undo step |
 | `scene_undo` / `scene_redo` | — | document-level undo/redo (recorded only when it succeeded) |
@@ -252,6 +253,9 @@ longer replay.
 | `add_guide_point` | `p[3]` | add a construction point |
 | `delete_guide` | `guide` | delete one construction guide |
 | `delete_all_guides` | — | delete every visible guide in one undo step |
+| `transform_guide` | `guide`, `affine[12]` | move one guide (no longer recorded by the app, which carries guides in `transform_selection`; still replays) |
+| `duplicate_guide_array` | `guide`, `affine[12]`, `count` | copy one guide `count` times along the step (no longer recorded by the app, which uses `duplicate_selection_array`; still replays) |
+| `delete_annotation` | `id` | delete one annotation (no longer recorded by the app, which uses `delete_selection`; still replays) |
 | `import_dae` | `bytes[]`, `images[]` (`{uri, bytes[], format}` objects) | additive COLLADA import (embeds the file + images) |
 | `import_gltf` | `bytes[]` | additive glTF/GLB import (embeds the file) |
 | `import_skp` | `bytes[]` | additive `.skp` import (embeds the file) |

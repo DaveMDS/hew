@@ -3331,7 +3331,8 @@ impl Scene {
         Ok(SegmentAddedJs { inner: report })
     }
 
-    /// Removes a sketch edge (eraser tool).
+    /// Removes a sketch edge. The app erases drawing through the drafting
+    /// engine (`draft_remove_edges`), not through this.
     pub fn sketch_remove_edge(
         &mut self,
         sketch: u64,
@@ -14169,7 +14170,7 @@ mod tests {
         );
     }
 
-    /// The eraser's commit (`sketch_remove_edge`) is captured and replayed:
+    /// A sketch edge removal (`sketch_remove_edge`) is captured and replayed:
     /// a session that deletes a line diverges without it (the merged
     /// regions and the surviving edge set differ), so the golden state
     /// hash is the proof it round-trips.

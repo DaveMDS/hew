@@ -18,8 +18,8 @@ a new one, and moving a shape onto another arranges them.
 Orbit, pan, and zoom, same mouse buttons, and fly through a model by
 holding the right mouse button and steering with W, A, S, D. Inference snapping everywhere,
 mostly the same shortcuts. Follow Me sweeps profiles into moldings,
-spheres, and goblets. Offset, Slice, through-cuts, and Move/Rotate/Scale
-with copy and `3x` arrays.
+spheres, and goblets. Offset, Slice, through-cuts, an Eraser you click or
+drag across, and Move/Rotate/Scale with copy and `3x` arrays.
 
 **Click or drag.** Every tool with a start and an end takes either
 click, move, click or press, drag, release, as in SketchUp. Standard

@@ -553,14 +553,15 @@ export default function App() {
   const [kernelPanicked, setKernelPanicked] = useState(false)
   /** Selected nodes (ordered; index 0 = primary). */
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
-  /** Selected construction guides, mutually exclusive with node
-   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes.
-   * Empty is always `NO_IDS`, so clearing an empty selection re-renders
-   * nothing. */
+  /** Selected construction guides, part of one selection with the nodes and
+   * annotations: a plain click replaces all three, a modified one changes
+   * only the kind clicked. Deleted with them via Edit ▸ Delete / the Delete
+   * key, in one undo step. Empty is always `NO_IDS`, so clearing an empty
+   * selection re-renders nothing. */
   const [selectedGuides, setSelectedGuides] = useState<readonly bigint[]>(NO_IDS)
-  /** Selected dimension/leader-text annotations, mutually exclusive with node
-   * and guide selection (docs/design/dimensions-text.md). Deleted via the
-   * same Edit ▸ Delete / Delete-key path. Empty is always `NO_IDS`. */
+  /** Selected dimension/leader-text annotations, part of one selection with
+   * the nodes and guides, under `selectedGuides`' rules
+   * (docs/design/dimensions-text.md). Empty is always `NO_IDS`. */
   const [selectedAnnotations, setSelectedAnnotations] = useState<readonly bigint[]>(NO_IDS)
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())

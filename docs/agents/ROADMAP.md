@@ -367,7 +367,10 @@ below.
   removes only the pasted instances. A paste under another origin
   (another window, or after File ▸ Open/New in this one) copies the
   definition as before, with repeat pastes of the same copy reusing it by
-  clipboard provenance; Make Unique breaks a link on purpose
+  clipboard provenance; Make Unique breaks a link on purpose. Copy and Cut
+  carry Objects, groups, and instances only: guides, dimensions, text, and
+  drawing in the selection stay in place, the toast says so, and Cut
+  leaves none of them selected
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
@@ -685,10 +688,12 @@ below.
   handle or the Up/Down arrow keys; sections keep their automatic height
   until one is resized
 - Construction guides — guide lines and points that participate in
-  snapping and are saved with the model. Move and Rotate transform a
-  guide like any selection (axis locks, typed and retyped values), and
-  their copy toggle copies it, ×N / /N arrays (rows, fans) included,
-  each transform or copy one undo step. With nothing else selected, a
+  snapping and are saved with the model. Move and Rotate carry the
+  selected guides together with the selected nodes (axis locks, typed and
+  retyped values), and their copy toggle copies them, ×N / /N arrays
+  (rows, fans) included, each transform or copy one undo step; after a
+  copy every copy is selected, guides included. With a selection, a click
+  on a guide is only the base point or pivot. With nothing selected, a
   click on a guide starts transforming that guide; a guide taken that
   way is selected only for the gesture
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
@@ -872,7 +877,9 @@ below.
   API) with every object and nested tag path following the new name
 - An Object Info panel for renaming, tagging, and checking an object's
   solid status; with several objects selected it tags them all at once,
-  showing the tags they share
+  showing the tags they share. It counts guides and annotations in a
+  mixed selection, and its Tags and Materials rows act on the nodes; a
+  lone guide or annotation shows its own entry
 - A Components panel listing every component definition with its live
   instance count; rename and delete (deleting a definition removes every
   instance that places it, confirmed when it has any); Purge Unused
@@ -1202,7 +1209,8 @@ below.
   it beforehand (SketchUp's pre-selection highlight — the object, group,
   instance, or drawn shape the click would take, and for Move and Rotate a
   guide, in the selection color, through the same resolver the click
-  runs). A selection Move or
+  runs; the Eraser highlights the same way what its click would erase,
+  guides, dimensions, and text included). A selection Move or
   Rotate took this way lasts only for the gesture: once the move or
   rotation lands — copies and ×N / /N arrays included — or is cancelled or
   refused, nothing is selected again; a selection made beforehand is kept.
@@ -1218,12 +1226,14 @@ below.
   are not directly editable from outside
 - The Select tool's full SketchUp modifier matrix, on both a click and a
   marquee drag: plain replaces the selection; Shift toggles each picked
-  node; Ctrl/⌘/Option always adds; Shift plus one of those always
-  subtracts. Triple-clicking a sketch line (or a drawn arc/circle) selects
-  its whole connected shape, while a single click still selects just the
-  one segment under the cursor. Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A)
-  and Edit ▸ Invert Selection round out Select All, mirrored on the native
-  menu bar and the command palette
+  node; Ctrl/⌘/Option always adds; Shift plus one of those always subtracts.
+  A click on a guide, dimension, or text follows the same matrix, so it
+  joins or leaves a selection of nodes; a plain click or marquee replaces
+  all of it. Triple-clicking a sketch line (or a drawn arc/circle) selects
+  its whole connected shape, while a single click still selects just the one
+  segment under the cursor. Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A) and
+  Edit ▸ Invert Selection round out Select All, mirrored on the native menu bar
+  and the command palette
 - Stage-aware status-bar guidance: every tool tells you what to do next
   ("Click the opposite corner — or type exact dimensions"), updating live
   as the gesture advances

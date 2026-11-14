@@ -515,7 +515,10 @@ to, so a Scene's hidden tags hide guides as they hide drawing (a `.skp`
 guide opens on its layer's tag). A guide line has a stretch: the whole
 line for one Hew draws, or a ray or a segment where a `.skp` file holds
 one (SketchUp's Tape Measure makes both), and only that stretch is drawn,
-snapped to, or crossed for an intersection snap.
+snapped to, or crossed for an intersection snap. Guides and annotations
+join the same selection as nodes: Move and Rotate carry the selected
+guides with the selected nodes, and Delete removes all of them, every
+such operation one undo step for the whole selection.
 
 A Sketch's closed loop normally has a face: the region that is filled,
 picked and extruded. A loop can also be edges alone (`faceless`), which is
@@ -549,16 +552,17 @@ is designed so that watertightness can never be broken as a side effect:
   fully watertight Objects sharing a coincident cut face — a real geometric
   split (in the spirit of a CAD "split body" operation), not a virtual
   overlay bolted onto one solid.
-- **Delete.** Deletion removes whole nodes (an Object, Group, Instance, or
-  guide) at a time. Deleting a single face or edge is deliberately
-  unsupported: allowing it would let a watertight solid become a leaky shell
-  through an everyday action, reintroducing the exact failure mode the data
-  model exists to prevent. Removing material or punching an opening always
-  routes through push-through instead. The one sub-element a user can
-  delete is drawing (2.4): erasing a drawn shape on a face merges two coplanar
-  faces back into one, which leaves the shell closed by construction, so
-  the kernel accepts exactly that and still refuses any merge across
-  non-coplanar faces.
+- **Delete.** Deletion removes whole nodes (an Object, Group, or Instance),
+  guides, and annotations; the ones selected together go in one undo step,
+  and the Eraser deletes through the same path. Deleting a single face or
+  edge is deliberately unsupported: allowing it would let a watertight solid
+  become a leaky shell through an everyday action, reintroducing the exact
+  failure mode the data model exists to prevent. Removing material or
+  punching an opening always routes through push-through instead. The one
+  sub-element a user can delete is drawing (2.4): erasing a drawn shape on a
+  face merges two coplanar faces back into one, which leaves the shell
+  closed by construction, so the kernel accepts exactly that and still
+  refuses any merge across non-coplanar faces.
   Model Health's `delete_faces` removes faces from an **open** Object only
   (an import's stray sheet, an importer's partition sheet); a solid refuses
   it with `ObjectIsSolid`, the same stance.
