@@ -81,6 +81,10 @@ msgid "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcu
 msgstr "{chordLabel} stays with {ownerLabel} on this Mac and can’t be a shortcut."
 
 #: src/App.tsx
+msgid "{copiedCount, plural, one {Copied # object; the rest of the selection can't be copied yet} other {Copied # objects; the rest of the selection can't be copied yet}}"
+msgstr "{copiedCount, plural, one {Copied # object; the rest of the selection can't be copied yet} other {Copied # objects; the rest of the selection can't be copied yet}}"
+
+#: src/App.tsx
 msgid "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 msgstr "{copiedCount, plural, one {Copied # object} other {Copied # objects}}"
 
@@ -3637,6 +3641,10 @@ msgstr "Guide point"
 #: src/panels/PrintDialog.tsx
 msgid "Guides"
 msgstr "Guides"
+
+#: src/App.tsx
+msgid "Guides, dimensions, and text can't be copied yet"
+msgstr "Guides, dimensions, and text can't be copied yet"
 
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part

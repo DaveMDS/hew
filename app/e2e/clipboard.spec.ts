@@ -190,6 +190,43 @@ test('a sketch-only selection refuses Copy with a toast, not a crash', async ({ 
   await expect(page.getByText(/Sketch geometry can't be copied yet/)).toBeVisible()
 })
 
+test('Cut of a box and a guide cuts the box, leaves the guide unselected, and says what it left out', async ({ page }) => {
+  const ctx = await setup(page)
+  const ids = await page.evaluate(() => {
+    const h = window.__hew_test!
+    return { box: h.drawBox([0, 0, 0], [1, 1, 0], 1), guide: h.addGuideLine(4, 0, 0, 0, 1, 0) }
+  })
+  await clickWorld(page, ctx, 0.5, 0.5, 1)
+  await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
+  await page.keyboard.down('Shift')
+  await clickWorld(page, ctx, 4, 1, 0)
+  await page.keyboard.up('Shift')
+  await expect(page.getByText('2 selected', { exact: true })).toBeVisible()
+
+  await page.keyboard.press('Control+x')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
+  await expect(page.getByText(/Copied 1 object; the rest of the selection can't be copied yet/)).toBeVisible()
+  expect(await page.evaluate(() => window.__hew_test!.getGuideIds())).toEqual([ids.guide])
+  // The guide left behind is not selected on its own, as if it had been cut.
+  expect(await page.evaluate(() => window.__hew_test!.getSelection())).toEqual([])
+  await expect(page.getByText('Guide line', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('2 selected', { exact: true })).toHaveCount(0)
+})
+
+test('a guide-only selection refuses Copy and Cut with a toast and keeps the guide', async ({ page }) => {
+  const ctx = await setup(page)
+  const guide = await page.evaluate(() => window.__hew_test!.addGuideLine(4, 0, 0, 0, 1, 0))
+  await clickWorld(page, ctx, 4, 1, 0)
+  await expect(page.getByText('Guide line', { exact: true })).toBeVisible()
+
+  await page.keyboard.press('Control+c')
+  await expect(page.getByText(/Guides, dimensions, and text can't be copied yet/)).toBeVisible()
+  await page.keyboard.press('Control+x')
+  await page.waitForTimeout(150)
+  expect(await page.evaluate(() => window.__hew_test!.getGuideIds())).toEqual([guide])
+  await expect(page.getByText('Guide line', { exact: true })).toBeVisible()
+})
+
 test('Cut of a multi-node selection is ONE undo step — a single Ctrl+Z restores everything', async ({ page }) => {
   await setup(page)
   const ids = await page.evaluate(() => {

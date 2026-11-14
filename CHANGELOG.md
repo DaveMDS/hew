@@ -35,6 +35,7 @@ is not guaranteed: releases that change the `.hew` format say so under
 - **Drawing:** At a corner or edge shared by two faces, a shape starts on the face the cursor is leaning toward, not always the one facing the camera most squarely. Off the solid to one side, it takes that side's plane.
 
 - **Move, Rotate:** With a selection, a click on a guide is just the base point or the pivot; it no longer switches the tool to moving that guide alone. With nothing selected, a click still takes the guide under it for that one move or rotation.
+- **Copy, Cut:** Copy and Cut say when part of the selection can't be copied yet (guides, dimensions, text, drawn geometry), instead of leaving it out silently, and Cut no longer leaves that part selected as if it had been cut. A selection of guides, dimensions, or text alone gets its own message.
 
 ### Fixed
 

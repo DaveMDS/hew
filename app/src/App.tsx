@@ -5301,17 +5301,22 @@ export default function App() {
     n.kind === 'object' || n.kind === 'group' || n.kind === 'instance'
 
   const SKETCH_COPY_TOAST = t`Sketch geometry can't be copied yet — use Move with Option/Alt held`
+  const GUIDE_COPY_TOAST = t`Guides, dimensions, and text can't be copied yet`
 
   /** Copy: `extract_item` (unwrapped — a copied plain box stays a plain box,
    *  unlike Save to Library's component wrap) of the selection's structural
    *  subset, then store it. Returns the copied nodes on success (so Cut can
    *  delete exactly what was actually captured) or `null` on refusal/error —
    *  Cut must NOT delete anything when this fails, or the geometry is lost
-   *  with no backup on the clipboard. */
+   *  with no backup on the clipboard. What the copy leaves out (drawn
+   *  geometry, guides, annotations) is said in the toast, never skipped
+   *  silently. */
   const doCopy = (): NodeRef[] | null => {
     const structural = selectedIds.filter(isStructuralNode)
+    const leftOut = selectedIds.length - structural.length + selectedGuides.length + selectedAnnotations.length
     if (structural.length === 0) {
-      if (selectedIds.length > 0) handleToast(SKETCH_COPY_TOAST)
+      if (selectedGuides.length > 0 || selectedAnnotations.length > 0) handleToast(GUIDE_COPY_TOAST)
+      else if (selectedIds.length > 0) handleToast(SKETCH_COPY_TOAST)
       return null
     }
     const scene = sceneRef.current
@@ -5349,7 +5354,14 @@ export default function App() {
     const copiedCount = structural.length
     void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine).then(() => {
       setClipboardAvailable(true)
-      handleToast(plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }))
+      handleToast(
+        leftOut > 0
+          ? plural(copiedCount, {
+              one: "Copied # object; the rest of the selection can't be copied yet",
+              other: "Copied # objects; the rest of the selection can't be copied yet",
+            })
+          : plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }),
+      )
     })
     return structural
   }
@@ -5358,11 +5370,14 @@ export default function App() {
     doCopy()
   }
 
+  /** Cut: Copy, then delete exactly what was copied. What the copy left out
+   *  stays in the model (Copy's toast says so) but leaves the selection
+   *  with the rest, so nothing stays selected as if it had been cut. */
   const handleCut = () => {
     const copied = doCopy()
     if (copied === null) return
     viewportApi.current?.runDelete(copied)
-    setSelectedIds((cur) => cur.filter((n) => !copied.some((c) => nodeEq(c, n))))
+    handleSelectNone()
     setDocRev((r) => r + 1)
   }
 
