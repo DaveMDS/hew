@@ -56,7 +56,7 @@ import { SectionManager, rescaleSectionPlane } from './sectionManager'
 import { isVisiblePartSnap, isClearFaceSnap, classifyTapeHold } from './tapePartsGate'
 import * as inputRecorder from '../recording/inputRecorder'
 import { ToolController } from '../tools/ToolController'
-import { draftEdgesToErase } from '../tools/transformSelection'
+import { draftEdgesToErase, inHistoryBracket } from '../tools/transformSelection'
 import { RectangleTool } from '../tools/RectangleTool'
 import { CircleTool } from '../tools/CircleTool'
 import { PolygonTool, DEFAULT_POLYGON_SIDES } from '../tools/PolygonTool'
@@ -5407,71 +5407,91 @@ export default function Viewport({
       // delete takes it along), and a whole sketch also selected covers its
       // free edges — a draft first would only churn.
       const { draftEdgeKeys, huskCandidates } = draftEdgesToErase(wasmScene, nodes, deletedSketches)
-      for (const [ctx, keys] of draftEdgeKeys) {
-        try {
-          runDraft(wasmScene, { kind: 'ctx', ctx }, t`Delete`, (d) => {
-            wasmScene.draft_remove_edges(d, keysToArray([...keys]))
-          })
-        } catch (err) {
-          const code = parseKernelErrorCode(err)
-          const rawMsg = err instanceof Error ? err.message : String(err)
-          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        }
-      }
-      for (const sketch of huskCandidates) {
-        try {
-          dropHusk(sketch)
-        } catch (err) {
-          const code = parseKernelErrorCode(err)
-          const rawMsg = err instanceof Error ? err.message : String(err)
-          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        }
-      }
-      // World node deletes (object/group/instance, NOT a definition member
-      // edited in-place) are collected here and issued as ONE
-      // `delete_selection` call after the loop, together with the selected
-      // guides and annotations, so a multi-node Delete/Cut lands as a single
-      // undo entry instead of N (adversarial review finding 3) — sketch
-      // sub-entity/def-member deletes stay per-node above, since
-      // `delete_selection` only takes world NodeIds.
-      const worldDeleteKinds: number[] = []
-      const worldDeleteIds: bigint[] = []
-      for (const n of ordered) {
-        try {
-          if (n.kind === 'sketch') {
-            wasmScene.delete_sketch(n.id)
-          } else if (n.kind === 'object' && activeComponent !== null) {
-            // Editing INSIDE a component instance's own definition (component-
-            // edit-parity.md phase A2): an 'object' node here is a definition
-            // member — `delete_def_member` splices it out of the definition
-            // (undo restores it) instead of the world `delete_node`, and
-            // refuses typed (`LastDefinitionMember`) rather than delete a
-            // definition's only member out from under every instance.
-            wasmScene.delete_def_member(activeComponent, n.id)
-          } else {
-            const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
-            worldDeleteKinds.push(kind)
-            worldDeleteIds.push(n.id)
+      // Each step below is its own undo entry (a draft per plane, a husk
+      // removal, a sketch or definition-member delete, the world batch), so
+      // a delete that takes more than one of them runs in one history
+      // bracket: the Delete key and an Eraser stroke undo in one step. A
+      // step that fails is toasted and the rest still go, as before.
+      const deletedAlone = (n: NodeRef): boolean =>
+        n.kind === 'sketch' || (n.kind === 'object' && activeComponent !== null)
+      const inBatch = guides.length > 0 || annotations.length > 0 || ordered.some((n) => !deletedAlone(n))
+      const stepCount =
+        draftEdgeKeys.size + huskCandidates.size + ordered.filter(deletedAlone).length + (inBatch ? 1 : 0)
+      const erase = (): void => {
+        for (const [ctx, keys] of draftEdgeKeys) {
+          try {
+            runDraft(wasmScene, { kind: 'ctx', ctx }, t`Delete`, (d) => {
+              wasmScene.draft_remove_edges(d, keysToArray([...keys]))
+            })
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
           }
-        } catch (err) {
-          const code = parseKernelErrorCode(err)
-          const rawMsg = err instanceof Error ? err.message : String(err)
-          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+        }
+        for (const sketch of huskCandidates) {
+          try {
+            dropHusk(sketch)
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          }
+        }
+        // World node deletes (object/group/instance, NOT a definition member
+        // edited in-place) are collected here and issued as ONE
+        // `delete_selection` call after the loop, together with the selected
+        // guides and annotations, so a multi-node Delete/Cut lands as a single
+        // undo entry instead of N (adversarial review finding 3) — sketch
+        // sub-entity/def-member deletes stay per-node above, since
+        // `delete_selection` only takes world NodeIds.
+        const worldDeleteKinds: number[] = []
+        const worldDeleteIds: bigint[] = []
+        for (const n of ordered) {
+          try {
+            if (n.kind === 'sketch') {
+              wasmScene.delete_sketch(n.id)
+            } else if (n.kind === 'object' && activeComponent !== null) {
+              // Editing INSIDE a component instance's own definition (component-
+              // edit-parity.md phase A2): an 'object' node here is a definition
+              // member — `delete_def_member` splices it out of the definition
+              // (undo restores it) instead of the world `delete_node`, and
+              // refuses typed (`LastDefinitionMember`) rather than delete a
+              // definition's only member out from under every instance.
+              wasmScene.delete_def_member(activeComponent, n.id)
+            } else {
+              const kind = n.kind === 'group' ? 1 : n.kind === 'instance' ? 2 : 0
+              worldDeleteKinds.push(kind)
+              worldDeleteIds.push(n.id)
+            }
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          }
+        }
+        if (worldDeleteKinds.length > 0 || guides.length > 0 || annotations.length > 0) {
+          try {
+            wasmScene.delete_selection(
+              new Uint8Array(worldDeleteKinds),
+              new BigUint64Array(worldDeleteIds),
+              new BigUint64Array(guides),
+              new BigUint64Array(annotations),
+            )
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          }
         }
       }
-      if (worldDeleteKinds.length > 0 || guides.length > 0 || annotations.length > 0) {
-        try {
-          wasmScene.delete_selection(
-            new Uint8Array(worldDeleteKinds),
-            new BigUint64Array(worldDeleteIds),
-            new BigUint64Array(guides),
-            new BigUint64Array(annotations),
-          )
-        } catch (err) {
-          const code = parseKernelErrorCode(err)
-          const rawMsg = err instanceof Error ? err.message : String(err)
-          handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
-        }
+      try {
+        inHistoryBracket(wasmScene, t`Delete`, erase, stepCount > 1)
+      } catch (err) {
+        // The bracket refused to commit and restored the document as it was.
+        const code = parseKernelErrorCode(err)
+        const rawMsg = err instanceof Error ? err.message : String(err)
+        handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       }
       handleSceneRefresh()
       sceneRenderer.refreshAllSketches()

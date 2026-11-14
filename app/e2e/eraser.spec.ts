@@ -148,6 +148,33 @@ test('a drag selects what it crosses, erases it all on release, and one undo bri
   expect(undone.guides).toContain(right)
 })
 
+test('a drag across a drawn line and a guide erases both, and one undo brings both back', async ({ page }) => {
+  const { left } = await boot(page)
+  // A lone line on the ground above the box, right of the left guide.
+  await page.evaluate(() => window.__hew_test!.drawLineChain([[-1, 2.5, 0], [0, 2.5, 0]]))
+  const drawnLines = () =>
+    page.evaluate(() => {
+      const h = window.__hew_test!
+      return h.getSketchIds().reduce((n, s) => n + h.getSketchLines(s).length, 0)
+    })
+  const before = await drawnLines()
+  expect(before).toBeGreaterThan(0)
+  await chooseEraser(page)
+
+  // From the left guide across the line's middle.
+  await pressAndDrag(page, [-2, 2.5, 0], [[-0.5, 2.5, 0]])
+  await expect(count(page, 2)).toBeVisible()
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+  expect((await live(page)).guides).not.toContain(left)
+  expect(await drawnLines()).toBe(0)
+
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(150)
+  expect((await live(page)).guides).toContain(left)
+  expect(await drawnLines()).toBe(before)
+})
+
 test('Escape mid-drag deselects what the stroke touched and erases nothing', async ({ page }) => {
   const { box, right } = await boot(page)
   await chooseEraser(page)
