@@ -4,7 +4,7 @@ description: "Move, Rotate, or Scale with full snapping, axis locks, and typed v
 order: 9
 ---
 
-Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide. With Move and Rotate, clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, their click places the first reference point as usual, and the selection stays. Scale's first click only selects and shows the grips to drag (see Scale below).
+Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide. With Move and Rotate, clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, their click places the first reference point as usual, even on a guide, and the selection stays. Scale's first click only selects and shows the grips to drag (see Scale below).
 
 <docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
 
@@ -16,7 +16,7 @@ All three transform tools show a live ghost preview of the result and a live rea
 
 A quick refresher:
 
-- **Click** an object, sketch, or guide to select it, replacing whatever was selected before. Clicking empty space clears the selection.
+- **Click** an object, sketch, guide, dimension, or text to select it, replacing whatever was selected before. Clicking empty space clears the selection.
 - **Triple-click** a line, or a drawn arc or circle, to select its whole connected shape instead of just the one line or curve run under the cursor. This works on the ground and on a solid's face alike.
 - **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
 - **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid blue rectangle tagged Window and selects what falls **entirely inside** it, plus anything it covers at least 80% of on screen and touches; dragging right→left draws a dashed green rectangle tagged Crossing and selects everything the rectangle **touches**.
@@ -31,6 +31,8 @@ A click or a drag replaces the selection by default. Add a modifier — to a cli
 - **`Shift` + `⌘`/`Option`** (Windows/Linux: `Shift` + `Ctrl`/`Alt`) always subtracts, never adding anything.
 
 The same three combinations work on a rubber-band drag, window or crossing.
+
+Guides, dimensions, and text belong to the same selection: a modified click adds one to the objects already selected, or takes it out, without dropping the rest. A rubber-band drag picks objects and drawn shapes only, so a modified drag leaves the selected guides, dimensions, and text as they are, and a plain drag replaces all of it. Object Info counts everything selected, of every kind.
 
 Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) selects every visible object, group, component, and drawn shape (on the ground or on a solid's face) — the whole model (inside a group's editing context, that group's contents instead); **Edit ▸ Select None** (`⇧⌘A` / `Ctrl+Shift+A`) clears the selection; and **Edit ▸ Invert Selection** swaps the two, selecting everything that wasn't selected and deselecting everything that was.
 
@@ -98,7 +100,7 @@ Scaling a component instance scales that instance alone — the shared definitio
 
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Move and Rotate also take a construction guide: with no objects selected, a click on a guide moves or rotates (or copies) that guide — see [Working with guides](/learn/measurement-and-guides/#working-with-guides). A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike. A sketch's in-plane copies arrive as one undo step per sketch. A copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch, so a shape with a hole keeps its hole, one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Selected guides go along: they move, rotate, copy, and array with the rest of the selection, in the same undo step, and after a copy every copy is selected, guides included. With nothing selected, a click on a guide moves or rotates (or copies) that guide alone — see [Working with guides](/learn/measurement-and-guides/#working-with-guides). A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike. A sketch's in-plane copies arrive as one undo step per sketch. A copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch, so a shape with a hole keeps its hole, one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
 
 Drawn geometry transforms at shape granularity, on the ground and on a solid's face alike. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that lands a shape on top of another joins them exactly as drawing it there would: lines split and merge and the regions re-form, as one undo step, and the moved shape stays selected. A face is no different from the ground here: a shape moved or dragged half past a face's edge splits into a part on the face and a part beyond it, each ready for Push/Pull, and moving it back joins them again. A solid's own edges and corners are not part of the drawing, so none of these tools can move them.
 
@@ -109,10 +111,20 @@ Move+Alt (above) is the fastest way to duplicate something in place, but `⌘C`/
 - **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move+Alt instead, which does carry sketch geometry.
 - **Paste** (`⌘V` / `Ctrl+V`) arms a placement ghost that follows the cursor with the same inference snapping as Move — click to drop it, `Esc` to cancel. Paste again for another copy at a new spot.
 - **Paste In Place** (`⇧⌘V` / `Ctrl+Shift+V`) drops the copy back exactly where it was cut or copied from, with no click.
-- **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selection — one undo step for the delete.
+- **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selected objects — one undo step for the delete.
 
 A copy of a component instance reuses the original's definition (pasting the same clipboard twice doesn't mint two definitions); a copy of a plain object or group stays a plain object or group.
 
 ## Deleting
 
-`Delete` or `Backspace` removes the current selection with any tool active. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` redoes, across the entire document history.
+`Delete` or `Backspace` removes the current selection with any tool active, guides, dimensions, and text included, in one undo step. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` redoes, across the entire document history.
+
+### Eraser (`E`)
+
+The Eraser deletes by touch, without selecting first. It takes what a Select click would take: an object, group, or component, a drawn line or curve, a guide, a dimension, or text. Hovering highlights what a click would erase.
+
+- **Click** something to erase it.
+- **Drag** across several things. Each one the drag touches is selected as it goes, so you can see in the selection highlight and in Object Info what is about to go; letting go of the button erases all of them, in one undo step.
+- Press `Esc` during a drag to cancel it: what it touched is deselected and nothing is erased.
+
+A click inside a filled shape erases nothing: erase its lines, or select the shape and press `Delete`. A click anywhere on a solid erases the whole solid, never one face. Whatever was selected before you pick the Eraser is deselected at the first press, not erased.

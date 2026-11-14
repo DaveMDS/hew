@@ -11,6 +11,7 @@ Tool shortcuts are plain letters, the same on every platform, matching SketchUp'
 | Tool | Key |
 |---|---|
 | Select | `Space` |
+| Eraser | `E` |
 | Line | `L` |
 | Rectangle | `R` |
 | Circle | `C` |
@@ -90,9 +91,9 @@ These keys change what the *current tool operation* does. Each is covered in mor
 | `Option` (Mac) / `Ctrl` (Windows, Linux) (tap) | Move/Rotate toggles between moving/rotating and copying (stays on until tapped again) |
 | `Option`/`Alt` (press) | Arc cycles how the arc closes: open · pie · segment |
 | `3x` or `3/` + `Enter` | Right after a copy commits: multiply it into 3 copies / divide the distance into 3 (Move; `x3` and `/3` work too) |
-| `Shift`-click | Toggle each clicked object in the selection (Select tool); same for a Shift-drag marquee |
-| `⌘`/`Option`-click (Mac) · `Ctrl`/`Alt`-click (Windows, Linux) | Add to the selection, never removing (Select tool); same for a marquee drag. On a Mac, `Ctrl`-click is a right-click, so use `⌘` or `Option` there |
-| `Shift` + `⌘`/`Option`-click (Mac) · `Shift` + `Ctrl`/`Alt`-click (Windows, Linux) | Subtract from the selection, never adding (Select tool); same for a marquee drag |
+| `Shift`-click | Toggle each clicked object, guide, dimension, or text in the selection (Select tool); same for a Shift-drag marquee, which takes objects only |
+| `⌘`/`Option`-click (Mac) · `Ctrl`/`Alt`-click (Windows, Linux) | Add to the selection, never removing (Select tool), guides, dimensions, and text included; same for a marquee drag. On a Mac, `Ctrl`-click is a right-click, so use `⌘` or `Option` there |
+| `Shift` + `⌘`/`Option`-click (Mac) · `Shift` + `Ctrl`/`Alt`-click (Windows, Linux) | Subtract from the selection, never adding (Select tool), guides, dimensions, and text included; same for a marquee drag |
 | Triple-click | Select a line's whole connected shape (Select tool) |
 | `⌘`/`Ctrl`-click | Paint the whole object instead of one face (Paint tool) |
 | Double-click | Enter a group/component/object's editing context; end a Line chain |

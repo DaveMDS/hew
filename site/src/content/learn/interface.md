@@ -22,7 +22,7 @@ A floating readout in the bottom-right corner shows live measurements — distan
 
 The left rail lists the everyday tools in three groups, each with its keyboard shortcut:
 
-- **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Polygon, Arc `A`
+- **Draw** — Select `Space`, Eraser `E`, Line `L`, Rectangle `R`, Circle `C`, Polygon, Arc `A`
 - **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`
 - **Inspect** — Tape Measure `T`, Dimension, Paint `B`, Section Plane
 

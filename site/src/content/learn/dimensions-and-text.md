@@ -56,3 +56,5 @@ The drawn line always shows what's being measured: a radius runs from the center
 **Labels hold their size on screen** as you zoom, and turn to stay readable rather than reading backwards from the far side.
 
 **They follow the geometry.** Move, rotate, or scale something a dimension is attached to and the dimension goes with it. If an edit destroys what a dimension was measuring — deleting the object, or consuming it in a boolean — the annotation is marked detached and drawn in a warning color rather than quietly pointing at nothing. Re-pick its anchors to reattach it.
+
+**They select and delete like the rest of the model.** Click a dimension or a text with the Select tool to select it; `Shift`-click adds more, alongside objects and guides. `Delete` removes the whole selection in one undo step: delete a dimension together with the object it measures. The [Eraser](/learn/moving-and-transforming/#eraser-e) takes them too. Copy and paste don't carry them.
