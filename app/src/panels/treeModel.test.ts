@@ -7,6 +7,7 @@ import {
   isTreeRowDimmed,
   nextSelection,
   nextIdSelection,
+  pruneDeadIds,
   NO_IDS,
   mergeSelection,
   canBoolean,
@@ -638,6 +639,31 @@ describe('nextIdSelection (guide/annotation ids)', () => {
   it('removing the last id leaves the shared empty list', () => {
     expect(nextIdSelection([1n], 1n, 'toggle')).toBe(NO_IDS)
     expect(nextIdSelection([1n], 1n, 'subtract')).toBe(NO_IDS)
+  })
+})
+
+describe('pruneDeadIds (guide/annotation ids)', () => {
+  it('drops the ids the live list no longer holds, preserving order', () => {
+    expect(pruneDeadIds([3n, 1n, 2n], () => [1n, 3n])).toEqual([3n, 1n])
+  })
+
+  it('keeps the very list when every id is alive', () => {
+    const cur = [1n, 2n]
+    expect(pruneDeadIds(cur, () => [2n, 1n, 5n])).toBe(cur)
+  })
+
+  it('leaves the shared empty list when every id died', () => {
+    expect(pruneDeadIds([1n, 2n], () => [3n])).toBe(NO_IDS)
+  })
+
+  it('never reads the live list for an empty selection', () => {
+    let reads = 0
+    const live = () => {
+      reads += 1
+      return [1n]
+    }
+    expect(pruneDeadIds(NO_IDS, live)).toBe(NO_IDS)
+    expect(reads).toBe(0)
   })
 })
 

@@ -846,6 +846,24 @@ export function nextIdSelection(
 }
 
 /**
+ * `pruneDeadSelection` for a selection of plain ids — the selected guides or
+ * annotations: drop every id `liveIds` no longer lists (an undo that took a
+ * guide copy back, say), since a dead id would make the whole batch Delete
+ * or Move refuse. `liveIds` is read only for a non-empty selection. Returns
+ * `current` itself when every id is alive, and `NO_IDS` for an empty result.
+ */
+export function pruneDeadIds(
+  current: readonly bigint[],
+  liveIds: () => ArrayLike<bigint>,
+): readonly bigint[] {
+  if (current.length === 0) return current
+  const live = new Set(Array.from(liveIds()))
+  if (current.every((id) => live.has(id))) return current
+  const kept = current.filter((id) => live.has(id))
+  return kept.length === 0 ? NO_IDS : kept
+}
+
+/**
  * Next selection after a MULTI-node pick (a marquee, Select All, Invert
  * Selection). The same four modes as `nextSelection`, applied per node:
  *

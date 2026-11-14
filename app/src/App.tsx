@@ -68,7 +68,7 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, nextIdSelection, NO_IDS, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, nextIdSelection, pruneDeadIds, NO_IDS, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
@@ -2000,6 +2000,19 @@ export default function App() {
         Array.from(scene.component_member_objects(component)),
         Array.from(scene.component_member_sketches(component)),
       )
+    })
+    // The same reconcile for the selected guides and annotations: a dead
+    // id left behind (an undone guide copy) would make the next Delete or
+    // Move of the whole selection refuse. `guide_ids` lists only the guides
+    // that are drawn, so a guide whose tag is hidden leaves the selection
+    // too, as it can no longer be seen or picked.
+    setSelectedGuides((sel) => {
+      const scene = sceneRef.current
+      return scene === null ? sel : pruneDeadIds(sel, () => scene.guide_ids())
+    })
+    setSelectedAnnotations((sel) => {
+      const scene = sceneRef.current
+      return scene === null ? sel : pruneDeadIds(sel, () => scene.annotation_ids())
     })
     // Recompute dirty on any mutation — but NOT during programmatic loads
     // (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).

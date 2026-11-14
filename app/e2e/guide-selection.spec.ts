@@ -158,6 +158,53 @@ test('Move carries a mixed selection of a box and a guide, and one undo brings b
   expect(undone.guide).toEqual(before.guide)
 })
 
+test('undoing a copy of a box and a guide leaves neither copy selected, so a later Delete still erases', async ({ page }) => {
+  const { box, right, left } = await boot(page)
+  const live = () => page.evaluate(() => {
+    const h = window.__hew_test!
+    return { objects: h.getObjectIds(), guides: h.getGuideIds() }
+  })
+
+  await click(page, [0.5, 0.5, 1])
+  await click(page, [3, 0.5, 0], ['Shift'])
+  await expect(count(page, 2)).toBeVisible()
+
+  // Move with the copy toggle on, 2 m along X: the copies become the selection.
+  await page.getByRole('radio', { name: 'Move' }).click()
+  await page.waitForTimeout(100)
+  await page.keyboard.press('Control') // a real clean tap: copy on
+  await click(page, [0.5, 0.5, 1])
+  const away = await pagePoint(page, [1.5, 0.5, 1])
+  await page.mouse.move(away.x, away.y, { steps: 4 })
+  await page.waitForTimeout(100)
+  await page.keyboard.press('ArrowRight')
+  await page.keyboard.type('2')
+  await page.keyboard.press('Enter')
+  await page.waitForTimeout(150)
+  const copied = await live()
+  expect(copied.objects).toHaveLength(2)
+  expect(copied.guides).toHaveLength(3)
+  await expect(count(page, 2)).toBeVisible()
+
+  // Undo takes both copies back, and with them the selection.
+  await page.evaluate(() => window.__hew_test!.undo())
+  await page.waitForTimeout(150)
+  const undone = await live()
+  expect(undone.objects).toEqual([box])
+  expect([...undone.guides].sort()).toEqual([right, left].sort())
+  await expect(page.getByText(/^\d+ selected$/)).toHaveCount(0)
+
+  // A Shift-click selects the box alone, and Delete erases it.
+  await page.getByRole('radio', { name: 'Select' }).click()
+  await page.waitForTimeout(100)
+  await click(page, [0.5, 0.5, 1], ['Shift'])
+  expect(await selection(page)).toEqual([box])
+  await expect(page.getByText(/^\d+ selected$/)).toHaveCount(0)
+  await page.keyboard.press('Delete')
+  await page.waitForTimeout(150)
+  expect((await live()).objects).not.toContain(box)
+})
+
 test('Rotate turns a mixed selection of a box and a guide, and one undo brings both back', async ({ page }) => {
   const { box, right } = await boot(page)
 
